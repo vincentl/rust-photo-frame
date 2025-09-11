@@ -1,0 +1,22 @@
+[package]
+name = "rust-photo-frame"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+bytemuck = { version = "1.16", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
+exif = { package = "kamadak-exif", version = "0.6.1" }
+image = "0.25"
+notify = "6"
+pollster = "0.3"
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+walkdir = "2"
+wgpu  = "0.20"
+winit = "0.30"
