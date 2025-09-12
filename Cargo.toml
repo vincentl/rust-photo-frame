@@ -2,6 +2,16 @@
 name = "rust-photo-frame"
 version = "0.1.0"
 edition = "2024"
+description = "Raspberry Pi photo frame slideshow: scan dirs, circular buffer, fullscreen display."
+license = "MIT"
+repository = "https://github.com/vincentl/rust-photo-frame.git"
+readme = "README.md"
+keywords = ["slideshow", "photo", "frame", "wgpu", "winit", "raspberry-pi"]
+categories = ["multimedia::images", "graphics", "command-line-utilities"]
+
+[lib]
+name = "photoframe"
+path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
@@ -15,8 +25,12 @@ pollster = "0.3"
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+thiserror = "2.0.16"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
 wgpu  = "0.20"
 winit = "0.30"
+
+[dev-dependencies]
+tempfile = "3.22.0"

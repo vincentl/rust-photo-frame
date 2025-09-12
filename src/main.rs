@@ -1,57 +1,40 @@
-mod config;
-mod scan;
-mod meta;
-mod render;
-mod index;
-mod watch;
+//! Minimal binary that delegates to the `photoframe` library API.
 
-use anyhow::{Context, Result};
+use std::path::PathBuf;
+
+use anyhow::Context as _;
 use clap::Parser;
 use tracing_subscriber::{EnvFilter, fmt};
 
-#[derive(Parser, Debug)]
+use photoframe::{DisplayOptions, build_buffer, config, run_slideshow, scan_photos};
+
+/// Photoframe – minimal slideshow runner.
+#[derive(Debug, Parser)]
 #[command(author, version, about)]
 struct Args {
-    #[arg(short, long)]
-    config: String,
-
-    #[arg(short, long, default_value = "info")]
-    log: String,
-
-    /// Skip EXIF to speed up scanning
-    #[arg(long)]
-    no_exif: bool,
-
-    /// Start filesystem watcher and keep process alive
-    #[arg(long)]
-    watch: bool,
+    /// Path to YAML configuration file.
+    #[arg(short, long, value_name = "FILE", default_value = "config.yaml")]
+    config: PathBuf,
 }
 
-fn init_logging(level: &str) {
-    let env = EnvFilter::try_new(level).or_else(|_| EnvFilter::try_new("info")).unwrap();
-    fmt().with_env_filter(env).init();
-}
+fn main() -> anyhow::Result<()> {
+    // logging
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt().with_env_filter(filter).init();
 
-fn main() -> Result<()> {
     let args = Args::parse();
-    init_logging(&args.log);
 
-    let cfg_text = std::fs::read_to_string(&args.config)
-        .with_context(|| format!("reading config: {}", &args.config))?;
-    let cfg = config::Config::from_yaml(&cfg_text).context("parsing YAML config")?;
-    cfg.validate().context("validating config")?;
+    let cfg = config::from_yaml_file(&args.config)
+        .with_context(|| format!("loading config from {}", args.config.display()))?;
 
-    // Initial scan (fast)
-    let files = scan::scan_dirs(&cfg.photo_paths);
+    let mut buffer = {
+        let photos = scan_photos(&cfg).context("scanning photo directories")?;
+        build_buffer(photos).context("building photo buffer")?
+    };
 
-    // (Optional) start notify as you implemented earlier…
-    // For the demo, just feed the list to the slideshow:
-    if files.is_empty() {
-        eprintln!("No supported images to show.");
-        return Ok(());
-    }
+    let display = DisplayOptions::from(cfg.display());
 
-    render::viewer::run_slideshow(files)?;
+    run_slideshow(&mut buffer, &display).context("running slideshow")?;
 
     Ok(())
 }
