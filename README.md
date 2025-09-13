@@ -14,6 +14,22 @@ This project is **alpha and under development**
 - Fixed per-image delay (configurable)
 - Error handling and structured logging
 
+## Event Flow
+
+```mermaid
+flowchart LR
+  MAIN[Main] --> FILES[PhotoFiles]
+  MAIN --> MAN[PhotoManager]
+  MAIN --> LOAD[PhotoLoader]
+  MAIN --> VIEW[PhotoViewer]
+
+  FILES -->|add remove| MAN
+  MAN -->|invalid exif| FILES
+  MAN -->|load| LOAD
+  LOAD -->|loaded| VIEW
+  LOAD -->|invalid load| FILES
+```
+
 ## License
 
 This project is licensed under the **MIT License**.
