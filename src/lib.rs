@@ -32,12 +32,10 @@ pub mod render;
 /// Directory scanning utilities and filters.
 pub mod scan;
 
-use std::path::PathBuf;
-
-use buffer::PhotoBuffer;
-use config::{Config, DisplayConfig, ScanConfig};
+use config::{Config, DisplayConfig};
 pub use error::Error;
-use scan::{ScanOptions, scan_with_options};
+use scan::scan;
+use std::path::PathBuf;
 
 /// Options to control the display loop.
 #[derive(Debug, Clone, Copy)]
@@ -59,38 +57,5 @@ impl From<&DisplayConfig> for DisplayOptions {
 /// # Errors
 /// Returns an error if any configured directory is invalid or if scanning fails.
 pub fn scan_photos(cfg: &Config) -> Result<Vec<PathBuf>, Error> {
-    let scan_cfg: &ScanConfig = cfg.scan();
-    let opts = ScanOptions {
-        recursive: scan_cfg.recursive.unwrap_or(true),
-        max_depth: scan_cfg.max_depth,
-        exts: None, // use default image extensions
-    };
-    scan_with_options(cfg.photo_paths(), &opts)
-}
-
-/// Build a circular photo buffer from discovered photos.
-///
-/// This validates emptiness and returns a buffer ready for iteration.
-///
-/// # Errors
-/// Returns [`Error::EmptyScan`] if the input list is empty.
-pub fn build_buffer(photos: Vec<PathBuf>) -> Result<PhotoBuffer, Error> {
-    PhotoBuffer::from_vec(photos)
-}
-
-/// Run the slideshow using the render backend in `crate::render::viewer`.
-///
-/// Steps:
-/// 1. Validate paths: skip missing/corrupt images with warnings.
-/// 2. Pass validated list and the configured delay to the viewer.
-///
-/// # Errors
-/// - [`Error::EmptyScan`] if no decodable images remain after validation.
-/// - [`Error::Render`] propagated from the viewer backend.
-pub fn run_slideshow(buffer: &mut PhotoBuffer, display: &DisplayOptions) -> Result<(), Error> {
-    let validated: Vec<PathBuf> = display::filter_valid_images(buffer.as_slice());
-    if validated.is_empty() {
-        return Err(Error::EmptyScan);
-    }
-    crate::render::viewer::run_slideshow(validated, display.delay_ms).map_err(Error::Render)
+    scan(cfg.photo_paths()).map(|metas| metas.into_iter().map(|m| m.path).collect())
 }

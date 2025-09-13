@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser};
+use photoframe::render::viewer::run_slideshow;
 use tracing::{Level, info};
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -52,15 +53,7 @@ fn main() -> Result<()> {
 
     let photos = photoframe::scan_photos(&cfg)?;
     info!(count = photos.len(), "scanned images");
-
-    // Build circular buffer and run
-    let mut buf = photoframe::build_buffer(photos)?;
-    let display = if let Some(ms) = cli.delay_ms {
-        photoframe::DisplayOptions { delay_ms: ms }
-    } else {
-        photoframe::DisplayOptions::from(cfg.display())
-    };
-
-    photoframe::run_slideshow(&mut buf, &display)?;
+    let delay_ms = 500;
+    run_slideshow(photos, delay_ms)?;
     Ok(())
 }

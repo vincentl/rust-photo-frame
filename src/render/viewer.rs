@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use crossbeam_channel as xchan;
-use image;
 use std::{path::PathBuf, sync::Arc, time::Instant};
-use tracing::{info, warn};
+use tracing::info;
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -11,6 +10,8 @@ use winit::{
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Fullscreen, Window, WindowAttributes, WindowId},
 };
+
+use crate::render::loader::{LoaderMsg, PreparedImage, spawn_loader};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -50,13 +51,6 @@ pub fn run_slideshow(paths: Vec<PathBuf>, delay_ms: u64) -> Result<()> {
     let mut app = App::new(paths, delay);
     event_loop.run_app(&mut app)?;
     Ok(())
-}
-
-struct Decoded {
-    pixels: Vec<u8>,
-    w: u32,
-    h: u32,
-    _path: PathBuf,
 }
 
 struct Tex {
@@ -110,32 +104,14 @@ struct App {
     gpu: Option<Gpu>,
 
     // decode pipeline
-    tx_req: xchan::Sender<PathBuf>,
-    rx_res: xchan::Receiver<Decoded>,
+    tx_req: xchan::Sender<LoaderMsg>,
+    rx_res: xchan::Receiver<PreparedImage>,
 }
 
 impl App {
     fn new(paths: Vec<PathBuf>, delay: std::time::Duration) -> Self {
-        // background decode thread
-        let (tx_req, rx_req) = xchan::unbounded::<PathBuf>();
-        let (tx_res, rx_res) = xchan::unbounded::<Decoded>();
-        std::thread::spawn(move || {
-            while let Ok(path) = rx_req.recv() {
-                match image::open(&path) {
-                    Ok(img) => {
-                        let rgba = img.to_rgba8();
-                        let (w, h) = rgba.dimensions();
-                        let _ = tx_res.send(Decoded {
-                            pixels: rgba.into_raw(),
-                            w,
-                            h,
-                            _path: path,
-                        });
-                    }
-                    Err(e) => warn!(error=%e, "decode failed"),
-                }
-            }
-        });
+        // background loader will be started after window init
+        let (_tx_dummy, rx_res) = xchan::unbounded::<PreparedImage>();
 
         Self {
             list: paths,
@@ -152,7 +128,7 @@ impl App {
             window: None,
             gpu: None,
 
-            tx_req,
+            tx_req: xchan::unbounded::<LoaderMsg>().0,
             rx_res,
         }
     }
@@ -170,12 +146,6 @@ impl App {
         }
         self.cur_idx = self.next_idx;
         self.next_idx = (self.cur_idx + 1) % self.list.len();
-    }
-
-    fn request_next_decode(&self) {
-        if let Some(p) = self.next_path() {
-            let _ = self.tx_req.send(p.clone());
-        }
     }
 }
 
@@ -200,36 +170,33 @@ impl ApplicationHandler for App {
         window.set_cursor_visible(false);
         self.window = Some(window.clone());
 
+        // ----- Start request-driven loader -----
+        let PhysicalSize {
+            width: win_w,
+            height: win_h,
+        } = window.inner_size();
+        let (tx_req, rx_req) = xchan::unbounded::<LoaderMsg>();
+        let (tx_res, rx_res) = xchan::unbounded::<PreparedImage>();
+        spawn_loader(rx_req, tx_res);
+        self.tx_req = tx_req;
+        self.rx_res = rx_res;
+        // queue current and next
+        if let Some(p) = self.current_path() {
+            let _ = self
+                .tx_req
+                .send(LoaderMsg::Decode(p.clone(), (win_w.max(1), win_h.max(1))));
+        }
+        if let Some(p) = self.next_path() {
+            let _ = self
+                .tx_req
+                .send(LoaderMsg::Decode(p.clone(), (win_w.max(1), win_h.max(1))));
+        }
+
         // ----- GPU init -----
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
         let surface = instance
             .create_surface(window.clone())
             .expect("create surface");
-
-        // Decode first image synchronously (so we can show something)
-        let first = self
-            .current_path()
-            .cloned()
-            .and_then(|p| match image::open(&p) {
-                Ok(img) => {
-                    let rgba = img.to_rgba8();
-                    let (w, h) = rgba.dimensions();
-                    info!(path=%p.display(), w, h, "decoded first image");
-                    Some(Decoded {
-                        pixels: rgba.into_raw(),
-                        w,
-                        h,
-                        _path: p,
-                    })
-                }
-                Err(e) => {
-                    warn!(path=%p.display(), error=%e, "failed to decode first; starting black");
-                    None
-                }
-            });
-
-        // Request decode of "next" immediately
-        self.request_next_decode();
 
         let gpu_init = async move {
             // adapter/device
@@ -316,12 +283,8 @@ impl ApplicationHandler for App {
                 }
             };
 
-            // A = first (or black), B = placeholder black
-            let tex_a = if let Some(Decoded { pixels, w, h, .. }) = first {
-                make_tex(&device, &queue, w, h, &pixels)
-            } else {
-                make_tex(&device, &queue, 1, 1, &[0, 0, 0, 255])
-            };
+            // A = black until first prepared image arrives; B = placeholder black
+            let tex_a = make_tex(&device, &queue, 1, 1, &[0, 0, 0, 255]);
             let tex_b = make_tex(&device, &queue, 1, 1, &[0, 0, 0, 255]);
 
             // sampler
@@ -607,14 +570,13 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, _el: &ActiveEventLoop) {
         // receive decoded images (non-blocking)
         if let Some(gpu) = &mut self.gpu {
-            let mut got_new_b = false;
             while let Ok(decoded) = self.rx_res.try_recv() {
                 let new_b = upload_texture(
                     &gpu.device,
                     &gpu.queue,
                     &decoded.pixels,
-                    decoded.w,
-                    decoded.h,
+                    decoded.size.0,
+                    decoded.size.1,
                 );
                 gpu.tex_b = new_b;
                 gpu.scale_b = compute_uv_scale(
@@ -628,20 +590,20 @@ impl ApplicationHandler for App {
                 block[0..4].copy_from_slice(&gpu.scale_b);
                 gpu.queue
                     .write_buffer(&gpu.params_b, 0, bytemuck::bytes_of(&block));
-                got_new_b = true;
             }
 
             // if B changed, rebuild bind group so it points at the new texture view
-            if got_new_b {
+            {
                 rebuild_bind_group(gpu);
             }
 
             // start a fade every second (if not already fading and we have a decoded B)
             let now = Instant::now();
             if !self.fading
-                && now.duration_since(self.last_switch) >= self.switch_interval
-                && gpu.tex_b.w > 1
-                || gpu.tex_b.h > 1
+                && ((gpu.tex_a.w == 1 && gpu.tex_a.h == 1 && gpu.tex_b.w > 1 && gpu.tex_b.h > 1)
+                    || (now.duration_since(self.last_switch) >= self.switch_interval
+                        && gpu.tex_b.w > 1
+                        && gpu.tex_b.h > 1))
             {
                 self.fading = true;
                 self.fade_start = now;
@@ -700,7 +662,16 @@ impl ApplicationHandler for App {
 
                     // advance pipeline
                     self.advance_indices();
-                    self.request_next_decode();
+                    if let Some(p) = self.next_path() {
+                        let PhysicalSize {
+                            width: win_w,
+                            height: win_h,
+                        } = self.window.as_ref().unwrap().inner_size();
+                        let _ = self
+                            .tx_req
+                            .send(LoaderMsg::Decode(p.clone(), (win_w.max(1), win_h.max(1))));
+                    }
+                    // (loader.rs handles queueing); no-op
                 }
             }
 
