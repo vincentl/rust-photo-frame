@@ -21,10 +21,14 @@
 pub mod buffer;
 /// Configuration types and loading/validation helpers.
 pub mod config;
+/// Display utilities (validation, glue to the viewer).
+pub mod display;
 /// Library error type used across modules.
 pub mod error;
 /// Small façade for graceful shutdown coordination.
 pub mod events;
+/// Render backend (provided by the app) with `viewer::run_slideshow`.
+pub mod render;
 /// Directory scanning utilities and filters.
 pub mod scan;
 
@@ -74,36 +78,26 @@ pub fn build_buffer(photos: Vec<PathBuf>) -> Result<PhotoBuffer, Error> {
     PhotoBuffer::from_vec(photos)
 }
 
-/// Run the slideshow using the existing render path.
+/// Run the slideshow using the render backend in `crate::render::viewer`.
 ///
-/// This function serves as a stable public entrypoint from `main.rs`.
+/// Steps:
+/// 1. Validate paths: skip missing/corrupt images with warnings.
+/// 2. Pass validated list and the configured delay to the viewer.
 ///
 /// # Errors
-/// Propagates rendering or IO errors as [`Error`].
+/// - [`Error::EmptyScan`] if no decodable images remain after validation.
+/// - [`Error::Render`] propagated from the viewer backend.
 pub fn run_slideshow(buffer: &mut PhotoBuffer, display: &DisplayOptions) -> Result<(), Error> {
-    // Keep the coupling to the rendering module behind this small shim,
-    // so future render backends can swap in.
-    render::viewer::run_slideshow(buffer, display.delay_ms).map_err(Error::Render)
-}
-
-// Keep render private to the library; only the `run_slideshow` API is public.
-mod render {
-    pub mod viewer {
-        use crate::buffer::PhotoBuffer;
-
-        /// Adapter to call the existing viewer implementation.
-        ///
-        /// NOTE: Replace this stub with the call into your
-        /// actual `render::viewer::run_slideshow` function.
-        /// The signature assumed here is `(buffer, delay_ms) -> anyhow::Result<()>`.
-        #[allow(
-            clippy::unnecessary_wraps,
-            clippy::needless_pass_by_ref_mut,
-            clippy::missing_const_for_fn
-        )]
-        pub fn run_slideshow(_buffer: &mut PhotoBuffer, _delay_ms: u64) -> anyhow::Result<()> {
-            // Replace this with your real rendering invocation.
-            Ok(())
-        }
+    // Borrow the discovered paths.
+    let validated: Vec<PathBuf> = display::filter_valid_images(buffer.as_slice());
+    if validated.is_empty() {
+        return Err(Error::EmptyScan);
     }
+
+    // Call your real viewer. Expected signature:
+    //     render::viewer::run_slideshow(validated, display.delay_ms)
+    //
+    // If your current viewer takes only a `Vec<PathBuf>`, add an overload or
+    // thread `delay_ms` through your event loop timing.
+    crate::render::viewer::run_slideshow(&validated, display.delay_ms).map_err(Error::Render)
 }

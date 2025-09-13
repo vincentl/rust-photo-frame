@@ -52,4 +52,10 @@ impl PhotoBuffer {
     pub const fn reset(&mut self) {
         self.idx = 0;
     }
+
+    /// Borrow the internal list (read-only).
+    #[must_use]
+    pub fn as_slice(&self) -> &[PathBuf] {
+        &self.items
+    }
 }
