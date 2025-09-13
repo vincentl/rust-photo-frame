@@ -1,25 +1,25 @@
-use thiserror::Error;
+//! Shared error type for the Photoframe library.
 
-/// Library error type for photoframe operations.
-#[derive(Debug, Error)]
+/// Crate error type
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// One or more configured photo directories are invalid or unreadable.
+    /// One or more configured directories are missing or invalid.
     #[error("invalid photo directory: {0}")]
     BadDir(String),
 
-    /// The scan completed but found no images.
+    /// No images found after scanning or filtering.
     #[error("no images found in configured directories")]
     EmptyScan,
 
-    /// Underlying IO error.
+    /// Wrapper for std IO errors.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
-    /// YAML/serde configuration error.
+    /// Configuration parse error (YAML via `serde_yaml`).
     #[error(transparent)]
     Config(#[from] serde_yaml::Error),
 
-    /// Rendering/display error from downstream viewer.
-    #[error("render error: {0}")]
-    Render(anyhow::Error),
+    /// Rendering/backend error bubbled up from the viewer.
+    #[error(transparent)]
+    Render(#[from] anyhow::Error),
 }

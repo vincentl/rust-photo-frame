@@ -1,4 +1,7 @@
-use std::{collections::HashSet, path::{Path, PathBuf}};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 #[derive(Default)]
 pub struct FileIndex {
@@ -7,7 +10,9 @@ pub struct FileIndex {
 }
 
 impl FileIndex {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Returns true if it was newly inserted.
     pub fn add(&mut self, p: PathBuf) -> bool {
@@ -36,6 +41,10 @@ impl FileIndex {
         self.list.clone()
     }
 
-    pub fn len(&self) -> usize { self.list.len() }
-    pub fn is_empty(&self) -> bool { self.list.is_empty() }
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
 }

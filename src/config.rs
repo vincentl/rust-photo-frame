@@ -2,9 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::Error;
 use serde::{Deserialize, Serialize};
-
-use crate::error::Error;
 
 /// Top-level configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]

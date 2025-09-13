@@ -27,7 +27,7 @@ pub mod display;
 pub mod error;
 /// Small façade for graceful shutdown coordination.
 pub mod events;
-/// Render backend (provided by the app) with `viewer::run_slideshow`.
+/// Render backend provided by the binary.
 pub mod render;
 /// Directory scanning utilities and filters.
 pub mod scan;
@@ -36,7 +36,7 @@ use std::path::PathBuf;
 
 use buffer::PhotoBuffer;
 use config::{Config, DisplayConfig, ScanConfig};
-use error::Error;
+pub use error::Error;
 use scan::{ScanOptions, scan_with_options};
 
 /// Options to control the display loop.
@@ -88,16 +88,9 @@ pub fn build_buffer(photos: Vec<PathBuf>) -> Result<PhotoBuffer, Error> {
 /// - [`Error::EmptyScan`] if no decodable images remain after validation.
 /// - [`Error::Render`] propagated from the viewer backend.
 pub fn run_slideshow(buffer: &mut PhotoBuffer, display: &DisplayOptions) -> Result<(), Error> {
-    // Borrow the discovered paths.
     let validated: Vec<PathBuf> = display::filter_valid_images(buffer.as_slice());
     if validated.is_empty() {
         return Err(Error::EmptyScan);
     }
-
-    // Call your real viewer. Expected signature:
-    //     render::viewer::run_slideshow(validated, display.delay_ms)
-    //
-    // If your current viewer takes only a `Vec<PathBuf>`, add an overload or
-    // thread `delay_ms` through your event loop timing.
-    crate::render::viewer::run_slideshow(&validated, display.delay_ms).map_err(Error::Render)
+    crate::render::viewer::run_slideshow(validated, display.delay_ms).map_err(Error::Render)
 }

@@ -1,17 +1,13 @@
 use anyhow::{Context, Result};
 use crossbeam_channel as xchan;
 use image;
-use std::{
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{path::PathBuf, sync::Arc, time::Instant};
+use tracing::{info, warn};
 use wgpu::util::DeviceExt;
-#[allow(clippy::wildcard_imports)]
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::*,
+    event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Fullscreen, Window, WindowAttributes, WindowId},
 };
@@ -43,13 +39,15 @@ const QUAD: [Vertex; 4] = [
     }, // top-right
 ];
 
-/// Run the slideshow over `paths`, waiting `delay_ms` between frames.
+/// Run the slideshow with a per-image delay in milliseconds.
 ///
 /// # Errors
-/// Returns an error if the event loop fails to start.
-pub fn run_slideshow(paths: &[PathBuf], delay_ms: u64) -> Result<()> {
+/// Returns an error if the rendering backend fails to initialize or submit work.
+pub fn run_slideshow(paths: Vec<PathBuf>, delay_ms: u64) -> Result<()> {
+    let delay = std::time::Duration::from_millis(delay_ms.max(1));
+    info!(count = paths.len(), "starting slideshow");
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(paths.to_vec(), Duration::from_millis(delay_ms.max(1)));
+    let mut app = App::new(paths, delay);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -58,6 +56,7 @@ struct Decoded {
     pixels: Vec<u8>,
     w: u32,
     h: u32,
+    _path: PathBuf,
 }
 
 struct Tex {
@@ -101,9 +100,9 @@ struct App {
 
     // timing
     last_switch: Instant,
-    switch_interval: Duration,
+    switch_interval: std::time::Duration,
     fade_start: Instant,
-    fade_dur: Duration,
+    fade_dur: std::time::Duration,
     fading: bool,
 
     // window/gpu
@@ -116,7 +115,7 @@ struct App {
 }
 
 impl App {
-    fn new(paths: Vec<PathBuf>, switch_interval: Duration) -> Self {
+    fn new(paths: Vec<PathBuf>, delay: std::time::Duration) -> Self {
         // background decode thread
         let (tx_req, rx_req) = xchan::unbounded::<PathBuf>();
         let (tx_res, rx_res) = xchan::unbounded::<Decoded>();
@@ -125,14 +124,15 @@ impl App {
                 match image::open(&path) {
                     Ok(img) => {
                         let rgba = img.to_rgba8();
-                        let (w, h) = (rgba.width(), rgba.height());
+                        let (w, h) = rgba.dimensions();
                         let _ = tx_res.send(Decoded {
                             pixels: rgba.into_raw(),
                             w,
                             h,
+                            _path: path,
                         });
                     }
-                    Err(e) => eprintln!("decode failed: {e}"),
+                    Err(e) => warn!(error=%e, "decode failed"),
                 }
             }
         });
@@ -143,10 +143,10 @@ impl App {
             next_idx: 1,
 
             last_switch: Instant::now(),
-            switch_interval,
+            switch_interval: delay,
 
             fade_start: Instant::now(),
-            fade_dur: Duration::from_millis(500),
+            fade_dur: delay,
             fading: false,
 
             window: None,
@@ -164,8 +164,7 @@ impl App {
         self.list.get(self.next_idx)
     }
 
-    #[allow(clippy::missing_const_for_fn)]
-    fn advance_indices(&mut self) {
+    const fn advance_indices(&mut self) {
         if self.list.is_empty() {
             return;
         }
@@ -181,13 +180,23 @@ impl App {
 }
 
 impl ApplicationHandler for App {
-    #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::collapsible_if,
+        clippy::collapsible_match
+    )]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::collapsible_if,
+        clippy::collapsible_match
+    )]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // ----- window -----
         let attrs = WindowAttributes::default().with_title("photo viewer");
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let monitor = window.current_monitor();
         window.set_fullscreen(Some(Fullscreen::Borderless(monitor)));
+        info!("window fullscreen initialized");
         window.set_cursor_visible(false);
         self.window = Some(window.clone());
 
@@ -198,17 +207,26 @@ impl ApplicationHandler for App {
             .expect("create surface");
 
         // Decode first image synchronously (so we can show something)
-        let first = self.current_path().cloned().and_then(|p| {
-            image::open(&p).ok().map(|img| {
-                let rgba = img.to_rgba8();
-                let (w, h) = (rgba.width(), rgba.height());
-                Decoded {
-                    pixels: rgba.into_raw(),
-                    w,
-                    h,
+        let first = self
+            .current_path()
+            .cloned()
+            .and_then(|p| match image::open(&p) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    info!(path=%p.display(), w, h, "decoded first image");
+                    Some(Decoded {
+                        pixels: rgba.into_raw(),
+                        w,
+                        h,
+                        _path: p,
+                    })
                 }
-            })
-        });
+                Err(e) => {
+                    warn!(path=%p.display(), error=%e, "failed to decode first; starting black");
+                    None
+                }
+            });
 
         // Request decode of "next" immediately
         self.request_next_decode();
@@ -556,7 +574,7 @@ impl ApplicationHandler for App {
                 if event.state == ElementState::Released {
                     use winit::keyboard::{KeyCode, PhysicalKey};
                     if let PhysicalKey::Code(KeyCode::Escape | KeyCode::KeyQ) = event.physical_key {
-                        std::process::exit(0);
+                        std::process::exit(0)
                     }
                 }
             }
@@ -695,8 +713,7 @@ impl ApplicationHandler for App {
 }
 
 impl App {
-    #[allow(clippy::needless_pass_by_ref_mut)]
-    fn draw(&mut self) {
+    fn draw(&self) {
         let Some(gpu) = &self.gpu else { return };
         let Ok(frame) = gpu.surface.get_current_texture() else {
             return;
