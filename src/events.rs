@@ -40,3 +40,10 @@ pub struct InvalidPhoto(pub PathBuf);
 /// Emitted by the viewer after a photo is shown (for now, immediately).
 #[derive(Debug)]
 pub struct Displayed(pub PathBuf);
+
+#[derive(Debug, Clone, Copy)]
+pub struct SurfaceSize {
+    pub width: u32,
+    pub height: u32,
+    pub oversample: f32, // scale factor for render target size
+}

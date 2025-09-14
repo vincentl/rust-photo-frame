@@ -20,6 +20,7 @@ async fn startup_recursive_scan_emits_photo_added() {
 
     let cfg = Configuration {
         photo_library_path: lib.clone(),
+        oversample: 1.0,
     };
 
     let (inv_tx, mut inv_rx) = mpsc::channel::<InventoryEvent>(16);
@@ -66,6 +67,7 @@ async fn invalid_photo_is_deleted_and_emits_removed() {
 
     let cfg = Configuration {
         photo_library_path: lib.clone(),
+        oversample: 1.0,
     };
 
     let (inv_tx, mut inv_rx) = mpsc::channel::<InventoryEvent>(16);

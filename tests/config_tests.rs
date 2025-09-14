@@ -8,6 +8,7 @@ photo-library-path: "/photos"
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(cfg.photo_library_path, PathBuf::from("/photos"));
+    assert!((cfg.oversample - 1.0).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -17,4 +18,16 @@ photo_library_path: "/p"
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(cfg.photo_library_path, PathBuf::from("/p"));
+    assert!((cfg.oversample - 1.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn parse_with_oversample() {
+    let yaml = r#"
+photo-library-path: "/photos"
+oversample: 1.5
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(cfg.photo_library_path, PathBuf::from("/photos"));
+    assert!((cfg.oversample - 1.5).abs() < f32::EPSILON);
 }

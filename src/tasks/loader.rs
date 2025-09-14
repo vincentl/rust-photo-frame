@@ -1,5 +1,7 @@
 use crate::events::{InvalidPhoto, LoadPhoto, MatMode, PhotoLoaded, PreparedImageCpu};
 use anyhow::Result;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 use tokio::select;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -18,9 +20,8 @@ fn decode_rgba8_apply_exif(path: &Path) -> anyhow::Result<image::RgbaImage> {
     // Convert to RGBA8 early so that subsequent ops work on a concrete buffer
     let mut img = img.to_rgba8();
 
-    // Attempt EXIF orientation correction (no-op default)
-    // TODO: wire in `exif` crate to read actual orientation.
-    let orientation: u32 = 1;
+    // Attempt EXIF orientation correction
+    let orientation: u16 = read_orientation(path).unwrap_or(1);
     // Map common EXIF orientations. Unsupported cases fall through as-is.
     match orientation {
         1 => {}
@@ -57,6 +58,20 @@ fn decode_rgba8_apply_exif(path: &Path) -> anyhow::Result<image::RgbaImage> {
     }
 
     Ok(img)
+}
+
+fn read_orientation(path: &Path) -> Option<u16> {
+    let file = File::open(path).ok()?;
+    let mut buf = BufReader::new(file);
+    let exif = exif::Reader::new().read_from_container(&mut buf).ok()?;
+    if let Some(field) = exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY) {
+        if let Some(val) = field.value.get_uint(0) {
+            let o = val as u16;
+            debug!("exif orientation {} for {}", o, path.display());
+            return Some(o);
+        }
+    }
+    None
 }
 
 /// Very simple loader:

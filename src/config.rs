@@ -4,15 +4,25 @@ use anyhow::Result;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", default)]
 pub struct Configuration {
     #[serde(alias = "photo_library_path")]
     pub photo_library_path: PathBuf,
+    pub oversample: f32,
 }
 
 impl Configuration {
     pub fn from_yaml_file(path: impl AsRef<Path>) -> Result<Self> {
         let s = std::fs::read_to_string(path)?;
         Ok(serde_yaml::from_str(&s)?)
+    }
+}
+
+impl Default for Configuration {
+    fn default() -> Self {
+        Self {
+            photo_library_path: PathBuf::new(),
+            oversample: 1.0,
+        }
     }
 }
