@@ -1,4 +1,4 @@
-use crate::events::{Displayed, MatMode, PhotoLoaded};
+use crate::events::{Displayed, PhotoLoaded};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 
@@ -161,11 +161,21 @@ pub fn run_windowed(
                 event_loop.exit();
                 return;
             }
-            let _ = self.from_loader.try_recv();
+            if let Ok(PhotoLoaded(img)) = self.from_loader.try_recv() {
+                tracing::info!(
+                    "loaded {} ({}x{}, {} bytes)",
+                    img.path.display(),
+                    img.width,
+                    img.height,
+                    img.pixels.len()
+                );
+                let _ = self
+                    .to_manager_displayed
+                    .try_send(Displayed(img.path));
+            }
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
-            let _ = &self.to_manager_displayed;
         }
     }
 
@@ -179,59 +189,4 @@ pub fn run_windowed(
     };
     event_loop.run_app(&mut app)?;
     Ok(())
-}
-
-// Helper functions used by tests
-
-#[allow(dead_code)]
-pub fn compute_padded_stride(bytes_per_row: u32) -> u32 {
-    const ALIGN: u32 = 256;
-    if bytes_per_row == 0 {
-        return 0;
-    }
-    ((bytes_per_row + (ALIGN - 1)) / ALIGN) * ALIGN
-}
-
-#[allow(dead_code)]
-pub fn compute_scaled_size(
-    img_w: u32,
-    img_h: u32,
-    surf_w: u32,
-    surf_h: u32,
-    oversample: f32,
-    max_dim: u32,
-) -> (u32, u32) {
-    if img_w == 0 || img_h == 0 || surf_w == 0 || surf_h == 0 {
-        return (1, 1);
-    }
-    let max_w = ((surf_w as f32) * oversample).round() as u32;
-    let max_h = ((surf_h as f32) * oversample).round() as u32;
-    let max_w = max_w.min(max_dim).max(1);
-    let max_h = max_h.min(max_dim).max(1);
-    let sw = (max_w as f32) / (img_w as f32);
-    let sh = (max_h as f32) / (img_h as f32);
-    let s = sw.min(sh).min(1.0);
-    let out_w = ((img_w as f32) * s).floor().max(1.0) as u32;
-    let out_h = ((img_h as f32) * s).floor().max(1.0) as u32;
-    (out_w, out_h)
-}
-
-#[allow(dead_code)]
-pub fn compute_dest_rect(
-    img_w: u32,
-    img_h: u32,
-    screen_w: u32,
-    screen_h: u32,
-    _mat: &MatMode,
-) -> (f32, f32, f32, f32) {
-    let iw = img_w as f32;
-    let ih = img_h as f32;
-    let sw = screen_w as f32;
-    let sh = screen_h as f32;
-    let scale = (sw / iw).min(sh / ih);
-    let w = iw * scale;
-    let h = ih * scale;
-    let x = (sw - w) * 0.5;
-    let y = (sh - h) * 0.5;
-    (x, y, w, h)
 }
