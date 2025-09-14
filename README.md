@@ -35,4 +35,13 @@ flowchart LR
 This project is licensed under the **MIT License**.
 See the [LICENSE](LICENSE) file for full text.
 
+### Third-Party Assets
+
+This project may bundle fonts licensed under the SIL Open Font License (OFL) 1.1.
+
+- Inconsolata (example font for UI text)
+  - License: SIL OFL 1.1
+  - License text: `assets/fonts/OFL.txt`
+  - Notes: The font remains under OFL, which permits bundling with MIT-licensed code. If the font is modified, the Reserved Font Name rules apply.
+
 © 2025 Vincent Lucarelli

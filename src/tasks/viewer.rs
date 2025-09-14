@@ -13,11 +13,30 @@ pub fn run_windowed(
     use winit::event_loop::{ActiveEventLoop, EventLoop};
     use winit::window::{Window, WindowId};
 
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Uniforms {
+        screen_w: f32,
+        screen_h: f32,
+        dest_x: f32,
+        dest_y: f32,
+        dest_w: f32,
+        dest_h: f32,
+        alpha: f32,
+        _pad: [f32; 3],
+    }
+
     struct GpuCtx {
         device: wgpu::Device,
         queue: wgpu::Queue,
         surface: wgpu::Surface<'static>,
         config: wgpu::SurfaceConfiguration,
+        limits: wgpu::Limits,
+        uniform_buf: wgpu::Buffer,
+        uniform_bind: wgpu::BindGroup,
+        img_bind_layout: wgpu::BindGroupLayout,
+        sampler: wgpu::Sampler,
+        pipeline: wgpu::RenderPipeline,
     }
 
     struct App {
@@ -26,6 +45,7 @@ pub fn run_windowed(
         cancel: CancellationToken,
         window: Option<Arc<Window>>,
         gpu: Option<GpuCtx>,
+        current: Option<(wgpu::BindGroup, u32, u32)>,
     }
 
     impl ApplicationHandler for App {
@@ -35,6 +55,15 @@ pub fn run_windowed(
                     .create_window(Window::default_attributes().with_title("Photo Frame"))
                     .unwrap(),
             );
+            // Enter borderless fullscreen and hide cursor for a clean demo
+            use winit::window::Fullscreen;
+            if let Some(m) = window.current_monitor() {
+                window.set_fullscreen(Some(Fullscreen::Borderless(Some(m))));
+            } else {
+                window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            }
+            window.set_cursor_visible(false);
+
             let instance = wgpu::Instance::default();
             let surface = instance.create_surface(window.clone()).unwrap();
             let adapter =
@@ -44,11 +73,12 @@ pub fn run_windowed(
                     force_fallback_adapter: false,
                 }))
                 .unwrap();
+            let limits = adapter.limits();
             let (device, queue) =
                 pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                     label: Some("viewer-device"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: adapter.limits(),
+                    required_limits: limits.clone(),
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::default(),
                 }))
@@ -72,13 +102,117 @@ pub fn run_windowed(
                 desired_maximum_frame_latency: 2,
             };
             surface.configure(&device, &config);
+            // Resources for quad
+            let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("viewer-uniforms"),
+                size: std::mem::size_of::<Uniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let uniform_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("uniform-layout"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                });
+            let uniform_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("uniform-bind"),
+                layout: &uniform_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buf.as_entire_binding(),
+                }],
+            });
+            let img_bind_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("image-bind-layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("linear-clamp"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            });
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("viewer-quad"),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                    "shaders/viewer_quad.wgsl"
+                ))),
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("pipeline-layout"),
+                bind_group_layouts: &[&uniform_layout, &img_bind_layout],
+                push_constant_ranges: &[],
+            });
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("quad-pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview: None,
+                cache: None,
+            });
             self.window = Some(window);
             self.gpu = Some(GpuCtx {
                 device,
                 queue,
                 surface,
                 config,
+                limits,
+                uniform_buf,
+                uniform_bind,
+                img_bind_layout,
+                sampler,
+                pipeline,
             });
+            self.current = None;
         }
 
         fn window_event(
@@ -125,30 +259,48 @@ pub fn run_windowed(
                     let mut encoder =
                         gpu.device
                             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("clear-encoder"),
+                                label: Some("draw-encoder"),
                             });
-                    {
-                        let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("clear-pass"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &view,
-                                depth_slice: None,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                                        r: 0.08,
-                                        g: 0.08,
-                                        b: 0.10,
-                                        a: 1.0,
-                                    }),
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: None,
-                            occlusion_query_set: None,
-                            timestamp_writes: None,
-                        });
+                    // Compute dest rect for letterbox
+                    let (dx, dy, dw, dh) = if let Some((_, iw, ih)) = &self.current {
+                        compute_dest_rect(*iw, *ih, gpu.config.width, gpu.config.height)
+                    } else {
+                        (0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32)
+                    };
+                    let uni = Uniforms {
+                        screen_w: gpu.config.width as f32,
+                        screen_h: gpu.config.height as f32,
+                        dest_x: dx,
+                        dest_y: dy,
+                        dest_w: dw,
+                        dest_h: dh,
+                        alpha: 1.0,
+                        _pad: [0.0; 3],
+                    };
+                    gpu.queue
+                        .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("draw-pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                    });
+                    rpass.set_pipeline(&gpu.pipeline);
+                    rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                    if let Some((bind, _, _)) = &self.current {
+                        rpass.set_bind_group(1, bind, &[]);
+                        rpass.draw(0..6, 0..1);
                     }
+                    drop(rpass);
                     gpu.queue.submit(Some(encoder.finish()));
                     frame.present();
                 }
@@ -162,16 +314,97 @@ pub fn run_windowed(
                 return;
             }
             if let Ok(PhotoLoaded(img)) = self.from_loader.try_recv() {
-                tracing::info!(
-                    "loaded {} ({}x{}, {} bytes)",
-                    img.path.display(),
-                    img.width,
-                    img.height,
-                    img.pixels.len()
-                );
-                let _ = self
-                    .to_manager_displayed
-                    .try_send(Displayed(img.path));
+                if let Some(gpu) = self.gpu.as_ref() {
+                    let (out_w, out_h) = compute_scaled_size(
+                        img.width,
+                        img.height,
+                        gpu.config.width,
+                        gpu.config.height,
+                        1.0,
+                        gpu.limits.max_texture_dimension_2d,
+                    );
+                    let mut pixels: std::borrow::Cow<'_, [u8]> =
+                        std::borrow::Cow::Borrowed(&img.pixels);
+                    if out_w != img.width || out_h != img.height {
+                        if let Some(src) =
+                            image::RgbaImage::from_raw(img.width, img.height, img.pixels.clone())
+                        {
+                            let resized = image::imageops::resize(
+                                &src,
+                                out_w,
+                                out_h,
+                                image::imageops::FilterType::Triangle,
+                            );
+                            pixels = std::borrow::Cow::Owned(resized.into_raw());
+                        }
+                    }
+                    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("photo-texture"),
+                        size: wgpu::Extent3d {
+                            width: out_w,
+                            height: out_h,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
+                    let stride = 4 * out_w;
+                    let padded = compute_padded_stride(stride);
+                    let upload: std::borrow::Cow<'_, [u8]> = if padded != stride {
+                        let mut staging = vec![0u8; (padded as usize) * (out_h as usize)];
+                        let rs = stride as usize;
+                        let rd = padded as usize;
+                        let src = pixels.as_ref();
+                        for y in 0..(out_h as usize) {
+                            let so = y * rs;
+                            let doff = y * rd;
+                            staging[doff..doff + rs].copy_from_slice(&src[so..so + rs]);
+                        }
+                        std::borrow::Cow::Owned(staging)
+                    } else {
+                        pixels
+                    };
+                    gpu.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &tex,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        &upload,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(padded),
+                            rows_per_image: Some(out_h),
+                        },
+                        wgpu::Extent3d {
+                            width: out_w,
+                            height: out_h,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                    let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("image-bind"),
+                        layout: &gpu.img_bind_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+                            },
+                        ],
+                    });
+                    self.current = Some((bind, out_w, out_h));
+                    let _ = self.to_manager_displayed.try_send(Displayed(img.path));
+                }
             }
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
@@ -186,7 +419,52 @@ pub fn run_windowed(
         cancel,
         window: None,
         gpu: None,
+        current: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+fn compute_padded_stride(bytes_per_row: u32) -> u32 {
+    const ALIGN: u32 = 256;
+    if bytes_per_row == 0 {
+        return 0;
+    }
+    bytes_per_row.div_ceil(ALIGN) * ALIGN
+}
+
+fn compute_scaled_size(
+    img_w: u32,
+    img_h: u32,
+    surf_w: u32,
+    surf_h: u32,
+    oversample: f32,
+    max_dim: u32,
+) -> (u32, u32) {
+    if img_w == 0 || img_h == 0 || surf_w == 0 || surf_h == 0 {
+        return (1, 1);
+    }
+    let max_w = ((surf_w as f32) * oversample).round().max(1.0) as u32;
+    let max_h = ((surf_h as f32) * oversample).round().max(1.0) as u32;
+    let max_w = max_w.min(max_dim).max(1);
+    let max_h = max_h.min(max_dim).max(1);
+    let sw = (max_w as f32) / (img_w as f32);
+    let sh = (max_h as f32) / (img_h as f32);
+    let s = sw.min(sh).min(1.0);
+    let out_w = ((img_w as f32) * s).floor().max(1.0) as u32;
+    let out_h = ((img_h as f32) * s).floor().max(1.0) as u32;
+    (out_w, out_h)
+}
+
+fn compute_dest_rect(img_w: u32, img_h: u32, screen_w: u32, screen_h: u32) -> (f32, f32, f32, f32) {
+    let iw = img_w as f32;
+    let ih = img_h as f32;
+    let sw = screen_w as f32;
+    let sh = screen_h as f32;
+    let scale = (sw / iw).min(sh / ih);
+    let w = iw * scale;
+    let h = ih * scale;
+    let x = (sw - w) * 0.5;
+    let y = (sh - h) * 0.5;
+    (x, y, w, h)
 }
