@@ -1,15 +1,22 @@
 use crate::config::Configuration;
 use crate::events::{InvalidPhoto, InventoryEvent};
 use anyhow::Result;
-use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
+use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
+use tracing::instrument;
+use tracing::{debug, error, info};
 use walkdir::WalkDir;
 
+#[instrument(
+    skip(to_manager, invalid_rx, cancel),
+    fields(root = %cfg.photo_library_path.display())
+)]
 pub async fn run(
     cfg: Configuration,
     to_manager: Sender<InventoryEvent>,
@@ -17,6 +24,7 @@ pub async fn run(
     cancel: CancellationToken,
 ) -> Result<()> {
     // 1) Startup scan (recursive)
+    let mut discovered = 0usize;
     for entry in WalkDir::new(&cfg.photo_library_path)
         .follow_links(true)
         .into_iter()
@@ -25,72 +33,84 @@ pub async fn run(
     {
         let path = entry.path().to_path_buf();
         if is_image(&path) {
+            discovered += 1;
+            debug!(action = "startup_add", path = %path.display());
             let _ = to_manager.send(InventoryEvent::PhotoAdded(path)).await;
         }
     }
+    info!(discovered, "startup recursive scan complete");
 
     // 2) Bridge notify callback -> async channel
     let (watch_tx, mut watch_rx) = mpsc::channel::<notify::Result<Event>>(128);
     let mut _watcher = recommended_watcher(move |res| {
         let _ = watch_tx.blocking_send(res);
     })?;
+
+    // Try to log the canonical path we ended up watching (helps spot symlink issues).
+    match cfg.photo_library_path.canonicalize() {
+        Ok(abs) => info!(watching = %abs.display(), "notify watcher initialized (recursive)"),
+        Err(_) => {
+            info!(watching = %cfg.photo_library_path.display(), "notify watcher initialized (recursive)")
+        }
+    }
     _watcher.watch(&cfg.photo_library_path, RecursiveMode::Recursive)?;
 
     // 3) Event loop
     loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                break;
-            }
+        select! {
+                    _ = cancel.cancelled() => {
+                        info!("cancel received; exiting files task");
+                        break;
+                    }
 
-            Some(InvalidPhoto(path)) = invalid_rx.recv() => {
-                quarantine(&cfg, &path)?;
-                let _ = to_manager.send(InventoryEvent::PhotoRemoved(path)).await;
-            }
+                    // From Manager/Loader: quarantine then tell Manager it disappeared.
+                    Some(InvalidPhoto(path)) = invalid_rx.recv() => {
+                        info!(path = %path.display(), "quarantining invalid photo");
+                        quarantine(&cfg, &path)?;
+                        let _ = to_manager.send(InventoryEvent::PhotoRemoved(path)).await;
+                    }
 
-            Some(res) = watch_rx.recv() => {
-                match res {
-                    Ok(event) => {
-                        match classify_kind(&event.kind) {
-                            Some(Action::Add) => {
-                                for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
-                                    let _ = to_manager.send(InventoryEvent::PhotoAdded(p)).await;
-                                }
-                            }
-                            Some(Action::Remove) => {
-                                for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
-                                    let _ = to_manager.send(InventoryEvent::PhotoRemoved(p)).await;
-                                }
-                            }
-                            None => {} // ignore
+                    // Filesystem notifications -> InventoryEvent via compact match
+                    Some(res) = watch_rx.recv() => match res {
+            Ok(event) => {
+                debug!(kind = ?event.kind, paths = ?event.paths, "notify event");
+
+                match &event.kind {
+                    EventKind::Create(CreateKind::File) => {
+                        for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
+                            info!(path = %p.display(), "fs: add (create)");
+                            let _ = to_manager.send(InventoryEvent::PhotoAdded(p)).await;
                         }
                     }
-                    Err(err) => {
-                        eprintln!("watch error: {err}");
+                    EventKind::Remove(RemoveKind::File) => {
+                        for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
+                            info!(path = %p.display(), "fs: remove (remove)");
+                            let _ = to_manager.send(InventoryEvent::PhotoRemoved(p)).await;
+                        }
+                    }
+                    EventKind::Modify(ModifyKind::Name(_mode)) => {
+                        // macOS often reports moves as Name(Any). Decide per-path by existence.
+                        for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
+                            let exists = p.exists();
+                            if exists {
+                                info!(path = %p.display(), "fs: add (rename/name)");
+                                let _ = to_manager.send(InventoryEvent::PhotoAdded(p)).await;
+                            } else {
+                                info!(path = %p.display(), "fs: remove (rename/name)");
+                                let _ = to_manager.send(InventoryEvent::PhotoRemoved(p)).await;
+                            }
+                        }
+                    }
+                    _ => {
+                        debug!(kind = ?event.kind, "fs: ignored");
                     }
                 }
             }
+            Err(err) => error!("watch error: {err}"),
         }
+                }
     }
     Ok(())
-}
-
-#[derive(Copy, Clone)]
-enum Action {
-    Add,
-    Remove,
-}
-
-#[inline]
-fn classify_kind(kind: &EventKind) -> Option<Action> {
-    use Action::*;
-    match kind {
-        EventKind::Create(CreateKind::File) => Some(Add),
-        EventKind::Remove(RemoveKind::File) => Some(Remove),
-        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => Some(Add),
-        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => Some(Remove),
-        _ => None,
-    }
 }
 
 #[inline]
@@ -106,7 +126,6 @@ fn is_image(p: &Path) -> bool {
 fn quarantine(cfg: &Configuration, p: &Path) -> Result<()> {
     fs::create_dir_all(&cfg.photo_quarantine_path)?;
     let file = p.file_name().unwrap_or_default();
-
     let mut dst = PathBuf::from(&cfg.photo_quarantine_path);
     dst.push(file);
 

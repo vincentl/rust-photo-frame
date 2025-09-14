@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::EnvFilter;
 
 use events::{InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded};
 
@@ -31,6 +32,15 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // init tracing (RUST_LOG controls level, default = info)
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .compact()
+        .init();
+
     let Args { config } = Args::parse();
     let cfg = config::Configuration::from_yaml_file(&config)?;
     println!(
