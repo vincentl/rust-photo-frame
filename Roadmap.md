@@ -21,13 +21,18 @@
 
 ## Intermediate Milestone – Cross-platform Image Display
 
-- [ ] **macOS support**
-  - [ ] Build and run the application, opening a window and showing a test image.
-- [ ] **Raspberry Pi support**
-  - [ ] Build and run on Pi with the same viewer path as macOS.
-- [ ] **Testing & QA**
-  - [ ] Ensure `cargo test` and `cargo clippy -- -D warnings` pass on both platforms.
-  - [ ] Document minimal steps to run the demo on each platform.
+- [ ] **GPU viewer shows decoded photo**
+  - [ ] Upload `PreparedImageCpu` to a wgpu texture and render a full-screen quad.
+  - [ ] Unit test verifies EXIF orientation is applied during load.
+  - [ ] Integration test confirms the viewer emits `Displayed` after drawing.
+- [ ] **macOS demo**
+  - [ ] Build & run on macOS, confirming a window renders the first photo.
+  - [ ] Document minimal run steps and dependencies.
+- [ ] **Raspberry Pi demo**
+  - [ ] Build & run the same viewer code on Raspberry Pi.
+  - [ ] Document any Pi-specific configuration.
+- [ ] **Quality gates**
+  - [ ] Keep `cargo build`, `cargo clippy -- -D warnings`, and `cargo test` clean.
 
 ## Tier 2 – Should-do (reliability & usability)
 
