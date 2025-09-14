@@ -112,16 +112,155 @@ pub async fn run(
     Ok(())
 }
 
+pub fn run_windowed(
+    mut from_loader: tokio::sync::mpsc::Receiver<PhotoLoaded>,
+    to_manager_displayed: tokio::sync::mpsc::Sender<Displayed>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
+    use winit::event::{Event, WindowEvent};
+    use winit::event_loop::EventLoop;
+    use winit::window::WindowBuilder;
+
+    let event_loop = EventLoop::new()?;
+    let window = WindowBuilder::new()
+        .with_title("Photo Frame")
+        .build(&event_loop)?;
+    let window = std::rc::Rc::new(window);
+
+    // Init wgpu (blocking) with a window surface
+    let instance = wgpu::Instance::default();
+    let surface_window = window.clone();
+    let surface = unsafe { instance.create_surface(surface_window.as_ref()) }?;
+    let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: Some(&surface),
+        force_fallback_adapter: false,
+    })) {
+        Some(a) => a,
+        None => return Err(anyhow::anyhow!("no suitable GPU adapter found")),
+    };
+    let limits = adapter.limits();
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("viewer-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: limits.clone(),
+        },
+        None,
+    ))?;
+
+    // Surface configuration (sRGB format, vsync)
+    let caps = surface.get_capabilities(&adapter);
+    let format = caps
+        .formats
+        .iter()
+        .copied()
+        .find(|f| f.is_srgb())
+        .unwrap_or(caps.formats[0]);
+    let size = window.inner_size();
+    let mut config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: size.width.max(1),
+        height: size.height.max(1),
+        present_mode: wgpu::PresentMode::AutoVsync,
+        alpha_mode: caps.alpha_modes[0],
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+    surface.configure(&device, &config);
+
+    // Local GPU context for this function (windowed)
+    struct GpuCtx<'w> {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        surface: wgpu::Surface<'w>,
+        config: wgpu::SurfaceConfiguration,
+        limits: wgpu::Limits,
+        oversample: f32,
+    }
+    let mut gpu = GpuCtx { device, queue, surface, config, limits, oversample: 1.0 };
+
+    // Basic event loop: handle resize, redraw, and cancellation. Rendering pipeline integration can follow.
+    event_loop.run(move |event, elwt| {
+        match event {
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => elwt.exit(),
+                WindowEvent::Resized(new_size) => {
+                    let w = new_size.width.max(1);
+                    let h = new_size.height.max(1);
+                    if w != gpu.config.width || h != gpu.config.height {
+                        gpu.config.width = w;
+                        gpu.config.height = h;
+                        gpu.surface.configure(&gpu.device, &gpu.config);
+                    }
+                }
+                WindowEvent::ScaleFactorChanged { .. } => {}
+                WindowEvent::RedrawRequested => {
+                    // Acquire the next frame from the surface
+                    let frame = match gpu.surface.get_current_texture() {
+                        Ok(frame) => frame,
+                        Err(err) => {
+                            match err {
+                                wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+                                    gpu.surface.configure(&gpu.device, &gpu.config);
+                                }
+                                wgpu::SurfaceError::Timeout => {}
+                                wgpu::SurfaceError::OutOfMemory => { elwt.exit(); }
+                            }
+                            return;
+                        }
+                    };
+                    let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("clear-encoder") });
+                    {
+                        let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("clear-pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.08, g: 0.08, b: 0.10, a: 1.0 }),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            occlusion_query_set: None,
+                            timestamp_writes: None,
+                        });
+                    }
+                    gpu.queue.submit(Some(encoder.finish()));
+                    frame.present();
+                }
+                _ => {}
+            },
+            Event::AboutToWait => {
+                if cancel.is_cancelled() { elwt.exit(); return; }
+                let _ = from_loader.try_recv();
+                window.request_redraw();
+            }
+            _ => {}
+        }
+    })?;
+
+    // Unreachable until event loop exits
+    let _ = to_manager_displayed; // suppress unused for now
+    Ok(())
+}
+
 async fn init_gpu(init_w: u32, init_h: u32) -> Result<Gpu> {
     let instance = wgpu::Instance::default();
-    let adapter = instance
+    let adapter = match instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: None,
             force_fallback_adapter: false,
         })
         .await
-        .ok_or_else(|| anyhow::anyhow!("no suitable GPU adapter found"))?;
+    {
+        Some(a) => a,
+        None => return Err(anyhow::anyhow!("no suitable GPU adapter found")),
+    };
     let limits = adapter.limits();
     let (device, queue) = adapter
         .request_device(

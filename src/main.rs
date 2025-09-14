@@ -16,7 +16,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-use events::{Displayed, InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded, SurfaceSize};
+use events::{Displayed, InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -55,7 +55,6 @@ async fn main() -> Result<()> {
     let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(1); // Manager -> Loader (preload buffer = 1)
     let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(1); // Loader  -> Viewer (preload buffer = 1)
     let (displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(64); // Viewer  -> Manager
-    let (surface_size_tx, surface_size_rx) = mpsc::channel::<SurfaceSize>(8); // UI/Window -> Viewer
 
     let cancel = CancellationToken::new();
 
@@ -98,25 +97,15 @@ async fn main() -> Result<()> {
         async move { tasks::loader::run(to_load_rx, invalid_tx, loaded_tx, cancel).await }
     });
 
-    // PhotoViewer
-    tasks.spawn({
-        let loaded_rx = loaded_rx;
-        let displayed_tx = displayed_tx.clone();
-        let surface_size_rx = surface_size_rx;
-        let cancel = cancel.clone();
-        async move { tasks::viewer::run(loaded_rx, displayed_tx, surface_size_rx, cancel).await }
-    });
+    // Run the windowed viewer on the main thread (blocking) after spawning other tasks
+    // This call returns when the window closes or cancellation occurs
+    if let Err(e) = tasks::viewer::run_windowed(loaded_rx, displayed_tx.clone(), cancel.clone()) {
+        tracing::error!("viewer error: {e:?}");
+    }
+    // Ensure other tasks are asked to stop
+    cancel.cancel();
 
-    // For now, send an initial surface size (placeholder until a real window reports it)
-    let _ = surface_size_tx
-        .send(SurfaceSize {
-            width: 1920,
-            height: 1080,
-            oversample: cfg.oversample,
-        })
-        .await;
-
-    // Drain JoinSet
+    // Drain JoinSet (wait for other tasks to complete)
     while let Some(res) = tasks.join_next().await {
         match res {
             Ok(Ok(())) => {}

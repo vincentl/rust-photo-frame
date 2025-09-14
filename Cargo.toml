@@ -4,21 +4,23 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-notify = "6"
-rand = "0.8"
-serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-tokio-util = "0.7"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-walkdir = "2"
-image = { version = "0.24", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+anyhow = "1.0.99"
+bytemuck = { version = "1.23.2", features = ["derive"] }
+clap = { version = "4.5.47", features = ["derive"] }
+exif = { version = "0.6.1", package = "kamadak-exif" }
+image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+notify = "6.1.1"
+pollster = "0.4.0"
+rand = "0.8.5"
+serde = { version = "1.0.221", features = ["derive"] }
+serde_yaml = "0.9.34"
+tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = "0.7.16"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
+walkdir = "2.5.0"
 wgpu = { version = "0.19", features = ["wgsl"] }
-bytemuck = { version = "1", features = ["derive"] }
-exif = { version = "0.5", package = "kamadak-exif" }
+winit = "0.29"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "3.22.0"
