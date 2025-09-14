@@ -13,7 +13,7 @@ use tracing::debug;
 // metadata is missing, the original orientation is preserved.
 fn decode_rgba8_apply_exif(path: &Path) -> anyhow::Result<image::RgbaImage> {
     // Read and decode
-    let img = image::io::Reader::open(path)?
+    let img = image::ImageReader::open(path)?
         .with_guessed_format()? // sniff based on content/extension
         .decode()?; // DynamicImage
 
