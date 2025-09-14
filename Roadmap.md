@@ -19,6 +19,16 @@
   - [x] Handle startup without crashing if photo list is empty/missing.
   - [x] Simple circular buffer of photos (no weighting yet).
 
+## Intermediate Milestone – Cross-platform Image Display
+
+- [ ] **macOS support**
+  - [ ] Build and run the application, opening a window and showing a test image.
+- [ ] **Raspberry Pi support**
+  - [ ] Build and run on Pi with the same viewer path as macOS.
+- [ ] **Testing & QA**
+  - [ ] Ensure `cargo test` and `cargo clippy -- -D warnings` pass on both platforms.
+  - [ ] Document minimal steps to run the demo on each platform.
+
 ## Tier 2 – Should-do (reliability & usability)
 
 - [ ] **Frame hardware**
