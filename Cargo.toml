@@ -9,7 +9,7 @@ bytemuck = { version = "1.23.2", features = ["derive"] }
 clap = { version = "4.5.47", features = ["derive"] }
 exif = { version = "0.6.1", package = "kamadak-exif" }
 image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-notify = "6.1.1"
+notify = "8.2.0"
 pollster = "0.4.0"
 rand = "0.8.5"
 serde = { version = "1.0.221", features = ["derive"] }
@@ -19,8 +19,8 @@ tokio-util = "0.7.16"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
 walkdir = "2.5.0"
-wgpu = { version = "0.19", features = ["wgsl"] }
-winit = "0.29"
+wgpu = { version = "26.0.1", features = ["wgsl"] }
+winit = "0.30.12"
 
 [dev-dependencies]
 tempfile = "3.22.0"
