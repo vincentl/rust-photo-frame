@@ -1,10 +1,10 @@
 mod config;
 mod events;
-mod tasks { 
-    pub mod files; 
-    pub mod loader; 
-    pub mod manager; 
-    pub mod viewer; 
+mod tasks {
+    pub mod files;
+    pub mod loader;
+    pub mod manager;
+    pub mod viewer;
 }
 
 use anyhow::Result;
@@ -15,10 +15,14 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use events::{InventoryEvent, InvalidPhoto, LoadPhoto, PhotoLoaded};
+use events::{InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded};
 
 #[derive(Debug, Parser)]
-#[command(name = "rust-photo-frame", version, about = "photo frame minimal scaffold")]
+#[command(
+    name = "rust-photo-frame",
+    version,
+    about = "photo frame minimal scaffold"
+)]
 struct Args {
     /// Path to YAML config
     #[arg(value_name = "CONFIG")]
@@ -29,13 +33,17 @@ struct Args {
 async fn main() -> Result<()> {
     let Args { config } = Args::parse();
     let cfg = config::Configuration::from_yaml_file(&config)?;
-    println!("Loaded configuration from {}:\n{:#?}", config.display(), cfg);
+    println!(
+        "Loaded configuration from {}:\n{:#?}",
+        config.display(),
+        cfg
+    );
 
     // Channels (small/bounded)
-    let (inv_tx, inv_rx)         = mpsc::channel::<InventoryEvent>(8); // PhotoFiles -> Manager
-    let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(8);   // Manager/Loader -> PhotoFiles
-    let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(2);      // Manager -> Loader (short)
-    let (loaded_tx, loaded_rx)   = mpsc::channel::<PhotoLoaded>(2);    // Loader  -> Viewer (short)
+    let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(8); // PhotoFiles -> Manager
+    let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(8); // Manager/Loader -> PhotoFiles
+    let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(2); // Manager -> Loader (short)
+    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(2); // Loader  -> Viewer (short)
 
     let cancel = CancellationToken::new();
 

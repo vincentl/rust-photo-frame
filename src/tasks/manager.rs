@@ -1,6 +1,6 @@
-use crate::events::{InventoryEvent, InvalidPhoto, LoadPhoto};
+use crate::events::{InvalidPhoto, InventoryEvent, LoadPhoto};
 use anyhow::Result;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use tokio::select;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -12,10 +12,15 @@ pub async fn run(
     to_loader: Sender<LoadPhoto>,
     cancel: CancellationToken,
 ) -> Result<()> {
+    // Known photos + a short queue of pending loads.
+    let mut known: HashSet<PathBuf> = HashSet::new();
     let mut pending: VecDeque<PathBuf> = VecDeque::new();
 
+    // Avoid unused warning until EXIF validation is added.
+    let _ = &invalid_tx;
+
     loop {
-        // Opportunistic send to keep loader fed.
+        // Opportunistic nonblocking send to keep the loader fed.
         if let Some(p) = pending.front().cloned() {
             if to_loader.try_send(LoadPhoto(p)).is_ok() {
                 pending.pop_front();
@@ -26,27 +31,27 @@ pub async fn run(
         select! {
             _ = cancel.cancelled() => break,
 
-            Some(ev) = inv_rx.recv() => {
-                match ev {
-                    InventoryEvent::PhotoAdded(path) => {
-                        // TODO: EXIF check; on failure:
-                        // let _ = invalid_tx.send(InvalidPhoto(path)).await;
-                        // else queue for load:
+            Some(ev) = inv_rx.recv() => match ev {
+                InventoryEvent::PhotoAdded(path) => {
+                    // Insert returns true only if it was not present.
+                    if known.insert(path.clone()) {
                         pending.push_back(path);
                     }
-                    InventoryEvent::PhotoRemoved(path) => {
-                        pending.retain(|p| p != &path);
-                        // TODO: also remove from internal list/plan if you keep one.
-                    }
                 }
-            }
+                InventoryEvent::PhotoRemoved(path) => {
+                    // Robust: ignore if we never saw it.
+                    known.remove(&path);
+                    pending.retain(|p| p != &path);
+                }
+            },
 
-            // If we have pending work but channel is full, await capacity alongside other events.
+            // If queue is non-empty but channel lacked capacity, await a slot.
             _ = async {
                 if let Some(p) = pending.front().cloned() {
                     let _ = to_loader.send(LoadPhoto(p)).await;
                 }
             }, if !pending.is_empty() => {
+                // Drop the item regardless of send result to avoid spins on closed channel.
                 let _ = pending.pop_front();
             }
         }

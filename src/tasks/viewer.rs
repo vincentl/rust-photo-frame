@@ -4,10 +4,7 @@ use tokio::select;
 use tokio::sync::mpsc::Receiver;
 use tokio_util::sync::CancellationToken;
 
-pub async fn run(
-    mut from_loader: Receiver<PhotoLoaded>,
-    cancel: CancellationToken,
-) -> Result<()> {
+pub async fn run(mut from_loader: Receiver<PhotoLoaded>, cancel: CancellationToken) -> Result<()> {
     loop {
         select! {
             _ = cancel.cancelled() => break,

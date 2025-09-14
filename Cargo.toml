@@ -6,8 +6,12 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+notify = "6"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-util = "0.7"
 walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
