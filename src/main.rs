@@ -16,7 +16,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-use events::{InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded};
+use events::{Displayed, InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -43,17 +43,18 @@ async fn main() -> Result<()> {
 
     let Args { config } = Args::parse();
     let cfg = config::Configuration::from_yaml_file(&config)?;
-    println!(
+    tracing::info!(
         "Loaded configuration from {}:\n{:#?}",
         config.display(),
         cfg
     );
 
     // Channels (small/bounded)
-    let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(8); // PhotoFiles -> Manager
-    let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(8); // Manager/Loader -> PhotoFiles
+    let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(128); // Files -> Manager
+    let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(64); // Manager/Loader -> Files
     let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(2); // Manager -> Loader (short)
     let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(2); // Loader  -> Viewer (short)
+    let (displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(64); // Viewer  -> Manager
 
     let cancel = CancellationToken::new();
 
@@ -81,10 +82,10 @@ async fn main() -> Result<()> {
     // PhotoManager
     tasks.spawn({
         let inv_rx = inv_rx;
-        let invalid_tx = invalid_tx.clone();
+        let displayed_rx = displayed_rx;
         let to_load_tx = to_load_tx.clone();
         let cancel = cancel.clone();
-        async move { tasks::manager::run(inv_rx, invalid_tx, to_load_tx, cancel).await }
+        async move { tasks::manager::run(inv_rx, displayed_rx, to_load_tx, cancel).await }
     });
 
     // PhotoLoader
@@ -99,16 +100,17 @@ async fn main() -> Result<()> {
     // PhotoViewer
     tasks.spawn({
         let loaded_rx = loaded_rx;
+        let displayed_tx = displayed_tx.clone();
         let cancel = cancel.clone();
-        async move { tasks::viewer::run(loaded_rx, cancel).await }
+        async move { tasks::viewer::run(loaded_rx, displayed_tx, cancel).await }
     });
 
     // Drain JoinSet
     while let Some(res) = tasks.join_next().await {
         match res {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => eprintln!("task error: {e:?}"),
-            Err(e) => eprintln!("join error: {e}"),
+            Ok(Err(e)) => tracing::error!("task error: {e:?}"),
+            Err(e) => tracing::error!("join error: {e}"),
         }
     }
 

@@ -1,4 +1,4 @@
-use crate::events::{InvalidPhoto, InventoryEvent, LoadPhoto};
+use crate::events::{Displayed, InventoryEvent, LoadPhoto};
 use anyhow::Result;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
@@ -8,24 +8,27 @@ use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use tracing::{debug, info, warn};
 
-#[instrument(skip(inv_rx, _invalid_tx, to_loader, cancel), name = "manager")]
+#[instrument(skip(inv_rx, displayed_rx, to_loader, cancel), name = "manager")]
 pub async fn run(
     mut inv_rx: Receiver<InventoryEvent>,
-    _invalid_tx: Sender<InvalidPhoto>, // reserved for future EXIF/validation
+    mut displayed_rx: Receiver<Displayed>,
     to_loader: Sender<LoadPhoto>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let mut known: HashSet<PathBuf> = HashSet::new();
-    let mut pending: VecDeque<PathBuf> = VecDeque::new();
+    // Catalog = membership; Playlist = order (front is next to send).
+    let mut catalog: HashSet<PathBuf> = HashSet::new();
+    let mut playlist: VecDeque<PathBuf> = VecDeque::new();
 
     info!("started");
 
     loop {
-        // Opportunistic non-blocking send.
-        if let Some(p) = pending.front().cloned() {
+        // Opportunistic non-blocking send of the current front.
+        if let Some(p) = playlist.front().cloned() {
             if to_loader.try_send(LoadPhoto(p.clone())).is_ok() {
                 debug!("-> loader (try_send): {}", p.display());
-                pending.pop_front();
+                // rotate on success
+                let f = playlist.pop_front().unwrap();
+                playlist.push_back(f);
                 continue;
             }
         }
@@ -36,45 +39,56 @@ pub async fn run(
                 break;
             }
 
-            Some(ev) = inv_rx.recv() => {
-                match ev {
-                    InventoryEvent::PhotoAdded(path) => {
-                        if known.insert(path.clone()) {
-                            info!("added: {}", path.display());
-                            pending.push_back(path);
-                        } else {
-                            debug!("duplicate add (ignored): {}", path.display());
-                        }
-                        debug!(known = known.len(), pending = pending.len(), "state");
+            Some(ev) = inv_rx.recv() => match ev {
+                InventoryEvent::PhotoAdded(path) => {
+                    if catalog.insert(path.clone()) {
+                        // New photos go to the front so they appear quickly.
+                        playlist.push_front(path.clone());
+                        info!("added: {}", path.display());
+                    } else {
+                        debug!("duplicate add (ignored): {}", path.display());
                     }
-                    InventoryEvent::PhotoRemoved(path) => {
-                        let was_known = known.remove(&path);
-                        let before = pending.len();
-                        pending.retain(|p| p != &path);
-                        let removed_pending = before != pending.len();
-
-                        if was_known || removed_pending {
-                            info!(
-                                "removed: {} (known_removed={}, pending_removed={})",
-                                path.display(), was_known, removed_pending
-                            );
-                        } else {
-                            warn!("spurious remove (ignored): {}", path.display());
-                        }
-                        debug!(known = known.len(), pending = pending.len(), "state");
-                    }
+                    let front_disp = playlist.front().map(|p| p.display().to_string()).unwrap_or_else(|| "<none>".to_string());
+                    debug!(catalog = catalog.len(), playlist = playlist.len(), front = %front_disp, "state");
                 }
+                InventoryEvent::PhotoRemoved(path) => {
+                    if catalog.remove(&path) {
+                        // Remove first/only occurrence from playlist
+                        if let Some(pos) = playlist.iter().position(|p| p == &path) {
+                            let removed_front = pos == 0;
+                            playlist.remove(pos);
+                            info!("removed: {} (was_front={})", path.display(), removed_front);
+                        } else {
+                            info!("removed: {} (not in playlist—already rotated)", path.display());
+                        }
+                    } else {
+                        warn!("spurious remove (ignored): {}", path.display());
+                    }
+                    let front_disp = playlist.front().map(|p| p.display().to_string()).unwrap_or_else(|| "<none>".to_string());
+                    debug!(catalog = catalog.len(), playlist = playlist.len(), front = %front_disp, "state");
+                }
+            },
+
+            // Viewer notification (informational for now)
+            Some(Displayed(path)) = displayed_rx.recv() => {
+                debug!("displayed: {}", path.display());
             }
 
-            _ = async {
-                if let Some(p) = pending.front().cloned() {
-                    match to_loader.send(LoadPhoto(p.clone())).await {
-                        Ok(()) => debug!("-> loader (await): {}", p.display()),
-                        Err(e) => warn!("send to loader failed for {}: {e}", p.display()),
+            // Await capacity if channel was full; rotate only on success.
+            res = to_loader.reserve(), if !playlist.is_empty() => {
+                match res {
+                    Ok(permit) => {
+                        if let Some(p) = playlist.front().cloned() {
+                            permit.send(LoadPhoto(p.clone()));
+                            debug!("-> loader (await): {}", p.display());
+                            let f = playlist.pop_front().unwrap();
+                            playlist.push_back(f);
+                        }
+                    }
+                    Err(_) => {
+                        warn!("loader channel closed");
                     }
                 }
-            }, if !pending.is_empty() => {
-                let _ = pending.pop_front();
             }
         }
     }

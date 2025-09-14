@@ -3,10 +3,10 @@ use crate::events::{InvalidPhoto, InventoryEvent};
 use anyhow::Result;
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
+use rand::seq::SliceRandom;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -23,8 +23,8 @@ pub async fn run(
     mut invalid_rx: Receiver<InvalidPhoto>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    // 1) Startup scan (recursive)
-    let mut discovered = 0usize;
+    // 1) Startup scan (recursive) -> collect, shuffle, emit
+    let mut initial = Vec::<PathBuf>::new();
     for entry in WalkDir::new(&cfg.photo_library_path)
         .follow_links(true)
         .into_iter()
@@ -33,12 +33,20 @@ pub async fn run(
     {
         let path = entry.path().to_path_buf();
         if is_image(&path) {
-            discovered += 1;
-            debug!(action = "startup_add", path = %path.display());
-            let _ = to_manager.send(InventoryEvent::PhotoAdded(path)).await;
+            initial.push(path);
         }
     }
-    info!(discovered, "startup recursive scan complete");
+    initial.shuffle(&mut rand::thread_rng());
+    for path in &initial {
+        debug!(action = "startup_add", path = %path.display());
+        let _ = to_manager
+            .send(InventoryEvent::PhotoAdded(path.clone()))
+            .await;
+    }
+    info!(
+        discovered = initial.len(),
+        "startup recursive scan complete (shuffled)"
+    );
 
     // 2) Bridge notify callback -> async channel
     let (watch_tx, mut watch_rx) = mpsc::channel::<notify::Result<Event>>(128);
@@ -46,7 +54,7 @@ pub async fn run(
         let _ = watch_tx.blocking_send(res);
     })?;
 
-    // Try to log the canonical path we ended up watching (helps spot symlink issues).
+    // Log what we’re watching
     match cfg.photo_library_path.canonicalize() {
         Ok(abs) => info!(watching = %abs.display(), "notify watcher initialized (recursive)"),
         Err(_) => {
@@ -57,58 +65,56 @@ pub async fn run(
 
     // 3) Event loop
     loop {
-        select! {
-                    _ = cancel.cancelled() => {
-                        info!("cancel received; exiting files task");
-                        break;
-                    }
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("cancel received; exiting files task");
+                break;
+            }
 
-                    // From Manager/Loader: quarantine then tell Manager it disappeared.
-                    Some(InvalidPhoto(path)) = invalid_rx.recv() => {
-                        info!(path = %path.display(), "quarantining invalid photo");
-                        quarantine(&cfg, &path)?;
-                        let _ = to_manager.send(InventoryEvent::PhotoRemoved(path)).await;
-                    }
+            // From Manager/Loader: quarantine then tell Manager it disappeared.
+            Some(InvalidPhoto(path)) = invalid_rx.recv() => {
+                info!(path = %path.display(), "quarantining invalid photo");
+                quarantine(&cfg, &path)?;
+                let _ = to_manager.send(InventoryEvent::PhotoRemoved(path)).await;
+            }
 
-                    // Filesystem notifications -> InventoryEvent via compact match
-                    Some(res) = watch_rx.recv() => match res {
-            Ok(event) => {
-                debug!(kind = ?event.kind, paths = ?event.paths, "notify event");
-
-                match &event.kind {
-                    EventKind::Create(CreateKind::File) => {
-                        for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
-                            info!(path = %p.display(), "fs: add (create)");
-                            let _ = to_manager.send(InventoryEvent::PhotoAdded(p)).await;
-                        }
-                    }
-                    EventKind::Remove(RemoveKind::File) => {
-                        for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
-                            info!(path = %p.display(), "fs: remove (remove)");
-                            let _ = to_manager.send(InventoryEvent::PhotoRemoved(p)).await;
-                        }
-                    }
-                    EventKind::Modify(ModifyKind::Name(_mode)) => {
-                        // macOS often reports moves as Name(Any). Decide per-path by existence.
-                        for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
-                            let exists = p.exists();
-                            if exists {
-                                info!(path = %p.display(), "fs: add (rename/name)");
+            // Filesystem notifications -> InventoryEvent
+            Some(res) = watch_rx.recv() => match res {
+                Ok(event) => {
+                    debug!(kind = ?event.kind, paths = ?event.paths, "notify event");
+                    match &event.kind {
+                        EventKind::Create(CreateKind::File) => {
+                            for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
+                                info!(path = %p.display(), "fs: add (create)");
                                 let _ = to_manager.send(InventoryEvent::PhotoAdded(p)).await;
-                            } else {
-                                info!(path = %p.display(), "fs: remove (rename/name)");
+                            }
+                        }
+                        EventKind::Remove(RemoveKind::File) => {
+                            for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
+                                info!(path = %p.display(), "fs: remove (remove)");
                                 let _ = to_manager.send(InventoryEvent::PhotoRemoved(p)).await;
                             }
                         }
-                    }
-                    _ => {
-                        debug!(kind = ?event.kind, "fs: ignored");
+                        EventKind::Modify(ModifyKind::Name(_)) => {
+                            // macOS often reports moves as Name(Any). Decide per-path by existence.
+                            for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
+                                if p.exists() {
+                                    info!(path = %p.display(), "fs: add (rename/name)");
+                                    let _ = to_manager.send(InventoryEvent::PhotoAdded(p)).await;
+                                } else {
+                                    info!(path = %p.display(), "fs: remove (rename/name)");
+                                    let _ = to_manager.send(InventoryEvent::PhotoRemoved(p)).await;
+                                }
+                            }
+                        }
+                        _ => {
+                            debug!(kind = ?event.kind, "fs: ignored");
+                        }
                     }
                 }
+                Err(err) => error!("watch error: {err}"),
             }
-            Err(err) => error!("watch error: {err}"),
         }
-                }
     }
     Ok(())
 }
