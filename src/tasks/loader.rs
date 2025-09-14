@@ -1,4 +1,4 @@
-use crate::events::{InvalidPhoto, LoadPhoto, MatMode, PhotoLoaded, PreparedImageCpu};
+use crate::events::{InvalidPhoto, LoadPhoto, PhotoLoaded, PreparedImageCpu};
 use anyhow::Result;
 use std::fs::File;
 use std::io::BufReader;
@@ -93,7 +93,6 @@ pub async fn run(
                         let (width, height) = rgba8.dimensions();
                         let prepared = PreparedImageCpu {
                             path: path.clone(),
-                            mat: MatMode::LetterboxBlack,
                             width,
                             height,
                             pixels: rgba8.into_raw(),

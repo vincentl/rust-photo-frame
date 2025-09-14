@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -11,22 +10,8 @@ pub enum InventoryEvent {
 pub struct LoadPhoto(pub PathBuf);
 
 #[derive(Debug, Clone)]
-pub enum MatMode {
-    LetterboxBlack,
-    StudioMat {
-        min_border_px: u32,
-        color_rgb: (u8, u8, u8),
-    },
-    BlurredBackground {
-        strength: f32,
-        dim: f32,
-    },
-}
-
-#[derive(Debug, Clone)]
 pub struct PreparedImageCpu {
     pub path: PathBuf,
-    pub mat: MatMode,
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
@@ -42,9 +27,3 @@ pub struct InvalidPhoto(pub PathBuf);
 #[derive(Debug)]
 pub struct Displayed(pub PathBuf);
 
-#[derive(Debug, Clone, Copy)]
-pub struct SurfaceSize {
-    pub width: u32,
-    pub height: u32,
-    pub oversample: f32, // scale factor for render target size
-}
