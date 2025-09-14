@@ -8,8 +8,6 @@ use serde::Deserialize;
 pub struct Configuration {
     #[serde(alias = "photo_library_path")]
     pub photo_library_path: PathBuf,
-    #[serde(alias = "photo_quarantine_path")]
-    pub photo_quarantine_path: PathBuf,
 }
 
 impl Configuration {

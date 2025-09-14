@@ -16,8 +16,8 @@
   - [ ] Add SSH authorized_keys for remote admin via Tailscale.
 - [ ] **Rust project core**
   - [ ] Scan photo directories + display scaled images full screen.
-  - [ ] Handle startup without crashing if photo list is empty/missing.
-  - [ ] Simple circular buffer of photos (no weighting yet).
+  - [x] Handle startup without crashing if photo list is empty/missing.
+  - [x] Simple circular buffer of photos (no weighting yet).
 
 ## Tier 2 – Should-do (reliability & usability)
 

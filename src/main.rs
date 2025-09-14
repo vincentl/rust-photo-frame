@@ -52,8 +52,8 @@ async fn main() -> Result<()> {
     // Channels (small/bounded)
     let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(128); // Files -> Manager
     let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(64); // Manager/Loader -> Files
-    let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(2); // Manager -> Loader (short)
-    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(2); // Loader  -> Viewer (short)
+    let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(1); // Manager -> Loader (preload buffer = 1)
+    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(1); // Loader  -> Viewer (preload buffer = 1)
     let (displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(64); // Viewer  -> Manager
 
     let cancel = CancellationToken::new();

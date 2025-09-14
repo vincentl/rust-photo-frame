@@ -1,4 +1,4 @@
-use rust_photo_frame::events::{InventoryEvent, LoadPhoto};
+use rust_photo_frame::events::{Displayed, InventoryEvent, LoadPhoto};
 use rust_photo_frame::tasks::manager;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -7,11 +7,16 @@ use tokio_util::sync::CancellationToken;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manager_ignores_spurious_remove_and_sends_load_on_add() {
     let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(16);
-    let (invalid_tx, _invalid_rx) = mpsc::channel(16);
+    let (_displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(16);
     let (to_load_tx, mut to_load_rx) = mpsc::channel::<LoadPhoto>(2);
     let cancel = CancellationToken::new();
 
-    let handle = tokio::spawn(manager::run(inv_rx, invalid_tx, to_load_tx, cancel.clone()));
+    let handle = tokio::spawn(manager::run(
+        inv_rx,
+        displayed_rx,
+        to_load_tx,
+        cancel.clone(),
+    ));
 
     // Spurious remove for path never added
     let ghost = PathBuf::from("/ghost/never-added.jpg");

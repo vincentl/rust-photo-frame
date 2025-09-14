@@ -71,10 +71,10 @@ pub async fn run(
                 break;
             }
 
-            // From Manager/Loader: quarantine then tell Manager it disappeared.
+            // From Manager/Loader: delete the bad file, then tell Manager it disappeared.
             Some(InvalidPhoto(path)) = invalid_rx.recv() => {
-                info!(path = %path.display(), "quarantining invalid photo");
-                quarantine(&cfg, &path)?;
+                info!(path = %path.display(), "deleting invalid photo");
+                delete_if_exists(&path)?;
                 let _ = to_manager.send(InventoryEvent::PhotoRemoved(path)).await;
             }
 
@@ -129,32 +129,21 @@ fn is_image(p: &Path) -> bool {
     )
 }
 
-fn quarantine(cfg: &Configuration, p: &Path) -> Result<()> {
-    fs::create_dir_all(&cfg.photo_quarantine_path)?;
-    let file = p.file_name().unwrap_or_default();
-    let mut dst = PathBuf::from(&cfg.photo_quarantine_path);
-    dst.push(file);
-
-    if dst.exists() {
-        let stem = p.file_stem().and_then(OsStr::to_str).unwrap_or("file");
-        let ext = p.extension().and_then(OsStr::to_str).unwrap_or("");
-        let mut n = 1u32;
-        loop {
-            let candidate = if ext.is_empty() {
-                format!("{}_{}", stem, n)
-            } else {
-                format!("{}_{}.{}", stem, n, ext)
-            };
-            let mut alt = PathBuf::from(&cfg.photo_quarantine_path);
-            alt.push(candidate);
-            if !alt.exists() {
-                dst = alt;
-                break;
-            }
-            n += 1;
-        }
+fn delete_if_exists(p: &Path) -> Result<()> {
+    if !p.exists() {
+        debug!(path = %p.display(), "delete: source missing; skipping");
+        return Ok(());
     }
-
-    fs::rename(p, &dst)?;
-    Ok(())
+    debug!(path = %p.display(), "delete: removing file");
+    match fs::remove_file(p) {
+        Ok(_) => {
+            info!(path = %p.display(), "delete: removed");
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            debug!(path = %p.display(), "delete: source vanished during remove; skipping");
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }
