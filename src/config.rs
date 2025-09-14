@@ -6,7 +6,9 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Configuration {
+    #[serde(alias = "photo_library_path")]
     pub photo_library_path: PathBuf,
+    #[serde(alias = "photo_quarantine_path")]
     pub photo_quarantine_path: PathBuf,
 }
 

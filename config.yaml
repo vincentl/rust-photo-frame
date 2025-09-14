@@ -1,3 +1,2 @@
-photo-paths:
-  - "/Users/vincent/rust-photo-frame/images/A"
-  - "/Users/vincent/rust-photo-frame/images/B"
+photo-library-path: /Users/vincent/rust-photo-frame/images
+photo-quarantine-path: /Users/vincent/rust-photo-frame/trash

@@ -12,6 +12,7 @@ tar \
   --exclude=.vscode \
   --exclude='*.DS_Store' \
   --exclude=make-src-archive.sh \
+  --exclude=old-src \
   -czf "$ARCHIVE_NAME" \
   -C .. rust-photo-frame
 

@@ -23,11 +23,11 @@ flowchart LR
   MAIN --> LOAD[PhotoLoader]
   MAIN --> VIEW[PhotoViewer]
 
-  FILES -->|add remove| MAN
-  MAN -->|invalid exif| FILES
+  FILES -->|add/remove| MAN
+  MAN -->|invalid photo| FILES
   MAN -->|load| LOAD
   LOAD -->|loaded| VIEW
-  LOAD -->|invalid load| FILES
+  LOAD -->|invalid photo| FILES
 ```
 
 ## License

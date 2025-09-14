@@ -1,16 +1,13 @@
 [package]
 name = "rust-photo-frame"
 version = "0.1.0"
-edition = "2024"
-description = "Raspberry Pi photo frame slideshow: scan dirs, circular buffer, fullscreen display."
-license = "MIT"
-repository = "https://github.com/vincentl/rust-photo-frame.git"
-readme = "README.md"
-keywords = ["slideshow", "photo", "frame", "wgpu", "winit", "raspberry-pi"]
-categories = ["multimedia::images", "graphics", "command-line-utilities"]
+edition = "2021"
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio-util = "0.7"
+walkdir = "2"
