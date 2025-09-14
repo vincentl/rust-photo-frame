@@ -19,6 +19,21 @@
   - [x] Handle startup without crashing if photo list is empty/missing.
   - [x] Simple circular buffer of photos (no weighting yet).
 
+## Intermediate Milestone – Cross-platform Image Display
+
+- [ ] **GPU viewer shows decoded photo**
+  - [ ] Upload `PreparedImageCpu` to a wgpu texture and render a full-screen quad.
+  - [ ] Unit test verifies EXIF orientation is applied during load.
+  - [ ] Integration test confirms the viewer emits `Displayed` after drawing.
+- [ ] **macOS demo**
+  - [ ] Build & run on macOS, confirming a window renders the first photo.
+  - [ ] Document minimal run steps and dependencies.
+- [ ] **Raspberry Pi demo**
+  - [ ] Build & run the same viewer code on Raspberry Pi.
+  - [ ] Document any Pi-specific configuration.
+- [ ] **Quality gates**
+  - [ ] Keep `cargo build`, `cargo clippy -- -D warnings`, and `cargo test` clean.
+
 ## Tier 2 – Should-do (reliability & usability)
 
 - [ ] **Frame hardware**
