@@ -4,8 +4,8 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use tokio::select;
-use tokio::task::JoinSet;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -85,7 +85,8 @@ pub async fn run(
     cancel: CancellationToken,
     max_in_flight: usize,
 ) -> Result<()> {
-    let mut in_flight: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut in_flight: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
     let mut tasks: JoinSet<(std::path::PathBuf, Option<image::RgbaImage>)> = JoinSet::new();
 
     loop {
@@ -132,4 +133,28 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    // JPEG 2x1 with EXIF orientation 6 (rotate 90 CW), base64 encoded
+    const ORIENT6_JPEG: &str = concat!(
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/4QAiRXhpZgAATU0AKgAAAAgAAQESAAMAAAABAAYAAAAAAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/",
+        "2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDi6KKK+ZP3E//Z"
+    );
+
+    #[test]
+    fn applies_orientation_six() {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(ORIENT6_JPEG)
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orient6.jpg");
+        std::fs::write(&path, &bytes).unwrap();
+        let img = decode_rgba8_apply_exif(&path).unwrap();
+        assert_eq!(img.dimensions(), (1, 2));
+    }
 }
