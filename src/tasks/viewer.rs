@@ -1,7 +1,7 @@
 use crate::events::{Displayed, PhotoLoaded};
+use std::collections::VecDeque;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
-use std::collections::VecDeque;
 use tracing::{debug, info};
 
 pub fn run_windowed(
@@ -218,12 +218,11 @@ pub fn run_windowed(
                 cache: None,
             });
             // Try to create a loading overlay texture from embedded PNG; fallback to 1x1 white
-            let mut loading: Option<(wgpu::BindGroup, u32, u32)> = None;
             let loading_png: &[u8] = include_bytes!("../../assets/ui/loading.png");
             let loading_rgba = image::load_from_memory(loading_png)
                 .ok()
                 .map(|dynimg| dynimg.to_rgba8());
-            if let Some(img) = loading_rgba {
+            let loading = if let Some(img) = loading_rgba {
                 let lw = img.width();
                 let lh = img.height();
                 let tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -275,7 +274,7 @@ pub fn run_windowed(
                         },
                     ],
                 });
-                loading = Some((bind, lw, lh));
+                Some((bind, lw, lh))
             } else {
                 let lw = 1u32;
                 let lh = 1u32;
@@ -328,8 +327,8 @@ pub fn run_windowed(
                         },
                     ],
                 });
-                loading = Some((bind, lw, lh));
-            }
+                Some((bind, lw, lh))
+            };
 
             self.window = Some(window);
             self.gpu = Some(GpuCtx {
@@ -412,7 +411,9 @@ pub fn run_windowed(
                     rpass.set_pipeline(&gpu.pipeline);
                     rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
                     if let Some(start) = self.fade_start {
-                        let mut t = ((start.elapsed().as_millis() as f32) / (self.fade_ms as f32).max(1.0)).clamp(0.0, 1.0);
+                        let mut t = ((start.elapsed().as_millis() as f32)
+                            / (self.fade_ms as f32).max(1.0))
+                        .clamp(0.0, 1.0);
                         t = t * t * (3.0 - 2.0 * t);
                         if let Some(cur) = &self.current {
                             let (dx, dy, dw, dh) = compute_dest_rect(
@@ -464,7 +465,11 @@ pub fn run_windowed(
                                 self.current = Some(next);
                                 self.fade_start = None;
                                 self.displayed_at = Some(std::time::Instant::now());
-                                info!("transition_end path={} queue_depth={}", path.display(), self.pending.len());
+                                info!(
+                                    "transition_end path={} queue_depth={}",
+                                    path.display(),
+                                    self.pending.len()
+                                );
                                 let _ = self.to_manager_displayed.try_send(Displayed(path));
                             } else {
                                 self.fade_start = None;
@@ -532,7 +537,9 @@ pub fn run_windowed(
             // Pull from loader only when there is capacity to avoid dropping
             // pending images; this allows the mpsc channel to provide backpressure.
             while self.pending.len() < self.preload_count {
-                let Ok(PhotoLoaded(img)) = self.from_loader.try_recv() else { break };
+                let Ok(PhotoLoaded(img)) = self.from_loader.try_recv() else {
+                    break;
+                };
                 if let Some(gpu) = self.gpu.as_ref() {
                     let (out_w, out_h) = compute_scaled_size(
                         img.width,
@@ -622,7 +629,12 @@ pub fn run_windowed(
                         ],
                     });
                     // Queue decoded image for later consumption
-                    let new_tex = ImgTex { bind, w: out_w, h: out_h, path: img.path };
+                    let new_tex = ImgTex {
+                        bind,
+                        w: out_w,
+                        h: out_h,
+                        path: img.path,
+                    };
                     self.pending.push_back(new_tex);
                     debug!("queued_image depth={}", self.pending.len());
                     // If nothing showing yet, promote immediately
@@ -632,7 +644,9 @@ pub fn run_windowed(
                             self.current = Some(first);
                             self.displayed_at = Some(std::time::Instant::now());
                             if let Some(cur) = &self.current {
-                                let _ = self.to_manager_displayed.try_send(Displayed(cur.path.clone()));
+                                let _ = self
+                                    .to_manager_displayed
+                                    .try_send(Displayed(cur.path.clone()));
                             }
                         }
                     }
@@ -644,7 +658,11 @@ pub fn run_windowed(
                     if shown_at.elapsed() >= std::time::Duration::from_millis(self.dwell_ms) {
                         if self.next.is_none() {
                             if let Some(stage) = self.pending.pop_front() {
-                                info!("transition_start path={} queue_depth={}", stage.path.display(), self.pending.len());
+                                info!(
+                                    "transition_start path={} queue_depth={}",
+                                    stage.path.display(),
+                                    self.pending.len()
+                                );
                                 self.next = Some(stage);
                             }
                         }

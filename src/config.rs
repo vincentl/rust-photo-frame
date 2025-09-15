@@ -7,6 +7,7 @@ use serde::Deserialize;
 #[serde(rename_all = "kebab-case", default)]
 pub struct Configuration {
     /// Root directory to scan recursively for images.
+    #[serde(alias = "photo_library_path")]
     pub photo_library_path: PathBuf,
     /// GPU render oversample factor relative to screen size (1.0 = native).
     pub oversample: f32,
@@ -18,6 +19,8 @@ pub struct Configuration {
     pub viewer_preload_count: usize,
     /// Maximum number of concurrent image decodes in the loader.
     pub loader_max_concurrent_decodes: usize,
+    /// Optional deterministic seed for initial photo shuffle.
+    pub startup_shuffle_seed: Option<u64>,
 }
 
 impl Configuration {
@@ -36,6 +39,7 @@ impl Default for Configuration {
             dwell_ms: 2000,
             viewer_preload_count: 3,
             loader_max_concurrent_decodes: 4,
+            startup_shuffle_seed: None,
         }
     }
 }
