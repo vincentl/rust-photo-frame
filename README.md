@@ -46,7 +46,7 @@ oversample: 1.0 # GPU render oversample vs. screen size
 matting:
   mode: fixed-color # fixed-color|studio|blur|random
   color: [0, 0, 0]   # used for fixed-color mode
-  min-fraction: 0.0  # fraction of shorter screen side for minimum mat
+  minimum-border-percentage: 0.0  # percentage of shorter screen side reserved for mat border
 ```
 
 Keys
@@ -59,7 +59,7 @@ Keys
 - oversample: Scales render target up to reduce aliasing; 1.0 is native.
 - matting.mode: Mat style (`fixed-color`, `studio`, `blur`, or `random`).
 - matting.color: RGB array used when `mode` is `fixed-color`.
-- matting.min-fraction: Minimum mat width relative to the shorter screen dimension.
+- matting.minimum-border-percentage: Minimum mat width as a percentage of the shorter screen dimension.
 
 ## License
 

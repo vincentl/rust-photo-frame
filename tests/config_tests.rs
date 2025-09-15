@@ -49,7 +49,7 @@ photo-library-path: "/p"
 matting:
   mode: blur
   color: [1,2,3]
-  min-fraction: 0.1
+  minimum-border-percentage: 2.5
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     assert!(matches!(
@@ -57,5 +57,5 @@ matting:
         rust_photo_frame::matting::MatMode::Blur
     ));
     assert_eq!(cfg.matting.color, [1, 2, 3]);
-    assert!((cfg.matting.min_fraction - 0.1).abs() < f32::EPSILON);
+    assert!((cfg.matting.minimum_border_percentage - 2.5).abs() < f32::EPSILON);
 }

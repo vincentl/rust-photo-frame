@@ -15,4 +15,4 @@ loader-max-concurrent-decodes: 4
 matting:
   mode: fixed-color
   color: [0, 0, 0]
-  min-fraction: 0.0
+  minimum-border-percentage: 0.0

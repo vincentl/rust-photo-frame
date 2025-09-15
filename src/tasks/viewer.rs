@@ -1,7 +1,8 @@
 use crate::events::{Displayed, PhotoLoaded};
 use crate::matting;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use std::collections::VecDeque;
+use std::sync::mpsc::{Receiver as StdReceiver, Sender as StdSender};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -69,6 +70,8 @@ pub fn run_windowed(
         mat_cfg: matting::MattingConfig,
         rng: rand::rngs::StdRng,
         oversample: f32,
+        ready_tx: StdSender<ImgTex>,
+        ready_rx: StdReceiver<ImgTex>,
     }
 
     impl ApplicationHandler for App {
@@ -539,8 +542,13 @@ pub fn run_windowed(
                 event_loop.exit();
                 return;
             }
-            // Pull from loader only when there is capacity to avoid dropping
-            // pending images; this allows the mpsc channel to provide backpressure.
+            // Drain any fully prepared textures from worker threads
+            while let Ok(tex) = self.ready_rx.try_recv() {
+                self.pending.push_back(tex);
+                debug!("queued_image depth={}", self.pending.len());
+            }
+
+            // Pull from loader and offload composition/texture upload to a worker thread
             while self.pending.len() < self.preload_count {
                 let Ok(PhotoLoaded(img)) = self.from_loader.try_recv() else {
                     break;
@@ -554,98 +562,107 @@ pub fn run_windowed(
                         .round()
                         .max(1.0) as u32)
                         .min(gpu.limits.max_texture_dimension_2d);
-                    if let Some(src) =
-                        image::RgbaImage::from_raw(img.width, img.height, img.pixels.clone())
-                    {
-                        let composed = matting::compose(&src, sw, sh, &self.mat_cfg, &mut self.rng);
-                        let (out_w, out_h) = composed.dimensions();
-                        let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                            label: Some("photo-texture"),
-                            size: wgpu::Extent3d {
-                                width: out_w,
-                                height: out_h,
-                                depth_or_array_layers: 1,
-                            },
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                                | wgpu::TextureUsages::COPY_DST,
-                            view_formats: &[],
-                        });
-                        let stride = 4 * out_w;
-                        let padded = compute_padded_stride(stride);
-                        let upload: std::borrow::Cow<'_, [u8]> = if padded != stride {
-                            let mut staging = vec![0u8; (padded as usize) * (out_h as usize)];
-                            let rs = stride as usize;
-                            let rd = padded as usize;
-                            let src = composed.as_raw();
-                            for y in 0..(out_h as usize) {
-                                let so = y * rs;
-                                let doff = y * rd;
-                                staging[doff..doff + rs].copy_from_slice(&src[so..so + rs]);
-                            }
-                            std::borrow::Cow::Owned(staging)
-                        } else {
-                            std::borrow::Cow::Borrowed(composed.as_raw())
-                        };
-                        gpu.queue.write_texture(
-                            wgpu::TexelCopyTextureInfo {
-                                texture: &tex,
-                                mip_level: 0,
-                                origin: wgpu::Origin3d::ZERO,
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            &upload,
-                            wgpu::TexelCopyBufferLayout {
-                                offset: 0,
-                                bytes_per_row: Some(padded),
-                                rows_per_image: Some(out_h),
-                            },
-                            wgpu::Extent3d {
-                                width: out_w,
-                                height: out_h,
-                                depth_or_array_layers: 1,
-                            },
-                        );
-                        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-                        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("image-bind"),
-                            layout: &gpu.img_bind_layout,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(&view),
+                    let device = gpu.device.clone();
+                    let queue = gpu.queue.clone();
+                    let layout = gpu.img_bind_layout.clone();
+                    let sampler = gpu.sampler.clone();
+                    let tx = self.ready_tx.clone();
+                    let mat_cfg = self.mat_cfg.clone();
+                    let path = img.path.clone();
+                    let seed = self.rng.gen();
+                    std::thread::spawn(move || {
+                        if let Some(src) =
+                            image::RgbaImage::from_raw(img.width, img.height, img.pixels)
+                        {
+                            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+                            let composed = matting::compose(&src, sw, sh, &mat_cfg, &mut rng);
+                            let (out_w, out_h) = composed.dimensions();
+                            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                                label: Some("photo-texture"),
+                                size: wgpu::Extent3d {
+                                    width: out_w,
+                                    height: out_h,
+                                    depth_or_array_layers: 1,
                                 },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: wgpu::BindingResource::Sampler(&gpu.sampler),
-                                },
-                            ],
-                        });
-                        // Queue composed image for later consumption
-                        let new_tex = ImgTex {
-                            bind,
-                            w: out_w,
-                            h: out_h,
-                            path: img.path,
-                        };
-                        self.pending.push_back(new_tex);
-                        debug!("queued_image depth={}", self.pending.len());
-                        // If nothing showing yet, promote immediately
-                        if self.current.is_none() && self.fade_start.is_none() {
-                            if let Some(first) = self.pending.pop_front() {
-                                info!("first_image path={}", first.path.display());
-                                self.current = Some(first);
-                                self.displayed_at = Some(std::time::Instant::now());
-                                if let Some(cur) = &self.current {
-                                    let _ = self
-                                        .to_manager_displayed
-                                        .try_send(Displayed(cur.path.clone()));
+                                mip_level_count: 1,
+                                sample_count: 1,
+                                dimension: wgpu::TextureDimension::D2,
+                                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                                    | wgpu::TextureUsages::COPY_DST,
+                                view_formats: &[],
+                            });
+                            let stride = 4 * out_w;
+                            let padded = compute_padded_stride(stride);
+                            let upload: std::borrow::Cow<'_, [u8]> = if padded != stride {
+                                let mut staging = vec![0u8; (padded as usize) * (out_h as usize)];
+                                let rs = stride as usize;
+                                let rd = padded as usize;
+                                let src = composed.as_raw();
+                                for y in 0..(out_h as usize) {
+                                    let so = y * rs;
+                                    let doff = y * rd;
+                                    staging[doff..doff + rs].copy_from_slice(&src[so..so + rs]);
                                 }
-                            }
+                                std::borrow::Cow::Owned(staging)
+                            } else {
+                                std::borrow::Cow::Borrowed(composed.as_raw())
+                            };
+                            queue.write_texture(
+                                wgpu::TexelCopyTextureInfo {
+                                    texture: &tex,
+                                    mip_level: 0,
+                                    origin: wgpu::Origin3d::ZERO,
+                                    aspect: wgpu::TextureAspect::All,
+                                },
+                                &upload,
+                                wgpu::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(padded),
+                                    rows_per_image: Some(out_h),
+                                },
+                                wgpu::Extent3d {
+                                    width: out_w,
+                                    height: out_h,
+                                    depth_or_array_layers: 1,
+                                },
+                            );
+                            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("image-bind"),
+                                layout: &layout,
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: wgpu::BindingResource::TextureView(&view),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: wgpu::BindingResource::Sampler(&sampler),
+                                    },
+                                ],
+                            });
+                            let new_tex = ImgTex {
+                                bind,
+                                w: out_w,
+                                h: out_h,
+                                path,
+                            };
+                            let _ = tx.send(new_tex);
                         }
+                    });
+                }
+            }
+            // promote first image if nothing showing yet
+            if self.current.is_none() && self.fade_start.is_none() {
+                if let Some(first) = self.pending.pop_front() {
+                    info!("first_image path={}", first.path.display());
+                    self.current = Some(first);
+                    self.displayed_at = Some(std::time::Instant::now());
+                    if let Some(cur) = &self.current {
+                        let _ = self
+                            .to_manager_displayed
+                            .try_send(Displayed(cur.path.clone()));
                     }
                 }
             }
@@ -676,6 +693,7 @@ pub fn run_windowed(
     }
 
     let event_loop = EventLoop::new()?;
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let mut app = App {
         from_loader,
         to_manager_displayed,
@@ -693,6 +711,8 @@ pub fn run_windowed(
         mat_cfg: cfg.matting.clone(),
         rng: rand::rngs::StdRng::from_entropy(),
         oversample: cfg.oversample,
+        ready_tx,
+        ready_rx,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
