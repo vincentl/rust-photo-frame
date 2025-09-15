@@ -44,7 +44,7 @@ pub fn run_windowed(
     }
 
     struct ImgTex {
-        bind: wgpu::BindGroup,
+        view: wgpu::TextureView,
         w: u32,
         h: u32,
         path: std::path::PathBuf,
@@ -149,28 +149,37 @@ pub fn run_windowed(
                     resource: uniform_buf.as_entire_binding(),
                 }],
             });
-            let img_bind_layout =
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("image-bind-layout"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                multisampled: false,
-                            },
-                            count: None,
+            let img_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("image-bind-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
                         },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
                         },
-                    ],
-                });
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
             let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("linear-clamp"),
                 address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -265,14 +274,9 @@ pub fn run_windowed(
                     label: Some("loading-bind"),
                     layout: &img_bind_layout,
                     entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&sampler),
-                        },
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
                     ],
                 });
                 loading = Some((bind, lw, lh));
@@ -318,14 +322,9 @@ pub fn run_windowed(
                     label: Some("loading-bind"),
                     layout: &img_bind_layout,
                     entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&sampler),
-                        },
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
                     ],
                 });
                 loading = Some((bind, lw, lh));
@@ -412,9 +411,9 @@ pub fn run_windowed(
                     rpass.set_pipeline(&gpu.pipeline);
                     rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
                     if let Some(start) = self.fade_start {
-                        let mut t = ((start.elapsed().as_millis() as f32) / (self.fade_ms as f32).max(1.0)).clamp(0.0, 1.0);
-                        t = t * t * (3.0 - 2.0 * t);
-                        if let Some(cur) = &self.current {
+                        // Linear time progression; mixing is linear in shader (linear-light).
+                        let t = ((start.elapsed().as_millis() as f32) / (self.fade_ms as f32).max(1.0)).clamp(0.0, 1.0);
+                        if let (Some(cur), Some(next)) = (&self.current, &self.next) {
                             let (dx, dy, dw, dh) = compute_dest_rect(
                                 cur.w,
                                 cur.h,
@@ -428,34 +427,20 @@ pub fn run_windowed(
                                 dest_y: dy,
                                 dest_w: dw,
                                 dest_h: dh,
-                                alpha: 1.0 - t,
-                                _pad: [0.0; 3],
-                            };
-                            gpu.queue
-                                .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                            rpass.set_bind_group(1, &cur.bind, &[]);
-                            rpass.draw(0..6, 0..1);
-                        }
-                        if let Some(next) = &self.next {
-                            let (dx, dy, dw, dh) = compute_dest_rect(
-                                next.w,
-                                next.h,
-                                gpu.config.width,
-                                gpu.config.height,
-                            );
-                            let uni = Uniforms {
-                                screen_w: gpu.config.width as f32,
-                                screen_h: gpu.config.height as f32,
-                                dest_x: dx,
-                                dest_y: dy,
-                                dest_w: dw,
-                                dest_h: dh,
                                 alpha: t,
                                 _pad: [0.0; 3],
                             };
-                            gpu.queue
-                                .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                            rpass.set_bind_group(1, &next.bind, &[]);
+                            gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
+                            let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("mix-bind"),
+                                layout: &gpu.img_bind_layout,
+                                entries: &[
+                                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&cur.view) },
+                                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&next.view) },
+                                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
+                                ],
+                            });
+                            rpass.set_bind_group(1, &bind, &[]);
                             rpass.draw(0..6, 0..1);
                         }
                         if t >= 1.0 {
@@ -471,8 +456,7 @@ pub fn run_windowed(
                             }
                         }
                     } else if let Some(cur) = &self.current {
-                        let (dx, dy, dw, dh) =
-                            compute_dest_rect(cur.w, cur.h, gpu.config.width, gpu.config.height);
+                        let (dx, dy, dw, dh) = compute_dest_rect(cur.w, cur.h, gpu.config.width, gpu.config.height);
                         let uni = Uniforms {
                             screen_w: gpu.config.width as f32,
                             screen_h: gpu.config.height as f32,
@@ -480,12 +464,20 @@ pub fn run_windowed(
                             dest_y: dy,
                             dest_w: dw,
                             dest_h: dh,
-                            alpha: 1.0,
+                            alpha: 0.0, // mix factor 0 -> show only current
                             _pad: [0.0; 3],
                         };
-                        gpu.queue
-                            .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                        rpass.set_bind_group(1, &cur.bind, &[]);
+                        gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
+                        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("single-bind"),
+                            layout: &gpu.img_bind_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&cur.view) },
+                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&cur.view) },
+                                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
+                            ],
+                        });
+                        rpass.set_bind_group(1, &bind, &[]);
                         rpass.draw(0..6, 0..1);
                     } else if let Some((bind, lw, lh)) = &gpu.loading {
                         // Draw loading overlay centered scaled to a reasonable fraction
@@ -607,22 +599,8 @@ pub fn run_windowed(
                         },
                     );
                     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-                    let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("image-bind"),
-                        layout: &gpu.img_bind_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&gpu.sampler),
-                            },
-                        ],
-                    });
                     // Queue decoded image for later consumption
-                    let new_tex = ImgTex { bind, w: out_w, h: out_h, path: img.path };
+                    let new_tex = ImgTex { view, w: out_w, h: out_h, path: img.path };
                     self.pending.push_back(new_tex);
                     debug!("queued_image depth={}", self.pending.len());
                     // If nothing showing yet, promote immediately

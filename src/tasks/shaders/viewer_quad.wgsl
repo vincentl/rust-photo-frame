@@ -15,8 +15,10 @@ struct Uniforms {
 var<uniform> U: Uniforms;
 
 @group(1) @binding(0)
-var t_tex: texture_2d<f32>;
+var t_tex_cur: texture_2d<f32>;
 @group(1) @binding(1)
+var t_tex_next: texture_2d<f32>;
+@group(1) @binding(2)
 var t_samp: sampler;
 
 struct VSOut {
@@ -52,6 +54,11 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-  let c = textureSample(t_tex, t_samp, in.uv);
-  return vec4<f32>(c.rgb, U.alpha);
+  // Sample both textures; textures are SRGB, sampling converts to linear in WGSL.
+  let c0 = textureSample(t_tex_cur, t_samp, in.uv);
+  let c1 = textureSample(t_tex_next, t_samp, in.uv);
+  // Linear light fade: mix in linear space using alpha as the mix factor.
+  let t = clamp(U.alpha, 0.0, 1.0);
+  let rgb = mix(c0.rgb, c1.rgb, t);
+  return vec4<f32>(rgb, 1.0);
 }
