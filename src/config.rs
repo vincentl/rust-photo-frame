@@ -7,7 +7,6 @@ use serde::Deserialize;
 #[serde(rename_all = "kebab-case", default)]
 pub struct Configuration {
     /// Root directory to scan recursively for images.
-    #[serde(alias = "photo_library_path")]
     pub photo_library_path: PathBuf,
     /// GPU render oversample factor relative to screen size (1.0 = native).
     pub oversample: f32,
