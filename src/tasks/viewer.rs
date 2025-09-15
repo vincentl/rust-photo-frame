@@ -1,6 +1,8 @@
 use crate::events::{Displayed, PhotoLoaded};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
+use std::collections::VecDeque;
+use tracing::{debug, info};
 
 pub fn run_windowed(
     from_loader: Receiver<PhotoLoaded>,
@@ -57,6 +59,10 @@ pub fn run_windowed(
         next: Option<ImgTex>,
         fade_start: Option<std::time::Instant>,
         fade_ms: u64,
+        displayed_at: Option<std::time::Instant>,
+        dwell_ms: u64,
+        pending: VecDeque<ImgTex>,
+        preload_count: usize,
     }
 
     impl ApplicationHandler for App {
@@ -221,7 +227,11 @@ pub fn run_windowed(
                 let lh = img.height();
                 let tex = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("loading-texture"),
-                    size: wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: lw,
+                        height: lh,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -231,18 +241,37 @@ pub fn run_windowed(
                 });
                 let bytes = img.as_raw();
                 queue.write_texture(
-                    wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
                     bytes,
-                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * lw), rows_per_image: Some(lh) },
-                    wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * lw),
+                        rows_per_image: Some(lh),
+                    },
+                    wgpu::Extent3d {
+                        width: lw,
+                        height: lh,
+                        depth_or_array_layers: 1,
+                    },
                 );
                 let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
                 let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("loading-bind"),
                     layout: &img_bind_layout,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&sampler),
+                        },
                     ],
                 });
                 loading = Some((bind, lw, lh));
@@ -251,7 +280,11 @@ pub fn run_windowed(
                 let lh = 1u32;
                 let tex = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("loading-pixel"),
-                    size: wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: lw,
+                        height: lh,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -261,18 +294,37 @@ pub fn run_windowed(
                 });
                 let white = [255u8, 255, 255, 255];
                 queue.write_texture(
-                    wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
                     &white,
-                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
-                    wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4),
+                        rows_per_image: Some(1),
+                    },
+                    wgpu::Extent3d {
+                        width: lw,
+                        height: lh,
+                        depth_or_array_layers: 1,
+                    },
                 );
                 let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
                 let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("loading-bind"),
                     layout: &img_bind_layout,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&sampler),
+                        },
                     ],
                 });
                 loading = Some((bind, lw, lh));
@@ -359,18 +411,49 @@ pub fn run_windowed(
                     rpass.set_pipeline(&gpu.pipeline);
                     rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
                     if let Some(start) = self.fade_start {
-                        let t = ((start.elapsed().as_millis() as f32) / (self.fade_ms as f32).max(1.0)).clamp(0.0, 1.0);
+                        let mut t = ((start.elapsed().as_millis() as f32) / (self.fade_ms as f32).max(1.0)).clamp(0.0, 1.0);
+                        t = t * t * (3.0 - 2.0 * t);
                         if let Some(cur) = &self.current {
-                            let (dx, dy, dw, dh) = compute_dest_rect(cur.w, cur.h, gpu.config.width, gpu.config.height);
-                            let uni = Uniforms { screen_w: gpu.config.width as f32, screen_h: gpu.config.height as f32, dest_x: dx, dest_y: dy, dest_w: dw, dest_h: dh, alpha: 1.0 - t, _pad: [0.0; 3] };
-                            gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
+                            let (dx, dy, dw, dh) = compute_dest_rect(
+                                cur.w,
+                                cur.h,
+                                gpu.config.width,
+                                gpu.config.height,
+                            );
+                            let uni = Uniforms {
+                                screen_w: gpu.config.width as f32,
+                                screen_h: gpu.config.height as f32,
+                                dest_x: dx,
+                                dest_y: dy,
+                                dest_w: dw,
+                                dest_h: dh,
+                                alpha: 1.0 - t,
+                                _pad: [0.0; 3],
+                            };
+                            gpu.queue
+                                .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
                             rpass.set_bind_group(1, &cur.bind, &[]);
                             rpass.draw(0..6, 0..1);
                         }
                         if let Some(next) = &self.next {
-                            let (dx, dy, dw, dh) = compute_dest_rect(next.w, next.h, gpu.config.width, gpu.config.height);
-                            let uni = Uniforms { screen_w: gpu.config.width as f32, screen_h: gpu.config.height as f32, dest_x: dx, dest_y: dy, dest_w: dw, dest_h: dh, alpha: t, _pad: [0.0; 3] };
-                            gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
+                            let (dx, dy, dw, dh) = compute_dest_rect(
+                                next.w,
+                                next.h,
+                                gpu.config.width,
+                                gpu.config.height,
+                            );
+                            let uni = Uniforms {
+                                screen_w: gpu.config.width as f32,
+                                screen_h: gpu.config.height as f32,
+                                dest_x: dx,
+                                dest_y: dy,
+                                dest_w: dw,
+                                dest_h: dh,
+                                alpha: t,
+                                _pad: [0.0; 3],
+                            };
+                            gpu.queue
+                                .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
                             rpass.set_bind_group(1, &next.bind, &[]);
                             rpass.draw(0..6, 0..1);
                         }
@@ -379,15 +462,28 @@ pub fn run_windowed(
                                 let path = next.path.clone();
                                 self.current = Some(next);
                                 self.fade_start = None;
+                                self.displayed_at = Some(std::time::Instant::now());
+                                info!("transition_end path={} queue_depth={}", path.display(), self.pending.len());
                                 let _ = self.to_manager_displayed.try_send(Displayed(path));
                             } else {
                                 self.fade_start = None;
                             }
                         }
                     } else if let Some(cur) = &self.current {
-                        let (dx, dy, dw, dh) = compute_dest_rect(cur.w, cur.h, gpu.config.width, gpu.config.height);
-                        let uni = Uniforms { screen_w: gpu.config.width as f32, screen_h: gpu.config.height as f32, dest_x: dx, dest_y: dy, dest_w: dw, dest_h: dh, alpha: 1.0, _pad: [0.0; 3] };
-                        gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
+                        let (dx, dy, dw, dh) =
+                            compute_dest_rect(cur.w, cur.h, gpu.config.width, gpu.config.height);
+                        let uni = Uniforms {
+                            screen_w: gpu.config.width as f32,
+                            screen_h: gpu.config.height as f32,
+                            dest_x: dx,
+                            dest_y: dy,
+                            dest_w: dw,
+                            dest_h: dh,
+                            alpha: 1.0,
+                            _pad: [0.0; 3],
+                        };
+                        gpu.queue
+                            .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
                         rpass.set_bind_group(1, &cur.bind, &[]);
                         rpass.draw(0..6, 0..1);
                     } else if let Some((bind, lw, lh)) = &gpu.loading {
@@ -403,8 +499,18 @@ pub fn run_windowed(
                         let dh = (ih * scale).clamp(0.0, sh);
                         let dx = (sw - dw) * 0.5;
                         let dy = (sh - dh) * 0.5;
-                        let uni = Uniforms { screen_w: sw, screen_h: sh, dest_x: dx, dest_y: dy, dest_w: dw, dest_h: dh, alpha: 1.0, _pad: [0.0; 3] };
-                        gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
+                        let uni = Uniforms {
+                            screen_w: sw,
+                            screen_h: sh,
+                            dest_x: dx,
+                            dest_y: dy,
+                            dest_w: dw,
+                            dest_h: dh,
+                            alpha: 1.0,
+                            _pad: [0.0; 3],
+                        };
+                        gpu.queue
+                            .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
                         rpass.set_bind_group(1, bind, &[]);
                         rpass.draw(0..6, 0..1);
                     }
@@ -422,7 +528,10 @@ pub fn run_windowed(
                 event_loop.exit();
                 return;
             }
-            if let Ok(PhotoLoaded(img)) = self.from_loader.try_recv() {
+            // Pull from loader only when there is capacity to avoid dropping
+            // pending images; this allows the mpsc channel to provide backpressure.
+            while self.pending.len() < self.preload_count {
+                let Ok(PhotoLoaded(img)) = self.from_loader.try_recv() else { break };
                 if let Some(gpu) = self.gpu.as_ref() {
                     let (out_w, out_h) = compute_scaled_size(
                         img.width,
@@ -511,16 +620,34 @@ pub fn run_windowed(
                             },
                         ],
                     });
-                    // Promote to current if empty, otherwise stage as next and start fade
+                    // Queue decoded image for later consumption
                     let new_tex = ImgTex { bind, w: out_w, h: out_h, path: img.path };
+                    self.pending.push_back(new_tex);
+                    debug!("queued_image depth={}", self.pending.len());
+                    // If nothing showing yet, promote immediately
                     if self.current.is_none() && self.fade_start.is_none() {
-                        self.current = Some(new_tex);
-                        if let Some(cur) = &self.current {
-                            let _ = self.to_manager_displayed.try_send(Displayed(cur.path.clone()));
+                        if let Some(first) = self.pending.pop_front() {
+                            info!("first_image path={}", first.path.display());
+                            self.current = Some(first);
+                            self.displayed_at = Some(std::time::Instant::now());
+                            if let Some(cur) = &self.current {
+                                let _ = self.to_manager_displayed.try_send(Displayed(cur.path.clone()));
+                            }
                         }
-                    } else {
-                        self.next = Some(new_tex);
-                        if self.fade_start.is_none() {
+                    }
+                }
+            }
+            // If dwell elapsed and we have pending, stage next and start fade
+            if self.fade_start.is_none() {
+                if let Some(shown_at) = self.displayed_at {
+                    if shown_at.elapsed() >= std::time::Duration::from_millis(self.dwell_ms) {
+                        if self.next.is_none() {
+                            if let Some(stage) = self.pending.pop_front() {
+                                info!("transition_start path={} queue_depth={}", stage.path.display(), self.pending.len());
+                                self.next = Some(stage);
+                            }
+                        }
+                        if self.next.is_some() {
                             self.fade_start = Some(std::time::Instant::now());
                         }
                     }
@@ -543,6 +670,10 @@ pub fn run_windowed(
         next: None,
         fade_start: None,
         fade_ms: 400,
+        displayed_at: None,
+        dwell_ms: 2000,
+        pending: VecDeque::new(),
+        preload_count: 3,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use tokio::select;
+use tokio::task::JoinSet;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -83,29 +84,51 @@ pub async fn run(
     to_viewer: Sender<PhotoLoaded>,
     cancel: CancellationToken,
 ) -> Result<()> {
+    const MAX_IN_FLIGHT: usize = 4;
+    let mut in_flight: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut tasks: JoinSet<(std::path::PathBuf, Option<image::RgbaImage>)> = JoinSet::new();
+
     loop {
         select! {
             _ = cancel.cancelled() => break,
-            Some(LoadPhoto(path)) = load_rx.recv() => {
-                match decode_rgba8_apply_exif(&path) {
-                    Ok(rgba8) => {
-                        debug!("loaded (rgba8): {}", path.display());
-                        let (width, height) = rgba8.dimensions();
-                        let prepared = PreparedImageCpu {
-                            path: path.clone(),
-                            width,
-                            height,
-                            pixels: rgba8.into_raw(),
-                        };
-                        let _ = to_viewer.send(PhotoLoaded(prepared)).await;
-                    }
-                    Err(e) => {
-                        debug!("invalid photo {}: {}", path.display(), e);
-                        let _ = invalid_tx.send(InvalidPhoto(path)).await;
+
+            // Accept new load requests while under limit
+            Some(LoadPhoto(path)) = load_rx.recv(), if in_flight.len() < MAX_IN_FLIGHT => {
+                if in_flight.insert(path.clone()) {
+                    tasks.spawn({
+                        let p = path.clone();
+                        async move {
+                            let res = tokio::task::spawn_blocking(move || decode_rgba8_apply_exif(&p)).await;
+                            (path, res.ok().and_then(|r| r.ok()))
+                        }
+                    });
+                }
+            }
+
+            // Handle completed decodes as they finish
+            Some(join_res) = tasks.join_next() => {
+                if let Ok((path, maybe_img)) = join_res {
+                    // remove from in-flight set
+                    in_flight.remove(&path);
+                    match maybe_img {
+                        Some(rgba8) => {
+                            debug!("loaded (rgba8): {}", path.display());
+                            let (width, height) = rgba8.dimensions();
+                            let prepared = PreparedImageCpu { path: path.clone(), width, height, pixels: rgba8.into_raw() };
+                            let _ = to_viewer.send(PhotoLoaded(prepared)).await;
+                        }
+                        None => {
+                            debug!("invalid photo {}", path.display());
+                            let _ = invalid_tx.send(InvalidPhoto(path)).await;
+                        }
                     }
                 }
             }
-            else => break,
+
+            else => {
+                // If both channels are closed and nothing in flight, exit
+                if in_flight.is_empty() { break; }
+            }
         }
     }
     Ok(())

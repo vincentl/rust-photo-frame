@@ -14,8 +14,9 @@ use tracing::{debug, warn};
 /// - Maintain a deduplicated `VecDeque<PathBuf>` playlist.
 /// - On any `PhotoAdded`, push_front so new shots surface quickly.
 /// - On `PhotoRemoved`, delete if present.
-/// - Timing is *only* the async `.send()` to the loader: when that branch
-///   completes we rotate the deque (pop_front -> push_back).
+/// - Timing is paced by the async `.send()` to the loader.
+/// - On successful send, rotate: pop_front -> push_back (keep cycling).
+/// - Displayed notifications are informational; no re-queue on display.
 pub async fn run(
     mut inv_rx: Receiver<InventoryEvent>,
     mut displayed_rx: Receiver<Displayed>,
@@ -33,22 +34,21 @@ pub async fn run(
             _ = cancel.cancelled() => break,
 
             // Drive slideshow by awaiting the send to the loader.
-            // Only enabled when we have something to show.
-            // When it completes, rotate the deque.
-            res = async {
-                if let Some(p) = playlist.front().cloned() {
-                    // Send the *current* front to the loader.
-                    // If the loader is busy or its channel is full, this await is our "timer".
-                    // Errors mean the receiver is gone; bubble as Err(()).
-                    to_loader.send(LoadPhoto(p)).await.map_err(|_| ())
-                } else {
-                    // No-op future if empty. This branch will never be selected because of the guard.
-                    Err(())
+            // Rotate the playlist on successful send; viewer/loader handle pacing.
+            res = {
+                let next = playlist.front().cloned();
+                let to_loader = to_loader.clone();
+                async move {
+                    if let Some(p) = next {
+                        to_loader.send(LoadPhoto(p)).await.map(|_| ()).map_err(|_| ())
+                    } else {
+                        Err(())
+                    }
                 }
             }, if !playlist.is_empty() => {
                 match res {
-                    Ok(_) => {
-                        // Successfully queued: rotate.
+                    Ok(()) => {
+                        // Successfully queued: rotate front -> back to keep it in play.
                         if let Some(f) = playlist.pop_front() {
                             playlist.push_back(f);
                         }
@@ -91,6 +91,7 @@ pub async fn run(
             maybe_disp = displayed_rx.recv() => {
                 if let Some(Displayed(p)) = maybe_disp {
                     debug!("displayed: {}", p.display());
+                    // No action required; we keep the playlist rotating regardless.
                 } else {
                     // Viewer side closed; nothing fatal.
                 }
