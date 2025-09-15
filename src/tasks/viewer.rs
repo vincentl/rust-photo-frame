@@ -37,6 +37,7 @@ pub fn run_windowed(
         img_bind_layout: wgpu::BindGroupLayout,
         sampler: wgpu::Sampler,
         pipeline: wgpu::RenderPipeline,
+        loading: Option<(wgpu::BindGroup, u32, u32)>,
     }
 
     struct App {
@@ -199,6 +200,74 @@ pub fn run_windowed(
                 multiview: None,
                 cache: None,
             });
+            // Try to create a loading overlay texture from embedded PNG; fallback to 1x1 white
+            let mut loading: Option<(wgpu::BindGroup, u32, u32)> = None;
+            let loading_png: &[u8] = include_bytes!("../../assets/ui/loading.png");
+            let loading_rgba = image::load_from_memory(loading_png)
+                .ok()
+                .map(|dynimg| dynimg.to_rgba8());
+            if let Some(img) = loading_rgba {
+                let lw = img.width();
+                let lh = img.height();
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("loading-texture"),
+                    size: wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let bytes = img.as_raw();
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    bytes,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * lw), rows_per_image: Some(lh) },
+                    wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+                );
+                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("loading-bind"),
+                    layout: &img_bind_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                    ],
+                });
+                loading = Some((bind, lw, lh));
+            } else {
+                let lw = 1u32;
+                let lh = 1u32;
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("loading-pixel"),
+                    size: wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let white = [255u8, 255, 255, 255];
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    &white,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+                    wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+                );
+                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("loading-bind"),
+                    layout: &img_bind_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                    ],
+                });
+                loading = Some((bind, lw, lh));
+            }
+
             self.window = Some(window);
             self.gpu = Some(GpuCtx {
                 device,
@@ -211,6 +280,7 @@ pub fn run_windowed(
                 img_bind_layout,
                 sampler,
                 pipeline,
+                loading,
             });
             self.current = None;
         }
@@ -299,8 +369,26 @@ pub fn run_windowed(
                     if let Some((bind, _, _)) = &self.current {
                         rpass.set_bind_group(1, bind, &[]);
                         rpass.draw(0..6, 0..1);
+                    } else if let Some((bind, lw, lh)) = &gpu.loading {
+                        // Draw loading overlay centered scaled to a reasonable fraction
+                        let sw = gpu.config.width as f32;
+                        let sh = gpu.config.height as f32;
+                        let iw = *lw as f32;
+                        let ih = *lh as f32;
+                        let maxw = sw * 0.4;
+                        let maxh = sh * 0.2;
+                        let scale = (maxw / iw).min(maxh / ih).min(1.0);
+                        let dw = (iw * scale).clamp(0.0, sw);
+                        let dh = (ih * scale).clamp(0.0, sh);
+                        let dx = (sw - dw) * 0.5;
+                        let dy = (sh - dh) * 0.5;
+                        let uni = Uniforms { screen_w: sw, screen_h: sh, dest_x: dx, dest_y: dy, dest_w: dw, dest_h: dh, alpha: 1.0, _pad: [0.0; 3] };
+                        gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
+                        rpass.set_bind_group(1, bind, &[]);
+                        rpass.draw(0..6, 0..1);
                     }
                     drop(rpass);
+
                     gpu.queue.submit(Some(encoder.finish()));
                     frame.present();
                 }
