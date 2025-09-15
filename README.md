@@ -34,19 +34,18 @@ flowchart LR
 
 Place a YAML file and pass its path as the CLI argument. Example:
 
-```yaml
+```
 photo-library-path: /path/to/photos
 
 # Render/transition settings
-fade-ms: 400 # Cross-fade duration (ms)
-dwell-ms: 2000 # Time an image remains fully visible (ms)
-viewer-preload-count: 3 # Images the viewer preloads; also sets viewer channel capacity
-loader-max-concurrent-decodes: 4 # Concurrent decodes in the loader
-oversample: 1.0 # GPU render oversample vs. screen size
+fade-ms: 400                # Cross-fade duration (ms)
+dwell-ms: 2000              # Time an image remains fully visible (ms)
+viewer-preload-count: 3     # Images the viewer preloads; also sets viewer channel capacity
+loader-max-concurrent-decodes: 4  # Concurrent decodes in the loader
+oversample: 1.0             # GPU render oversample vs. screen size
 ```
 
 Keys
-
 - photo-library-path: Root directory for images to display.
 - fade-ms: Cross-fade transition duration in milliseconds.
 - dwell-ms: Dwell time before starting a transition, in milliseconds.
