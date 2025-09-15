@@ -16,14 +16,10 @@ pub struct Configuration {
     /// Time an image remains fully visible before starting a transition, in ms.
     pub dwell_ms: u64,
     /// How many images the viewer preloads/keeps pending.
-    #[serde(rename = "viewer-preload-count", alias = "preload-count")]
+    #[serde(rename = "viewer-preload-count")]
     pub preload_count: usize,
     /// Maximum number of concurrent image decodes in the loader.
-    #[serde(
-        rename = "loader-max-concurrent-decodes",
-        alias = "max-in-flight",
-        alias = "loader-max-in-flight"
-    )]
+    #[serde(rename = "loader-max-concurrent-decodes")]
     pub max_in_flight: usize,
 }
 

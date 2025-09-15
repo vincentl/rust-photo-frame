@@ -53,10 +53,6 @@ Keys
 - loader-max-concurrent-decodes: Max concurrent CPU decodes; tune for CPU/GPU balance.
 - oversample: Scales render target up to reduce aliasing; 1.0 is native.
 
-Backward compatibility
-- preload-count is accepted as an alias for viewer-preload-count.
-- max-in-flight and loader-max-in-flight are accepted as aliases for loader-max-concurrent-decodes.
-
 ## License
 
 This project is licensed under the **MIT License**.
