@@ -9,6 +9,20 @@ pub struct Configuration {
     #[serde(alias = "photo_library_path")]
     pub photo_library_path: PathBuf,
     pub oversample: f32,
+    /// Cross-fade duration in milliseconds.
+    pub fade_ms: u64,
+    /// Time an image remains fully visible before starting a transition, in ms.
+    pub dwell_ms: u64,
+    /// How many images the viewer preloads/keeps pending.
+    #[serde(rename = "viewer-preload-count", alias = "preload-count")]
+    pub preload_count: usize,
+    /// Maximum number of concurrent image decodes in the loader.
+    #[serde(
+        rename = "loader-max-concurrent-decodes",
+        alias = "max-in-flight",
+        alias = "loader-max-in-flight"
+    )]
+    pub max_in_flight: usize,
 }
 
 impl Configuration {
@@ -23,6 +37,10 @@ impl Default for Configuration {
         Self {
             photo_library_path: PathBuf::new(),
             oversample: 1.0,
+            fade_ms: 400,
+            dwell_ms: 2000,
+            preload_count: 3,
+            max_in_flight: 4,
         }
     }
 }

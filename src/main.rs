@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
     let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(128); // Files -> Manager
     let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(64); // Manager/Loader -> Files
     let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(4); // Manager -> Loader (allow a few in-flight requests)
-    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(3); // Loader  -> Viewer (prefetch up to 3)
+    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(cfg.preload_count); // Loader  -> Viewer (prefetch up to cfg.preload_count)
     let (displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(64); // Viewer  -> Manager
 
     let cancel = CancellationToken::new();
@@ -94,12 +94,13 @@ async fn main() -> Result<()> {
         let invalid_tx = invalid_tx.clone();
         let loaded_tx = loaded_tx.clone();
         let cancel = cancel.clone();
-        async move { tasks::loader::run(to_load_rx, invalid_tx, loaded_tx, cancel).await }
+        let max_in_flight = cfg.max_in_flight;
+        async move { tasks::loader::run(to_load_rx, invalid_tx, loaded_tx, cancel, max_in_flight).await }
     });
 
     // Run the windowed viewer on the main thread (blocking) after spawning other tasks
     // This call returns when the window closes or cancellation occurs
-    if let Err(e) = tasks::viewer::run_windowed(loaded_rx, displayed_tx.clone(), cancel.clone()) {
+    if let Err(e) = tasks::viewer::run_windowed(loaded_rx, displayed_tx.clone(), cancel.clone(), cfg.clone()) {
         tracing::error!("viewer error: {e:?}");
     }
     // Ensure other tasks are asked to stop

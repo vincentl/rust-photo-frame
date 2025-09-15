@@ -1,1 +1,13 @@
 photo-library-path: /Users/vincent/rust-photo-frame/photo-library-test
+
+# Render/transition settings
+# Cross-fade duration in milliseconds
+fade-ms: 400
+# Dwell time (ms) the current image remains fully displayed before fading
+dwell-ms: 2000
+# Number of images to preload in the viewer (aligns with channel capacity)
+viewer-preload-count: 3
+# GPU decode/render oversample factor (1.0 = native to screen)
+oversample: 1.0
+# Concurrent image decodes in loader
+loader-max-concurrent-decodes: 4

@@ -8,6 +8,7 @@ pub fn run_windowed(
     from_loader: Receiver<PhotoLoaded>,
     to_manager_displayed: Sender<Displayed>,
     cancel: CancellationToken,
+    cfg: crate::config::Configuration,
 ) -> anyhow::Result<()> {
     use std::sync::Arc;
     use winit::application::ApplicationHandler;
@@ -669,11 +670,11 @@ pub fn run_windowed(
         current: None,
         next: None,
         fade_start: None,
-        fade_ms: 400,
+        fade_ms: cfg.fade_ms,
         displayed_at: None,
-        dwell_ms: 2000,
+        dwell_ms: cfg.dwell_ms,
         pending: VecDeque::new(),
-        preload_count: 3,
+        preload_count: cfg.preload_count,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

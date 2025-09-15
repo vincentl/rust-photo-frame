@@ -83,8 +83,8 @@ pub async fn run(
     invalid_tx: Sender<InvalidPhoto>,
     to_viewer: Sender<PhotoLoaded>,
     cancel: CancellationToken,
+    max_in_flight: usize,
 ) -> Result<()> {
-    const MAX_IN_FLIGHT: usize = 4;
     let mut in_flight: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     let mut tasks: JoinSet<(std::path::PathBuf, Option<image::RgbaImage>)> = JoinSet::new();
 
@@ -93,7 +93,7 @@ pub async fn run(
             _ = cancel.cancelled() => break,
 
             // Accept new load requests while under limit
-            Some(LoadPhoto(path)) = load_rx.recv(), if in_flight.len() < MAX_IN_FLIGHT => {
+            Some(LoadPhoto(path)) = load_rx.recv(), if in_flight.len() < max_in_flight => {
                 if in_flight.insert(path.clone()) {
                     tasks.spawn({
                         let p = path.clone();
