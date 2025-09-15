@@ -674,7 +674,7 @@ pub fn run_windowed(
         displayed_at: None,
         dwell_ms: cfg.dwell_ms,
         pending: VecDeque::new(),
-        preload_count: cfg.preload_count,
+        preload_count: cfg.viewer_preload_count,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

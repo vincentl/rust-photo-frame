@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
     let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(128); // Files -> Manager
     let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(64); // Manager/Loader -> Files
     let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(4); // Manager -> Loader (allow a few in-flight requests)
-    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(cfg.preload_count); // Loader  -> Viewer (prefetch up to cfg.preload_count)
+    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count); // Loader  -> Viewer (prefetch up to cfg.viewer_preload_count)
     let (displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(64); // Viewer  -> Manager
 
     let cancel = CancellationToken::new();
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
         let invalid_tx = invalid_tx.clone();
         let loaded_tx = loaded_tx.clone();
         let cancel = cancel.clone();
-        let max_in_flight = cfg.max_in_flight;
+        let max_in_flight = cfg.loader_max_concurrent_decodes;
         async move { tasks::loader::run(to_load_rx, invalid_tx, loaded_tx, cancel, max_in_flight).await }
     });
 
