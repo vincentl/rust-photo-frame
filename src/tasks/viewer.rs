@@ -1,7 +1,9 @@
 use crate::events::{Displayed, PhotoLoaded};
+use crate::matting;
+use rand::SeedableRng;
+use std::collections::VecDeque;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
-use std::collections::VecDeque;
 use tracing::{debug, info};
 
 pub fn run_windowed(
@@ -64,6 +66,9 @@ pub fn run_windowed(
         dwell_ms: u64,
         pending: VecDeque<ImgTex>,
         preload_count: usize,
+        mat_cfg: matting::MattingConfig,
+        rng: rand::rngs::StdRng,
+        oversample: f32,
     }
 
     impl ApplicationHandler for App {
@@ -218,12 +223,11 @@ pub fn run_windowed(
                 cache: None,
             });
             // Try to create a loading overlay texture from embedded PNG; fallback to 1x1 white
-            let mut loading: Option<(wgpu::BindGroup, u32, u32)> = None;
             let loading_png: &[u8] = include_bytes!("../../assets/ui/loading.png");
             let loading_rgba = image::load_from_memory(loading_png)
                 .ok()
                 .map(|dynimg| dynimg.to_rgba8());
-            if let Some(img) = loading_rgba {
+            let loading = if let Some(img) = loading_rgba {
                 let lw = img.width();
                 let lh = img.height();
                 let tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -275,7 +279,7 @@ pub fn run_windowed(
                         },
                     ],
                 });
-                loading = Some((bind, lw, lh));
+                Some((bind, lw, lh))
             } else {
                 let lw = 1u32;
                 let lh = 1u32;
@@ -328,8 +332,8 @@ pub fn run_windowed(
                         },
                     ],
                 });
-                loading = Some((bind, lw, lh));
-            }
+                Some((bind, lw, lh))
+            };
 
             self.window = Some(window);
             self.gpu = Some(GpuCtx {
@@ -412,7 +416,9 @@ pub fn run_windowed(
                     rpass.set_pipeline(&gpu.pipeline);
                     rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
                     if let Some(start) = self.fade_start {
-                        let mut t = ((start.elapsed().as_millis() as f32) / (self.fade_ms as f32).max(1.0)).clamp(0.0, 1.0);
+                        let mut t = ((start.elapsed().as_millis() as f32)
+                            / (self.fade_ms as f32).max(1.0))
+                        .clamp(0.0, 1.0);
                         t = t * t * (3.0 - 2.0 * t);
                         if let Some(cur) = &self.current {
                             let (dx, dy, dw, dh) = compute_dest_rect(
@@ -464,7 +470,11 @@ pub fn run_windowed(
                                 self.current = Some(next);
                                 self.fade_start = None;
                                 self.displayed_at = Some(std::time::Instant::now());
-                                info!("transition_end path={} queue_depth={}", path.display(), self.pending.len());
+                                info!(
+                                    "transition_end path={} queue_depth={}",
+                                    path.display(),
+                                    self.pending.len()
+                                );
                                 let _ = self.to_manager_displayed.try_send(Displayed(path));
                             } else {
                                 self.fade_start = None;
@@ -532,107 +542,108 @@ pub fn run_windowed(
             // Pull from loader only when there is capacity to avoid dropping
             // pending images; this allows the mpsc channel to provide backpressure.
             while self.pending.len() < self.preload_count {
-                let Ok(PhotoLoaded(img)) = self.from_loader.try_recv() else { break };
+                let Ok(PhotoLoaded(img)) = self.from_loader.try_recv() else {
+                    break;
+                };
                 if let Some(gpu) = self.gpu.as_ref() {
-                    let (out_w, out_h) = compute_scaled_size(
-                        img.width,
-                        img.height,
-                        gpu.config.width,
-                        gpu.config.height,
-                        1.0,
-                        gpu.limits.max_texture_dimension_2d,
-                    );
-                    let mut pixels: std::borrow::Cow<'_, [u8]> =
-                        std::borrow::Cow::Borrowed(&img.pixels);
-                    if out_w != img.width || out_h != img.height {
-                        if let Some(src) =
-                            image::RgbaImage::from_raw(img.width, img.height, img.pixels.clone())
-                        {
-                            let resized = image::imageops::resize(
-                                &src,
-                                out_w,
-                                out_h,
-                                image::imageops::FilterType::Triangle,
-                            );
-                            pixels = std::borrow::Cow::Owned(resized.into_raw());
-                        }
-                    }
-                    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                        label: Some("photo-texture"),
-                        size: wgpu::Extent3d {
-                            width: out_w,
-                            height: out_h,
-                            depth_or_array_layers: 1,
-                        },
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                        view_formats: &[],
-                    });
-                    let stride = 4 * out_w;
-                    let padded = compute_padded_stride(stride);
-                    let upload: std::borrow::Cow<'_, [u8]> = if padded != stride {
-                        let mut staging = vec![0u8; (padded as usize) * (out_h as usize)];
-                        let rs = stride as usize;
-                        let rd = padded as usize;
-                        let src = pixels.as_ref();
-                        for y in 0..(out_h as usize) {
-                            let so = y * rs;
-                            let doff = y * rd;
-                            staging[doff..doff + rs].copy_from_slice(&src[so..so + rs]);
-                        }
-                        std::borrow::Cow::Owned(staging)
-                    } else {
-                        pixels
-                    };
-                    gpu.queue.write_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &tex,
-                            mip_level: 0,
-                            origin: wgpu::Origin3d::ZERO,
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        &upload,
-                        wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(padded),
-                            rows_per_image: Some(out_h),
-                        },
-                        wgpu::Extent3d {
-                            width: out_w,
-                            height: out_h,
-                            depth_or_array_layers: 1,
-                        },
-                    );
-                    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-                    let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("image-bind"),
-                        layout: &gpu.img_bind_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&view),
+                    let sw = (((gpu.config.width as f32) * self.oversample)
+                        .round()
+                        .max(1.0) as u32)
+                        .min(gpu.limits.max_texture_dimension_2d);
+                    let sh = (((gpu.config.height as f32) * self.oversample)
+                        .round()
+                        .max(1.0) as u32)
+                        .min(gpu.limits.max_texture_dimension_2d);
+                    if let Some(src) =
+                        image::RgbaImage::from_raw(img.width, img.height, img.pixels.clone())
+                    {
+                        let composed = matting::compose(&src, sw, sh, &self.mat_cfg, &mut self.rng);
+                        let (out_w, out_h) = composed.dimensions();
+                        let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("photo-texture"),
+                            size: wgpu::Extent3d {
+                                width: out_w,
+                                height: out_h,
+                                depth_or_array_layers: 1,
                             },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                                | wgpu::TextureUsages::COPY_DST,
+                            view_formats: &[],
+                        });
+                        let stride = 4 * out_w;
+                        let padded = compute_padded_stride(stride);
+                        let upload: std::borrow::Cow<'_, [u8]> = if padded != stride {
+                            let mut staging = vec![0u8; (padded as usize) * (out_h as usize)];
+                            let rs = stride as usize;
+                            let rd = padded as usize;
+                            let src = composed.as_raw();
+                            for y in 0..(out_h as usize) {
+                                let so = y * rs;
+                                let doff = y * rd;
+                                staging[doff..doff + rs].copy_from_slice(&src[so..so + rs]);
+                            }
+                            std::borrow::Cow::Owned(staging)
+                        } else {
+                            std::borrow::Cow::Borrowed(composed.as_raw())
+                        };
+                        gpu.queue.write_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &tex,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
                             },
-                        ],
-                    });
-                    // Queue decoded image for later consumption
-                    let new_tex = ImgTex { bind, w: out_w, h: out_h, path: img.path };
-                    self.pending.push_back(new_tex);
-                    debug!("queued_image depth={}", self.pending.len());
-                    // If nothing showing yet, promote immediately
-                    if self.current.is_none() && self.fade_start.is_none() {
-                        if let Some(first) = self.pending.pop_front() {
-                            info!("first_image path={}", first.path.display());
-                            self.current = Some(first);
-                            self.displayed_at = Some(std::time::Instant::now());
-                            if let Some(cur) = &self.current {
-                                let _ = self.to_manager_displayed.try_send(Displayed(cur.path.clone()));
+                            &upload,
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(padded),
+                                rows_per_image: Some(out_h),
+                            },
+                            wgpu::Extent3d {
+                                width: out_w,
+                                height: out_h,
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("image-bind"),
+                            layout: &gpu.img_bind_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(&view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+                                },
+                            ],
+                        });
+                        // Queue composed image for later consumption
+                        let new_tex = ImgTex {
+                            bind,
+                            w: out_w,
+                            h: out_h,
+                            path: img.path,
+                        };
+                        self.pending.push_back(new_tex);
+                        debug!("queued_image depth={}", self.pending.len());
+                        // If nothing showing yet, promote immediately
+                        if self.current.is_none() && self.fade_start.is_none() {
+                            if let Some(first) = self.pending.pop_front() {
+                                info!("first_image path={}", first.path.display());
+                                self.current = Some(first);
+                                self.displayed_at = Some(std::time::Instant::now());
+                                if let Some(cur) = &self.current {
+                                    let _ = self
+                                        .to_manager_displayed
+                                        .try_send(Displayed(cur.path.clone()));
+                                }
                             }
                         }
                     }
@@ -644,7 +655,11 @@ pub fn run_windowed(
                     if shown_at.elapsed() >= std::time::Duration::from_millis(self.dwell_ms) {
                         if self.next.is_none() {
                             if let Some(stage) = self.pending.pop_front() {
-                                info!("transition_start path={} queue_depth={}", stage.path.display(), self.pending.len());
+                                info!(
+                                    "transition_start path={} queue_depth={}",
+                                    stage.path.display(),
+                                    self.pending.len()
+                                );
                                 self.next = Some(stage);
                             }
                         }
@@ -675,6 +690,9 @@ pub fn run_windowed(
         dwell_ms: cfg.dwell_ms,
         pending: VecDeque::new(),
         preload_count: cfg.viewer_preload_count,
+        mat_cfg: cfg.matting.clone(),
+        rng: rand::rngs::StdRng::from_entropy(),
+        oversample: cfg.oversample,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -686,29 +704,6 @@ fn compute_padded_stride(bytes_per_row: u32) -> u32 {
         return 0;
     }
     bytes_per_row.div_ceil(ALIGN) * ALIGN
-}
-
-fn compute_scaled_size(
-    img_w: u32,
-    img_h: u32,
-    surf_w: u32,
-    surf_h: u32,
-    oversample: f32,
-    max_dim: u32,
-) -> (u32, u32) {
-    if img_w == 0 || img_h == 0 || surf_w == 0 || surf_h == 0 {
-        return (1, 1);
-    }
-    let max_w = ((surf_w as f32) * oversample).round().max(1.0) as u32;
-    let max_h = ((surf_h as f32) * oversample).round().max(1.0) as u32;
-    let max_w = max_w.min(max_dim).max(1);
-    let max_h = max_h.min(max_dim).max(1);
-    let sw = (max_w as f32) / (img_w as f32);
-    let sh = (max_h as f32) / (img_h as f32);
-    let s = sw.min(sh).min(1.0);
-    let out_w = ((img_w as f32) * s).floor().max(1.0) as u32;
-    let out_h = ((img_h as f32) * s).floor().max(1.0) as u32;
-    (out_w, out_h)
 }
 
 fn compute_dest_rect(img_w: u32, img_h: u32, screen_w: u32, screen_h: u32) -> (f32, f32, f32, f32) {

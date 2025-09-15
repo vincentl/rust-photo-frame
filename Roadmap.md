@@ -23,7 +23,7 @@
 
 - [ ] **GPU viewer shows decoded photo**
   - [ ] Upload `PreparedImageCpu` to a wgpu texture and render a full-screen quad.
-  - [ ] Unit test verifies EXIF orientation is applied during load.
+  - [x] Unit test verifies EXIF orientation is applied during load.
   - [ ] Integration test confirms the viewer emits `Displayed` after drawing.
 - [ ] **macOS demo**
   - [ ] Build & run on macOS, confirming a window renders the first photo.
@@ -46,7 +46,7 @@
 - [ ] **Rust project features**
   - [ ] Circular buffer weighting (half-life replication for new photos).
   - [ ] Graceful removal of deleted photos from list.
-  - [ ] Randomized list at boot with configurable seed.
+  - [x] Randomized list at boot with configurable seed.
   - [ ] Event system:
     - [ ] Short button press → toggle screen.
     - [ ] Long button press → shutdown.
@@ -56,11 +56,11 @@
 ## Tier 3 – Nice-to-have (polish & extras)
 
 - [ ] **Photo rendering**
-  - [ ] Matting options:
-    - [ ] Fixed color mat (configurable).
-    - [ ] Studio mat (average color + textured bevel).
-    - [ ] Blur mat (scaled background fill).
-    - [ ] Configurable minimum mat size.
+  - [x] Matting options:
+    - [x] Fixed color mat (configurable).
+    - [x] Studio mat (average color + textured bevel).
+    - [x] Blur mat (scaled background fill).
+    - [x] Configurable minimum mat size.
 - [ ] **User web interface**
   - [ ] Local web server for configuration (cloud, mats, screen schedule, photo timing).
   - [ ] Access limited to local network.

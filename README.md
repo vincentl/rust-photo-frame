@@ -43,6 +43,10 @@ dwell-ms: 2000 # Time an image remains fully visible (ms)
 viewer-preload-count: 3 # Images the viewer preloads; also sets viewer channel capacity
 loader-max-concurrent-decodes: 4 # Concurrent decodes in the loader
 oversample: 1.0 # GPU render oversample vs. screen size
+matting:
+  mode: fixed-color # fixed-color|studio|blur|random
+  color: [0, 0, 0]   # used for fixed-color mode
+  min-fraction: 0.0  # fraction of shorter screen side for minimum mat
 ```
 
 Keys
@@ -53,6 +57,9 @@ Keys
 - viewer-preload-count: Number of images the viewer holds ready; determines backpressure depth to the loader.
 - loader-max-concurrent-decodes: Max concurrent CPU decodes; tune for CPU/GPU balance.
 - oversample: Scales render target up to reduce aliasing; 1.0 is native.
+- matting.mode: Mat style (`fixed-color`, `studio`, `blur`, or `random`).
+- matting.color: RGB array used when `mode` is `fixed-color`.
+- matting.min-fraction: Minimum mat width relative to the shorter screen dimension.
 
 ## License
 

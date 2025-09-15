@@ -3,7 +3,7 @@ use crate::events::{InvalidPhoto, InventoryEvent};
 use anyhow::Result;
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
-use rand::seq::SliceRandom;
+use rand::{seq::SliceRandom, SeedableRng};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,7 +36,11 @@ pub async fn run(
             initial.push(path);
         }
     }
-    initial.shuffle(&mut rand::thread_rng());
+    let mut rng = match cfg.startup_shuffle_seed {
+        Some(seed) => rand::rngs::StdRng::seed_from_u64(seed),
+        None => rand::rngs::StdRng::from_entropy(),
+    };
+    initial.shuffle(&mut rng);
     for path in &initial {
         debug!(action = "startup_add", path = %path.display());
         let _ = to_manager
