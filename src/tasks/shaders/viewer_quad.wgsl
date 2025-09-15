@@ -45,7 +45,8 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
 
   var out: VSOut;
   out.pos = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
-  out.uv = vec2<f32>(p.x, 1.0 - p.y);
+  // Use texture UV with origin at top-left (no extra flip)
+  out.uv = vec2<f32>(p.x, p.y);
   return out;
 }
 
@@ -54,4 +55,3 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let c = textureSample(t_tex, t_samp, in.uv);
   return vec4<f32>(c.rgb, U.alpha);
 }
-

@@ -40,13 +40,23 @@ pub fn run_windowed(
         loading: Option<(wgpu::BindGroup, u32, u32)>,
     }
 
+    struct ImgTex {
+        bind: wgpu::BindGroup,
+        w: u32,
+        h: u32,
+        path: std::path::PathBuf,
+    }
+
     struct App {
         from_loader: Receiver<PhotoLoaded>,
         to_manager_displayed: Sender<Displayed>,
         cancel: CancellationToken,
         window: Option<Arc<Window>>,
         gpu: Option<GpuCtx>,
-        current: Option<(wgpu::BindGroup, u32, u32)>,
+        current: Option<ImgTex>,
+        next: Option<ImgTex>,
+        fade_start: Option<std::time::Instant>,
+        fade_ms: u64,
     }
 
     impl ApplicationHandler for App {
@@ -331,24 +341,6 @@ pub fn run_windowed(
                             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("draw-encoder"),
                             });
-                    // Compute dest rect for letterbox
-                    let (dx, dy, dw, dh) = if let Some((_, iw, ih)) = &self.current {
-                        compute_dest_rect(*iw, *ih, gpu.config.width, gpu.config.height)
-                    } else {
-                        (0.0, 0.0, gpu.config.width as f32, gpu.config.height as f32)
-                    };
-                    let uni = Uniforms {
-                        screen_w: gpu.config.width as f32,
-                        screen_h: gpu.config.height as f32,
-                        dest_x: dx,
-                        dest_y: dy,
-                        dest_w: dw,
-                        dest_h: dh,
-                        alpha: 1.0,
-                        _pad: [0.0; 3],
-                    };
-                    gpu.queue
-                        .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
                     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("draw-pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -366,8 +358,37 @@ pub fn run_windowed(
                     });
                     rpass.set_pipeline(&gpu.pipeline);
                     rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                    if let Some((bind, _, _)) = &self.current {
-                        rpass.set_bind_group(1, bind, &[]);
+                    if let Some(start) = self.fade_start {
+                        let t = ((start.elapsed().as_millis() as f32) / (self.fade_ms as f32).max(1.0)).clamp(0.0, 1.0);
+                        if let Some(cur) = &self.current {
+                            let (dx, dy, dw, dh) = compute_dest_rect(cur.w, cur.h, gpu.config.width, gpu.config.height);
+                            let uni = Uniforms { screen_w: gpu.config.width as f32, screen_h: gpu.config.height as f32, dest_x: dx, dest_y: dy, dest_w: dw, dest_h: dh, alpha: 1.0 - t, _pad: [0.0; 3] };
+                            gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
+                            rpass.set_bind_group(1, &cur.bind, &[]);
+                            rpass.draw(0..6, 0..1);
+                        }
+                        if let Some(next) = &self.next {
+                            let (dx, dy, dw, dh) = compute_dest_rect(next.w, next.h, gpu.config.width, gpu.config.height);
+                            let uni = Uniforms { screen_w: gpu.config.width as f32, screen_h: gpu.config.height as f32, dest_x: dx, dest_y: dy, dest_w: dw, dest_h: dh, alpha: t, _pad: [0.0; 3] };
+                            gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
+                            rpass.set_bind_group(1, &next.bind, &[]);
+                            rpass.draw(0..6, 0..1);
+                        }
+                        if t >= 1.0 {
+                            if let Some(next) = self.next.take() {
+                                let path = next.path.clone();
+                                self.current = Some(next);
+                                self.fade_start = None;
+                                let _ = self.to_manager_displayed.try_send(Displayed(path));
+                            } else {
+                                self.fade_start = None;
+                            }
+                        }
+                    } else if let Some(cur) = &self.current {
+                        let (dx, dy, dw, dh) = compute_dest_rect(cur.w, cur.h, gpu.config.width, gpu.config.height);
+                        let uni = Uniforms { screen_w: gpu.config.width as f32, screen_h: gpu.config.height as f32, dest_x: dx, dest_y: dy, dest_w: dw, dest_h: dh, alpha: 1.0, _pad: [0.0; 3] };
+                        gpu.queue.write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
+                        rpass.set_bind_group(1, &cur.bind, &[]);
                         rpass.draw(0..6, 0..1);
                     } else if let Some((bind, lw, lh)) = &gpu.loading {
                         // Draw loading overlay centered scaled to a reasonable fraction
@@ -490,8 +511,19 @@ pub fn run_windowed(
                             },
                         ],
                     });
-                    self.current = Some((bind, out_w, out_h));
-                    let _ = self.to_manager_displayed.try_send(Displayed(img.path));
+                    // Promote to current if empty, otherwise stage as next and start fade
+                    let new_tex = ImgTex { bind, w: out_w, h: out_h, path: img.path };
+                    if self.current.is_none() && self.fade_start.is_none() {
+                        self.current = Some(new_tex);
+                        if let Some(cur) = &self.current {
+                            let _ = self.to_manager_displayed.try_send(Displayed(cur.path.clone()));
+                        }
+                    } else {
+                        self.next = Some(new_tex);
+                        if self.fade_start.is_none() {
+                            self.fade_start = Some(std::time::Instant::now());
+                        }
+                    }
                 }
             }
             if let Some(window) = self.window.as_ref() {
@@ -508,6 +540,9 @@ pub fn run_windowed(
         window: None,
         gpu: None,
         current: None,
+        next: None,
+        fade_start: None,
+        fade_ms: 400,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
