@@ -1,3 +1,4 @@
+use rand::{seq::SliceRandom, SeedableRng};
 use rust_photo_frame::config::Configuration;
 use rust_photo_frame::events::{InvalidPhoto, InventoryEvent};
 use rust_photo_frame::tasks::files;
@@ -6,6 +7,7 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use walkdir::WalkDir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn startup_recursive_scan_emits_photo_added() {
@@ -21,6 +23,7 @@ async fn startup_recursive_scan_emits_photo_added() {
     let cfg = Configuration {
         photo_library_path: lib.clone(),
         oversample: 1.0,
+        ..Default::default()
     };
 
     let (inv_tx, mut inv_rx) = mpsc::channel::<InventoryEvent>(16);
@@ -68,6 +71,7 @@ async fn invalid_photo_is_deleted_and_emits_removed() {
     let cfg = Configuration {
         photo_library_path: lib.clone(),
         oversample: 1.0,
+        ..Default::default()
     };
 
     let (inv_tx, mut inv_rx) = mpsc::channel::<InventoryEvent>(16);
@@ -110,6 +114,65 @@ async fn invalid_photo_is_deleted_and_emits_removed() {
 
     // Original should be gone
     assert!(!bad.exists(), "original file should be deleted");
+
+    cancel.cancel();
+    let _ = handle.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_shuffle_is_deterministic_with_seed() {
+    let tmp = tempdir().unwrap();
+    let lib = tmp.path().join("lib");
+    fs::create_dir_all(lib.join("nested")).unwrap();
+
+    // Create files before the task starts
+    fs::write(lib.join("a.jpg"), b"x").unwrap();
+    fs::write(lib.join("nested").join("b.jpeg"), b"x").unwrap();
+
+    let cfg = Configuration {
+        photo_library_path: lib.clone(),
+        startup_shuffle_seed: Some(42),
+        ..Default::default()
+    };
+
+    // Expected order after shuffle with seed 42
+    let mut expected = Vec::new();
+    for entry in WalkDir::new(&lib)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+    {
+        let path = entry.path().to_path_buf();
+        if matches!(
+            path.extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase()),
+            Some(ref e) if ["jpg", "jpeg", "png", "webp"].contains(&e.as_str())
+        ) {
+            expected.push(path);
+        }
+    }
+    expected.shuffle(&mut rand::rngs::StdRng::seed_from_u64(42));
+
+    let (inv_tx, mut inv_rx) = mpsc::channel::<InventoryEvent>(16);
+    let (_invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(16);
+    let cancel = CancellationToken::new();
+
+    let handle = tokio::spawn(files::run(cfg, inv_tx, invalid_rx, cancel.clone()));
+
+    let mut actual: Vec<PathBuf> = Vec::new();
+    while actual.len() < 2 {
+        if let Some(InventoryEvent::PhotoAdded(p)) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), inv_rx.recv())
+                .await
+                .expect("timeout waiting for inventory event")
+        {
+            actual.push(p);
+        }
+    }
+
+    assert_eq!(actual, expected);
 
     cancel.cancel();
     let _ = handle.await;

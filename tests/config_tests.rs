@@ -31,3 +31,13 @@ oversample: 1.5
     assert_eq!(cfg.photo_library_path, PathBuf::from("/photos"));
     assert!((cfg.oversample - 1.5).abs() < f32::EPSILON);
 }
+
+#[test]
+fn parse_with_startup_shuffle_seed() {
+    let yaml = r#"
+photo-library-path: "/p"
+startup-shuffle-seed: 7
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(cfg.startup_shuffle_seed, Some(7));
+}
