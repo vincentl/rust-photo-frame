@@ -183,18 +183,22 @@ mod tests {
     }
 
     #[test]
-    fn select_mode_random_is_deterministic() {
+    fn select_mode_random_with_seed() {
         let cfg = MattingConfig {
             mode: MatMode::Random,
             ..Default::default()
         };
-        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
-        let first = select_mode(&cfg, &mut rng);
-        let second = select_mode(&cfg, &mut rng);
-        assert_ne!(
-            std::mem::discriminant(&first),
-            std::mem::discriminant(&second)
-        );
+        let mut rng_studio = rand::rngs::StdRng::seed_from_u64(42);
+        let first = select_mode(&cfg, &mut rng_studio);
+        assert!(matches!(first, MatMode::Studio));
+
+        let mut rng_fixed = rand::rngs::StdRng::seed_from_u64(10);
+        let second = select_mode(&cfg, &mut rng_fixed);
+        assert!(matches!(second, MatMode::FixedColor));
+
+        let mut rng_blur = rand::rngs::StdRng::seed_from_u64(1);
+        let third = select_mode(&cfg, &mut rng_blur);
+        assert!(matches!(third, MatMode::Blur));
     }
 
     #[test]

@@ -10,7 +10,7 @@ This project is **alpha and under development**
 
 - Recursive/scoped directory scanning (configurable)
 - Image type filtering (jpg/png/gif/webp/bmp/tiff)
-- Circular buffer (infinite loop)
+- Weighted circular playlist that boosts new photos then gracefully decays
 - Fixed per-image delay (configurable)
 - Error handling and structured logging
 
