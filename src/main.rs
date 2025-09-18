@@ -100,7 +100,9 @@ async fn main() -> Result<()> {
 
     // Run the windowed viewer on the main thread (blocking) after spawning other tasks
     // This call returns when the window closes or cancellation occurs
-    if let Err(e) = tasks::viewer::run_windowed(loaded_rx, displayed_tx.clone(), cancel.clone(), cfg.clone()) {
+    if let Err(e) =
+        tasks::viewer::run_windowed(loaded_rx, displayed_tx.clone(), cancel.clone(), cfg.clone())
+    {
         tracing::error!("viewer error: {e:?}");
     }
     // Ensure other tasks are asked to stop

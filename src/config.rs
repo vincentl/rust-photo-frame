@@ -5,6 +5,61 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
+pub struct MattingOptions {
+    #[serde(default = "MattingOptions::default_minimum_percentage")]
+    pub minimum_mat_percentage: f32,
+    #[serde(flatten, default)]
+    pub style: MattingMode,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum MattingMode {
+    FixedColor {
+        #[serde(default = "MattingMode::default_color")]
+        color: [u8; 3],
+    },
+    Blur {
+        #[serde(default = "MattingMode::default_blur_sigma")]
+        sigma: f32,
+    },
+}
+
+impl Default for MattingOptions {
+    fn default() -> Self {
+        Self {
+            minimum_mat_percentage: Self::default_minimum_percentage(),
+            style: MattingMode::default(),
+        }
+    }
+}
+
+impl MattingOptions {
+    const fn default_minimum_percentage() -> f32 {
+        0.0
+    }
+}
+
+impl Default for MattingMode {
+    fn default() -> Self {
+        Self::FixedColor {
+            color: Self::default_color(),
+        }
+    }
+}
+
+impl MattingMode {
+    const fn default_color() -> [u8; 3] {
+        [0, 0, 0]
+    }
+
+    const fn default_blur_sigma() -> f32 {
+        20.0
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
 pub struct Configuration {
     /// Root directory to scan recursively for images.
     #[serde(alias = "photo_library_path")]
@@ -21,6 +76,8 @@ pub struct Configuration {
     pub loader_max_concurrent_decodes: usize,
     /// Optional deterministic seed for initial photo shuffle.
     pub startup_shuffle_seed: Option<u64>,
+    /// Matting configuration for displayed photos.
+    pub matting: MattingOptions,
 }
 
 impl Configuration {
@@ -40,6 +97,7 @@ impl Default for Configuration {
             viewer_preload_count: 3,
             loader_max_concurrent_decodes: 4,
             startup_shuffle_seed: None,
+            matting: MattingOptions::default(),
         }
     }
 }

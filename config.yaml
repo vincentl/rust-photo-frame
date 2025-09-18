@@ -11,3 +11,9 @@ viewer-preload-count: 3
 oversample: 1.0
 # Concurrent image decodes in loader
 loader-max-concurrent-decodes: 4
+
+# Matting settings
+matting:
+  type: fixed-color
+  color: [0, 0, 0]
+  minimum-mat-percentage: 0.0
