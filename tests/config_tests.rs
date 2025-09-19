@@ -1,4 +1,4 @@
-use rust_photo_frame::config::Configuration;
+use rust_photo_frame::config::{BlurBackend, Configuration, MattingMode};
 use std::path::PathBuf;
 
 #[test]
@@ -40,4 +40,21 @@ startup-shuffle-seed: 7
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(cfg.startup_shuffle_seed, Some(7));
+}
+
+#[test]
+fn parse_blur_backend() {
+    let yaml = r#"
+photo-library-path: "/p"
+matting:
+  type: blur
+  backend: wgpu-compute
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    match cfg.matting.style {
+        MattingMode::Blur { backend, .. } => {
+            assert!(matches!(backend, BlurBackend::WgpuCompute));
+        }
+        _ => panic!("expected blur matting"),
+    }
 }
