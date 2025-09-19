@@ -147,75 +147,50 @@ pub fn run_windowed(
             return None;
         }
 
+        let (canvas_w, canvas_h) = compute_canvas_size(screen_w, screen_h, oversample, max_dim);
         let margin = (matting.minimum_mat_percentage / 100.0).clamp(0.0, 0.45);
-        let mut canvas_w = ((screen_w as f32) * oversample).round().max(1.0) as u32;
-        let mut canvas_h = ((screen_h as f32) * oversample).round().max(1.0) as u32;
-        canvas_w = canvas_w.min(max_dim).max(1);
-        canvas_h = canvas_h.min(max_dim).max(1);
-
-        let max_w = canvas_w as f32;
-        let max_h = canvas_h as f32;
-        let scale_w = max_w / (width as f32);
-        let scale_h = max_h / (height as f32);
-        let base_scale = scale_w.min(scale_h).min(1.0);
-        let base_w = ((width as f32) * base_scale).floor().max(1.0);
-        let base_h = ((height as f32) * base_scale).floor().max(1.0);
-
-        let margin_px_x = (max_w * margin).clamp(0.0, max_w * 0.45);
-        let margin_px_y = (max_h * margin).clamp(0.0, max_h * 0.45);
-        let avail_w = (max_w - 2.0 * margin_px_x).max(1.0);
-        let avail_h = (max_h - 2.0 * margin_px_y).max(1.0);
-        let fit_scale = (avail_w / base_w).min(avail_h / base_h).min(1.0);
-        let final_w = (base_w * fit_scale).floor().max(1.0) as u32;
-        let final_h = (base_h * fit_scale).floor().max(1.0) as u32;
-
-        let main_img = if final_w == width && final_h == height {
-            src.clone()
-        } else {
-            imageops::resize(&src, final_w, final_h, imageops::FilterType::Triangle)
-        };
-
-        let mut canvas = match matting.style {
+        let mut background = match matting.style {
             MattingMode::FixedColor { color } => {
                 let px = Rgba([color[0], color[1], color[2], 255]);
                 RgbaImage::from_pixel(canvas_w, canvas_h, px)
             }
             MattingMode::Blur { sigma } => {
-                let scale_w = (canvas_w as f32) / (width as f32);
-                let scale_h = (canvas_h as f32) / (height as f32);
-                let scale = scale_w.max(scale_h).max(1.0);
-                let scaled_w = ((width as f32) * scale)
-                    .ceil()
-                    .max(canvas_w as f32)
-                    .min(max_dim as f32)
-                    .max(1.0) as u32;
-                let scaled_h = ((height as f32) * scale)
-                    .ceil()
-                    .max(canvas_h as f32)
-                    .min(max_dim as f32)
-                    .max(1.0) as u32;
-                let scaled =
-                    imageops::resize(&src, scaled_w, scaled_h, imageops::FilterType::Triangle);
-                let crop_x = ((scaled_w.saturating_sub(canvas_w)) / 2) as u32;
-                let crop_y = ((scaled_h.saturating_sub(canvas_h)) / 2) as u32;
-                let mut cropped =
-                    imageops::crop_imm(&scaled, crop_x, crop_y, canvas_w, canvas_h).to_image();
-                if sigma > 0.0 {
-                    let dynamic = DynamicImage::ImageRgba8(cropped);
-                    cropped = imageops::blur(&dynamic, sigma);
+                let (bg_w, bg_h) = resize_to_cover(canvas_w, canvas_h, width, height, max_dim);
+                let mut bg = imageops::resize(&src, bg_w, bg_h, imageops::FilterType::Triangle);
+                if bg_w > canvas_w || bg_h > canvas_h {
+                    let crop_x = (bg_w.saturating_sub(canvas_w)) / 2;
+                    let crop_y = (bg_h.saturating_sub(canvas_h)) / 2;
+                    bg = imageops::crop_imm(&bg, crop_x, crop_y, canvas_w, canvas_h).to_image();
+                } else if bg_w < canvas_w || bg_h < canvas_h {
+                    let mut canvas =
+                        RgbaImage::from_pixel(canvas_w, canvas_h, Rgba([0u8, 0, 0, 255]));
+                    let (bg_x, bg_y) = center_offset(bg_w, bg_h, canvas_w, canvas_h);
+                    imageops::overlay(&mut canvas, &bg, bg_x as i64, bg_y as i64);
+                    bg = canvas;
                 }
-                cropped
+                if sigma > 0.0 {
+                    let dynamic = DynamicImage::ImageRgba8(bg);
+                    imageops::blur(&dynamic, sigma)
+                } else {
+                    bg
+                }
             }
         };
 
-        let offset_x = ((canvas_w as i64 - final_w as i64) / 2).max(0);
-        let offset_y = ((canvas_h as i64 - final_h as i64) / 2).max(0);
-        imageops::overlay(&mut canvas, &main_img, offset_x, offset_y);
+        let (final_w, final_h) =
+            resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin);
+        let main_img = if final_w == width && final_h == height {
+            src
+        } else {
+            imageops::resize(&src, final_w, final_h, imageops::FilterType::Triangle)
+        };
+        let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
+        imageops::overlay(&mut background, &main_img, offset_x as i64, offset_y as i64);
 
         let canvas = ImagePlane {
             width: canvas_w,
             height: canvas_h,
-            pixels: canvas.into_raw(),
+            pixels: background.into_raw(),
         };
 
         Some(MatResult { path, canvas })
@@ -941,6 +916,59 @@ fn compute_padded_stride(bytes_per_row: u32) -> u32 {
         return 0;
     }
     bytes_per_row.div_ceil(ALIGN) * ALIGN
+}
+
+fn compute_canvas_size(screen_w: u32, screen_h: u32, oversample: f32, max_dim: u32) -> (u32, u32) {
+    let sw = (screen_w as f32 * oversample)
+        .round()
+        .clamp(1.0, max_dim as f32);
+    let sh = (screen_h as f32 * oversample)
+        .round()
+        .clamp(1.0, max_dim as f32);
+    (sw as u32, sh as u32)
+}
+
+fn resize_to_fit_with_margin(
+    canvas_w: u32,
+    canvas_h: u32,
+    src_w: u32,
+    src_h: u32,
+    margin_frac: f32,
+) -> (u32, u32) {
+    let iw = src_w.max(1) as f32;
+    let ih = src_h.max(1) as f32;
+    let cw = canvas_w.max(1) as f32;
+    let ch = canvas_h.max(1) as f32;
+    let margin_frac = margin_frac.clamp(0.0, 0.45);
+    let avail_w = (cw * (1.0 - 2.0 * margin_frac)).max(1.0);
+    let avail_h = (ch * (1.0 - 2.0 * margin_frac)).max(1.0);
+    let scale = (avail_w / iw).min(avail_h / ih).min(1.0);
+    let w = (iw * scale).round().clamp(1.0, cw);
+    let h = (ih * scale).round().clamp(1.0, ch);
+    (w as u32, h as u32)
+}
+
+fn resize_to_cover(
+    canvas_w: u32,
+    canvas_h: u32,
+    src_w: u32,
+    src_h: u32,
+    max_dim: u32,
+) -> (u32, u32) {
+    let iw = src_w.max(1) as f32;
+    let ih = src_h.max(1) as f32;
+    let cw = canvas_w.max(1) as f32;
+    let ch = canvas_h.max(1) as f32;
+    let scale = (cw / iw).max(ch / ih).max(1.0);
+    let w = (iw * scale).round().clamp(1.0, max_dim as f32);
+    let h = (ih * scale).round().clamp(1.0, max_dim as f32);
+    (w as u32, h as u32)
+}
+
+fn center_offset(inner_w: u32, inner_h: u32, outer_w: u32, outer_h: u32) -> (u32, u32) {
+    let ox = outer_w.saturating_sub(inner_w) / 2;
+    let oy = outer_h.saturating_sub(inner_h) / 2;
+    (ox, oy)
 }
 
 fn compute_cover_rect(
