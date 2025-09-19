@@ -1,7 +1,7 @@
 use crate::config::{MattingMode, MattingOptions};
 use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
-use image::{imageops, DynamicImage, RgbaImage};
+use image::{imageops, DynamicImage, Rgba, RgbaImage};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -54,8 +54,7 @@ pub fn run_windowed(
     }
 
     struct ImgTex {
-        main: TexturePlane,
-        background: Option<TexturePlane>,
+        plane: TexturePlane,
         path: std::path::PathBuf,
     }
 
@@ -81,8 +80,7 @@ pub fn run_windowed(
 
     struct MatResult {
         path: std::path::PathBuf,
-        main: ImagePlane,
-        background: Option<ImagePlane>,
+        canvas: ImagePlane,
     }
 
     struct MattingPipeline {
@@ -149,62 +147,78 @@ pub fn run_windowed(
             return None;
         }
 
-        let (main_w, main_h) =
-            compute_scaled_size(width, height, screen_w, screen_h, oversample, max_dim);
-        let main_img = if main_w == width && main_h == height {
+        let margin = (matting.minimum_mat_percentage / 100.0).clamp(0.0, 0.45);
+        let mut canvas_w = ((screen_w as f32) * oversample).round().max(1.0) as u32;
+        let mut canvas_h = ((screen_h as f32) * oversample).round().max(1.0) as u32;
+        canvas_w = canvas_w.min(max_dim).max(1);
+        canvas_h = canvas_h.min(max_dim).max(1);
+
+        let max_w = canvas_w as f32;
+        let max_h = canvas_h as f32;
+        let scale_w = max_w / (width as f32);
+        let scale_h = max_h / (height as f32);
+        let base_scale = scale_w.min(scale_h).min(1.0);
+        let base_w = ((width as f32) * base_scale).floor().max(1.0);
+        let base_h = ((height as f32) * base_scale).floor().max(1.0);
+
+        let margin_px_x = (max_w * margin).clamp(0.0, max_w * 0.45);
+        let margin_px_y = (max_h * margin).clamp(0.0, max_h * 0.45);
+        let avail_w = (max_w - 2.0 * margin_px_x).max(1.0);
+        let avail_h = (max_h - 2.0 * margin_px_y).max(1.0);
+        let fit_scale = (avail_w / base_w).min(avail_h / base_h).min(1.0);
+        let final_w = (base_w * fit_scale).floor().max(1.0) as u32;
+        let final_h = (base_h * fit_scale).floor().max(1.0) as u32;
+
+        let main_img = if final_w == width && final_h == height {
             src.clone()
         } else {
-            imageops::resize(&src, main_w, main_h, imageops::FilterType::Triangle)
-        };
-        let main = ImagePlane {
-            width: main_w,
-            height: main_h,
-            pixels: main_img.into_raw(),
+            imageops::resize(&src, final_w, final_h, imageops::FilterType::Triangle)
         };
 
-        let background = match matting.style {
-            MattingMode::FixedColor { .. } => None,
+        let mut canvas = match matting.style {
+            MattingMode::FixedColor { color } => {
+                let px = Rgba([color[0], color[1], color[2], 255]);
+                RgbaImage::from_pixel(canvas_w, canvas_h, px)
+            }
             MattingMode::Blur { sigma } => {
-                let mut target_w = ((screen_w as f32) * oversample).round().max(1.0) as u32;
-                let mut target_h = ((screen_h as f32) * oversample).round().max(1.0) as u32;
-                target_w = target_w.min(max_dim).max(1);
-                target_h = target_h.min(max_dim).max(1);
-                let scale_w = (target_w as f32) / (width as f32);
-                let scale_h = (target_h as f32) / (height as f32);
+                let scale_w = (canvas_w as f32) / (width as f32);
+                let scale_h = (canvas_h as f32) / (height as f32);
                 let scale = scale_w.max(scale_h).max(1.0);
                 let scaled_w = ((width as f32) * scale)
                     .ceil()
-                    .max(target_w as f32)
+                    .max(canvas_w as f32)
                     .min(max_dim as f32)
                     .max(1.0) as u32;
                 let scaled_h = ((height as f32) * scale)
                     .ceil()
-                    .max(target_h as f32)
+                    .max(canvas_h as f32)
                     .min(max_dim as f32)
                     .max(1.0) as u32;
                 let scaled =
                     imageops::resize(&src, scaled_w, scaled_h, imageops::FilterType::Triangle);
-                let crop_x = ((scaled_w.saturating_sub(target_w)) / 2) as u32;
-                let crop_y = ((scaled_h.saturating_sub(target_h)) / 2) as u32;
+                let crop_x = ((scaled_w.saturating_sub(canvas_w)) / 2) as u32;
+                let crop_y = ((scaled_h.saturating_sub(canvas_h)) / 2) as u32;
                 let mut cropped =
-                    imageops::crop_imm(&scaled, crop_x, crop_y, target_w, target_h).to_image();
+                    imageops::crop_imm(&scaled, crop_x, crop_y, canvas_w, canvas_h).to_image();
                 if sigma > 0.0 {
                     let dynamic = DynamicImage::ImageRgba8(cropped);
                     cropped = imageops::blur(&dynamic, sigma);
                 }
-                Some(ImagePlane {
-                    width: target_w,
-                    height: target_h,
-                    pixels: cropped.into_raw(),
-                })
+                cropped
             }
         };
 
-        Some(MatResult {
-            path,
-            main,
-            background,
-        })
+        let offset_x = ((canvas_w as i64 - final_w as i64) / 2).max(0);
+        let offset_y = ((canvas_h as i64 - final_h as i64) / 2).max(0);
+        imageops::overlay(&mut canvas, &main_img, offset_x, offset_y);
+
+        let canvas = ImagePlane {
+            width: canvas_w,
+            height: canvas_h,
+            pixels: canvas.into_raw(),
+        };
+
+        Some(MatResult { path, canvas })
     }
 
     fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
@@ -287,18 +301,9 @@ pub fn run_windowed(
     }
 
     fn upload_mat_result(gpu: &GpuCtx, result: MatResult) -> Option<ImgTex> {
-        let MatResult {
-            path,
-            main,
-            background,
-        } = result;
-        let main = upload_plane(gpu, main)?;
-        let background = background.and_then(|plane| upload_plane(gpu, plane));
-        Some(ImgTex {
-            main,
-            background,
-            path,
-        })
+        let MatResult { path, canvas } = result;
+        let plane = upload_plane(gpu, canvas)?;
+        Some(ImgTex { plane, path })
     }
 
     struct App {
@@ -676,44 +681,17 @@ pub fn run_windowed(
                     });
                     rpass.set_pipeline(&gpu.pipeline);
                     rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                    let margin = (self.matting.minimum_mat_percentage / 100.0).clamp(0.0, 0.45);
                     if let Some(start) = self.fade_start {
                         let mut t = ((start.elapsed().as_millis() as f32)
                             / (self.fade_ms as f32).max(1.0))
                         .clamp(0.0, 1.0);
                         t = t * t * (3.0 - 2.0 * t);
                         if let Some(cur) = &self.current {
-                            if let Some(bg) = &cur.background {
-                                let (dx, dy, dw, dh) = compute_cover_rect(
-                                    bg.w,
-                                    bg.h,
-                                    gpu.config.width,
-                                    gpu.config.height,
-                                );
-                                let uni = Uniforms {
-                                    screen_w: gpu.config.width as f32,
-                                    screen_h: gpu.config.height as f32,
-                                    dest_x: dx,
-                                    dest_y: dy,
-                                    dest_w: dw,
-                                    dest_h: dh,
-                                    alpha: 1.0 - t,
-                                    _pad: [0.0; 3],
-                                };
-                                gpu.queue.write_buffer(
-                                    &gpu.uniform_buf,
-                                    0,
-                                    bytemuck::bytes_of(&uni),
-                                );
-                                rpass.set_bind_group(1, &bg.bind, &[]);
-                                rpass.draw(0..6, 0..1);
-                            }
-                            let (dx, dy, dw, dh) = compute_dest_rect_with_margin(
-                                cur.main.w,
-                                cur.main.h,
+                            let (dx, dy, dw, dh) = compute_cover_rect(
+                                cur.plane.w,
+                                cur.plane.h,
                                 gpu.config.width,
                                 gpu.config.height,
-                                margin,
                             );
                             let uni = Uniforms {
                                 screen_w: gpu.config.width as f32,
@@ -727,41 +705,15 @@ pub fn run_windowed(
                             };
                             gpu.queue
                                 .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                            rpass.set_bind_group(1, &cur.main.bind, &[]);
+                            rpass.set_bind_group(1, &cur.plane.bind, &[]);
                             rpass.draw(0..6, 0..1);
                         }
                         if let Some(next) = &self.next {
-                            if let Some(bg) = &next.background {
-                                let (dx, dy, dw, dh) = compute_cover_rect(
-                                    bg.w,
-                                    bg.h,
-                                    gpu.config.width,
-                                    gpu.config.height,
-                                );
-                                let uni = Uniforms {
-                                    screen_w: gpu.config.width as f32,
-                                    screen_h: gpu.config.height as f32,
-                                    dest_x: dx,
-                                    dest_y: dy,
-                                    dest_w: dw,
-                                    dest_h: dh,
-                                    alpha: t,
-                                    _pad: [0.0; 3],
-                                };
-                                gpu.queue.write_buffer(
-                                    &gpu.uniform_buf,
-                                    0,
-                                    bytemuck::bytes_of(&uni),
-                                );
-                                rpass.set_bind_group(1, &bg.bind, &[]);
-                                rpass.draw(0..6, 0..1);
-                            }
-                            let (dx, dy, dw, dh) = compute_dest_rect_with_margin(
-                                next.main.w,
-                                next.main.h,
+                            let (dx, dy, dw, dh) = compute_cover_rect(
+                                next.plane.w,
+                                next.plane.h,
                                 gpu.config.width,
                                 gpu.config.height,
-                                margin,
                             );
                             let uni = Uniforms {
                                 screen_w: gpu.config.width as f32,
@@ -775,7 +727,7 @@ pub fn run_windowed(
                             };
                             gpu.queue
                                 .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                            rpass.set_bind_group(1, &next.main.bind, &[]);
+                            rpass.set_bind_group(1, &next.plane.bind, &[]);
                             rpass.draw(0..6, 0..1);
                         }
                         if t >= 1.0 {
@@ -795,30 +747,11 @@ pub fn run_windowed(
                             }
                         }
                     } else if let Some(cur) = &self.current {
-                        if let Some(bg) = &cur.background {
-                            let (dx, dy, dw, dh) =
-                                compute_cover_rect(bg.w, bg.h, gpu.config.width, gpu.config.height);
-                            let uni = Uniforms {
-                                screen_w: gpu.config.width as f32,
-                                screen_h: gpu.config.height as f32,
-                                dest_x: dx,
-                                dest_y: dy,
-                                dest_w: dw,
-                                dest_h: dh,
-                                alpha: 1.0,
-                                _pad: [0.0; 3],
-                            };
-                            gpu.queue
-                                .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                            rpass.set_bind_group(1, &bg.bind, &[]);
-                            rpass.draw(0..6, 0..1);
-                        }
-                        let (dx, dy, dw, dh) = compute_dest_rect_with_margin(
-                            cur.main.w,
-                            cur.main.h,
+                        let (dx, dy, dw, dh) = compute_cover_rect(
+                            cur.plane.w,
+                            cur.plane.h,
                             gpu.config.width,
                             gpu.config.height,
-                            margin,
                         );
                         let uni = Uniforms {
                             screen_w: gpu.config.width as f32,
@@ -832,7 +765,7 @@ pub fn run_windowed(
                         };
                         gpu.queue
                             .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                        rpass.set_bind_group(1, &cur.main.bind, &[]);
+                        rpass.set_bind_group(1, &cur.plane.bind, &[]);
                         rpass.draw(0..6, 0..1);
                     } else if let Some((bind, lw, lh)) = &gpu.loading {
                         // Draw loading overlay centered scaled to a reasonable fraction
@@ -1008,53 +941,6 @@ fn compute_padded_stride(bytes_per_row: u32) -> u32 {
         return 0;
     }
     bytes_per_row.div_ceil(ALIGN) * ALIGN
-}
-
-fn compute_scaled_size(
-    img_w: u32,
-    img_h: u32,
-    surf_w: u32,
-    surf_h: u32,
-    oversample: f32,
-    max_dim: u32,
-) -> (u32, u32) {
-    if img_w == 0 || img_h == 0 || surf_w == 0 || surf_h == 0 {
-        return (1, 1);
-    }
-    let max_w = ((surf_w as f32) * oversample).round().max(1.0) as u32;
-    let max_h = ((surf_h as f32) * oversample).round().max(1.0) as u32;
-    let max_w = max_w.min(max_dim).max(1);
-    let max_h = max_h.min(max_dim).max(1);
-    let sw = (max_w as f32) / (img_w as f32);
-    let sh = (max_h as f32) / (img_h as f32);
-    let s = sw.min(sh).min(1.0);
-    let out_w = ((img_w as f32) * s).floor().max(1.0) as u32;
-    let out_h = ((img_h as f32) * s).floor().max(1.0) as u32;
-    (out_w, out_h)
-}
-
-fn compute_dest_rect_with_margin(
-    img_w: u32,
-    img_h: u32,
-    screen_w: u32,
-    screen_h: u32,
-    margin_fraction: f32,
-) -> (f32, f32, f32, f32) {
-    let iw = img_w.max(1) as f32;
-    let ih = img_h.max(1) as f32;
-    let sw = screen_w.max(1) as f32;
-    let sh = screen_h.max(1) as f32;
-    let margin = margin_fraction.clamp(0.0, 0.45);
-    let margin_x = (sw * margin).clamp(0.0, sw * 0.5);
-    let margin_y = (sh * margin).clamp(0.0, sh * 0.5);
-    let avail_w = (sw - 2.0 * margin_x).max(1.0);
-    let avail_h = (sh - 2.0 * margin_y).max(1.0);
-    let scale = (avail_w / iw).min(avail_h / ih).min(1.0);
-    let w = iw * scale;
-    let h = ih * scale;
-    let x = (sw - w) * 0.5;
-    let y = (sh - h) * 0.5;
-    (x, y, w, h)
 }
 
 fn compute_cover_rect(
