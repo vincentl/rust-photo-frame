@@ -154,7 +154,10 @@ pub fn run_windowed(
                 let px = Rgba([color[0], color[1], color[2], 255]);
                 RgbaImage::from_pixel(canvas_w, canvas_h, px)
             }
-            MattingMode::Blur { sigma } => {
+            MattingMode::Blur {
+                sigma,
+                max_sample_dim,
+            } => {
                 let (bg_w, bg_h) = resize_to_cover(canvas_w, canvas_h, width, height, max_dim);
                 let mut bg = imageops::resize(&src, bg_w, bg_h, imageops::FilterType::Triangle);
                 if bg_w > canvas_w || bg_h > canvas_h {
@@ -169,8 +172,50 @@ pub fn run_windowed(
                     bg = canvas;
                 }
                 if sigma > 0.0 {
-                    let dynamic = DynamicImage::ImageRgba8(bg);
-                    imageops::blur(&dynamic, sigma)
+                    let limit = max_sample_dim
+                        .filter(|v| *v > 0)
+                        .unwrap_or_else(|| {
+                            #[cfg(target_arch = "aarch64")]
+                            {
+                                MattingMode::default_blur_max_sample_dim()
+                            }
+                            #[cfg(not(target_arch = "aarch64"))]
+                            {
+                                max_dim
+                            }
+                        })
+                        .min(max_dim)
+                        .max(1);
+
+                    let mut sample = bg;
+                    let mut sigma_px = sigma;
+                    let canvas_max = canvas_w.max(canvas_h).max(1);
+                    if canvas_max > limit {
+                        let scale = (limit as f32) / (canvas_max as f32);
+                        let sample_w =
+                            ((canvas_w as f32) * scale).round().clamp(1.0, limit as f32) as u32;
+                        let sample_h =
+                            ((canvas_h as f32) * scale).round().clamp(1.0, limit as f32) as u32;
+                        sample = imageops::resize(
+                            &sample,
+                            sample_w,
+                            sample_h,
+                            imageops::FilterType::Triangle,
+                        );
+                        sigma_px *= scale.max(0.01);
+                    }
+
+                    let dynamic = DynamicImage::ImageRgba8(sample);
+                    let mut blurred: RgbaImage = imageops::blur(&dynamic, sigma_px);
+                    if blurred.width() != canvas_w || blurred.height() != canvas_h {
+                        blurred = imageops::resize(
+                            &blurred,
+                            canvas_w,
+                            canvas_h,
+                            imageops::FilterType::CatmullRom,
+                        );
+                    }
+                    blurred
                 } else {
                     bg
                 }

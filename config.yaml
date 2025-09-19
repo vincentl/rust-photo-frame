@@ -18,3 +18,8 @@ matting:
   color: [0, 0, 0]
   minimum-mat-percentage: 0.0
   max-upscale-factor: 1.0
+# To enable the blur mat optimized for Raspberry Pi, switch to:
+# matting:
+#   type: blur
+#   sigma: 20.0
+#   max-sample-dim: 1536
