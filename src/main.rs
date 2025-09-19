@@ -1,5 +1,6 @@
 mod config;
 mod events;
+mod matting;
 mod tasks {
     pub mod files;
     pub mod loader;
