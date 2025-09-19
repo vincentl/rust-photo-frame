@@ -18,7 +18,7 @@ pub fn run_windowed(
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
     use winit::event_loop::{ActiveEventLoop, EventLoop};
-    use winit::window::{Window, WindowId};
+    use winit::window::{Fullscreen, Window, WindowId};
 
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -315,20 +315,15 @@ pub fn run_windowed(
             self.fade_start = None;
             self.displayed_at = None;
             self.mat_inflight = 0;
-            use winit::window::Fullscreen;
-            let window = Arc::new(
-                event_loop
-                    .create_window(
-                        Window::default_attributes()
-                            .with_title("Photo Frame")
-                            .with_fullscreen(Some(Fullscreen::Borderless(None)))
-                            .with_decorations(false),
-                    )
-                    .unwrap(),
-            );
-            if let Some(m) = window.current_monitor() {
-                window.set_fullscreen(Some(Fullscreen::Borderless(Some(m))));
-            }
+            let monitor = event_loop.primary_monitor();
+            let attrs = Window::default_attributes()
+                .with_title("Photo Frame")
+                .with_decorations(false)
+                .with_fullscreen(Some(match monitor {
+                    Some(m) => Fullscreen::Borderless(Some(m)),
+                    None => Fullscreen::Borderless(None),
+                }));
+            let window = Arc::new(event_loop.create_window(attrs).unwrap());
             window.set_cursor_visible(false);
 
             let instance = wgpu::Instance::default();
@@ -618,8 +613,12 @@ pub fn run_windowed(
                     gpu.config.height = new_size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
                 }
-                WindowEvent::ScaleFactorChanged { .. } => {
+                WindowEvent::ScaleFactorChanged {
+                    mut inner_size_writer,
+                    ..
+                } => {
                     let size = window.inner_size();
+                    let _ = inner_size_writer.request_inner_size(size);
                     gpu.config.width = size.width.max(1);
                     gpu.config.height = size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
