@@ -8,6 +8,11 @@ use serde::Deserialize;
 pub struct MattingOptions {
     #[serde(default = "MattingOptions::default_minimum_percentage")]
     pub minimum_mat_percentage: f32,
+    #[serde(
+        default = "MattingOptions::default_max_upscale_factor",
+        deserialize_with = "MattingOptions::deserialize_max_upscale"
+    )]
+    pub max_upscale_factor: f32,
     #[serde(flatten, default)]
     pub style: MattingMode,
 }
@@ -29,6 +34,7 @@ impl Default for MattingOptions {
     fn default() -> Self {
         Self {
             minimum_mat_percentage: Self::default_minimum_percentage(),
+            max_upscale_factor: Self::default_max_upscale_factor(),
             style: MattingMode::default(),
         }
     }
@@ -37,6 +43,18 @@ impl Default for MattingOptions {
 impl MattingOptions {
     const fn default_minimum_percentage() -> f32 {
         0.0
+    }
+
+    const fn default_max_upscale_factor() -> f32 {
+        1.0
+    }
+
+    fn deserialize_max_upscale<'de, D>(deserializer: D) -> Result<f32, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let factor = f32::deserialize(deserializer)?;
+        Ok(factor.max(1.0))
     }
 }
 

@@ -17,3 +17,4 @@ matting:
   type: fixed-color
   color: [0, 0, 0]
   minimum-mat-percentage: 0.0
+  max-upscale-factor: 1.0
