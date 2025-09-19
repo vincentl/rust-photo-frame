@@ -177,8 +177,9 @@ pub fn run_windowed(
             }
         };
 
+        let max_upscale = matting.max_upscale_factor.max(1.0);
         let (final_w, final_h) =
-            resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin);
+            resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
         let main_img = if final_w == width && final_h == height {
             src
         } else {
@@ -934,6 +935,7 @@ fn resize_to_fit_with_margin(
     src_w: u32,
     src_h: u32,
     margin_frac: f32,
+    max_upscale: f32,
 ) -> (u32, u32) {
     let iw = src_w.max(1) as f32;
     let ih = src_h.max(1) as f32;
@@ -942,7 +944,8 @@ fn resize_to_fit_with_margin(
     let margin_frac = margin_frac.clamp(0.0, 0.45);
     let avail_w = (cw * (1.0 - 2.0 * margin_frac)).max(1.0);
     let avail_h = (ch * (1.0 - 2.0 * margin_frac)).max(1.0);
-    let scale = (avail_w / iw).min(avail_h / ih).min(1.0);
+    let max_upscale = max_upscale.max(1.0);
+    let scale = (avail_w / iw).min(avail_h / ih).min(max_upscale);
     let w = (iw * scale).round().clamp(1.0, cw);
     let h = (ih * scale).round().clamp(1.0, ch);
     (w as u32, h as u32)
