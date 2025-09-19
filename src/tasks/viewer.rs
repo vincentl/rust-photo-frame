@@ -1,5 +1,10 @@
-use crate::events::{Displayed, PhotoLoaded};
+use crate::config::{MattingMode, MattingOptions};
+use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
+use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
+use image::{imageops, DynamicImage, Rgba, RgbaImage};
+use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -10,11 +15,10 @@ pub fn run_windowed(
     cancel: CancellationToken,
     cfg: crate::config::Configuration,
 ) -> anyhow::Result<()> {
-    use std::sync::Arc;
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
     use winit::event_loop::{ActiveEventLoop, EventLoop};
-    use winit::window::{Window, WindowId};
+    use winit::window::{Fullscreen, Window, WindowId};
 
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -43,11 +47,239 @@ pub fn run_windowed(
         loading: Option<(wgpu::BindGroup, u32, u32)>,
     }
 
-    struct ImgTex {
+    struct TexturePlane {
         bind: wgpu::BindGroup,
         w: u32,
         h: u32,
+    }
+
+    struct ImgTex {
+        plane: TexturePlane,
         path: std::path::PathBuf,
+    }
+
+    #[derive(Clone)]
+    struct MatParams {
+        screen_w: u32,
+        screen_h: u32,
+        oversample: f32,
+        max_dim: u32,
+        matting: MattingOptions,
+    }
+
+    struct MatTask {
+        image: PreparedImageCpu,
+        params: MatParams,
+    }
+
+    struct ImagePlane {
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    }
+
+    struct MatResult {
+        path: std::path::PathBuf,
+        canvas: ImagePlane,
+    }
+
+    struct MattingPipeline {
+        task_tx: CbSender<MatTask>,
+        result_rx: CbReceiver<MatResult>,
+    }
+
+    impl MattingPipeline {
+        fn new(worker_count: usize, capacity: usize) -> Self {
+            let worker_count = worker_count.max(1);
+            let capacity = capacity.max(worker_count).max(2);
+            let (task_tx, task_rx) = bounded::<MatTask>(capacity);
+            let (result_tx, result_rx) = bounded::<MatResult>(capacity);
+            let task_rx = Arc::new(task_rx);
+            let result_tx = Arc::new(result_tx);
+            for _ in 0..worker_count {
+                let task_rx = Arc::clone(&task_rx);
+                let result_tx = Arc::clone(&result_tx);
+                std::thread::spawn(move || {
+                    while let Ok(task) = task_rx.recv() {
+                        if let Some(result) = process_mat_task(task) {
+                            if result_tx.send(result).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            Self { task_tx, result_rx }
+        }
+
+        fn try_submit(&self, task: MatTask) -> Result<(), MatTask> {
+            match self.task_tx.try_send(task) {
+                Ok(()) => Ok(()),
+                Err(TrySendError::Full(task)) | Err(TrySendError::Disconnected(task)) => Err(task),
+            }
+        }
+
+        fn try_recv(&self) -> Option<MatResult> {
+            self.result_rx.try_recv().ok()
+        }
+    }
+
+    fn process_mat_task(task: MatTask) -> Option<MatResult> {
+        let MatTask { image, params } = task;
+        let PreparedImageCpu {
+            path,
+            width,
+            height,
+            pixels,
+        } = image;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let src = RgbaImage::from_raw(width, height, pixels)?;
+        let MatParams {
+            screen_w,
+            screen_h,
+            oversample,
+            max_dim,
+            matting,
+        } = params;
+        if screen_w == 0 || screen_h == 0 {
+            return None;
+        }
+
+        let (canvas_w, canvas_h) = compute_canvas_size(screen_w, screen_h, oversample, max_dim);
+        let margin = (matting.minimum_mat_percentage / 100.0).clamp(0.0, 0.45);
+        let mut background = match matting.style {
+            MattingMode::FixedColor { color } => {
+                let px = Rgba([color[0], color[1], color[2], 255]);
+                RgbaImage::from_pixel(canvas_w, canvas_h, px)
+            }
+            MattingMode::Blur { sigma } => {
+                let (bg_w, bg_h) = resize_to_cover(canvas_w, canvas_h, width, height, max_dim);
+                let mut bg = imageops::resize(&src, bg_w, bg_h, imageops::FilterType::Triangle);
+                if bg_w > canvas_w || bg_h > canvas_h {
+                    let crop_x = (bg_w.saturating_sub(canvas_w)) / 2;
+                    let crop_y = (bg_h.saturating_sub(canvas_h)) / 2;
+                    bg = imageops::crop_imm(&bg, crop_x, crop_y, canvas_w, canvas_h).to_image();
+                } else if bg_w < canvas_w || bg_h < canvas_h {
+                    let mut canvas =
+                        RgbaImage::from_pixel(canvas_w, canvas_h, Rgba([0u8, 0, 0, 255]));
+                    let (bg_x, bg_y) = center_offset(bg_w, bg_h, canvas_w, canvas_h);
+                    imageops::overlay(&mut canvas, &bg, bg_x as i64, bg_y as i64);
+                    bg = canvas;
+                }
+                if sigma > 0.0 {
+                    let dynamic = DynamicImage::ImageRgba8(bg);
+                    imageops::blur(&dynamic, sigma)
+                } else {
+                    bg
+                }
+            }
+        };
+
+        let max_upscale = matting.max_upscale_factor.max(1.0);
+        let (final_w, final_h) =
+            resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
+        let main_img = if final_w == width && final_h == height {
+            src
+        } else {
+            imageops::resize(&src, final_w, final_h, imageops::FilterType::Triangle)
+        };
+        let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
+        imageops::overlay(&mut background, &main_img, offset_x as i64, offset_y as i64);
+
+        let canvas = ImagePlane {
+            width: canvas_w,
+            height: canvas_h,
+            pixels: background.into_raw(),
+        };
+
+        Some(MatResult { path, canvas })
+    }
+
+    fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
+        let ImagePlane {
+            width,
+            height,
+            pixels,
+        } = plane;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("photo-texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let stride = 4 * width;
+        let padded = compute_padded_stride(stride);
+        let upload: Cow<'_, [u8]> = if padded != stride {
+            let mut staging = vec![0u8; (padded as usize) * (height as usize)];
+            let rs = stride as usize;
+            let rd = padded as usize;
+            for y in 0..(height as usize) {
+                let so = y * rs;
+                let doff = y * rd;
+                staging[doff..doff + rs].copy_from_slice(&pixels[so..so + rs]);
+            }
+            Cow::Owned(staging)
+        } else {
+            Cow::Borrowed(&pixels)
+        };
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            upload.as_ref(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("image-bind"),
+            layout: &gpu.img_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+                },
+            ],
+        });
+        Some(TexturePlane {
+            bind,
+            w: width,
+            h: height,
+        })
+    }
+
+    fn upload_mat_result(gpu: &GpuCtx, result: MatResult) -> Option<ImgTex> {
+        let MatResult { path, canvas } = result;
+        let plane = upload_plane(gpu, canvas)?;
+        Some(ImgTex { plane, path })
     }
 
     struct App {
@@ -64,22 +296,34 @@ pub fn run_windowed(
         dwell_ms: u64,
         pending: VecDeque<ImgTex>,
         preload_count: usize,
+        oversample: f32,
+        matting: MattingOptions,
+        mat_pipeline: MattingPipeline,
+        mat_inflight: usize,
+        ready_results: VecDeque<MatResult>,
+        deferred_images: VecDeque<PreparedImageCpu>,
+        clear_color: wgpu::Color,
     }
 
     impl ApplicationHandler for App {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-            let window = Arc::new(
-                event_loop
-                    .create_window(Window::default_attributes().with_title("Photo Frame"))
-                    .unwrap(),
-            );
-            // Enter borderless fullscreen and hide cursor for a clean demo
-            use winit::window::Fullscreen;
-            if let Some(m) = window.current_monitor() {
-                window.set_fullscreen(Some(Fullscreen::Borderless(Some(m))));
-            } else {
-                window.set_fullscreen(Some(Fullscreen::Borderless(None)));
-            }
+            self.pending.clear();
+            self.ready_results.clear();
+            self.deferred_images.clear();
+            self.current = None;
+            self.next = None;
+            self.fade_start = None;
+            self.displayed_at = None;
+            self.mat_inflight = 0;
+            let monitor = event_loop.primary_monitor();
+            let attrs = Window::default_attributes()
+                .with_title("Photo Frame")
+                .with_decorations(false)
+                .with_fullscreen(Some(match monitor {
+                    Some(m) => Fullscreen::Borderless(Some(m)),
+                    None => Fullscreen::Borderless(None),
+                }));
+            let window = Arc::new(event_loop.create_window(attrs).unwrap());
             window.set_cursor_visible(false);
 
             let instance = wgpu::Instance::default();
@@ -369,7 +613,16 @@ pub fn run_windowed(
                     gpu.config.height = new_size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
                 }
-                WindowEvent::ScaleFactorChanged { .. } => {}
+                WindowEvent::ScaleFactorChanged {
+                    mut inner_size_writer,
+                    ..
+                } => {
+                    let size = window.inner_size();
+                    let _ = inner_size_writer.request_inner_size(size);
+                    gpu.config.width = size.width.max(1);
+                    gpu.config.height = size.height.max(1);
+                    gpu.surface.configure(&gpu.device, &gpu.config);
+                }
                 WindowEvent::RedrawRequested => {
                     let frame = match gpu.surface.get_current_texture() {
                         Ok(frame) => frame,
@@ -400,7 +653,7 @@ pub fn run_windowed(
                             depth_slice: None,
                             resolve_target: None,
                             ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                load: wgpu::LoadOp::Clear(self.clear_color),
                                 store: wgpu::StoreOp::Store,
                             },
                         })],
@@ -416,9 +669,9 @@ pub fn run_windowed(
                         .clamp(0.0, 1.0);
                         t = t * t * (3.0 - 2.0 * t);
                         if let Some(cur) = &self.current {
-                            let (dx, dy, dw, dh) = compute_dest_rect(
-                                cur.w,
-                                cur.h,
+                            let (dx, dy, dw, dh) = compute_cover_rect(
+                                cur.plane.w,
+                                cur.plane.h,
                                 gpu.config.width,
                                 gpu.config.height,
                             );
@@ -434,13 +687,13 @@ pub fn run_windowed(
                             };
                             gpu.queue
                                 .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                            rpass.set_bind_group(1, &cur.bind, &[]);
+                            rpass.set_bind_group(1, &cur.plane.bind, &[]);
                             rpass.draw(0..6, 0..1);
                         }
                         if let Some(next) = &self.next {
-                            let (dx, dy, dw, dh) = compute_dest_rect(
-                                next.w,
-                                next.h,
+                            let (dx, dy, dw, dh) = compute_cover_rect(
+                                next.plane.w,
+                                next.plane.h,
                                 gpu.config.width,
                                 gpu.config.height,
                             );
@@ -456,7 +709,7 @@ pub fn run_windowed(
                             };
                             gpu.queue
                                 .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                            rpass.set_bind_group(1, &next.bind, &[]);
+                            rpass.set_bind_group(1, &next.plane.bind, &[]);
                             rpass.draw(0..6, 0..1);
                         }
                         if t >= 1.0 {
@@ -476,8 +729,12 @@ pub fn run_windowed(
                             }
                         }
                     } else if let Some(cur) = &self.current {
-                        let (dx, dy, dw, dh) =
-                            compute_dest_rect(cur.w, cur.h, gpu.config.width, gpu.config.height);
+                        let (dx, dy, dw, dh) = compute_cover_rect(
+                            cur.plane.w,
+                            cur.plane.h,
+                            gpu.config.width,
+                            gpu.config.height,
+                        );
                         let uni = Uniforms {
                             screen_w: gpu.config.width as f32,
                             screen_h: gpu.config.height as f32,
@@ -490,7 +747,7 @@ pub fn run_windowed(
                         };
                         gpu.queue
                             .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                        rpass.set_bind_group(1, &cur.bind, &[]);
+                        rpass.set_bind_group(1, &cur.plane.bind, &[]);
                         rpass.draw(0..6, 0..1);
                     } else if let Some((bind, lw, lh)) = &gpu.loading {
                         // Draw loading overlay centered scaled to a reasonable fraction
@@ -534,121 +791,61 @@ pub fn run_windowed(
                 event_loop.exit();
                 return;
             }
-            // Pull from loader only when there is capacity to avoid dropping
-            // pending images; this allows the mpsc channel to provide backpressure.
-            while self.pending.len() < self.preload_count {
-                let Ok(PhotoLoaded(img)) = self.from_loader.try_recv() else {
+            while let Some(result) = self.mat_pipeline.try_recv() {
+                self.mat_inflight = self.mat_inflight.saturating_sub(1);
+                self.ready_results.push_back(result);
+            }
+            if let Some(gpu) = self.gpu.as_ref() {
+                while let Some(result) = self.ready_results.pop_front() {
+                    if let Some(new_tex) = upload_mat_result(gpu, result) {
+                        self.pending.push_back(new_tex);
+                        debug!("queued_image depth={}", self.pending.len());
+                    }
+                }
+            }
+            while self.pending.len() + self.mat_inflight < self.preload_count {
+                let next_img = if let Some(img) = self.deferred_images.pop_front() {
+                    Some(img)
+                } else {
+                    match self.from_loader.try_recv() {
+                        Ok(PhotoLoaded(img)) => Some(img),
+                        Err(_) => None,
+                    }
+                };
+                let Some(img) = next_img else {
                     break;
                 };
-                if let Some(gpu) = self.gpu.as_ref() {
-                    let (out_w, out_h) = compute_scaled_size(
-                        img.width,
-                        img.height,
-                        gpu.config.width,
-                        gpu.config.height,
-                        1.0,
-                        gpu.limits.max_texture_dimension_2d,
-                    );
-                    let mut pixels: std::borrow::Cow<'_, [u8]> =
-                        std::borrow::Cow::Borrowed(&img.pixels);
-                    if out_w != img.width || out_h != img.height {
-                        if let Some(src) =
-                            image::RgbaImage::from_raw(img.width, img.height, img.pixels.clone())
-                        {
-                            let resized = image::imageops::resize(
-                                &src,
-                                out_w,
-                                out_h,
-                                image::imageops::FilterType::Triangle,
-                            );
-                            pixels = std::borrow::Cow::Owned(resized.into_raw());
-                        }
+                let Some(gpu) = self.gpu.as_ref() else {
+                    self.deferred_images.push_front(img);
+                    break;
+                };
+                let params = MatParams {
+                    screen_w: gpu.config.width.max(1),
+                    screen_h: gpu.config.height.max(1),
+                    oversample: self.oversample,
+                    max_dim: gpu.limits.max_texture_dimension_2d,
+                    matting: self.matting.clone(),
+                };
+                let task = MatTask { image: img, params };
+                match self.mat_pipeline.try_submit(task) {
+                    Ok(()) => {
+                        self.mat_inflight += 1;
                     }
-                    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                        label: Some("photo-texture"),
-                        size: wgpu::Extent3d {
-                            width: out_w,
-                            height: out_h,
-                            depth_or_array_layers: 1,
-                        },
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                        view_formats: &[],
-                    });
-                    let stride = 4 * out_w;
-                    let padded = compute_padded_stride(stride);
-                    let upload: std::borrow::Cow<'_, [u8]> = if padded != stride {
-                        let mut staging = vec![0u8; (padded as usize) * (out_h as usize)];
-                        let rs = stride as usize;
-                        let rd = padded as usize;
-                        let src = pixels.as_ref();
-                        for y in 0..(out_h as usize) {
-                            let so = y * rs;
-                            let doff = y * rd;
-                            staging[doff..doff + rs].copy_from_slice(&src[so..so + rs]);
-                        }
-                        std::borrow::Cow::Owned(staging)
-                    } else {
-                        pixels
-                    };
-                    gpu.queue.write_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &tex,
-                            mip_level: 0,
-                            origin: wgpu::Origin3d::ZERO,
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        &upload,
-                        wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(padded),
-                            rows_per_image: Some(out_h),
-                        },
-                        wgpu::Extent3d {
-                            width: out_w,
-                            height: out_h,
-                            depth_or_array_layers: 1,
-                        },
-                    );
-                    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-                    let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("image-bind"),
-                        layout: &gpu.img_bind_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&gpu.sampler),
-                            },
-                        ],
-                    });
-                    // Queue decoded image for later consumption
-                    let new_tex = ImgTex {
-                        bind,
-                        w: out_w,
-                        h: out_h,
-                        path: img.path,
-                    };
-                    self.pending.push_back(new_tex);
-                    debug!("queued_image depth={}", self.pending.len());
-                    // If nothing showing yet, promote immediately
-                    if self.current.is_none() && self.fade_start.is_none() {
-                        if let Some(first) = self.pending.pop_front() {
-                            info!("first_image path={}", first.path.display());
-                            self.current = Some(first);
-                            self.displayed_at = Some(std::time::Instant::now());
-                            if let Some(cur) = &self.current {
-                                let _ = self
-                                    .to_manager_displayed
-                                    .try_send(Displayed(cur.path.clone()));
-                            }
-                        }
+                    Err(MatTask { image, .. }) => {
+                        self.deferred_images.push_front(image);
+                        break;
+                    }
+                }
+            }
+            if self.current.is_none() && self.fade_start.is_none() {
+                if let Some(first) = self.pending.pop_front() {
+                    info!("first_image path={}", first.path.display());
+                    self.current = Some(first);
+                    self.displayed_at = Some(std::time::Instant::now());
+                    if let Some(cur) = &self.current {
+                        let _ = self
+                            .to_manager_displayed
+                            .try_send(Displayed(cur.path.clone()));
                     }
                 }
             }
@@ -679,6 +876,21 @@ pub fn run_windowed(
     }
 
     let event_loop = EventLoop::new()?;
+    let worker_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .max(1);
+    let pipeline_capacity = cfg.viewer_preload_count.max(2);
+    let mat_pipeline = MattingPipeline::new(worker_count, pipeline_capacity);
+    let clear_color = match &cfg.matting.style {
+        MattingMode::FixedColor { color } => wgpu::Color {
+            r: (color[0] as f64) / 255.0,
+            g: (color[1] as f64) / 255.0,
+            b: (color[2] as f64) / 255.0,
+            a: 1.0,
+        },
+        MattingMode::Blur { .. } => wgpu::Color::BLACK,
+    };
     let mut app = App {
         from_loader,
         to_manager_displayed,
@@ -693,6 +905,13 @@ pub fn run_windowed(
         dwell_ms: cfg.dwell_ms,
         pending: VecDeque::new(),
         preload_count: cfg.viewer_preload_count,
+        oversample: cfg.oversample,
+        matting: cfg.matting.clone(),
+        mat_pipeline,
+        mat_inflight: 0,
+        ready_results: VecDeque::new(),
+        deferred_images: VecDeque::new(),
+        clear_color,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -706,35 +925,72 @@ fn compute_padded_stride(bytes_per_row: u32) -> u32 {
     bytes_per_row.div_ceil(ALIGN) * ALIGN
 }
 
-fn compute_scaled_size(
-    img_w: u32,
-    img_h: u32,
-    surf_w: u32,
-    surf_h: u32,
-    oversample: f32,
-    max_dim: u32,
-) -> (u32, u32) {
-    if img_w == 0 || img_h == 0 || surf_w == 0 || surf_h == 0 {
-        return (1, 1);
-    }
-    let max_w = ((surf_w as f32) * oversample).round().max(1.0) as u32;
-    let max_h = ((surf_h as f32) * oversample).round().max(1.0) as u32;
-    let max_w = max_w.min(max_dim).max(1);
-    let max_h = max_h.min(max_dim).max(1);
-    let sw = (max_w as f32) / (img_w as f32);
-    let sh = (max_h as f32) / (img_h as f32);
-    let s = sw.min(sh).min(1.0);
-    let out_w = ((img_w as f32) * s).floor().max(1.0) as u32;
-    let out_h = ((img_h as f32) * s).floor().max(1.0) as u32;
-    (out_w, out_h)
+fn compute_canvas_size(screen_w: u32, screen_h: u32, oversample: f32, max_dim: u32) -> (u32, u32) {
+    let sw = (screen_w as f32 * oversample)
+        .round()
+        .clamp(1.0, max_dim as f32);
+    let sh = (screen_h as f32 * oversample)
+        .round()
+        .clamp(1.0, max_dim as f32);
+    (sw as u32, sh as u32)
 }
 
-fn compute_dest_rect(img_w: u32, img_h: u32, screen_w: u32, screen_h: u32) -> (f32, f32, f32, f32) {
-    let iw = img_w as f32;
-    let ih = img_h as f32;
-    let sw = screen_w as f32;
-    let sh = screen_h as f32;
-    let scale = (sw / iw).min(sh / ih);
+fn resize_to_fit_with_margin(
+    canvas_w: u32,
+    canvas_h: u32,
+    src_w: u32,
+    src_h: u32,
+    margin_frac: f32,
+    max_upscale: f32,
+) -> (u32, u32) {
+    let iw = src_w.max(1) as f32;
+    let ih = src_h.max(1) as f32;
+    let cw = canvas_w.max(1) as f32;
+    let ch = canvas_h.max(1) as f32;
+    let margin_frac = margin_frac.clamp(0.0, 0.45);
+    let avail_w = (cw * (1.0 - 2.0 * margin_frac)).max(1.0);
+    let avail_h = (ch * (1.0 - 2.0 * margin_frac)).max(1.0);
+    let max_upscale = max_upscale.max(1.0);
+    let scale = (avail_w / iw).min(avail_h / ih).min(max_upscale);
+    let w = (iw * scale).round().clamp(1.0, cw);
+    let h = (ih * scale).round().clamp(1.0, ch);
+    (w as u32, h as u32)
+}
+
+fn resize_to_cover(
+    canvas_w: u32,
+    canvas_h: u32,
+    src_w: u32,
+    src_h: u32,
+    max_dim: u32,
+) -> (u32, u32) {
+    let iw = src_w.max(1) as f32;
+    let ih = src_h.max(1) as f32;
+    let cw = canvas_w.max(1) as f32;
+    let ch = canvas_h.max(1) as f32;
+    let scale = (cw / iw).max(ch / ih).max(1.0);
+    let w = (iw * scale).round().clamp(1.0, max_dim as f32);
+    let h = (ih * scale).round().clamp(1.0, max_dim as f32);
+    (w as u32, h as u32)
+}
+
+fn center_offset(inner_w: u32, inner_h: u32, outer_w: u32, outer_h: u32) -> (u32, u32) {
+    let ox = outer_w.saturating_sub(inner_w) / 2;
+    let oy = outer_h.saturating_sub(inner_h) / 2;
+    (ox, oy)
+}
+
+fn compute_cover_rect(
+    img_w: u32,
+    img_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+) -> (f32, f32, f32, f32) {
+    let iw = img_w.max(1) as f32;
+    let ih = img_h.max(1) as f32;
+    let sw = screen_w.max(1) as f32;
+    let sh = screen_h.max(1) as f32;
+    let scale = (sw / iw).max(sh / ih);
     let w = iw * scale;
     let h = ih * scale;
     let x = (sw - w) * 0.5;

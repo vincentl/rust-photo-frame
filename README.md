@@ -43,16 +43,49 @@ dwell-ms: 2000 # Time an image remains fully visible (ms)
 viewer-preload-count: 3 # Images the viewer preloads; also sets viewer channel capacity
 loader-max-concurrent-decodes: 4 # Concurrent decodes in the loader
 oversample: 1.0 # GPU render oversample vs. screen size
+startup-shuffle-seed: null # Optional deterministic seed for initial shuffle
+
+matting:
+  minimum-mat-percentage: 0.0 # % of each screen edge reserved for mat border
+  max-upscale-factor: 1.0 # Limit for enlarging images when applying mats
+  type: fixed-color
+  color: [0, 0, 0]
 ```
 
-Keys
+### Top-level keys
 
-- photo-library-path: Root directory for images to display.
-- fade-ms: Cross-fade transition duration in milliseconds.
-- dwell-ms: Dwell time before starting a transition, in milliseconds.
-- viewer-preload-count: Number of images the viewer holds ready; determines backpressure depth to the loader.
-- loader-max-concurrent-decodes: Max concurrent CPU decodes; tune for CPU/GPU balance.
-- oversample: Scales render target up to reduce aliasing; 1.0 is native.
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `photo-library-path` | string | `""` | Root directory that will be scanned recursively for photos. |
+| `fade-ms` | integer | `400` | Cross-fade transition duration in milliseconds. |
+| `dwell-ms` | integer | `2000` | Time an image remains fully visible before the next fade begins. |
+| `viewer-preload-count` | integer | `3` | Number of prepared images the viewer keeps queued; controls GPU upload backlog. |
+| `loader-max-concurrent-decodes` | integer | `4` | Maximum number of CPU decodes that can run in parallel. |
+| `oversample` | float | `1.0` | Render target scale relative to the screen; values >1.0 reduce aliasing but cost GPU time. |
+| `startup-shuffle-seed` | integer or `null` | `null` | Optional deterministic seed used for the initial photo shuffle. |
+| `matting` | mapping | see below | Controls how mats are generated around each photo. |
+
+### Matting configuration
+
+The `matting` table chooses how the background behind each photo is prepared.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `minimum-mat-percentage` | float | `0.0` | Fraction (0–45%) of each screen edge reserved for the mat border. |
+| `max-upscale-factor` | float | `1.0` | Maximum enlargement factor when fitting inside the mat; `1.0` disables upscaling. |
+| `type` | string | `fixed-color` | Mat style to render. The value selects one of the variants below. |
+
+#### `type: fixed-color`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `color` | `[r, g, b]` array | `[0, 0, 0]` | The RGB values (0–255) used to fill the mat background. |
+
+#### `type: blur`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `sigma` | float | `20.0` | Gaussian blur radius applied to a scaled copy of the photo that covers the screen. |
 
 ## License
 
