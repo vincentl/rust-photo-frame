@@ -315,17 +315,19 @@ pub fn run_windowed(
             self.fade_start = None;
             self.displayed_at = None;
             self.mat_inflight = 0;
+            use winit::window::Fullscreen;
             let window = Arc::new(
                 event_loop
-                    .create_window(Window::default_attributes().with_title("Photo Frame"))
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("Photo Frame")
+                            .with_fullscreen(Some(Fullscreen::Borderless(None)))
+                            .with_decorations(false),
+                    )
                     .unwrap(),
             );
-            // Enter borderless fullscreen and hide cursor for a clean demo
-            use winit::window::Fullscreen;
             if let Some(m) = window.current_monitor() {
                 window.set_fullscreen(Some(Fullscreen::Borderless(Some(m))));
-            } else {
-                window.set_fullscreen(Some(Fullscreen::Borderless(None)));
             }
             window.set_cursor_visible(false);
 
@@ -616,7 +618,12 @@ pub fn run_windowed(
                     gpu.config.height = new_size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
                 }
-                WindowEvent::ScaleFactorChanged { .. } => {}
+                WindowEvent::ScaleFactorChanged { .. } => {
+                    let size = window.inner_size();
+                    gpu.config.width = size.width.max(1);
+                    gpu.config.height = size.height.max(1);
+                    gpu.surface.configure(&gpu.device, &gpu.config);
+                }
                 WindowEvent::RedrawRequested => {
                     let frame = match gpu.surface.get_current_texture() {
                         Ok(frame) => frame,
