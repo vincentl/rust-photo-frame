@@ -1,5 +1,6 @@
 pub mod config;
 pub mod events;
+pub mod processing;
 pub mod tasks {
     pub mod files;
     pub mod loader;

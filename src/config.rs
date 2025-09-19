@@ -27,7 +27,26 @@ pub enum MattingMode {
     Blur {
         #[serde(default = "MattingMode::default_blur_sigma")]
         sigma: f32,
+        #[serde(default)]
+        max_sample_dim: Option<u32>,
+        #[serde(default)]
+        backend: BlurBackend,
     },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlurBackend {
+    Auto,
+    Cpu,
+    Neon,
+    WgpuCompute,
+}
+
+impl Default for BlurBackend {
+    fn default() -> Self {
+        Self::Auto
+    }
 }
 
 impl Default for MattingOptions {
@@ -73,6 +92,11 @@ impl MattingMode {
 
     const fn default_blur_sigma() -> f32 {
         20.0
+    }
+
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+    pub const fn default_blur_max_sample_dim() -> u32 {
+        2048
     }
 }
 

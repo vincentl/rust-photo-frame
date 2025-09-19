@@ -86,6 +86,8 @@ The `matting` table chooses how the background behind each photo is prepared.
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `sigma` | float | `20.0` | Gaussian blur radius applied to a scaled copy of the photo that covers the screen. |
+| `max-sample-dim` | integer or `null` | `null` (defaults to `2048` on 64-bit ARM builds, otherwise unlimited) | Optional cap on the background texture size used for the blur. When set, the background is downscaled to this maximum dimension before blurring and then upscaled back to the screen size, preserving the soft-focus look while reducing CPU cost on small GPUs. |
+| `backend` | string | `auto` | Blur implementation to use. `auto` prefers the NEON vector path on 64-bit ARM, then a WGPU compute shader, and finally the CPU-only renderer. You can force a specific branch by setting `cpu`, `neon`, or `wgpu-compute`. |
 
 ## License
 
