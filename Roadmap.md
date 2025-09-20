@@ -15,14 +15,14 @@
   - [ ] Configure button → key events with `gpio-shutdown` overlay.
   - [ ] Add SSH authorized_keys for remote admin via Tailscale.
 - [ ] **Rust project core**
-  - [ ] Scan photo directories + display scaled images full screen.
+  - [x] Scan photo directories + display scaled images full screen.
   - [x] Handle startup without crashing if photo list is empty/missing.
   - [x] Simple circular buffer of photos (no weighting yet).
 
 ## Intermediate Milestone – Cross-platform Image Display
 
 - [ ] **GPU viewer shows decoded photo**
-  - [ ] Upload `PreparedImageCpu` to a wgpu texture and render a full-screen quad.
+  - [x] Upload `PreparedImageCpu` to a wgpu texture and render a full-screen quad.
   - [x] Unit test verifies EXIF orientation is applied during load.
   - [ ] Integration test confirms the viewer emits `Displayed` after drawing.
 - [ ] **macOS demo**
@@ -45,7 +45,7 @@
   - [ ] Add wifi configuration utility (form → wpa_supplicant update).
 - [ ] **Rust project features**
   - [ ] Circular buffer weighting (half-life replication for new photos).
-  - [ ] Graceful removal of deleted photos from list.
+  - [x] Graceful removal of deleted photos from list.
   - [x] Randomized list at boot with configurable seed.
   - [ ] Event system:
     - [ ] Short button press → toggle screen.
@@ -57,10 +57,10 @@
 
 - [ ] **Photo rendering**
   - [ ] Matting options:
-    - [ ] Fixed color mat (configurable).
+    - [x] Fixed color mat (configurable).
     - [ ] Studio mat (average color + textured bevel).
-    - [ ] Blur mat (scaled background fill).
-    - [ ] Configurable minimum mat size.
+    - [x] Blur mat (scaled background fill).
+    - [x] Configurable minimum mat size.
     - [ ] Fixed background image that is scaled to fit screen and images are overlayed
 - [ ] **User web interface**
   - [ ] Local web server for configuration (cloud, mats, screen schedule, photo timing).
