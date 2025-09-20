@@ -13,7 +13,7 @@ if [[ ! -f "${SCRIPT_SRC}" ]]; then
 fi
 
 echo "[03-configure-button-monitor] Installing Python dependencies..."
-apt-get install -y python3 python3-gpiozero python3-pip python3-venv
+apt-get install -y python3 python3-gpiozero python3-lgpio python3-pip python3-venv
 
 if [[ "${SERVICE_USER}" != "root" ]]; then
     echo "[03-configure-button-monitor] Ensuring ${SERVICE_USER} has GPIO/video access..."
@@ -39,6 +39,7 @@ User=${SERVICE_USER}
 Group=${SERVICE_USER}
 SupplementaryGroups=gpio video
 Environment=BUTTON_GPIO=17
+Environment=GPIOZERO_PIN_FACTORY=lgpio
 
 [Install]
 WantedBy=multi-user.target
