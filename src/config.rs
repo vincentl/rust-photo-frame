@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -124,6 +124,22 @@ impl Configuration {
     pub fn from_yaml_file(path: impl AsRef<Path>) -> Result<Self> {
         let s = std::fs::read_to_string(path)?;
         Ok(serde_yaml::from_str(&s)?)
+    }
+
+    /// Validate runtime invariants that cannot be expressed via serde defaults alone.
+    pub fn validated(self) -> Result<Self> {
+        ensure!(
+            self.viewer_preload_count > 0,
+            "viewer-preload-count must be greater than zero"
+        );
+        ensure!(
+            self.loader_max_concurrent_decodes > 0,
+            "loader-max-concurrent-decodes must be greater than zero"
+        );
+        ensure!(self.oversample > 0.0, "oversample must be positive");
+        ensure!(self.fade_ms > 0, "fade-ms must be greater than zero");
+        ensure!(self.dwell_ms > 0, "dwell-ms must be greater than zero");
+        Ok(self)
     }
 }
 
