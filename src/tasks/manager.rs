@@ -40,17 +40,19 @@ pub async fn run(
                 let to_loader = to_loader.clone();
                 async move {
                     if let Some(p) = next {
-                        to_loader.send(LoadPhoto(p)).await.map(|_| ()).map_err(|_| ())
+                        to_loader.send(LoadPhoto(p.clone())).await.map(|_| p).map_err(|_| ())
                     } else {
                         Err(())
                     }
                 }
             }, if !playlist.is_empty() => {
                 match res {
-                    Ok(()) => {
-                        // Successfully queued: rotate front -> back to keep it in play.
-                        if let Some(f) = playlist.pop_front() {
-                            playlist.push_back(f);
+                    Ok(sent) => {
+                        // Successfully queued: rotate the item we actually sent.
+                        if let Some(pos) = playlist.iter().position(|q| q == &sent) {
+                            if let Some(item) = playlist.remove(pos) {
+                                playlist.push_back(item);
+                            }
                         }
                     }
                     Err(_) => {
