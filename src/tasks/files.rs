@@ -25,31 +25,12 @@ pub async fn run(
     cancel: CancellationToken,
 ) -> Result<()> {
     // 1) Startup scan (recursive) -> collect, shuffle, emit
-    let mut initial = Vec::<PathBuf>::new();
-    for entry in WalkDir::new(&cfg.photo_library_path)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-    {
-        let path = entry.path().to_path_buf();
-        if is_image(&path) {
-            initial.push(path);
-        }
-    }
-    let mut rng = match cfg.startup_shuffle_seed {
-        Some(seed) => rand::rngs::StdRng::seed_from_u64(seed),
-        None => rand::rngs::StdRng::from_entropy(),
-    };
-    initial.shuffle(&mut rng);
-    for path in &initial {
-        debug!(action = "startup_add", path = %path.display());
-        let created_at = photo_created_at(path);
-        let info = PhotoInfo {
-            path: path.clone(),
-            created_at,
-        };
-        let _ = to_manager.send(InventoryEvent::PhotoAdded(info)).await;
+    let initial = discover_startup_photos(&cfg)?;
+    for info in &initial {
+        debug!(action = "startup_add", path = %info.path.display());
+        let _ = to_manager
+            .send(InventoryEvent::PhotoAdded(info.clone()))
+            .await;
     }
     info!(
         discovered = initial.len(),
@@ -168,4 +149,33 @@ fn photo_created_at(path: &Path) -> SystemTime {
             .unwrap_or_else(|_| SystemTime::now()),
         Err(_) => SystemTime::now(),
     }
+}
+
+pub fn discover_startup_photos(cfg: &Configuration) -> Result<Vec<PhotoInfo>> {
+    let mut initial = Vec::<PathBuf>::new();
+    for entry in WalkDir::new(&cfg.photo_library_path)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+    {
+        let path = entry.path().to_path_buf();
+        if is_image(&path) {
+            initial.push(path);
+        }
+    }
+
+    let mut rng = match cfg.startup_shuffle_seed {
+        Some(seed) => rand::rngs::StdRng::seed_from_u64(seed),
+        None => rand::rngs::StdRng::from_entropy(),
+    };
+    initial.shuffle(&mut rng);
+
+    Ok(initial
+        .into_iter()
+        .map(|path| {
+            let created_at = photo_created_at(&path);
+            PhotoInfo { path, created_at }
+        })
+        .collect())
 }
