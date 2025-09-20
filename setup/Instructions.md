@@ -74,4 +74,4 @@ This workflow prepares a Raspberry Pi OS (Bookworm, 64-bit) image that boots dir
    sudo ./setup/system-setup.sh
    ```
 4. Watch the console output for prompts or errors. You can rerun an individual module directly (e.g., `sudo ./setup/setup-modules/00-update-os.sh`).
-5. After the base setup completes, continue following the roadmap to implement kiosk mode, background synchronization, Tailscale, Wi-Fi recovery mode, and the configuration web UI.
+5. After the base setup completes, continue following the roadmap to implement kiosk mode, background synchronization, button monitoring, Tailscale, Wi-Fi recovery mode, and the configuration web UI.
