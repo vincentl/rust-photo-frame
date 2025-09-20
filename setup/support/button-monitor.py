@@ -9,6 +9,7 @@ import sys
 import time
 
 from gpiozero import Button
+from gpiozero.exc import BadPinFactory
 
 BUTTON_GPIO = int(os.getenv("BUTTON_GPIO", "17"))
 SHUTDOWN_HOLD_SECONDS = float(os.getenv("SHUTDOWN_HOLD_SECONDS", "5"))
@@ -51,7 +52,17 @@ def main() -> int:
     signal.signal(signal.SIGTERM, handle_exit)
     signal.signal(signal.SIGINT, handle_exit)
 
-    button = Button(BUTTON_GPIO, pull_up=True, bounce_time=0.05)
+    try:
+        button = Button(BUTTON_GPIO, pull_up=True, bounce_time=0.05)
+    except BadPinFactory as exc:
+        logging.error("Failed to initialize GPIO pin factory: %s", exc)
+        logging.error(
+            "Ensure the lgpio package is installed and the service has access to /dev/gpiomem"
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001 - log unexpected hardware init errors
+        logging.exception("Unexpected failure initializing button: %s", exc)
+        return 1
     logging.info("Monitoring button on GPIO %s", BUTTON_GPIO)
 
     while running:
