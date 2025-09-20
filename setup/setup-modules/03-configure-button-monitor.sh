@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SERVICE_USER="${SUDO_USER:-pi}"
+INSTALL_OWNER="${SUDO_USER:-pi}"
 INSTALL_DIR="/opt/rust-photo-frame/button-monitor"
 SCRIPT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)/support/button-monitor.py"
 SCRIPT_DEST="${INSTALL_DIR}/button-monitor.py"
@@ -18,7 +18,7 @@ apt-get install -y python3 python3-gpiozero python3-pip python3-venv
 mkdir -p "${INSTALL_DIR}"
 cp "${SCRIPT_SRC}" "${SCRIPT_DEST}"
 chmod 755 "${SCRIPT_DEST}"
-chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_DIR}"
+chown -R "${INSTALL_OWNER}:${INSTALL_OWNER}" "${INSTALL_DIR}"
 
 echo "[03-configure-button-monitor] Creating systemd service..."
 cat <<SERVICE > "${SERVICE_FILE}"
@@ -30,8 +30,9 @@ After=network.target
 Type=simple
 ExecStart=/usr/bin/env python3 ${SCRIPT_DEST}
 Restart=on-failure
-User=${SERVICE_USER}
-Group=${SERVICE_USER}
+# Run the button monitor as root so it can invoke /sbin/shutdown when needed.
+User=root
+Group=root
 Environment=BUTTON_GPIO=17
 
 [Install]
