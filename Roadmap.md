@@ -76,7 +76,8 @@
   - [ ] Automate Tailscale install + login during setup.
   - [ ] Add wifi configuration utility (form → wpa_supplicant update).
 - [ ] **Rust project features**
-  - [ ] Circular buffer weighting (half-life replication for new photos).
+  - [x] Circular buffer weighting (half-life replication for new photos).
+    - [x] Exponential half-life weighting keeps recent additions repeating while ensuring every photo appears each cycle.
   - [x] Graceful removal of deleted photos from list.
   - [x] Randomized list at boot with configurable seed.
   - [ ] Event system:

@@ -1,5 +1,5 @@
 use crate::config::Configuration;
-use crate::events::{InvalidPhoto, InventoryEvent};
+use crate::events::{InvalidPhoto, InventoryEvent, PhotoInfo};
 use anyhow::Result;
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
@@ -7,6 +7,7 @@ use rand::{seq::SliceRandom, SeedableRng};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -24,27 +25,11 @@ pub async fn run(
     cancel: CancellationToken,
 ) -> Result<()> {
     // 1) Startup scan (recursive) -> collect, shuffle, emit
-    let mut initial = Vec::<PathBuf>::new();
-    for entry in WalkDir::new(&cfg.photo_library_path)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-    {
-        let path = entry.path().to_path_buf();
-        if is_image(&path) {
-            initial.push(path);
-        }
-    }
-    let mut rng = match cfg.startup_shuffle_seed {
-        Some(seed) => rand::rngs::StdRng::seed_from_u64(seed),
-        None => rand::rngs::StdRng::from_entropy(),
-    };
-    initial.shuffle(&mut rng);
-    for path in &initial {
-        debug!(action = "startup_add", path = %path.display());
+    let initial = discover_startup_photos(&cfg)?;
+    for info in &initial {
+        debug!(action = "startup_add", path = %info.path.display());
         let _ = to_manager
-            .send(InventoryEvent::PhotoAdded(path.clone()))
+            .send(InventoryEvent::PhotoAdded(info.clone()))
             .await;
     }
     info!(
@@ -90,7 +75,9 @@ pub async fn run(
                         EventKind::Create(CreateKind::File) => {
                             for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
                                 info!(path = %p.display(), "fs: add (create)");
-                                let _ = to_manager.send(InventoryEvent::PhotoAdded(p)).await;
+                                let created_at = photo_created_at(&p);
+                                let info = PhotoInfo { path: p.clone(), created_at };
+                                let _ = to_manager.send(InventoryEvent::PhotoAdded(info)).await;
                             }
                         }
                         EventKind::Remove(RemoveKind::File) => {
@@ -104,7 +91,9 @@ pub async fn run(
                             for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
                                 if p.exists() {
                                     info!(path = %p.display(), "fs: add (rename/name)");
-                                    let _ = to_manager.send(InventoryEvent::PhotoAdded(p)).await;
+                                    let created_at = photo_created_at(&p);
+                                    let info = PhotoInfo { path: p.clone(), created_at };
+                                    let _ = to_manager.send(InventoryEvent::PhotoAdded(info)).await;
                                 } else {
                                     info!(path = %p.display(), "fs: remove (rename/name)");
                                     let _ = to_manager.send(InventoryEvent::PhotoRemoved(p)).await;
@@ -150,4 +139,43 @@ fn delete_if_exists(p: &Path) -> Result<()> {
         }
         Err(e) => Err(e.into()),
     }
+}
+
+fn photo_created_at(path: &Path) -> SystemTime {
+    match fs::metadata(path) {
+        Ok(meta) => meta
+            .created()
+            .or_else(|_| meta.modified())
+            .unwrap_or_else(|_| SystemTime::now()),
+        Err(_) => SystemTime::now(),
+    }
+}
+
+pub fn discover_startup_photos(cfg: &Configuration) -> Result<Vec<PhotoInfo>> {
+    let mut initial = Vec::<PathBuf>::new();
+    for entry in WalkDir::new(&cfg.photo_library_path)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+    {
+        let path = entry.path().to_path_buf();
+        if is_image(&path) {
+            initial.push(path);
+        }
+    }
+
+    let mut rng = match cfg.startup_shuffle_seed {
+        Some(seed) => rand::rngs::StdRng::seed_from_u64(seed),
+        None => rand::rngs::StdRng::from_entropy(),
+    };
+    initial.shuffle(&mut rng);
+
+    Ok(initial
+        .into_iter()
+        .map(|path| {
+            let created_at = photo_created_at(&path);
+            PhotoInfo { path, created_at }
+        })
+        .collect())
 }

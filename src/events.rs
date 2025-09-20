@@ -1,9 +1,16 @@
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 #[derive(Debug)]
 pub enum InventoryEvent {
-    PhotoAdded(PathBuf),
+    PhotoAdded(PhotoInfo),
     PhotoRemoved(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+pub struct PhotoInfo {
+    pub path: PathBuf,
+    pub created_at: SystemTime,
 }
 
 #[derive(Debug)]
