@@ -301,11 +301,12 @@ impl BlurContext {
         );
 
         let slice = staging_buffer.slice(..);
+        self.queue.submit(Some(encoder.finish()));
+
         let (sender, receiver) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |res| {
             let _ = sender.send(res);
         });
-        self.queue.submit(Some(encoder.finish()));
         let _ = self.device.poll(wgpu::PollType::Wait);
         match receiver.recv() {
             Ok(Ok(())) => {}
