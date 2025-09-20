@@ -12,6 +12,7 @@ This project is **alpha and under development**
 - Image type filtering (jpg/png/gif/webp/bmp/tiff)
 - Circular buffer (infinite loop)
 - Fixed per-image delay (configurable)
+- Weighted playlist that repeats new photos using an exponential half-life decay
 - Error handling and structured logging
 
 ## Event Flow
@@ -45,6 +46,10 @@ loader-max-concurrent-decodes: 4 # Concurrent decodes in the loader
 oversample: 1.0 # GPU render oversample vs. screen size
 startup-shuffle-seed: null # Optional deterministic seed for initial shuffle
 
+playlist:
+  new-multiplicity: 3 # How many copies of a brand-new photo to schedule per cycle
+  half-life: 3 days # How quickly that multiplicity decays back toward 1
+
 matting:
   minimum-mat-percentage: 0.0 # % of each screen edge reserved for mat border
   max-upscale-factor: 1.0 # Limit for enlarging images when applying mats
@@ -63,7 +68,25 @@ matting:
 | `loader-max-concurrent-decodes` | integer | `4` | Maximum number of CPU decodes that can run in parallel. |
 | `oversample` | float | `1.0` | Render target scale relative to the screen; values >1.0 reduce aliasing but cost GPU time. |
 | `startup-shuffle-seed` | integer or `null` | `null` | Optional deterministic seed used for the initial photo shuffle. |
+| `playlist` | mapping | see below | Controls how aggressively new photos repeat before settling into the long-term cadence. |
 | `matting` | mapping | see below | Controls how mats are generated around each photo. |
+
+### Playlist weighting
+
+The playlist treats every photo as a node in a cycle. Brand-new photos are temporarily duplicated so that they appear multiple times per cycle, then decay back toward a single appearance as they age.
+
+The multiplicity for each photo is computed as:
+
+```
+multiplicity(age) = ceil(max(1, new_multiplicity) * 0.5^(age / half_life))
+```
+
+Where `age` is the difference between the current time and the photo's creation timestamp. The `half-life` duration controls how quickly the multiplicity decays; once a photo's age reaches one half-life the multiplicity halves. Each cycle shuffles the scheduled copies so every photo appears at least once, and new arrivals are pinned to the front of the queue so their first showing happens immediately.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `new-multiplicity` | integer | `3` | Number of copies a brand-new photo receives in the next playlist cycle. |
+| `half-life` | duration string | `1 day` | Exponential half-life governing how quickly the multiplicity decays toward `1`. Accepts human-friendly strings via [`humantime`](https://docs.rs/humantime). |
 
 ### Matting configuration
 
