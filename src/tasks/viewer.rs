@@ -157,7 +157,68 @@ pub fn run_windowed(
             resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
         let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
 
-        let mut background = match matting.style {
+        let avg_color = average_color(&src);
+
+        let main_img: Cow<'_, RgbaImage> = if final_w == width && final_h == height {
+            Cow::Borrowed(&src)
+        } else {
+            Cow::Owned(imageops::resize(
+                &src,
+                final_w,
+                final_h,
+                imageops::FilterType::Triangle,
+            ))
+        };
+
+        if let MattingMode::Studio {
+            bevel_width,
+            highlight_strength,
+            shadow_strength,
+            image_overlap_px,
+            bevel_angle_deg,
+            linen_intensity,
+            linen_scale_px,
+            linen_rotation_deg,
+            light_dir,
+            shadow_radius_px,
+            shadow_offset_px,
+        } = &matting.style
+        {
+            let canvas = render_studio_mat(
+                path.as_path(),
+                width,
+                height,
+                canvas_w,
+                canvas_h,
+                offset_x,
+                offset_y,
+                final_w,
+                final_h,
+                main_img.as_ref(),
+                avg_color,
+                *bevel_width,
+                *bevel_angle_deg,
+                *highlight_strength,
+                *shadow_strength,
+                *linen_intensity,
+                *linen_scale_px,
+                *linen_rotation_deg,
+                *light_dir,
+                *shadow_radius_px,
+                *shadow_offset_px,
+                *image_overlap_px,
+            );
+
+            let canvas = ImagePlane {
+                width: canvas_w,
+                height: canvas_h,
+                pixels: canvas.into_raw(),
+            };
+
+            return Some(MatResult { path, canvas });
+        }
+
+        let mut background = match &matting.style {
             MattingMode::FixedColor { color } => {
                 let px = Rgba([color[0], color[1], color[2], 255]);
                 RgbaImage::from_pixel(canvas_w, canvas_h, px)
@@ -180,7 +241,7 @@ pub fn run_windowed(
                     imageops::overlay(&mut canvas, &bg, bg_x as i64, bg_y as i64);
                     bg = canvas;
                 }
-                if sigma > 0.0 {
+                if *sigma > 0.0 {
                     let limit = max_sample_dim
                         .filter(|v| *v > 0)
                         .unwrap_or_else(|| {
@@ -197,7 +258,7 @@ pub fn run_windowed(
                         .max(1);
 
                     let mut sample = bg;
-                    let mut sigma_px = sigma;
+                    let mut sigma_px = *sigma;
                     let canvas_max = canvas_w.max(canvas_h).max(1);
                     if canvas_max > limit {
                         let scale = (limit as f32) / (canvas_max as f32);
@@ -214,7 +275,7 @@ pub fn run_windowed(
                         sigma_px *= scale.max(0.01);
                     }
 
-                    let mut blurred: RgbaImage = apply_blur(&sample, sigma_px, backend);
+                    let mut blurred: RgbaImage = apply_blur(&sample, sigma_px, *backend);
                     if blurred.width() != canvas_w || blurred.height() != canvas_h {
                         blurred = imageops::resize(
                             &blurred,
@@ -228,30 +289,7 @@ pub fn run_windowed(
                     bg
                 }
             }
-            MattingMode::Studio {
-                bevel_width,
-                highlight_strength,
-                shadow_strength,
-                texture_strength,
-            } => {
-                let avg = average_color(&src);
-                render_studio_mat(
-                    path.as_path(),
-                    width,
-                    height,
-                    canvas_w,
-                    canvas_h,
-                    offset_x,
-                    offset_y,
-                    final_w,
-                    final_h,
-                    avg,
-                    bevel_width,
-                    highlight_strength,
-                    shadow_strength,
-                    texture_strength,
-                )
-            }
+            MattingMode::Studio { .. } => unreachable!(),
             MattingMode::FixedImage { fit, .. } => {
                 if let Some(bg) = matting.runtime.fixed_image.as_ref() {
                     let bg_img: &RgbaImage = bg.as_ref();
@@ -325,12 +363,12 @@ pub fn run_windowed(
             }
         };
 
-        let main_img = if final_w == width && final_h == height {
-            src
-        } else {
-            imageops::resize(&src, final_w, final_h, imageops::FilterType::Triangle)
-        };
-        imageops::overlay(&mut background, &main_img, offset_x as i64, offset_y as i64);
+        imageops::overlay(
+            &mut background,
+            main_img.as_ref(),
+            offset_x as i64,
+            offset_y as i64,
+        );
 
         let canvas = ImagePlane {
             width: canvas_w,
@@ -1183,106 +1221,224 @@ fn render_studio_mat(
     src_h: u32,
     canvas_w: u32,
     canvas_h: u32,
-    inner_x: u32,
-    inner_y: u32,
-    inner_w: u32,
-    inner_h: u32,
+    photo_x: u32,
+    photo_y: u32,
+    photo_w: u32,
+    photo_h: u32,
+    photo: &RgbaImage,
     avg_color: [f32; 3],
     bevel_width: f32,
+    bevel_angle_deg: f32,
     highlight_strength: f32,
     shadow_strength: f32,
-    texture_strength: f32,
+    linen_intensity: f32,
+    linen_scale_px: f32,
+    linen_rotation_deg: f32,
+    light_dir: [f32; 3],
+    shadow_radius_px: f32,
+    shadow_offset_px: f32,
+    image_overlap_px: f32,
 ) -> RgbaImage {
-    let highlight_strength = highlight_strength.clamp(0.0, 1.5);
-    let shadow_strength = shadow_strength.clamp(0.0, 1.5);
-    let texture_strength = texture_strength.clamp(0.0, 1.0);
-
     let seed = studio_seed(
-        path, src_w, src_h, canvas_w, canvas_h, inner_x, inner_y, inner_w, inner_h,
+        path, src_w, src_h, canvas_w, canvas_h, photo_x, photo_y, photo_w, photo_h,
     );
     let coarse_seed = seed;
     let fine_seed = seed.rotate_left(17) ^ 0xa076_1d64_78bd_642f;
     let fiber_seed = seed.rotate_left(29) ^ 0xe703_7ed1_a0b4_28db;
 
-    let inner_right = inner_x.saturating_add(inner_w);
-    let inner_bottom = inner_y.saturating_add(inner_h);
-    let left_border = inner_x as f32;
-    let top_border = inner_y as f32;
-    let right_border = canvas_w.saturating_sub(inner_right) as f32;
-    let bottom_border = canvas_h.saturating_sub(inner_bottom) as f32;
-    let available = left_border
-        .min(top_border)
-        .min(right_border)
-        .min(bottom_border);
-    let bevel_ratio = (bevel_width.max(0.0)) / 100.0;
-    let mut bevel_px = (canvas_w.min(canvas_h) as f32) * bevel_ratio;
-    bevel_px = bevel_px.max(1.0).min(available.max(1.0));
-    let inv_bevel = 1.0 / bevel_px.max(1.0);
+    let mut bevel_px = bevel_width.max(0.0);
+    let max_border = photo_x
+        .min(photo_y)
+        .min(canvas_w.saturating_sub(photo_x.saturating_add(photo_w)))
+        .min(canvas_h.saturating_sub(photo_y.saturating_add(photo_h))) as f32;
+    if bevel_px > 0.0 {
+        bevel_px = bevel_px.min(max_border.max(0.0));
+    } else {
+        bevel_px = 0.0;
+    }
 
-    let center_x = (canvas_w as f32) * 0.5;
-    let center_y = (canvas_h as f32) * 0.5;
+    let max_overlap = (photo_w.min(photo_h) as f32) * 0.45;
+    let overlap = image_overlap_px.clamp(0.0, max_overlap.max(0.0));
+    let visible_w = (photo_w as f32 - 2.0 * overlap).max(1.0);
+    let visible_h = (photo_h as f32 - 2.0 * overlap).max(1.0);
+    let window_x = photo_x as f32 + overlap;
+    let window_y = photo_y as f32 + overlap;
+    let window_max_x = window_x + visible_w;
+    let window_max_y = window_y + visible_h;
+
+    let outer_min_x = (window_x - bevel_px).max(0.0);
+    let outer_min_y = (window_y - bevel_px).max(0.0);
+    let outer_max_x = (window_max_x + bevel_px).min(canvas_w as f32);
+    let outer_max_y = (window_max_y + bevel_px).min(canvas_h as f32);
 
     let luma = (avg_color[0] * 0.299 + avg_color[1] * 0.587 + avg_color[2] * 0.114).clamp(0.0, 1.0);
     let mut base = [0.0f32; 3];
     for (i, channel) in base.iter_mut().enumerate() {
-        let softened = lerp(luma, avg_color[i], 0.6);
-        *channel = lerp(softened, 0.92, 0.25).clamp(0.04, 0.98);
+        let softened = lerp(avg_color[i], luma, 0.25);
+        *channel = lerp(softened, 0.92, 0.12).clamp(0.05, 0.97);
     }
+
+    let linen_strength = linen_intensity.clamp(0.0, 1.0);
+    let linen_scale = linen_scale_px.max(64.0);
+    let linen_amp = 0.02 + linen_strength * 0.02;
+    let rotation = linen_rotation_deg.to_radians();
+    let cos_r = rotation.cos();
+    let sin_r = rotation.sin();
+    let cx = canvas_w as f32 * 0.5;
+    let cy = canvas_h as f32 * 0.5;
+
+    let mut light = normalize3(light_dir);
+    if light[2].abs() <= f32::EPSILON {
+        light[2] = 0.2;
+        light = normalize3(light);
+    }
+    let light_xy = normalize2([light[0], light[1]]);
+
+    let highlight_scale = highlight_strength.clamp(0.0, 1.0) * 0.22;
+    let shadow_scale = shadow_strength.clamp(0.0, 1.0) * 0.22;
+    let bevel_angle = bevel_angle_deg.to_radians().abs().max(1.0f32.to_radians());
+    let bevel_xy = bevel_angle.cos().abs().max(0.01);
+    let bevel_z = bevel_angle.sin().abs().max(0.01);
+
+    let shadow_radius = shadow_radius_px.max(0.1);
+    let shadow_offset = shadow_offset_px.max(0.0);
+    let shadow_weight = shadow_strength.clamp(0.0, 1.0) * 0.35;
 
     let mut mat = RgbaImage::new(canvas_w, canvas_h);
     for (x, y, pixel) in mat.enumerate_pixels_mut() {
         let px = x as f32 + 0.5;
         let py = y as f32 + 0.5;
 
-        let dist_left = (inner_x as f32 - px).max(0.0);
-        let dist_top = (inner_y as f32 - py).max(0.0);
-        let dist_right = (px - inner_right as f32).max(0.0);
-        let dist_bottom = (py - inner_bottom as f32).max(0.0);
-
-        let left_term = ((bevel_px - dist_left).max(0.0) * inv_bevel).powf(1.6);
-        let top_term = ((bevel_px - dist_top).max(0.0) * inv_bevel).powf(1.6);
-        let right_term = ((bevel_px - dist_right).max(0.0) * inv_bevel).powf(1.6);
-        let bottom_term = ((bevel_px - dist_bottom).max(0.0) * inv_bevel).powf(1.6);
-
-        let highlight = ((left_term + top_term) * 0.5) * highlight_strength;
-        let shadow = ((right_term + bottom_term) * 0.5) * shadow_strength;
-
-        let inner_dist = dist_left.min(dist_top).min(dist_right).min(dist_bottom);
-        let bevel_profile = ((bevel_px - inner_dist).max(0.0) * inv_bevel).powf(2.0);
-        let bevel_pop = bevel_profile * 0.18 * (highlight_strength + shadow_strength).max(0.2);
-
-        let diag = ((px - inner_x as f32) - (py - inner_y as f32))
-            / ((inner_w.max(1) + inner_h.max(1)) as f32);
-        let diag_emphasis = diag * 0.2 * (highlight_strength - shadow_strength);
-
-        let mut shade = 1.0 + highlight - shadow + bevel_pop + diag_emphasis;
-        let dx = (px - center_x) / (canvas_w.max(1) as f32);
-        let dy = (py - center_y) / (canvas_h.max(1) as f32);
-        let radial = (dx * dx + dy * dy).sqrt();
-        shade *= 1.0 - radial.powf(1.35) * 0.05;
-        let shade = shade.clamp(0.25, 3.0);
-
-        let texture = if texture_strength > 0.0 {
-            let coarse = fbm_noise(coarse_seed, px * 0.018, py * 0.018, 5);
-            let fine = fbm_noise(fine_seed, px * 0.07, py * 0.07, 3);
-            let fibers = fbm_noise(
-                fiber_seed,
-                px * 0.12 + py * 0.018,
-                py * 0.12 - px * 0.018,
-                3,
-            );
-            let combined = (coarse * 0.6 + fine * 0.4 - 0.5) * 0.55 + (fibers - 0.5) * 0.35;
-            combined * texture_strength
+        let rx = (px - cx) * cos_r - (py - cy) * sin_r;
+        let ry = (px - cx) * sin_r + (py - cy) * cos_r;
+        let linen = if linen_strength > 0.0 {
+            let u = rx / linen_scale;
+            let v = ry / linen_scale;
+            let jitter_u = fbm_noise(coarse_seed, v * 5.1, v * 3.7, 4) * 0.1 - 0.05;
+            let jitter_v = fbm_noise(fine_seed, u * 4.6, u * 3.3, 4) * 0.1 - 0.05;
+            let warp = (std::f32::consts::TAU * (u + jitter_u)).sin() * 0.5;
+            let weft = (std::f32::consts::TAU * (v + jitter_v)).sin() * 0.5;
+            let fiber = fbm_noise(fiber_seed, u * 22.0, v * 22.0, 3) - 0.5;
+            (1.0 + linen_amp * (warp + weft) + linen_amp * 0.45 * fiber).clamp(0.94, 1.06)
         } else {
-            0.0
+            1.0
         };
 
+        let mut base_color = [0.0f32; 3];
         for c in 0..3 {
-            let mut value = base[c] * shade + texture;
-            value = value.clamp(0.0, 1.0);
-            pixel[c] = srgb_u8(value);
+            base_color[c] = (base[c] * linen).clamp(0.0, 1.0);
         }
-        pixel[3] = 255;
+
+        let inside_window =
+            px >= window_x && px <= window_max_x && py >= window_y && py <= window_max_y;
+
+        if inside_window {
+            let u = if visible_w <= f32::EPSILON {
+                0.0
+            } else {
+                ((px - window_x) / visible_w).clamp(0.0, 1.0)
+            };
+            let v = if visible_h <= f32::EPSILON {
+                0.0
+            } else {
+                ((py - window_y) / visible_h).clamp(0.0, 1.0)
+            };
+            let sample_x = (overlap + u * visible_w).clamp(0.0, photo_w as f32 - 1.0);
+            let sample_y = (overlap + v * visible_h).clamp(0.0, photo_h as f32 - 1.0);
+            let mut sample = sample_bilinear(photo, sample_x, sample_y);
+
+            let dist_left = (px - window_x).max(0.0);
+            let dist_right = (window_max_x - px).max(0.0);
+            let dist_top = (py - window_y).max(0.0);
+            let dist_bottom = (window_max_y - py).max(0.0);
+            let (edge_normal, edge_distance) =
+                if dist_left <= dist_right && dist_left <= dist_top && dist_left <= dist_bottom {
+                    ([-1.0, 0.0], dist_left)
+                } else if dist_right <= dist_top && dist_right <= dist_bottom {
+                    ([1.0, 0.0], dist_right)
+                } else if dist_top <= dist_bottom {
+                    ([0.0, -1.0], dist_top)
+                } else {
+                    ([0.0, 1.0], dist_bottom)
+                };
+
+            let directional = if light_xy == [0.0, 0.0] {
+                0.0
+            } else {
+                (edge_normal[0] * -light_xy[0] + edge_normal[1] * -light_xy[1]).max(0.0)
+            };
+            let shadow_dist = (edge_distance - shadow_offset).max(0.0);
+            let falloff = 1.0 - smoothstep((shadow_dist / shadow_radius).clamp(0.0, 1.0));
+            let shadow = (shadow_weight * directional * falloff).clamp(0.0, 0.6);
+            for c in 0..3 {
+                sample[c] = (sample[c] * (1.0 - shadow)).clamp(0.0, 1.0);
+            }
+
+            for c in 0..3 {
+                pixel[c] = srgb_u8(sample[c]);
+            }
+            pixel[3] = 255;
+            continue;
+        }
+
+        let in_outer =
+            px >= outer_min_x && px <= outer_max_x && py >= outer_min_y && py <= outer_max_y;
+
+        if in_outer && bevel_px > 0.0 {
+            let dist_left = (window_x - px).max(0.0);
+            let dist_right = (px - window_max_x).max(0.0);
+            let dist_top = (window_y - py).max(0.0);
+            let dist_bottom = (py - window_max_y).max(0.0);
+            let edge_distance = dist_left
+                .max(dist_right)
+                .max(dist_top)
+                .max(dist_bottom)
+                .min(bevel_px);
+
+            let (edge_normal_xy, _) =
+                if dist_left >= dist_right && dist_left >= dist_top && dist_left >= dist_bottom {
+                    ([-1.0, 0.0], dist_left)
+                } else if dist_right >= dist_top && dist_right >= dist_bottom {
+                    ([1.0, 0.0], dist_right)
+                } else if dist_top >= dist_bottom {
+                    ([0.0, -1.0], dist_top)
+                } else {
+                    ([0.0, 1.0], dist_bottom)
+                };
+
+            let mut normal = [
+                edge_normal_xy[0] * bevel_xy,
+                edge_normal_xy[1] * bevel_xy,
+                bevel_z,
+            ];
+            normal = normalize3(normal);
+            let dot = normal[0] * light[0] + normal[1] * light[1] + normal[2] * light[2];
+            let mut shade = if dot >= 0.0 {
+                0.88 + highlight_scale * dot
+            } else {
+                0.88 - shadow_scale * (-dot)
+            };
+            let depth = (edge_distance / bevel_px).clamp(0.0, 1.0);
+            shade *= lerp(1.04, 0.94, depth);
+            shade = shade.clamp(0.0, 1.0);
+            let dist_outer = (px - outer_min_x)
+                .min(outer_max_x - px)
+                .min(py - outer_min_y)
+                .min(outer_max_y - py)
+                .max(0.0);
+            let blend = smoothstep(dist_outer.clamp(0.0, 1.0));
+            for c in 0..3 {
+                let bevel_color = shade;
+                let value = lerp(base_color[c], bevel_color, blend).clamp(0.0, 1.0);
+                pixel[c] = srgb_u8(value);
+            }
+            pixel[3] = 255;
+        } else {
+            for c in 0..3 {
+                pixel[c] = srgb_u8(base_color[c]);
+            }
+            pixel[3] = 255;
+        }
     }
 
     mat
@@ -1373,6 +1529,59 @@ fn fbm_noise(seed: u64, x: f32, y: f32, octaves: u32) -> f32 {
     } else {
         0.5
     }
+}
+
+fn normalize3(v: [f32; 3]) -> [f32; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len <= f32::EPSILON {
+        [0.0, 0.0, 1.0]
+    } else {
+        [v[0] / len, v[1] / len, v[2] / len]
+    }
+}
+
+fn normalize2(v: [f32; 2]) -> [f32; 2] {
+    let len = (v[0] * v[0] + v[1] * v[1]).sqrt();
+    if len <= f32::EPSILON {
+        [0.0, 0.0]
+    } else {
+        [v[0] / len, v[1] / len]
+    }
+}
+
+fn sample_bilinear(img: &RgbaImage, x: f32, y: f32) -> [f32; 3] {
+    let w = img.width();
+    let h = img.height();
+    if w == 0 || h == 0 {
+        return [0.0, 0.0, 0.0];
+    }
+    let max_x = (w - 1) as f32;
+    let max_y = (h - 1) as f32;
+    let xf = x.clamp(0.0, max_x);
+    let yf = y.clamp(0.0, max_y);
+    let x0 = xf.floor() as u32;
+    let y0 = yf.floor() as u32;
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let tx = xf - x0 as f32;
+    let ty = yf - y0 as f32;
+
+    let p00 = img.get_pixel(x0, y0);
+    let p10 = img.get_pixel(x1, y0);
+    let p01 = img.get_pixel(x0, y1);
+    let p11 = img.get_pixel(x1, y1);
+
+    let mut result = [0.0f32; 3];
+    for c in 0..3 {
+        let c00 = p00[c] as f32 / 255.0;
+        let c10 = p10[c] as f32 / 255.0;
+        let c01 = p01[c] as f32 / 255.0;
+        let c11 = p11[c] as f32 / 255.0;
+        let c0 = lerp(c00, c10, tx);
+        let c1 = lerp(c01, c11, tx);
+        result[c] = lerp(c0, c1, ty);
+    }
+    result
 }
 
 fn compute_cover_rect(

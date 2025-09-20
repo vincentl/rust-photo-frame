@@ -28,8 +28,9 @@ matting:
 # matting:
 #   type: studio
 #   minimum-mat-percentage: 3.5
-#   bevel-width: 6.0
-#   texture-strength: 0.1
+#   bevel-width: 3.0
+#   image-overlap-px: 4.0
+#   linen-intensity: 0.6
 # Example fixed background image scaled to cover the screen:
 # matting:
 #   type: fixed-image

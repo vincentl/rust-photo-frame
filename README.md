@@ -93,12 +93,19 @@ The `matting` table chooses how the background behind each photo is prepared.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `bevel-width` | float | `8.0` | Width of the beveled edge expressed as a percentage of the shorter canvas dimension. |
-| `highlight-strength` | float | `0.25` | Amount of brightening applied to the top/left bevel edges (0–1). |
-| `shadow-strength` | float | `0.3` | Amount of darkening applied to the bottom/right bevel edges (0–1). |
-| `texture-strength` | float | `0.08` | Blending factor for the subtle paper texture noise (0–1). |
+| `bevel-width` | float | `3.0` | Visible width of the white bevel band in pixels. |
+| `highlight-strength` | float | `1.0` | Intensity of the light-side bevel shading (0–1). |
+| `shadow-strength` | float | `1.0` | Intensity of the shadow-side bevel shading (0–1). |
+| `image-overlap-px` | float | `4.0` | Amount of mat overlap on each side of the photo window in pixels. |
+| `bevel-angle-deg` | float | `45.0` | Angle of the beveled cut used to shape the lighting falloff. |
+| `linen-intensity` | float | `0.7` | Strength of the linen weave luminance modulation (0–1). Alias: `texture-strength`. |
+| `linen-scale-px` | float | `900.0` | Approximate pixel scale of the linen weave repeat. |
+| `linen-rotation-deg` | float | `12.0` | Rotation of the linen texture in degrees. |
+| `light-dir` | `[x, y, z]` array | `[-0.6, -0.8, 0.2]` | Normalized light direction used for bevel shading. |
+| `shadow-radius-px` | float | `1.0` | Radius of the soft drop shadow that falls onto the photo. |
+| `shadow-offset-px` | float | `0.75` | Offset of the inner drop shadow projected into the photo (pixels along the bevel normal). |
 
-The studio mat derives its base color from the average of the displayed photo, then layers a beveled vignette and paper texture for a gallery-style presentation.
+The studio mat derives a uniform base color from the photo’s average RGB, applies a subtle linen weave in luminance only, renders a mitred white bevel using the supplied lighting parameters, and reveals the cropped photo through the window with a soft inner shadow for depth.
 
 #### `type: fixed-image`
 
