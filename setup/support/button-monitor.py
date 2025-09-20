@@ -57,7 +57,7 @@ def main() -> int:
     except BadPinFactory as exc:
         logging.error("Failed to initialize GPIO pin factory: %s", exc)
         logging.error(
-            "Ensure the lgpio package is installed and the service has access to /dev/gpiomem"
+            "Ensure the python3-rpi-lgpio package is installed and the service has access to /dev/gpiomem"
         )
         return 1
     except Exception as exc:  # noqa: BLE001 - log unexpected hardware init errors
