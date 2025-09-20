@@ -15,6 +15,11 @@ fi
 echo "[03-configure-button-monitor] Installing Python dependencies..."
 apt-get install -y python3 python3-gpiozero python3-pip python3-venv
 
+if [[ "${SERVICE_USER}" != "root" ]]; then
+    echo "[03-configure-button-monitor] Ensuring ${SERVICE_USER} has GPIO/video access..."
+    usermod -aG gpio,video "${SERVICE_USER}"
+fi
+
 mkdir -p "${INSTALL_DIR}"
 cp "${SCRIPT_SRC}" "${SCRIPT_DEST}"
 chmod 755 "${SCRIPT_DEST}"
@@ -32,6 +37,7 @@ ExecStart=/usr/bin/env python3 ${SCRIPT_DEST}
 Restart=on-failure
 User=${SERVICE_USER}
 Group=${SERVICE_USER}
+SupplementaryGroups=gpio video
 Environment=BUTTON_GPIO=17
 
 [Install]
