@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{ensure, Result};
 use serde::Deserialize;
@@ -118,6 +119,8 @@ pub struct Configuration {
     pub startup_shuffle_seed: Option<u64>,
     /// Matting configuration for displayed photos.
     pub matting: MattingOptions,
+    /// Playlist weighting options for how frequently new photos repeat.
+    pub playlist: PlaylistOptions,
 }
 
 impl Configuration {
@@ -139,6 +142,7 @@ impl Configuration {
         ensure!(self.oversample > 0.0, "oversample must be positive");
         ensure!(self.fade_ms > 0, "fade-ms must be greater than zero");
         ensure!(self.dwell_ms > 0, "dwell-ms must be greater than zero");
+        self.playlist.validate()?;
         Ok(self)
     }
 }
@@ -154,6 +158,57 @@ impl Default for Configuration {
             loader_max_concurrent_decodes: 4,
             startup_shuffle_seed: None,
             matting: MattingOptions::default(),
+            playlist: PlaylistOptions::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct PlaylistOptions {
+    /// Initial multiplicity for brand new photos.
+    pub new_multiplicity: u32,
+    /// Half-life duration controlling the exponential decay of multiplicity.
+    #[serde(with = "humantime_serde")]
+    pub half_life: Duration,
+}
+
+impl PlaylistOptions {
+    const fn default_new_multiplicity() -> u32 {
+        3
+    }
+
+    const fn default_half_life() -> Duration {
+        Duration::from_secs(60 * 60 * 24)
+    }
+
+    pub fn multiplicity_for(&self, created_at: SystemTime, now: SystemTime) -> usize {
+        let age = now.duration_since(created_at).unwrap_or_default();
+        let half_life = self.half_life.max(Duration::from_secs(1));
+        let exponent = age.as_secs_f64() / half_life.as_secs_f64();
+        let base = f64::from(self.new_multiplicity.max(1));
+        let weight = base * 0.5_f64.powf(exponent);
+        weight.ceil().max(1.0) as usize
+    }
+
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.new_multiplicity >= 1,
+            "playlist.new-multiplicity must be >= 1"
+        );
+        ensure!(
+            self.half_life > Duration::from_secs(0),
+            "playlist.half-life must be positive"
+        );
+        Ok(())
+    }
+}
+
+impl Default for PlaylistOptions {
+    fn default() -> Self {
+        Self {
+            new_multiplicity: Self::default_new_multiplicity(),
+            half_life: Self::default_half_life(),
         }
     }
 }
