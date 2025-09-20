@@ -49,8 +49,25 @@ pub enum MattingMode {
         highlight_strength: f32,
         #[serde(default = "MattingMode::default_studio_shadow_strength")]
         shadow_strength: f32,
-        #[serde(default = "MattingMode::default_studio_texture_strength")]
-        texture_strength: f32,
+        #[serde(default = "MattingMode::default_studio_image_overlap")]
+        image_overlap_px: f32,
+        #[serde(default = "MattingMode::default_studio_bevel_angle")]
+        bevel_angle_deg: f32,
+        #[serde(
+            default = "MattingMode::default_studio_linen_intensity",
+            alias = "texture-strength"
+        )]
+        linen_intensity: f32,
+        #[serde(default = "MattingMode::default_studio_linen_scale")]
+        linen_scale_px: f32,
+        #[serde(default = "MattingMode::default_studio_linen_rotation")]
+        linen_rotation_deg: f32,
+        #[serde(default = "MattingMode::default_studio_light_dir")]
+        light_dir: [f32; 3],
+        #[serde(default = "MattingMode::default_studio_shadow_radius")]
+        shadow_radius_px: f32,
+        #[serde(default = "MattingMode::default_studio_shadow_offset")]
+        shadow_offset_px: f32,
     },
     FixedImage {
         path: PathBuf,
@@ -157,19 +174,47 @@ impl MattingMode {
     }
 
     const fn default_studio_bevel_width() -> f32 {
-        8.0
+        3.0
     }
 
     const fn default_studio_highlight_strength() -> f32 {
-        0.25
+        1.0
     }
 
     const fn default_studio_shadow_strength() -> f32 {
-        0.3
+        1.0
     }
 
-    const fn default_studio_texture_strength() -> f32 {
-        0.08
+    const fn default_studio_image_overlap() -> f32 {
+        4.0
+    }
+
+    const fn default_studio_bevel_angle() -> f32 {
+        45.0
+    }
+
+    const fn default_studio_linen_intensity() -> f32 {
+        0.7
+    }
+
+    const fn default_studio_linen_scale() -> f32 {
+        900.0
+    }
+
+    const fn default_studio_linen_rotation() -> f32 {
+        12.0
+    }
+
+    const fn default_studio_light_dir() -> [f32; 3] {
+        [-0.6, -0.8, 0.2]
+    }
+
+    const fn default_studio_shadow_radius() -> f32 {
+        1.0
+    }
+
+    const fn default_studio_shadow_offset() -> f32 {
+        0.75
     }
 }
 
