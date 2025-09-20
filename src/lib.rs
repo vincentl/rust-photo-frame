@@ -6,3 +6,4 @@ pub mod tasks {
     pub mod manager;
     pub mod viewer;
 }
+pub mod processing;
