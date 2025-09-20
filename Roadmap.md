@@ -61,6 +61,7 @@
     - [ ] Studio mat (average color + textured bevel).
     - [ ] Blur mat (scaled background fill).
     - [ ] Configurable minimum mat size.
+    - [ ] Fixed background image that is scaled to fit screen and images are overlayed
 - [ ] **User web interface**
   - [ ] Local web server for configuration (cloud, mats, screen schedule, photo timing).
   - [ ] Access limited to local network.
