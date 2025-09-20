@@ -108,8 +108,9 @@ async fn main() -> Result<()> {
         let displayed_rx = displayed_rx;
         let to_load_tx = to_load_tx.clone();
         let cancel = cancel.clone();
+        let playlist = cfg.playlist.clone();
         async move {
-            tasks::manager::run(inv_rx, displayed_rx, to_load_tx, cancel)
+            tasks::manager::run(inv_rx, displayed_rx, to_load_tx, cancel, playlist)
                 .await
                 .context("manager task failed")
         }
