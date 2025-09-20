@@ -3,8 +3,6 @@ use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
 use crate::processing::blur::apply_blur;
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
 use image::{imageops, Rgba, RgbaImage};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::VecDeque;
@@ -154,6 +152,11 @@ pub fn run_windowed(
 
         let (canvas_w, canvas_h) = compute_canvas_size(screen_w, screen_h, oversample, max_dim);
         let margin = (matting.minimum_mat_percentage / 100.0).clamp(0.0, 0.45);
+        let max_upscale = matting.max_upscale_factor.max(1.0);
+        let (final_w, final_h) =
+            resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
+        let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
+
         let mut background = match matting.style {
             MattingMode::FixedColor { color } => {
                 let px = Rgba([color[0], color[1], color[2], 255]);
@@ -232,46 +235,22 @@ pub fn run_windowed(
                 texture_strength,
             } => {
                 let avg = average_color(&src);
-                let base = Rgba([
-                    (avg[0] * 255.0).round().clamp(0.0, 255.0) as u8,
-                    (avg[1] * 255.0).round().clamp(0.0, 255.0) as u8,
-                    (avg[2] * 255.0).round().clamp(0.0, 255.0) as u8,
-                    255,
-                ]);
-                let mut mat = RgbaImage::from_pixel(canvas_w, canvas_h, base);
-                let bevel_px =
-                    (canvas_w.min(canvas_h) as f32) * (bevel_width.max(0.0) / 100.0).max(0.5);
-                let bevel_px = bevel_px.max(1.0);
-                let highlight_strength = highlight_strength.clamp(0.0, 1.0);
-                let shadow_strength = shadow_strength.clamp(0.0, 1.0);
-                let texture_strength = texture_strength.clamp(0.0, 1.0);
-                let mut rng = studio_rng(path.as_path(), width, height, canvas_w, canvas_h);
-                for (x, y, pixel) in mat.enumerate_pixels_mut() {
-                    let xf = x as f32;
-                    let yf = y as f32;
-                    let inv_x = (canvas_w.saturating_sub(1) as f32 - xf).max(0.0);
-                    let inv_y = (canvas_h.saturating_sub(1) as f32 - yf).max(0.0);
-                    let left = (1.0 - (xf / bevel_px)).clamp(0.0, 1.0);
-                    let top = (1.0 - (yf / bevel_px)).clamp(0.0, 1.0);
-                    let right = (1.0 - (inv_x / bevel_px)).clamp(0.0, 1.0);
-                    let bottom = (1.0 - (inv_y / bevel_px)).clamp(0.0, 1.0);
-                    let highlight = ((left + top) * 0.5).powf(1.35) * highlight_strength;
-                    let shadow = ((right + bottom) * 0.5).powf(1.35) * shadow_strength;
-                    let shade = (1.0 + highlight - shadow).clamp(0.2, 2.5);
-                    let noise = if texture_strength > 0.0 {
-                        (rng.gen::<f32>() * 2.0 - 1.0) * texture_strength * 0.2
-                    } else {
-                        0.0
-                    };
-                    for c in 0..3 {
-                        let base = (pixel[c] as f32) / 255.0;
-                        let mut value = base * shade + noise;
-                        value = value.clamp(0.0, 1.0);
-                        pixel[c] = (value * 255.0).round().clamp(0.0, 255.0) as u8;
-                    }
-                    pixel[3] = 255;
-                }
-                mat
+                render_studio_mat(
+                    path.as_path(),
+                    width,
+                    height,
+                    canvas_w,
+                    canvas_h,
+                    offset_x,
+                    offset_y,
+                    final_w,
+                    final_h,
+                    avg,
+                    bevel_width,
+                    highlight_strength,
+                    shadow_strength,
+                    texture_strength,
+                )
             }
             MattingMode::FixedImage { fit, .. } => {
                 if let Some(bg) = matting.runtime.fixed_image.as_ref() {
@@ -346,15 +325,11 @@ pub fn run_windowed(
             }
         };
 
-        let max_upscale = matting.max_upscale_factor.max(1.0);
-        let (final_w, final_h) =
-            resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
         let main_img = if final_w == width && final_h == height {
             src
         } else {
             imageops::resize(&src, final_w, final_h, imageops::FilterType::Triangle)
         };
-        let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
         imageops::overlay(&mut background, &main_img, offset_x as i64, offset_y as i64);
 
         let canvas = ImagePlane {
@@ -1202,24 +1177,202 @@ fn average_color_rgba(img: &RgbaImage) -> Rgba<u8> {
     ])
 }
 
-fn studio_rng(
+fn render_studio_mat(
     path: &std::path::Path,
     src_w: u32,
     src_h: u32,
     canvas_w: u32,
     canvas_h: u32,
-) -> StdRng {
+    inner_x: u32,
+    inner_y: u32,
+    inner_w: u32,
+    inner_h: u32,
+    avg_color: [f32; 3],
+    bevel_width: f32,
+    highlight_strength: f32,
+    shadow_strength: f32,
+    texture_strength: f32,
+) -> RgbaImage {
+    let highlight_strength = highlight_strength.clamp(0.0, 1.5);
+    let shadow_strength = shadow_strength.clamp(0.0, 1.5);
+    let texture_strength = texture_strength.clamp(0.0, 1.0);
+
+    let seed = studio_seed(
+        path, src_w, src_h, canvas_w, canvas_h, inner_x, inner_y, inner_w, inner_h,
+    );
+    let coarse_seed = seed;
+    let fine_seed = seed.rotate_left(17) ^ 0xa076_1d64_78bd_642f;
+    let fiber_seed = seed.rotate_left(29) ^ 0xe703_7ed1_a0b4_28db;
+
+    let inner_right = inner_x.saturating_add(inner_w);
+    let inner_bottom = inner_y.saturating_add(inner_h);
+    let left_border = inner_x as f32;
+    let top_border = inner_y as f32;
+    let right_border = canvas_w.saturating_sub(inner_right) as f32;
+    let bottom_border = canvas_h.saturating_sub(inner_bottom) as f32;
+    let available = left_border
+        .min(top_border)
+        .min(right_border)
+        .min(bottom_border);
+    let bevel_ratio = (bevel_width.max(0.0)) / 100.0;
+    let mut bevel_px = (canvas_w.min(canvas_h) as f32) * bevel_ratio;
+    bevel_px = bevel_px.max(1.0).min(available.max(1.0));
+    let inv_bevel = 1.0 / bevel_px.max(1.0);
+
+    let center_x = (canvas_w as f32) * 0.5;
+    let center_y = (canvas_h as f32) * 0.5;
+
+    let luma = (avg_color[0] * 0.299 + avg_color[1] * 0.587 + avg_color[2] * 0.114).clamp(0.0, 1.0);
+    let mut base = [0.0f32; 3];
+    for (i, channel) in base.iter_mut().enumerate() {
+        let softened = lerp(luma, avg_color[i], 0.6);
+        *channel = lerp(softened, 0.92, 0.25).clamp(0.04, 0.98);
+    }
+
+    let mut mat = RgbaImage::new(canvas_w, canvas_h);
+    for (x, y, pixel) in mat.enumerate_pixels_mut() {
+        let px = x as f32 + 0.5;
+        let py = y as f32 + 0.5;
+
+        let dist_left = (inner_x as f32 - px).max(0.0);
+        let dist_top = (inner_y as f32 - py).max(0.0);
+        let dist_right = (px - inner_right as f32).max(0.0);
+        let dist_bottom = (py - inner_bottom as f32).max(0.0);
+
+        let left_term = ((bevel_px - dist_left).max(0.0) * inv_bevel).powf(1.6);
+        let top_term = ((bevel_px - dist_top).max(0.0) * inv_bevel).powf(1.6);
+        let right_term = ((bevel_px - dist_right).max(0.0) * inv_bevel).powf(1.6);
+        let bottom_term = ((bevel_px - dist_bottom).max(0.0) * inv_bevel).powf(1.6);
+
+        let highlight = ((left_term + top_term) * 0.5) * highlight_strength;
+        let shadow = ((right_term + bottom_term) * 0.5) * shadow_strength;
+
+        let inner_dist = dist_left.min(dist_top).min(dist_right).min(dist_bottom);
+        let bevel_profile = ((bevel_px - inner_dist).max(0.0) * inv_bevel).powf(2.0);
+        let bevel_pop = bevel_profile * 0.18 * (highlight_strength + shadow_strength).max(0.2);
+
+        let diag = ((px - inner_x as f32) - (py - inner_y as f32))
+            / ((inner_w.max(1) + inner_h.max(1)) as f32);
+        let diag_emphasis = diag * 0.2 * (highlight_strength - shadow_strength);
+
+        let mut shade = 1.0 + highlight - shadow + bevel_pop + diag_emphasis;
+        let dx = (px - center_x) / (canvas_w.max(1) as f32);
+        let dy = (py - center_y) / (canvas_h.max(1) as f32);
+        let radial = (dx * dx + dy * dy).sqrt();
+        shade *= 1.0 - radial.powf(1.35) * 0.05;
+        let shade = shade.clamp(0.25, 3.0);
+
+        let texture = if texture_strength > 0.0 {
+            let coarse = fbm_noise(coarse_seed, px * 0.018, py * 0.018, 5);
+            let fine = fbm_noise(fine_seed, px * 0.07, py * 0.07, 3);
+            let fibers = fbm_noise(
+                fiber_seed,
+                px * 0.12 + py * 0.018,
+                py * 0.12 - px * 0.018,
+                3,
+            );
+            let combined = (coarse * 0.6 + fine * 0.4 - 0.5) * 0.55 + (fibers - 0.5) * 0.35;
+            combined * texture_strength
+        } else {
+            0.0
+        };
+
+        for c in 0..3 {
+            let mut value = base[c] * shade + texture;
+            value = value.clamp(0.0, 1.0);
+            pixel[c] = srgb_u8(value);
+        }
+        pixel[3] = 255;
+    }
+
+    mat
+}
+
+fn studio_seed(
+    path: &std::path::Path,
+    src_w: u32,
+    src_h: u32,
+    canvas_w: u32,
+    canvas_h: u32,
+    inner_x: u32,
+    inner_y: u32,
+    inner_w: u32,
+    inner_h: u32,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
-    let hash = hasher.finish();
-    let mut seed = [0u8; 32];
-    seed[0..8].copy_from_slice(&hash.to_le_bytes());
-    seed[8..12].copy_from_slice(&src_w.to_le_bytes());
-    seed[12..16].copy_from_slice(&src_h.to_le_bytes());
-    seed[16..20].copy_from_slice(&canvas_w.to_le_bytes());
-    seed[20..24].copy_from_slice(&canvas_h.to_le_bytes());
-    seed[24..32].copy_from_slice(&(hash.rotate_left(32)).to_le_bytes());
-    StdRng::from_seed(seed)
+    src_w.hash(&mut hasher);
+    src_h.hash(&mut hasher);
+    canvas_w.hash(&mut hasher);
+    canvas_h.hash(&mut hasher);
+    inner_x.hash(&mut hasher);
+    inner_y.hash(&mut hasher);
+    inner_w.hash(&mut hasher);
+    inner_h.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn srgb_u8(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn hash_2d(seed: u64, x: i32, y: i32) -> f32 {
+    let mut v = seed
+        .wrapping_add((x as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+        .wrapping_add((y as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9));
+    v ^= v >> 30;
+    v = v.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    v ^= v >> 27;
+    v = v.wrapping_mul(0x94d0_49bb_1331_11eb);
+    v ^= v >> 31;
+    (v as f64 / u64::MAX as f64) as f32
+}
+
+fn value_noise(seed: u64, x: f32, y: f32) -> f32 {
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let xf = x - x0 as f32;
+    let yf = y - y0 as f32;
+    let n00 = hash_2d(seed, x0, y0);
+    let n10 = hash_2d(seed, x0 + 1, y0);
+    let n01 = hash_2d(seed, x0, y0 + 1);
+    let n11 = hash_2d(seed, x0 + 1, y0 + 1);
+    let u = smoothstep(xf);
+    let v = smoothstep(yf);
+    let nx0 = lerp(n00, n10, u);
+    let nx1 = lerp(n01, n11, u);
+    lerp(nx0, nx1, v)
+}
+
+fn fbm_noise(seed: u64, x: f32, y: f32, octaves: u32) -> f32 {
+    let mut frequency = 1.0f32;
+    let mut amplitude = 1.0f32;
+    let mut sum = 0.0f32;
+    let mut total = 0.0f32;
+    let mut cur_seed = seed;
+    for _ in 0..octaves.max(1) {
+        sum += value_noise(cur_seed, x * frequency, y * frequency) * amplitude;
+        total += amplitude;
+        frequency *= 2.0;
+        amplitude *= 0.5;
+        cur_seed = cur_seed
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(0x243f_6a88_85a3_08d3);
+    }
+    if total > f32::EPSILON {
+        sum / total
+    } else {
+        0.5
+    }
 }
 
 fn compute_cover_rect(
