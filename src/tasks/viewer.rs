@@ -1,5 +1,6 @@
 use crate::config::{MattingMode, MattingOptions};
 use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
+use crate::processing::blur;
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
 use image::{imageops, DynamicImage, Rgba, RgbaImage};
 use std::borrow::Cow;
@@ -169,8 +170,13 @@ pub fn run_windowed(
                     bg = canvas;
                 }
                 if sigma > 0.0 {
-                    let dynamic = DynamicImage::ImageRgba8(bg);
-                    imageops::blur(&dynamic, sigma)
+                    if let Some(gpu) = blur::try_gpu_blur(&bg, sigma) {
+                        bg = gpu;
+                    } else {
+                        let dynamic = DynamicImage::ImageRgba8(bg);
+                        bg = imageops::blur(&dynamic, sigma);
+                    }
+                    bg
                 } else {
                     bg
                 }
