@@ -8,7 +8,7 @@ mod tasks {
     pub mod viewer;
 }
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use std::io::{self, Read};
 use std::path::PathBuf;
@@ -43,7 +43,10 @@ async fn main() -> Result<()> {
         .init();
 
     let Args { config } = Args::parse();
-    let cfg = config::Configuration::from_yaml_file(&config)?;
+    let cfg = config::Configuration::from_yaml_file(&config)
+        .with_context(|| format!("failed to load configuration from {}", config.display()))?
+        .validated()
+        .context("invalid configuration values")?;
     tracing::info!(
         "Loaded configuration from {}:\n{:#?}",
         config.display(),
@@ -59,12 +62,27 @@ async fn main() -> Result<()> {
 
     let cancel = CancellationToken::new();
 
-    // Ctrl-D cancels
+    // Ctrl-D/Ctrl-C cancel the pipeline
     {
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || {
             let mut sink = Vec::new();
-            let _ = io::stdin().read_to_end(&mut sink);
+            match io::stdin().read_to_end(&mut sink) {
+                Ok(_) => tracing::info!("stdin closed; initiating shutdown"),
+                Err(err) => tracing::warn!("stdin watcher failed: {err}"),
+            }
+            cancel.cancel();
+        });
+    }
+
+    {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            if let Err(err) = tokio::signal::ctrl_c().await {
+                tracing::warn!("ctrl-c handler failed: {err}");
+                return;
+            }
+            tracing::info!("ctrl-c received; initiating shutdown");
             cancel.cancel();
         });
     }
@@ -77,7 +95,11 @@ async fn main() -> Result<()> {
         let inv_tx = inv_tx.clone();
         let invalid_rx = invalid_rx;
         let cancel = cancel.clone();
-        async move { tasks::files::run(cfg, inv_tx, invalid_rx, cancel).await }
+        async move {
+            tasks::files::run(cfg, inv_tx, invalid_rx, cancel)
+                .await
+                .context("files task failed")
+        }
     });
 
     // PhotoManager
@@ -86,7 +108,11 @@ async fn main() -> Result<()> {
         let displayed_rx = displayed_rx;
         let to_load_tx = to_load_tx.clone();
         let cancel = cancel.clone();
-        async move { tasks::manager::run(inv_rx, displayed_rx, to_load_tx, cancel).await }
+        async move {
+            tasks::manager::run(inv_rx, displayed_rx, to_load_tx, cancel)
+                .await
+                .context("manager task failed")
+        }
     });
 
     // PhotoLoader
@@ -96,15 +122,20 @@ async fn main() -> Result<()> {
         let loaded_tx = loaded_tx.clone();
         let cancel = cancel.clone();
         let max_in_flight = cfg.loader_max_concurrent_decodes;
-        async move { tasks::loader::run(to_load_rx, invalid_tx, loaded_tx, cancel, max_in_flight).await }
+        async move {
+            tasks::loader::run(to_load_rx, invalid_tx, loaded_tx, cancel, max_in_flight)
+                .await
+                .context("loader task failed")
+        }
     });
 
     // Run the windowed viewer on the main thread (blocking) after spawning other tasks
     // This call returns when the window closes or cancellation occurs
     if let Err(e) =
         tasks::viewer::run_windowed(loaded_rx, displayed_tx.clone(), cancel.clone(), cfg.clone())
+            .context("viewer failed")
     {
-        tracing::error!("viewer error: {e:?}");
+        tracing::error!("{e:?}");
     }
     // Ensure other tasks are asked to stop
     cancel.cancel();
