@@ -5,7 +5,7 @@ This roadmap tracks the tasks required to automate the provisioning of a Raspber
 ## Completed in this iteration
 - [x] Establish initial `setup/` directory structure and module loader scaffolding.
 - [x] Draft initial instructions covering Raspberry Pi imaging, SSH setup, repository cloning, and invoking automation scripts.
-- [x] Create base setup modules for OS updates, display boot configuration, Rust installation, and button monitoring prerequisites.
+- [x] Create base setup modules for OS updates, display boot configuration, and Rust installation.
 
 ## TODO
 - [ ] Document kiosk mode configuration and automation of the rust-photo-frame service.
