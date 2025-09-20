@@ -81,7 +81,21 @@ The multiplicity for each photo is computed as:
 multiplicity(age) = ceil(max(1, new_multiplicity) * 0.5^(age / half_life))
 ```
 
-Where `age` is the difference between the current time and the photo's creation timestamp. The `half-life` duration controls how quickly the multiplicity decays; once a photo's age reaches one half-life the multiplicity halves. Each cycle shuffles the scheduled copies so every photo appears at least once, and new arrivals are pinned to the front of the queue so their first showing happens immediately.
+Where `age` is the difference between the active playlist clock and the photo's creation timestamp. By default the clock is `SystemTime::now()`, but you can freeze it for testing with the `--playlist-now <RFC3339>` CLI flag. The `half-life` duration controls how quickly the multiplicity decays; once a photo's age reaches one half-life the multiplicity halves. Each cycle shuffles the scheduled copies so every photo appears at least once, and new arrivals are pinned to the front of the queue so their first showing happens immediately.
+
+#### Testing the weighting
+
+Use the new dry-run tooling to validate a configuration without launching the UI:
+
+```bash
+cargo run --release -- \
+  config.yaml \
+  --playlist-now 2025-01-01T00:00:00Z \
+  --playlist-dry-run 32 \
+  --playlist-seed 1234
+```
+
+The command prints the multiplicity assigned to each discovered photo and the first 32 scheduled entries according to the weighted queue. Run with `RUST_LOG=info` (or `debug` for per-photo weights) during a normal session to watch the manager log the same multiplicity calculations as the playlist rebuilds.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |

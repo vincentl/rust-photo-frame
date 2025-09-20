@@ -9,7 +9,7 @@ use tokio::select;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Orchestrates the playlist and paces the show via the async send to `loader`.
 ///
@@ -26,8 +26,14 @@ pub async fn run(
     to_loader: Sender<LoadPhoto>,
     cancel: CancellationToken,
     options: PlaylistOptions,
+    now_override: Option<SystemTime>,
+    seed_override: Option<u64>,
 ) -> Result<()> {
-    let mut playlist = PlaylistState::new(options);
+    let rng = match seed_override {
+        Some(seed) => StdRng::seed_from_u64(seed),
+        None => StdRng::from_entropy(),
+    };
+    let mut playlist = PlaylistState::with_rng(options, rng, now_override);
 
     loop {
         playlist.ensure_ready();
@@ -107,17 +113,19 @@ struct PlaylistState {
     rng: StdRng,
     options: PlaylistOptions,
     dirty: bool,
+    now_override: Option<SystemTime>,
 }
 
 impl PlaylistState {
-    fn new(options: PlaylistOptions) -> Self {
+    fn with_rng(options: PlaylistOptions, rng: StdRng, now_override: Option<SystemTime>) -> Self {
         Self {
             queue: VecDeque::new(),
             known: HashMap::new(),
             prioritized: Vec::new(),
-            rng: StdRng::from_entropy(),
+            rng,
             options,
             dirty: true,
+            now_override,
         }
     }
 
@@ -135,17 +143,19 @@ impl PlaylistState {
             return;
         }
 
-        let now = SystemTime::now();
+        let now = self.now_override.unwrap_or_else(SystemTime::now);
         let prioritized = std::mem::take(&mut self.prioritized);
         let prioritized_set: HashSet<PathBuf> = prioritized.iter().cloned().collect();
         let mut front: Vec<PathBuf> = Vec::new();
         let mut rest: Vec<PathBuf> = Vec::new();
+        let mut multiplicities: Vec<(PathBuf, usize)> = Vec::new();
 
         for info in self.known.values() {
             let multiplicity = self.options.multiplicity_for(info.created_at, now);
             if multiplicity == 0 {
                 continue;
             }
+            multiplicities.push((info.path.clone(), multiplicity));
             if prioritized_set.contains(&info.path) {
                 front.push(info.path.clone());
                 for _ in 1..multiplicity {
@@ -175,6 +185,22 @@ impl PlaylistState {
 
         self.queue = queue;
         self.dirty = false;
+
+        for (path, multiplicity) in &multiplicities {
+            debug!(
+                path = %path.display(),
+                multiplicity,
+                now = ?now,
+                "playlist multiplicity"
+            );
+        }
+        info!(
+            photos = multiplicities.len(),
+            scheduled = self.queue.len(),
+            prioritized = prioritized_set.len(),
+            now = ?now,
+            "playlist rebuilt"
+        );
     }
 
     fn peek(&self) -> Option<&PathBuf> {
@@ -213,4 +239,38 @@ impl PlaylistState {
             self.dirty = true;
         }
     }
+}
+
+pub fn simulate_playlist<I>(
+    photos: I,
+    options: PlaylistOptions,
+    now: SystemTime,
+    iterations: usize,
+    seed: Option<u64>,
+) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = PhotoInfo>,
+{
+    let rng = match seed {
+        Some(seed) => StdRng::seed_from_u64(seed),
+        None => StdRng::from_entropy(),
+    };
+    let mut playlist = PlaylistState::with_rng(options, rng, Some(now));
+
+    for info in photos {
+        playlist.record_add(info);
+    }
+
+    let mut plan = Vec::new();
+    for _ in 0..iterations {
+        playlist.ensure_ready();
+        if let Some(next) = playlist.peek().cloned() {
+            plan.push(next.clone());
+            playlist.mark_sent(&next);
+        } else {
+            break;
+        }
+    }
+
+    plan
 }

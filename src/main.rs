@@ -10,8 +10,10 @@ mod tasks {
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use humantime::{format_rfc3339, parse_rfc3339};
 use std::io::{self, Read};
 use std::path::PathBuf;
+use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -29,6 +31,15 @@ struct Args {
     /// Path to YAML config
     #[arg(value_name = "CONFIG")]
     config: PathBuf,
+    /// Freeze playlist weighting at this RFC 3339 instant (useful for tests)
+    #[arg(long = "playlist-now", value_name = "RFC3339")]
+    playlist_now: Option<String>,
+    /// Print the weighted playlist order without launching the UI
+    #[arg(long = "playlist-dry-run", value_name = "ITERATIONS")]
+    playlist_dry_run: Option<usize>,
+    /// Deterministic RNG seed for playlist shuffling (applies to dry-run and live modes)
+    #[arg(long = "playlist-seed", value_name = "SEED")]
+    playlist_seed: Option<u64>,
 }
 
 #[tokio::main]
@@ -42,7 +53,18 @@ async fn main() -> Result<()> {
         .compact()
         .init();
 
-    let Args { config } = Args::parse();
+    let Args {
+        config,
+        playlist_now,
+        playlist_dry_run,
+        playlist_seed,
+    } = Args::parse();
+
+    let now_override = match playlist_now {
+        Some(ts) => Some(parse_rfc3339(&ts).context("failed to parse --playlist-now")?),
+        None => None,
+    };
+
     let cfg = config::Configuration::from_yaml_file(&config)
         .with_context(|| format!("failed to load configuration from {}", config.display()))?
         .validated()
@@ -52,6 +74,11 @@ async fn main() -> Result<()> {
         config.display(),
         cfg
     );
+
+    if let Some(iterations) = playlist_dry_run {
+        run_playlist_dry_run(&cfg, iterations, now_override, playlist_seed)?;
+        return Ok(());
+    }
 
     // Channels (small/bounded)
     let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(128); // Files -> Manager
@@ -109,10 +136,20 @@ async fn main() -> Result<()> {
         let to_load_tx = to_load_tx.clone();
         let cancel = cancel.clone();
         let playlist = cfg.playlist.clone();
+        let now_override = now_override;
+        let seed_override = playlist_seed;
         async move {
-            tasks::manager::run(inv_rx, displayed_rx, to_load_tx, cancel, playlist)
-                .await
-                .context("manager task failed")
+            tasks::manager::run(
+                inv_rx,
+                displayed_rx,
+                to_load_tx,
+                cancel,
+                playlist,
+                now_override,
+                seed_override,
+            )
+            .await
+            .context("manager task failed")
         }
     });
 
@@ -147,6 +184,57 @@ async fn main() -> Result<()> {
             Ok(Ok(())) => {}
             Ok(Err(e)) => tracing::error!("task error: {e:?}"),
             Err(e) => tracing::error!("join error: {e}"),
+        }
+    }
+
+    Ok(())
+}
+
+fn run_playlist_dry_run(
+    cfg: &config::Configuration,
+    iterations: usize,
+    now_override: Option<SystemTime>,
+    seed: Option<u64>,
+) -> Result<()> {
+    let now = now_override.unwrap_or_else(SystemTime::now);
+    let photos = tasks::files::discover_startup_photos(cfg)?;
+
+    println!(
+        "# playlist dry run\n# photos: {}\n# now: {}\n# iterations: {}\n# seed: {}\n",
+        photos.len(),
+        format_rfc3339(now),
+        iterations,
+        seed.map_or_else(|| "(random)".to_string(), |s| s.to_string())
+    );
+
+    if photos.is_empty() {
+        println!(
+            "(no photos discovered under {})",
+            cfg.photo_library_path.display()
+        );
+        return Ok(());
+    }
+
+    println!("# weights (multiplicity per cycle):");
+    for info in &photos {
+        let multiplicity = cfg.playlist.multiplicity_for(info.created_at, now);
+        println!("  {:>3} × {}", multiplicity, info.path.display());
+    }
+
+    let plan = tasks::manager::simulate_playlist(
+        photos.clone(),
+        cfg.playlist.clone(),
+        now,
+        iterations,
+        seed,
+    );
+
+    println!("\n# planned order:");
+    if plan.is_empty() {
+        println!("(playlist empty)");
+    } else {
+        for (idx, path) in plan.iter().enumerate() {
+            println!("  {:>4}: {}", idx + 1, path.display());
         }
     }
 

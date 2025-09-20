@@ -20,6 +20,8 @@ async fn manager_ignores_spurious_remove_and_sends_load_on_add() {
         to_load_tx,
         cancel.clone(),
         PlaylistOptions::default(),
+        None,
+        None,
     ));
 
     // Spurious remove for path never added
@@ -69,6 +71,8 @@ async fn manager_rotates_actual_sent_item() {
         to_load_tx,
         cancel.clone(),
         PlaylistOptions::default(),
+        None,
+        None,
     ));
 
     let initial_a = PathBuf::from("/photos/a.jpg");
@@ -141,4 +145,34 @@ async fn receive_with_timeout(rx: &mut mpsc::Receiver<LoadPhoto>) -> PathBuf {
 
 fn photo_info(path: PathBuf, created_at: SystemTime) -> PhotoInfo {
     PhotoInfo { path, created_at }
+}
+
+#[test]
+fn simulate_playlist_respects_seed_and_weights() {
+    let options = PlaylistOptions {
+        new_multiplicity: 3,
+        half_life: Duration::from_secs(86_400),
+    };
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let fresh_path = PathBuf::from("fresh.jpg");
+    let old_path = PathBuf::from("old.jpg");
+    let photos = vec![
+        photo_info(fresh_path.clone(), now - Duration::from_secs(3_600)),
+        photo_info(old_path.clone(), now - Duration::from_secs(86_400 * 30)),
+    ];
+
+    let plan = manager::simulate_playlist(photos.clone(), options.clone(), now, 8, Some(42));
+
+    assert!(plan.len() >= 4, "expected several scheduled items");
+    assert_eq!(plan[0], fresh_path, "fresh photo should appear first");
+
+    let fresh_count = plan.iter().filter(|p| *p == &fresh_path).count();
+    let old_count = plan.iter().filter(|p| *p == &old_path).count();
+    assert!(
+        fresh_count > old_count,
+        "fresh photo should repeat more often than old ones"
+    );
+
+    let plan_again = manager::simulate_playlist(photos, options, now, 8, Some(42));
+    assert_eq!(plan, plan_again, "seeded runs should be deterministic");
 }
