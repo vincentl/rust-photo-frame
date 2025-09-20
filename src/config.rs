@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
+
+use image::RgbaImage;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
@@ -15,6 +18,13 @@ pub struct MattingOptions {
     pub max_upscale_factor: f32,
     #[serde(flatten, default)]
     pub style: MattingMode,
+    #[serde(skip)]
+    pub runtime: MattingRuntime,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MattingRuntime {
+    pub fixed_image: Option<Arc<RgbaImage>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -32,6 +42,21 @@ pub enum MattingMode {
         #[serde(default)]
         backend: BlurBackend,
     },
+    Studio {
+        #[serde(default = "MattingMode::default_studio_bevel_width")]
+        bevel_width: f32,
+        #[serde(default = "MattingMode::default_studio_highlight_strength")]
+        highlight_strength: f32,
+        #[serde(default = "MattingMode::default_studio_shadow_strength")]
+        shadow_strength: f32,
+        #[serde(default = "MattingMode::default_studio_texture_strength")]
+        texture_strength: f32,
+    },
+    FixedImage {
+        path: PathBuf,
+        #[serde(default)]
+        fit: FixedImageFit,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -41,9 +66,23 @@ pub enum BlurBackend {
     Neon,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FixedImageFit {
+    Cover,
+    Contain,
+    Stretch,
+}
+
 impl Default for BlurBackend {
     fn default() -> Self {
         Self::Cpu
+    }
+}
+
+impl Default for FixedImageFit {
+    fn default() -> Self {
+        Self::Cover
     }
 }
 
@@ -53,6 +92,7 @@ impl Default for MattingOptions {
             minimum_mat_percentage: Self::default_minimum_percentage(),
             max_upscale_factor: Self::default_max_upscale_factor(),
             style: MattingMode::default(),
+            runtime: MattingRuntime::default(),
         }
     }
 }
@@ -72,6 +112,25 @@ impl MattingOptions {
     {
         let factor = f32::deserialize(deserializer)?;
         Ok(factor.max(1.0))
+    }
+
+    pub fn prepare_runtime(&mut self) -> Result<()> {
+        self.runtime = MattingRuntime::default();
+        match &self.style {
+            MattingMode::FixedImage { path, .. } => {
+                let img = image::open(path)
+                    .with_context(|| {
+                        format!(
+                            "failed to load fixed background image at {}",
+                            path.display()
+                        )
+                    })?
+                    .to_rgba8();
+                self.runtime.fixed_image = Some(Arc::new(img));
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -95,6 +154,22 @@ impl MattingMode {
     #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     pub const fn default_blur_max_sample_dim() -> u32 {
         2048
+    }
+
+    const fn default_studio_bevel_width() -> f32 {
+        8.0
+    }
+
+    const fn default_studio_highlight_strength() -> f32 {
+        0.25
+    }
+
+    const fn default_studio_shadow_strength() -> f32 {
+        0.3
+    }
+
+    const fn default_studio_texture_strength() -> f32 {
+        0.08
     }
 }
 
@@ -127,7 +202,7 @@ impl Configuration {
     }
 
     /// Validate runtime invariants that cannot be expressed via serde defaults alone.
-    pub fn validated(self) -> Result<Self> {
+    pub fn validated(mut self) -> Result<Self> {
         ensure!(
             self.viewer_preload_count > 0,
             "viewer-preload-count must be greater than zero"
@@ -139,6 +214,9 @@ impl Configuration {
         ensure!(self.oversample > 0.0, "oversample must be positive");
         ensure!(self.fade_ms > 0, "fade-ms must be greater than zero");
         ensure!(self.dwell_ms > 0, "dwell-ms must be greater than zero");
+        self.matting
+            .prepare_runtime()
+            .context("failed to prepare matting resources")?;
         Ok(self)
     }
 }

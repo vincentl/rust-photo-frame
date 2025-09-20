@@ -1,10 +1,14 @@
-use crate::config::{MattingMode, MattingOptions};
+use crate::config::{FixedImageFit, MattingMode, MattingOptions};
 use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
 use crate::processing::blur::apply_blur;
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
 use image::{imageops, Rgba, RgbaImage};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::borrow::Cow;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
@@ -219,6 +223,125 @@ pub fn run_windowed(
                     blurred
                 } else {
                     bg
+                }
+            }
+            MattingMode::Studio {
+                bevel_width,
+                highlight_strength,
+                shadow_strength,
+                texture_strength,
+            } => {
+                let avg = average_color(&src);
+                let base = Rgba([
+                    (avg[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+                    (avg[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+                    (avg[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+                    255,
+                ]);
+                let mut mat = RgbaImage::from_pixel(canvas_w, canvas_h, base);
+                let bevel_px =
+                    (canvas_w.min(canvas_h) as f32) * (bevel_width.max(0.0) / 100.0).max(0.5);
+                let bevel_px = bevel_px.max(1.0);
+                let highlight_strength = highlight_strength.clamp(0.0, 1.0);
+                let shadow_strength = shadow_strength.clamp(0.0, 1.0);
+                let texture_strength = texture_strength.clamp(0.0, 1.0);
+                let mut rng = studio_rng(path.as_path(), width, height, canvas_w, canvas_h);
+                for (x, y, pixel) in mat.enumerate_pixels_mut() {
+                    let xf = x as f32;
+                    let yf = y as f32;
+                    let inv_x = (canvas_w.saturating_sub(1) as f32 - xf).max(0.0);
+                    let inv_y = (canvas_h.saturating_sub(1) as f32 - yf).max(0.0);
+                    let left = (1.0 - (xf / bevel_px)).clamp(0.0, 1.0);
+                    let top = (1.0 - (yf / bevel_px)).clamp(0.0, 1.0);
+                    let right = (1.0 - (inv_x / bevel_px)).clamp(0.0, 1.0);
+                    let bottom = (1.0 - (inv_y / bevel_px)).clamp(0.0, 1.0);
+                    let highlight = ((left + top) * 0.5).powf(1.35) * highlight_strength;
+                    let shadow = ((right + bottom) * 0.5).powf(1.35) * shadow_strength;
+                    let shade = (1.0 + highlight - shadow).clamp(0.2, 2.5);
+                    let noise = if texture_strength > 0.0 {
+                        (rng.gen::<f32>() * 2.0 - 1.0) * texture_strength * 0.2
+                    } else {
+                        0.0
+                    };
+                    for c in 0..3 {
+                        let base = (pixel[c] as f32) / 255.0;
+                        let mut value = base * shade + noise;
+                        value = value.clamp(0.0, 1.0);
+                        pixel[c] = (value * 255.0).round().clamp(0.0, 255.0) as u8;
+                    }
+                    pixel[3] = 255;
+                }
+                mat
+            }
+            MattingMode::FixedImage { fit, .. } => {
+                if let Some(bg) = matting.runtime.fixed_image.as_ref() {
+                    let bg_img: &RgbaImage = bg.as_ref();
+                    match fit {
+                        FixedImageFit::Stretch => imageops::resize(
+                            bg_img,
+                            canvas_w,
+                            canvas_h,
+                            imageops::FilterType::CatmullRom,
+                        ),
+                        FixedImageFit::Cover => {
+                            let (bg_w, bg_h) = resize_to_cover(
+                                canvas_w,
+                                canvas_h,
+                                bg_img.width(),
+                                bg_img.height(),
+                                max_dim,
+                            );
+                            let mut resized = imageops::resize(
+                                bg_img,
+                                bg_w,
+                                bg_h,
+                                imageops::FilterType::CatmullRom,
+                            );
+                            if bg_w > canvas_w || bg_h > canvas_h {
+                                let crop_x = (bg_w.saturating_sub(canvas_w)) / 2;
+                                let crop_y = (bg_h.saturating_sub(canvas_h)) / 2;
+                                resized = imageops::crop_imm(
+                                    &resized, crop_x, crop_y, canvas_w, canvas_h,
+                                )
+                                .to_image();
+                            } else if bg_w < canvas_w || bg_h < canvas_h {
+                                let mut canvas = RgbaImage::from_pixel(
+                                    canvas_w,
+                                    canvas_h,
+                                    average_color_rgba(bg_img),
+                                );
+                                let (ox, oy) = center_offset(bg_w, bg_h, canvas_w, canvas_h);
+                                imageops::overlay(&mut canvas, &resized, ox as i64, oy as i64);
+                                resized = canvas;
+                            }
+                            resized
+                        }
+                        FixedImageFit::Contain => {
+                            let (bg_w, bg_h) = resize_to_contain(
+                                canvas_w,
+                                canvas_h,
+                                bg_img.width(),
+                                bg_img.height(),
+                                max_dim,
+                            );
+                            let resized = imageops::resize(
+                                bg_img,
+                                bg_w,
+                                bg_h,
+                                imageops::FilterType::CatmullRom,
+                            );
+                            let mut canvas = RgbaImage::from_pixel(
+                                canvas_w,
+                                canvas_h,
+                                average_color_rgba(bg_img),
+                            );
+                            let (ox, oy) = center_offset(bg_w, bg_h, canvas_w, canvas_h);
+                            imageops::overlay(&mut canvas, &resized, ox as i64, oy as i64);
+                            canvas
+                        }
+                    }
+                } else {
+                    RgbaImage::from_pixel(canvas_w, canvas_h, Rgba([0, 0, 0, 255]))
                 }
             }
         };
@@ -936,6 +1059,8 @@ pub fn run_windowed(
             a: 1.0,
         },
         MattingMode::Blur { .. } => wgpu::Color::BLACK,
+        MattingMode::Studio { .. } => wgpu::Color::BLACK,
+        MattingMode::FixedImage { .. } => wgpu::Color::BLACK,
     };
     let mut app = App {
         from_loader,
@@ -1020,10 +1145,81 @@ fn resize_to_cover(
     (w as u32, h as u32)
 }
 
+fn resize_to_contain(
+    canvas_w: u32,
+    canvas_h: u32,
+    src_w: u32,
+    src_h: u32,
+    max_dim: u32,
+) -> (u32, u32) {
+    let iw = src_w.max(1) as f32;
+    let ih = src_h.max(1) as f32;
+    let cw = canvas_w.max(1) as f32;
+    let ch = canvas_h.max(1) as f32;
+    let scale = (cw / iw).min(ch / ih).max(0.0);
+    let scale = if scale.is_finite() { scale } else { 1.0 };
+    let w = (iw * scale).round().clamp(1.0, max_dim as f32);
+    let h = (ih * scale).round().clamp(1.0, max_dim as f32);
+    (w as u32, h as u32)
+}
+
 fn center_offset(inner_w: u32, inner_h: u32, outer_w: u32, outer_h: u32) -> (u32, u32) {
     let ox = outer_w.saturating_sub(inner_w) / 2;
     let oy = outer_h.saturating_sub(inner_h) / 2;
     (ox, oy)
+}
+
+fn average_color(img: &RgbaImage) -> [f32; 3] {
+    let mut accum = [0f64; 3];
+    let mut total = 0f64;
+    for pixel in img.pixels() {
+        let alpha = (pixel[3] as f64) / 255.0;
+        if alpha <= 0.0 {
+            continue;
+        }
+        total += alpha;
+        for c in 0..3 {
+            accum[c] += (pixel[c] as f64) * alpha;
+        }
+    }
+    if total <= f64::EPSILON {
+        return [0.1, 0.1, 0.1];
+    }
+    [
+        (accum[0] / (255.0 * total)) as f32,
+        (accum[1] / (255.0 * total)) as f32,
+        (accum[2] / (255.0 * total)) as f32,
+    ]
+}
+
+fn average_color_rgba(img: &RgbaImage) -> Rgba<u8> {
+    let avg = average_color(img);
+    Rgba([
+        (avg[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+        (avg[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+        (avg[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+        255,
+    ])
+}
+
+fn studio_rng(
+    path: &std::path::Path,
+    src_w: u32,
+    src_h: u32,
+    canvas_w: u32,
+    canvas_h: u32,
+) -> StdRng {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    let hash = hasher.finish();
+    let mut seed = [0u8; 32];
+    seed[0..8].copy_from_slice(&hash.to_le_bytes());
+    seed[8..12].copy_from_slice(&src_w.to_le_bytes());
+    seed[12..16].copy_from_slice(&src_h.to_le_bytes());
+    seed[16..20].copy_from_slice(&canvas_w.to_le_bytes());
+    seed[20..24].copy_from_slice(&canvas_h.to_le_bytes());
+    seed[24..32].copy_from_slice(&(hash.rotate_left(32)).to_le_bytes());
+    StdRng::from_seed(seed)
 }
 
 fn compute_cover_rect(
