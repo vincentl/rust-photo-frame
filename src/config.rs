@@ -110,7 +110,6 @@ pub struct ButtonConfig {
     pub grab_device: bool,
     pub output_name: Option<String>,
     pub use_wlr_randr: bool,
-    pub use_vcgencmd_fallback: bool,
     pub shutdown_command: String,
 }
 
@@ -125,7 +124,6 @@ impl Default for ButtonConfig {
             grab_device: true,
             output_name: None,
             use_wlr_randr: true,
-            use_vcgencmd_fallback: true,
             shutdown_command: "systemctl poweroff".to_string(),
         }
     }
