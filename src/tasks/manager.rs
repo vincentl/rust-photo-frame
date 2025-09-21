@@ -1,32 +1,43 @@
-use crate::events::{Displayed, InventoryEvent, LoadPhoto};
+use crate::config::PlaylistOptions;
+use crate::events::{Displayed, InventoryEvent, LoadPhoto, PhotoInfo};
 use anyhow::Result;
-use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use tokio::select;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Orchestrates the playlist and paces the show via the async send to `loader`.
 ///
 /// Rules:
-/// - Maintain a deduplicated `VecDeque<PathBuf>` playlist.
-/// - On any `PhotoAdded`, push_front so new shots surface quickly.
-/// - On `PhotoRemoved`, delete if present.
+/// - Maintain a weighted `VecDeque<PathBuf>` playlist, duplicating photos by multiplicity.
+/// - On `PhotoAdded`, record metadata and prioritize the new image at the front of the next cycle.
+/// - On `PhotoRemoved`, drop all scheduled occurrences and forget future weighting.
 /// - Timing is paced by the async `.send()` to the loader.
-/// - On successful send, rotate: pop_front -> push_back (keep cycling).
+/// - On successful send, consume that scheduled occurrence; rebuild the queue when exhausted or dirty.
 /// - Displayed notifications are informational; no re-queue on display.
 pub async fn run(
     mut inv_rx: Receiver<InventoryEvent>,
     mut displayed_rx: Receiver<Displayed>,
     to_loader: Sender<LoadPhoto>,
     cancel: CancellationToken,
+    options: PlaylistOptions,
+    now_override: Option<SystemTime>,
+    seed_override: Option<u64>,
 ) -> Result<()> {
-    let mut playlist: VecDeque<PathBuf> = VecDeque::new();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let rng = match seed_override {
+        Some(seed) => StdRng::seed_from_u64(seed),
+        None => StdRng::from_entropy(),
+    };
+    let mut playlist = PlaylistState::with_rng(options, rng, now_override);
 
     loop {
+        playlist.ensure_ready();
+
         // Prefer to make progress by sending when we have something.
         // Remain responsive to inventory + displayed events via `select!`.
         // Also include a small idle tick so startup (empty playlist) doesn't stall forever.
@@ -36,7 +47,7 @@ pub async fn run(
             // Drive slideshow by awaiting the send to the loader.
             // Rotate the playlist on successful send; viewer/loader handle pacing.
             res = {
-                let next = playlist.front().cloned();
+                let next = playlist.peek().cloned();
                 let to_loader = to_loader.clone();
                 async move {
                     if let Some(p) = next {
@@ -48,12 +59,7 @@ pub async fn run(
             }, if !playlist.is_empty() => {
                 match res {
                     Ok(sent) => {
-                        // Successfully queued: rotate the item we actually sent.
-                        if let Some(pos) = playlist.iter().position(|q| q == &sent) {
-                            if let Some(item) = playlist.remove(pos) {
-                                playlist.push_back(item);
-                            }
-                        }
+                        playlist.mark_sent(&sent);
                     }
                     Err(_) => {
                         warn!("loader channel closed");
@@ -66,21 +72,11 @@ pub async fn run(
             // Inventory updates (from files task)
             maybe_ev = inv_rx.recv() => {
                 match maybe_ev {
-                    Some(InventoryEvent::PhotoAdded(p)) => {
-                        if seen.insert(p.clone()) {
-                            // New to us: put it up front so it shows soon.
-                            playlist.push_front(p);
-                        } else {
-                            // Already known; ignore.
-                        }
+                    Some(InventoryEvent::PhotoAdded(info)) => {
+                        playlist.record_add(info);
                     }
                     Some(InventoryEvent::PhotoRemoved(p)) => {
-                        if seen.remove(&p) {
-                            // Remove from deque if present.
-                            if let Some(pos) = playlist.iter().position(|q| q == &p) {
-                                playlist.remove(pos);
-                            }
-                        }
+                        playlist.record_remove(&p);
                     }
                     None => {
                         // Inventory producer ended. We can continue with what we have.
@@ -108,4 +104,173 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+struct PlaylistState {
+    queue: VecDeque<PathBuf>,
+    known: HashMap<PathBuf, PhotoInfo>,
+    prioritized: Vec<PathBuf>,
+    rng: StdRng,
+    options: PlaylistOptions,
+    dirty: bool,
+    now_override: Option<SystemTime>,
+}
+
+impl PlaylistState {
+    fn with_rng(options: PlaylistOptions, rng: StdRng, now_override: Option<SystemTime>) -> Self {
+        Self {
+            queue: VecDeque::new(),
+            known: HashMap::new(),
+            prioritized: Vec::new(),
+            rng,
+            options,
+            dirty: true,
+            now_override,
+        }
+    }
+
+    fn ensure_ready(&mut self) {
+        if self.dirty || self.queue.is_empty() {
+            self.rebuild();
+        }
+    }
+
+    fn rebuild(&mut self) {
+        if self.known.is_empty() {
+            self.queue.clear();
+            self.dirty = false;
+            self.prioritized.clear();
+            return;
+        }
+
+        let now = self.now_override.unwrap_or_else(SystemTime::now);
+        let prioritized = std::mem::take(&mut self.prioritized);
+        let prioritized_set: HashSet<PathBuf> = prioritized.iter().cloned().collect();
+        let mut front: Vec<PathBuf> = Vec::new();
+        let mut rest: Vec<PathBuf> = Vec::new();
+        let mut multiplicities: Vec<(PathBuf, usize)> = Vec::new();
+
+        for info in self.known.values() {
+            let multiplicity = self.options.multiplicity_for(info.created_at, now);
+            if multiplicity == 0 {
+                continue;
+            }
+            multiplicities.push((info.path.clone(), multiplicity));
+            if prioritized_set.contains(&info.path) {
+                front.push(info.path.clone());
+                for _ in 1..multiplicity {
+                    rest.push(info.path.clone());
+                }
+            } else {
+                for _ in 0..multiplicity {
+                    rest.push(info.path.clone());
+                }
+            }
+        }
+
+        rest.shuffle(&mut self.rng);
+
+        let mut queue = VecDeque::new();
+        for path in prioritized {
+            if let Some(idx) = front.iter().position(|p| p == &path) {
+                queue.push_back(front.remove(idx));
+            }
+        }
+        for path in front {
+            queue.push_back(path);
+        }
+        for path in rest {
+            queue.push_back(path);
+        }
+
+        self.queue = queue;
+        self.dirty = false;
+
+        for (path, multiplicity) in &multiplicities {
+            debug!(
+                path = %path.display(),
+                multiplicity,
+                now = ?now,
+                "playlist multiplicity"
+            );
+        }
+        info!(
+            photos = multiplicities.len(),
+            scheduled = self.queue.len(),
+            prioritized = prioritized_set.len(),
+            now = ?now,
+            "playlist rebuilt"
+        );
+    }
+
+    fn peek(&self) -> Option<&PathBuf> {
+        self.queue.front()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    fn mark_sent(&mut self, sent: &Path) {
+        if let Some(front) = self.queue.front() {
+            if front == sent {
+                self.queue.pop_front();
+                return;
+            }
+        }
+        if let Some(pos) = self.queue.iter().position(|p| p == sent) {
+            self.queue.remove(pos);
+        }
+    }
+
+    fn record_add(&mut self, info: PhotoInfo) {
+        let path = info.path.clone();
+        let was_new = self.known.insert(info.path.clone(), info).is_none();
+        if was_new && !self.prioritized.iter().any(|p| p == &path) {
+            self.prioritized.push(path);
+        }
+        self.dirty = true;
+    }
+
+    fn record_remove(&mut self, path: &Path) {
+        if self.known.remove(path).is_some() {
+            self.prioritized.retain(|p| p != path);
+            self.queue.retain(|p| p != path);
+            self.dirty = true;
+        }
+    }
+}
+
+pub fn simulate_playlist<I>(
+    photos: I,
+    options: PlaylistOptions,
+    now: SystemTime,
+    iterations: usize,
+    seed: Option<u64>,
+) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = PhotoInfo>,
+{
+    let rng = match seed {
+        Some(seed) => StdRng::seed_from_u64(seed),
+        None => StdRng::from_entropy(),
+    };
+    let mut playlist = PlaylistState::with_rng(options, rng, Some(now));
+
+    for info in photos {
+        playlist.record_add(info);
+    }
+
+    let mut plan = Vec::new();
+    for _ in 0..iterations {
+        playlist.ensure_ready();
+        if let Some(next) = playlist.peek().cloned() {
+            plan.push(next.clone());
+            playlist.mark_sent(&next);
+        } else {
+            break;
+        }
+    }
+
+    plan
 }

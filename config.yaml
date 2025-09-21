@@ -12,6 +12,10 @@ oversample: 1.0
 # Concurrent image decodes in loader
 loader-max-concurrent-decodes: 4
 
+playlist:
+  new-multiplicity: 3
+  half-life: 3 days
+
 # Matting settings
 matting:
   type: fixed-color
