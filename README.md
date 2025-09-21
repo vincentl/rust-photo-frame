@@ -89,6 +89,24 @@ The `matting` table chooses how the background behind each photo is prepared.
 | `max-sample-dim` | integer or `null` | `null` (defaults to `2048` on 64-bit ARM builds, otherwise unlimited) | Optional cap on the background texture size used for the blur. When set, the background is downscaled to this maximum dimension before blurring and then upscaled back to the screen size, preserving the soft-focus look while reducing CPU cost on small GPUs. |
 | `backend` | string | `cpu` | Blur implementation to use. Set to `cpu` for the high-quality software renderer (default) or `neon` to request the vector-accelerated path on 64-bit ARM. When `neon` is selected but unsupported at runtime, the code automatically falls back to the CPU backend. |
 
+#### `type: studio`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `bevel-width-px` | float | `3.0` | Visible width of the bevel band in pixels. The renderer clamps this value to the available mat border if the photo touches an edge. |
+| `bevel-color` | `[r, g, b]` array | `[255, 255, 255]` | RGB values (0–255) used for the bevel band. |
+
+The studio mat derives a uniform base color from the photo’s average RGB, renders a crisp mitred bevel band with the configured width and color, and reveals the photo flush against that inner frame.
+
+#### `type: fixed-image`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `path` | string | (required) | Filesystem path to the background image that should appear behind every photo. |
+| `fit` | string | `cover` | How the background image is scaled to the canvas. Options: `cover` (default, fills while cropping as needed), `contain` (letterboxes to preserve the whole image), or `stretch` (distorts to exactly fill). |
+
+The fixed background image is loaded once at startup and reused for every slide, ensuring smooth transitions even with large source files.
+
 ## License
 
 This project is licensed under the **MIT License**.
