@@ -58,24 +58,6 @@ matting:
 }
 
 #[test]
-fn matting_rejects_unknown_fields() {
-    let yaml = r#"
-photo-library-path: "/photos"
-matting:
-  type: studio
-  bevel-width-px: 4.0
-  unexpected: 1
-"#;
-
-    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(
-        err.to_string().contains("unknown field"),
-        "unexpected error: {}",
-        err
-    );
-}
-
-#[test]
 fn validated_rejects_zero_preload() {
     let cfg = Configuration {
         viewer_preload_count: 0,

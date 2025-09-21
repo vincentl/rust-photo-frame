@@ -2,17 +2,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{ensure, Context, Result};
-use serde::de::{Error as DeError, IntoDeserializer};
 use serde::Deserialize;
 
 use image::RgbaImage;
-use serde_yaml::Value as YamlValue;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct MattingOptions {
+    #[serde(default = "MattingOptions::default_minimum_percentage")]
     pub minimum_mat_percentage: f32,
+    #[serde(default = "MattingOptions::default_max_upscale_factor")]
     pub max_upscale_factor: f32,
+    #[serde(default, flatten)]
     pub style: MattingMode,
+    #[serde(default, skip_deserializing)]
     pub runtime: MattingRuntime,
 }
 
@@ -21,30 +24,77 @@ pub struct MattingRuntime {
     pub fixed_image: Option<Arc<RgbaImage>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
 pub enum MattingMode {
+    #[serde(rename = "fixed-color")]
     FixedColor {
+        #[serde(default = "MattingMode::default_color")]
         color: [u8; 3],
     },
     Blur {
+        #[serde(default = "MattingMode::default_blur_sigma")]
         sigma: f32,
+        #[serde(default, rename = "max-sample-dim")]
         max_sample_dim: Option<u32>,
+        #[serde(default)]
         backend: BlurBackend,
     },
     Studio {
+        #[serde(
+            default = "MattingMode::default_studio_bevel_width_px",
+            rename = "bevel-width-px"
+        )]
         bevel_width_px: f32,
+        #[serde(
+            default = "MattingMode::default_studio_highlight_strength",
+            rename = "highlight-strength"
+        )]
         highlight_strength: f32,
+        #[serde(
+            default = "MattingMode::default_studio_shadow_strength",
+            rename = "shadow-strength"
+        )]
         shadow_strength: f32,
+        #[serde(
+            default = "MattingMode::default_studio_bevel_angle",
+            rename = "bevel-angle-deg"
+        )]
         bevel_angle_deg: f32,
+        #[serde(
+            default = "MattingMode::default_studio_linen_intensity",
+            rename = "linen-intensity"
+        )]
         linen_intensity: f32,
+        #[serde(
+            default = "MattingMode::default_studio_linen_scale",
+            rename = "linen-scale-px"
+        )]
         linen_scale_px: f32,
+        #[serde(
+            default = "MattingMode::default_studio_linen_rotation",
+            rename = "linen-rotation-deg"
+        )]
         linen_rotation_deg: f32,
+        #[serde(
+            default = "MattingMode::default_studio_light_dir",
+            rename = "light-dir"
+        )]
         light_dir: [f32; 3],
+        #[serde(
+            default = "MattingMode::default_studio_shadow_radius",
+            rename = "shadow-radius-px"
+        )]
         shadow_radius_px: f32,
+        #[serde(
+            default = "MattingMode::default_studio_shadow_offset",
+            rename = "shadow-offset-px"
+        )]
         shadow_offset_px: f32,
     },
     FixedImage {
         path: PathBuf,
+        #[serde(default)]
         fit: FixedImageFit,
     },
 }
@@ -87,55 +137,6 @@ impl Default for MattingOptions {
     }
 }
 
-impl<'de> Deserialize<'de> for MattingOptions {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let mut value = YamlValue::deserialize(deserializer)?;
-        let mapping = value
-            .as_mapping_mut()
-            .ok_or_else(|| DeError::custom("matting: expected a mapping"))?;
-
-        let minimum_mat_percentage =
-            match mapping.remove(&YamlValue::String("minimum-mat-percentage".to_string())) {
-                Some(raw) => serde_yaml::from_value(raw)
-                    .map_err(|err| DeError::custom(format!("matting: {err}")))?,
-                None => MattingOptions::default_minimum_percentage(),
-            };
-
-        let max_upscale_factor =
-            match mapping.remove(&YamlValue::String("max-upscale-factor".to_string())) {
-                Some(raw) => serde_yaml::from_value::<f32>(raw)
-                    .map(|v| v.max(1.0))
-                    .map_err(|err| DeError::custom(format!("matting: {err}")))?,
-                None => MattingOptions::default_max_upscale_factor(),
-            };
-
-        let style = if mapping.is_empty() {
-            MattingMode::default()
-        } else {
-            if !mapping.contains_key(&YamlValue::String("type".to_string())) {
-                return Err(DeError::custom(
-                    "matting: missing `type` while additional fields were provided",
-                ));
-            }
-
-            MattingMode::deserialize(
-                YamlValue::Mapping(std::mem::take(mapping)).into_deserializer(),
-            )
-            .map_err(|err| DeError::custom(format!("matting: {err}")))?
-        };
-
-        Ok(Self {
-            minimum_mat_percentage,
-            max_upscale_factor,
-            style,
-            runtime: MattingRuntime::default(),
-        })
-    }
-}
-
 impl MattingOptions {
     const fn default_minimum_percentage() -> f32 {
         0.0
@@ -169,133 +170,6 @@ impl Default for MattingMode {
     fn default() -> Self {
         Self::FixedColor {
             color: Self::default_color(),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for MattingMode {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-        struct FixedColorFields {
-            #[serde(default = "MattingMode::default_color")]
-            color: [u8; 3],
-        }
-
-        #[derive(Deserialize)]
-        #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-        struct BlurFields {
-            #[serde(default = "MattingMode::default_blur_sigma")]
-            sigma: f32,
-            #[serde(default)]
-            max_sample_dim: Option<u32>,
-            #[serde(default)]
-            backend: BlurBackend,
-        }
-
-        #[derive(Deserialize)]
-        #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-        struct StudioFields {
-            #[serde(default = "MattingMode::default_studio_bevel_width_px")]
-            bevel_width_px: f32,
-            #[serde(default = "MattingMode::default_studio_highlight_strength")]
-            highlight_strength: f32,
-            #[serde(default = "MattingMode::default_studio_shadow_strength")]
-            shadow_strength: f32,
-            #[serde(default = "MattingMode::default_studio_bevel_angle")]
-            bevel_angle_deg: f32,
-            #[serde(default = "MattingMode::default_studio_linen_intensity")]
-            linen_intensity: f32,
-            #[serde(default = "MattingMode::default_studio_linen_scale")]
-            linen_scale_px: f32,
-            #[serde(default = "MattingMode::default_studio_linen_rotation")]
-            linen_rotation_deg: f32,
-            #[serde(default = "MattingMode::default_studio_light_dir")]
-            light_dir: [f32; 3],
-            #[serde(default = "MattingMode::default_studio_shadow_radius")]
-            shadow_radius_px: f32,
-            #[serde(default = "MattingMode::default_studio_shadow_offset")]
-            shadow_offset_px: f32,
-        }
-
-        #[derive(Deserialize)]
-        #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-        struct FixedImageFields {
-            path: PathBuf,
-            #[serde(default)]
-            fit: FixedImageFit,
-        }
-
-        let mut value = YamlValue::deserialize(deserializer)?;
-        let mapping = value
-            .as_mapping_mut()
-            .ok_or_else(|| DeError::custom("matting: expected a mapping"))?;
-
-        let mode_value = mapping
-            .remove(&YamlValue::String("type".to_string()))
-            .ok_or_else(|| DeError::custom("matting: missing `type` field"))?;
-
-        let mode = match mode_value {
-            YamlValue::String(name) => name,
-            other => {
-                return Err(DeError::custom(format!(
-                    "matting: `type` must be a string, got {other:?}"
-                )))
-            }
-        };
-
-        match mode.as_str() {
-            "fixed-color" => {
-                let payload = YamlValue::Mapping(std::mem::take(mapping));
-                let fields = FixedColorFields::deserialize(payload.into_deserializer())
-                    .map_err(|err| DeError::custom(format!("matting: {err}")))?;
-                Ok(Self::FixedColor {
-                    color: fields.color,
-                })
-            }
-            "blur" => {
-                let payload = YamlValue::Mapping(std::mem::take(mapping));
-                let fields = BlurFields::deserialize(payload.into_deserializer())
-                    .map_err(|err| DeError::custom(format!("matting: {err}")))?;
-                Ok(Self::Blur {
-                    sigma: fields.sigma,
-                    max_sample_dim: fields.max_sample_dim,
-                    backend: fields.backend,
-                })
-            }
-            "studio" => {
-                let payload = YamlValue::Mapping(std::mem::take(mapping));
-                let fields = StudioFields::deserialize(payload.into_deserializer())
-                    .map_err(|err| DeError::custom(format!("matting: {err}")))?;
-                Ok(Self::Studio {
-                    bevel_width_px: fields.bevel_width_px,
-                    highlight_strength: fields.highlight_strength,
-                    shadow_strength: fields.shadow_strength,
-                    bevel_angle_deg: fields.bevel_angle_deg,
-                    linen_intensity: fields.linen_intensity,
-                    linen_scale_px: fields.linen_scale_px,
-                    linen_rotation_deg: fields.linen_rotation_deg,
-                    light_dir: fields.light_dir,
-                    shadow_radius_px: fields.shadow_radius_px,
-                    shadow_offset_px: fields.shadow_offset_px,
-                })
-            }
-            "fixed-image" => {
-                let payload = YamlValue::Mapping(std::mem::take(mapping));
-                let fields = FixedImageFields::deserialize(payload.into_deserializer())
-                    .map_err(|err| DeError::custom(format!("matting: {err}")))?;
-                Ok(Self::FixedImage {
-                    path: fields.path,
-                    fit: fields.fit,
-                })
-            }
-            other => Err(DeError::custom(format!(
-                "matting: unknown matting `type` `{}`",
-                other
-            ))),
         }
     }
 }
@@ -356,7 +230,7 @@ impl MattingMode {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
+#[serde(rename_all = "kebab-case", default)]
 pub struct Configuration {
     /// Root directory to scan recursively for images.
     pub photo_library_path: PathBuf,
@@ -395,6 +269,10 @@ impl Configuration {
         ensure!(self.oversample > 0.0, "oversample must be positive");
         ensure!(self.fade_ms > 0, "fade-ms must be greater than zero");
         ensure!(self.dwell_ms > 0, "dwell-ms must be greater than zero");
+        self.matting.max_upscale_factor = self
+            .matting
+            .max_upscale_factor
+            .max(MattingOptions::default_max_upscale_factor());
         self.matting
             .prepare_runtime()
             .context("failed to prepare matting resources")?;
