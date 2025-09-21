@@ -211,12 +211,12 @@ async fn toggle_screen(
     last_known_state: &mut Option<bool>,
     cfg: &ButtonConfig,
 ) -> Result<()> {
-    if !cfg.use_wlr_randr && !cfg.use_vcgencmd_fallback {
-        tracing::info!("Display toggle requested but no control mechanisms are enabled");
+    if !cfg.use_wlr_randr {
+        tracing::info!("Display toggle requested but display control is disabled");
         return Ok(());
     }
 
-    if cfg.use_wlr_randr && output.is_none() {
+    if output.is_none() {
         if let Some(name) = cfg.output_name.clone() {
             *output = Some(name);
         } else {
@@ -266,52 +266,34 @@ async fn detect_output() -> Option<String> {
 }
 
 async fn screen_is_on(output_name: Option<&str>, cfg: &ButtonConfig) -> Result<bool> {
-    if cfg.use_wlr_randr {
-        if let Some(name) = output_name {
-            if let Some(state) = query_wlr_output_state(name).await? {
-                return Ok(state);
-            }
-        } else if let Some(name) = detect_output().await {
+    if let Some(name) = output_name {
+        if let Some(state) = query_wlr_output_state(name).await? {
+            return Ok(state);
+        }
+    } else if cfg.use_wlr_randr {
+        if let Some(name) = detect_output().await {
             if let Some(state) = query_wlr_output_state(&name).await? {
                 return Ok(state);
             }
         }
     }
 
-    if cfg.use_vcgencmd_fallback {
-        if let Some(state) = query_vcgencmd_state().await? {
-            return Ok(state);
-        }
-    }
-
     Ok(true)
 }
 
-async fn turn_off(output_name: Option<&str>, cfg: &ButtonConfig) -> Result<()> {
+async fn turn_off(output_name: Option<&str>, _cfg: &ButtonConfig) -> Result<()> {
     let mut last_error: Option<anyhow::Error> = None;
 
-    if cfg.use_wlr_randr {
-        if let Some(name) = output_name {
-            match run_wlr_randr(&["--output", name, "--off"]).await {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    tracing::warn!("wlr-randr failed to power off {name}: {err:?}");
-                    last_error = Some(err);
-                }
-            }
-        } else {
-            tracing::warn!("No output name available for wlr-randr --off command");
-        }
-    }
-
-    if cfg.use_vcgencmd_fallback {
-        match run_vcgencmd(false).await {
+    if let Some(name) = output_name {
+        match run_wlr_randr(&["--output", name, "--off"]).await {
             Ok(()) => return Ok(()),
             Err(err) => {
-                tracing::warn!("vcgencmd display_power 0 failed: {err:?}");
+                tracing::warn!("wlr-randr failed to power off {name}: {err:?}");
                 last_error = Some(err);
             }
         }
+    } else {
+        tracing::warn!("No output name available for wlr-randr --off command");
     }
 
     if let Some(err) = last_error {
@@ -321,31 +303,19 @@ async fn turn_off(output_name: Option<&str>, cfg: &ButtonConfig) -> Result<()> {
     }
 }
 
-async fn turn_on(output_name: Option<&str>, cfg: &ButtonConfig) -> Result<()> {
+async fn turn_on(output_name: Option<&str>, _cfg: &ButtonConfig) -> Result<()> {
     let mut last_error: Option<anyhow::Error> = None;
 
-    if cfg.use_wlr_randr {
-        if let Some(name) = output_name {
-            match run_wlr_randr(&["--output", name, "--on"]).await {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    tracing::warn!("wlr-randr failed to power on {name}: {err:?}");
-                    last_error = Some(err);
-                }
-            }
-        } else {
-            tracing::warn!("No output name available for wlr-randr --on command");
-        }
-    }
-
-    if cfg.use_vcgencmd_fallback {
-        match run_vcgencmd(true).await {
+    if let Some(name) = output_name {
+        match run_wlr_randr(&["--output", name, "--on"]).await {
             Ok(()) => return Ok(()),
             Err(err) => {
-                tracing::warn!("vcgencmd display_power 1 failed: {err:?}");
+                tracing::warn!("wlr-randr failed to power on {name}: {err:?}");
                 last_error = Some(err);
             }
         }
+    } else {
+        tracing::warn!("No output name available for wlr-randr --on command");
     }
 
     if let Some(err) = last_error {
@@ -366,25 +336,6 @@ async fn run_wlr_randr(args: &[&str]) -> Result<()> {
         Ok(())
     } else {
         Err(anyhow!("wlr-randr exited with status {}", output.status))
-    }
-}
-
-async fn run_vcgencmd(power_on: bool) -> Result<()> {
-    let value = if power_on { "1" } else { "0" };
-    let output = Command::new("/usr/bin/vcgencmd")
-        .arg("display_power")
-        .arg(value)
-        .output()
-        .await
-        .context("spawn vcgencmd")?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "vcgencmd display_power {value} exited with status {}",
-            output.status
-        ))
     }
 }
 
@@ -539,30 +490,5 @@ async fn query_wlr_output_state(name: &str) -> Result<Option<bool>> {
             return Ok(None);
         }
     }
-    Ok(None)
-}
-
-async fn query_vcgencmd_state() -> Result<Option<bool>> {
-    let output = Command::new("/usr/bin/vcgencmd")
-        .arg("display_power")
-        .output()
-        .await
-        .context("spawn vcgencmd")?;
-
-    if !output.status.success() {
-        return Ok(None);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if let Some(rest) = line.split('=').nth(1) {
-            match rest.trim() {
-                "1" => return Ok(Some(true)),
-                "0" => return Ok(Some(false)),
-                _ => {}
-            }
-        }
-    }
-
     Ok(None)
 }

@@ -65,7 +65,6 @@ button:
   grab-device: true
   output-name: null
   use-wlr-randr: true
-  use-vcgencmd-fallback: true
   shutdown-command: systemctl poweroff
 ```
 
@@ -153,7 +152,6 @@ The `button` table configures the optional momentary button connected to the Ras
 | `grab-device` | boolean | `true` | Attempt to grab the input device exclusively so other handlers do not react to the key. |
 | `output-name` | string or `null` | `null` | Preferred Wayland output name. When `null`, the task auto-detects the first connected output reported by `wlr-randr`. |
 | `use-wlr-randr` | boolean | `true` | Enable display control via `wlr-randr`. |
-| `use-vcgencmd-fallback` | boolean | `true` | Allow falling back to `/usr/bin/vcgencmd display_power` when `wlr-randr` is unavailable or fails. |
 | `shutdown-command` | string | `"systemctl poweroff"` | Command executed for long presses. It is invoked via `sh -c`, so shell features are available. |
 
 Short presses (< `short-max-ms`) toggle the display state. Presses between the short and long thresholds fall in the "dead zone" and are ignored. When a press reaches the long threshold the configured shutdown command runs immediately; the eventual key release is drained from the event stream so the task stays in sync.
@@ -177,8 +175,6 @@ To integrate the Pi 5 power-button header on Raspberry Pi OS (Bookworm) in a Way
    sudo apt update
    sudo apt install -y wlr-randr
    ```
-
-   The app automatically falls back to `/usr/bin/vcgencmd display_power` when enabled.
 
 3. Ensure the user that runs the photo frame belongs to the `input` group so it can read `/dev/input/event*` devices:
 

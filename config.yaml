@@ -39,5 +39,4 @@ button:
   grab-device: true
   output-name: null
   use-wlr-randr: true
-  use-vcgencmd-fallback: true
   shutdown-command: systemctl poweroff
