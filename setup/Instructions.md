@@ -69,7 +69,7 @@ This workflow prepares a Raspberry Pi OS (Bookworm, 64-bit) image that boots dir
    ```bash
    chmod +x setup/system-setup.sh setup/setup-modules/*.sh
    ```
-3. Run the system configuration wrapper. It executes each module in ascending numeric order:
+3. Run the system configuration wrapper. It executes each module in ascending numeric order and will prompt for optional features (such as the power button override) before running them:
    ```bash
    sudo ./setup/system-setup.sh
    ```
