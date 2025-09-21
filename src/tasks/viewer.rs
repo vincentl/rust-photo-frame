@@ -153,11 +153,100 @@ pub fn run_windowed(
         let (canvas_w, canvas_h) = compute_canvas_size(screen_w, screen_h, oversample, max_dim);
         let margin = (matting.minimum_mat_percentage / 100.0).clamp(0.0, 0.45);
         let max_upscale = matting.max_upscale_factor.max(1.0);
+        let avg_color = average_color(&src);
+
+        if let MattingMode::Studio {
+            bevel_width,
+            highlight_strength,
+            shadow_strength,
+            bevel_angle_deg,
+            linen_intensity,
+            linen_scale_px,
+            linen_rotation_deg,
+            light_dir,
+            shadow_radius_px,
+            shadow_offset_px,
+        } = &matting.style
+        {
+            let mut bevel_px = bevel_width.max(0.0);
+            let margin_x = (canvas_w as f32 * margin).round();
+            let margin_y = (canvas_h as f32 * margin).round();
+            let inner_w = (canvas_w as f32 - 2.0 * margin_x).max(1.0);
+            let inner_h = (canvas_h as f32 - 2.0 * margin_y).max(1.0);
+            let max_bevel = 0.5 * inner_w.min(inner_h).max(0.0);
+            if max_bevel <= 0.0 {
+                bevel_px = 0.0;
+            } else {
+                bevel_px = bevel_px.min(max_bevel);
+            }
+            let photo_space_w = (canvas_w as f32 - 2.0 * (margin_x + bevel_px)).max(1.0);
+            let photo_space_h = (canvas_h as f32 - 2.0 * (margin_y + bevel_px)).max(1.0);
+
+            let iw = width.max(1) as f32;
+            let ih = height.max(1) as f32;
+            let mut scale = (photo_space_w / iw)
+                .min(photo_space_h / ih)
+                .min(max_upscale);
+            if !scale.is_finite() || scale <= 0.0 {
+                scale = 1.0;
+            }
+            let max_photo_w = photo_space_w.floor().max(1.0);
+            let max_photo_h = photo_space_h.floor().max(1.0);
+            let mut photo_w = (iw * scale).round().clamp(1.0, max_photo_w);
+            let mut photo_h = (ih * scale).round().clamp(1.0, max_photo_h);
+            photo_w = photo_w.clamp(1.0, canvas_w as f32);
+            photo_h = photo_h.clamp(1.0, canvas_h as f32);
+            let photo_w = photo_w as u32;
+            let photo_h = photo_h as u32;
+            let (offset_x, offset_y) = center_offset(photo_w, photo_h, canvas_w, canvas_h);
+
+            let main_img: Cow<'_, RgbaImage> = if photo_w == width && photo_h == height {
+                Cow::Borrowed(&src)
+            } else {
+                Cow::Owned(imageops::resize(
+                    &src,
+                    photo_w,
+                    photo_h,
+                    imageops::FilterType::Triangle,
+                ))
+            };
+
+            let canvas = render_studio_mat(
+                path.as_path(),
+                width,
+                height,
+                canvas_w,
+                canvas_h,
+                offset_x,
+                offset_y,
+                photo_w,
+                photo_h,
+                main_img.as_ref(),
+                avg_color,
+                bevel_px,
+                *bevel_angle_deg,
+                *highlight_strength,
+                *shadow_strength,
+                *linen_intensity,
+                *linen_scale_px,
+                *linen_rotation_deg,
+                *light_dir,
+                *shadow_radius_px,
+                *shadow_offset_px,
+            );
+
+            let canvas = ImagePlane {
+                width: canvas_w,
+                height: canvas_h,
+                pixels: canvas.into_raw(),
+            };
+
+            return Some(MatResult { path, canvas });
+        }
+
         let (final_w, final_h) =
             resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
         let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
-
-        let avg_color = average_color(&src);
 
         let main_img: Cow<'_, RgbaImage> = if final_w == width && final_h == height {
             Cow::Borrowed(&src)
@@ -169,54 +258,6 @@ pub fn run_windowed(
                 imageops::FilterType::Triangle,
             ))
         };
-
-        if let MattingMode::Studio {
-            bevel_width,
-            highlight_strength,
-            shadow_strength,
-            image_overlap_px,
-            bevel_angle_deg,
-            linen_intensity,
-            linen_scale_px,
-            linen_rotation_deg,
-            light_dir,
-            shadow_radius_px,
-            shadow_offset_px,
-        } = &matting.style
-        {
-            let canvas = render_studio_mat(
-                path.as_path(),
-                width,
-                height,
-                canvas_w,
-                canvas_h,
-                offset_x,
-                offset_y,
-                final_w,
-                final_h,
-                main_img.as_ref(),
-                avg_color,
-                *bevel_width,
-                *bevel_angle_deg,
-                *highlight_strength,
-                *shadow_strength,
-                *linen_intensity,
-                *linen_scale_px,
-                *linen_rotation_deg,
-                *light_dir,
-                *shadow_radius_px,
-                *shadow_offset_px,
-                *image_overlap_px,
-            );
-
-            let canvas = ImagePlane {
-                width: canvas_w,
-                height: canvas_h,
-                pixels: canvas.into_raw(),
-            };
-
-            return Some(MatResult { path, canvas });
-        }
 
         let mut background = match &matting.style {
             MattingMode::FixedColor { color } => {
@@ -1237,7 +1278,6 @@ fn render_studio_mat(
     light_dir: [f32; 3],
     shadow_radius_px: f32,
     shadow_offset_px: f32,
-    image_overlap_px: f32,
 ) -> RgbaImage {
     let seed = studio_seed(
         path, src_w, src_h, canvas_w, canvas_h, photo_x, photo_y, photo_w, photo_h,
@@ -1257,12 +1297,10 @@ fn render_studio_mat(
         bevel_px = 0.0;
     }
 
-    let max_overlap = (photo_w.min(photo_h) as f32) * 0.45;
-    let overlap = image_overlap_px.clamp(0.0, max_overlap.max(0.0));
-    let visible_w = (photo_w as f32 - 2.0 * overlap).max(1.0);
-    let visible_h = (photo_h as f32 - 2.0 * overlap).max(1.0);
-    let window_x = photo_x as f32 + overlap;
-    let window_y = photo_y as f32 + overlap;
+    let visible_w = photo_w.max(1) as f32;
+    let visible_h = photo_h.max(1) as f32;
+    let window_x = photo_x as f32;
+    let window_y = photo_y as f32;
     let window_max_x = window_x + visible_w;
     let window_max_y = window_y + visible_h;
 
@@ -1351,8 +1389,8 @@ fn render_studio_mat(
             } else {
                 ((py - window_y) / visible_h).clamp(0.0, 1.0)
             };
-            let sample_x = (overlap + u * visible_w).clamp(0.0, photo_w as f32 - 1.0);
-            let sample_y = (overlap + v * visible_h).clamp(0.0, photo_h as f32 - 1.0);
+            let sample_x = (u * (photo_w.max(1) as f32 - 1.0)).clamp(0.0, photo_w as f32 - 1.0);
+            let sample_y = (v * (photo_h.max(1) as f32 - 1.0)).clamp(0.0, photo_h as f32 - 1.0);
             let mut sample = sample_bilinear(photo, sample_x, sample_y);
 
             let dist_left = (px - window_x).max(0.0);

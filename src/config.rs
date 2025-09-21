@@ -49,8 +49,6 @@ pub enum MattingMode {
         highlight_strength: f32,
         #[serde(default = "MattingMode::default_studio_shadow_strength")]
         shadow_strength: f32,
-        #[serde(default = "MattingMode::default_studio_image_overlap")]
-        image_overlap_px: f32,
         #[serde(default = "MattingMode::default_studio_bevel_angle")]
         bevel_angle_deg: f32,
         #[serde(
@@ -183,10 +181,6 @@ impl MattingMode {
 
     const fn default_studio_shadow_strength() -> f32 {
         1.0
-    }
-
-    const fn default_studio_image_overlap() -> f32 {
-        4.0
     }
 
     const fn default_studio_bevel_angle() -> f32 {

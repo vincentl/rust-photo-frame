@@ -96,7 +96,6 @@ The `matting` table chooses how the background behind each photo is prepared.
 | `bevel-width` | float | `3.0` | Visible width of the white bevel band in pixels. |
 | `highlight-strength` | float | `1.0` | Intensity of the light-side bevel shading (0–1). |
 | `shadow-strength` | float | `1.0` | Intensity of the shadow-side bevel shading (0–1). |
-| `image-overlap-px` | float | `4.0` | Amount of mat overlap on each side of the photo window in pixels. |
 | `bevel-angle-deg` | float | `45.0` | Angle of the beveled cut used to shape the lighting falloff. |
 | `linen-intensity` | float | `0.7` | Strength of the linen weave luminance modulation (0–1). Alias: `texture-strength`. |
 | `linen-scale-px` | float | `900.0` | Approximate pixel scale of the linen weave repeat. |
@@ -105,7 +104,7 @@ The `matting` table chooses how the background behind each photo is prepared.
 | `shadow-radius-px` | float | `1.0` | Radius of the soft drop shadow that falls onto the photo. |
 | `shadow-offset-px` | float | `0.75` | Offset of the inner drop shadow projected into the photo (pixels along the bevel normal). |
 
-The studio mat derives a uniform base color from the photo’s average RGB, applies a subtle linen weave in luminance only, renders a mitred white bevel using the supplied lighting parameters, and reveals the cropped photo through the window with a soft inner shadow for depth.
+The studio mat derives a uniform base color from the photo’s average RGB, applies a subtle linen weave in luminance only, renders a mitred white bevel using the supplied lighting parameters, and reveals the photo flush against the bevel (no overlap) with a soft inner shadow for depth.
 
 #### `type: fixed-image`
 
