@@ -1,6 +1,9 @@
-use rust_photo_frame::events::{Displayed, InventoryEvent, LoadPhoto};
+use rust_photo_frame::config::PlaylistOptions;
+use rust_photo_frame::events::{Displayed, InventoryEvent, LoadPhoto, PhotoInfo};
 use rust_photo_frame::tasks::manager;
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -16,6 +19,9 @@ async fn manager_ignores_spurious_remove_and_sends_load_on_add() {
         displayed_rx,
         to_load_tx,
         cancel.clone(),
+        PlaylistOptions::default(),
+        None,
+        None,
     ));
 
     // Spurious remove for path never added
@@ -35,7 +41,10 @@ async fn manager_ignores_spurious_remove_and_sends_load_on_add() {
     // Now add a real file and expect a load
     let real = PathBuf::from("/real/a.jpg");
     inv_tx
-        .send(InventoryEvent::PhotoAdded(real.clone()))
+        .send(InventoryEvent::PhotoAdded(photo_info(
+            real.clone(),
+            SystemTime::now(),
+        )))
         .await
         .unwrap();
 
@@ -61,6 +70,9 @@ async fn manager_rotates_actual_sent_item() {
         displayed_rx,
         to_load_tx,
         cancel.clone(),
+        PlaylistOptions::default(),
+        None,
+        None,
     ));
 
     let initial_a = PathBuf::from("/photos/a.jpg");
@@ -68,13 +80,19 @@ async fn manager_rotates_actual_sent_item() {
     let newcomer = PathBuf::from("/photos/new.jpg");
 
     inv_tx
-        .send(InventoryEvent::PhotoAdded(initial_a.clone()))
+        .send(InventoryEvent::PhotoAdded(photo_info(
+            initial_a.clone(),
+            SystemTime::now() - Duration::from_secs(86_400),
+        )))
         .await
         .unwrap();
     assert_eq!(receive_with_timeout(&mut to_load_rx).await, initial_a);
 
     inv_tx
-        .send(InventoryEvent::PhotoAdded(initial_b.clone()))
+        .send(InventoryEvent::PhotoAdded(photo_info(
+            initial_b.clone(),
+            SystemTime::now() - Duration::from_secs(172_800),
+        )))
         .await
         .unwrap();
 
@@ -82,19 +100,35 @@ async fn manager_rotates_actual_sent_item() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     inv_tx
-        .send(InventoryEvent::PhotoAdded(newcomer.clone()))
+        .send(InventoryEvent::PhotoAdded(photo_info(
+            newcomer.clone(),
+            SystemTime::now(),
+        )))
         .await
         .unwrap();
 
-    let mut order = Vec::new();
-    for _ in 0..3 {
-        order.push(receive_with_timeout(&mut to_load_rx).await);
+    let mut seen_newcomer = false;
+    let mut seen_older = HashSet::new();
+    for _ in 0..6 {
+        let next = receive_with_timeout(&mut to_load_rx).await;
+        if next == newcomer {
+            seen_newcomer = true;
+        } else {
+            seen_older.insert(next);
+        }
+        if seen_newcomer && seen_older.len() == 2 {
+            break;
+        }
     }
 
     assert!(
-        order.contains(&newcomer),
-        "new photo should be enqueued promptly, got {:?}",
-        order
+        seen_newcomer,
+        "new photo should appear early in the rotation"
+    );
+    assert_eq!(
+        seen_older.len(),
+        2,
+        "all older photos should remain in the cycle"
     );
 
     cancel.cancel();
@@ -107,4 +141,38 @@ async fn receive_with_timeout(rx: &mut mpsc::Receiver<LoadPhoto>) -> PathBuf {
         .expect("timed out waiting for LoadPhoto")
         .expect("loader channel closed unexpectedly");
     path
+}
+
+fn photo_info(path: PathBuf, created_at: SystemTime) -> PhotoInfo {
+    PhotoInfo { path, created_at }
+}
+
+#[test]
+fn simulate_playlist_respects_seed_and_weights() {
+    let options = PlaylistOptions {
+        new_multiplicity: 3,
+        half_life: Duration::from_secs(86_400),
+    };
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let fresh_path = PathBuf::from("fresh.jpg");
+    let old_path = PathBuf::from("old.jpg");
+    let photos = vec![
+        photo_info(fresh_path.clone(), now - Duration::from_secs(3_600)),
+        photo_info(old_path.clone(), now - Duration::from_secs(86_400 * 30)),
+    ];
+
+    let plan = manager::simulate_playlist(photos.clone(), options.clone(), now, 8, Some(42));
+
+    assert!(plan.len() >= 4, "expected several scheduled items");
+    assert_eq!(plan[0], fresh_path, "fresh photo should appear first");
+
+    let fresh_count = plan.iter().filter(|p| *p == &fresh_path).count();
+    let old_count = plan.iter().filter(|p| *p == &old_path).count();
+    assert!(
+        fresh_count > old_count,
+        "fresh photo should repeat more often than old ones"
+    );
+
+    let plan_again = manager::simulate_playlist(photos, options, now, 8, Some(42));
+    assert_eq!(plan, plan_again, "seeded runs should be deterministic");
 }

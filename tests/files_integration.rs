@@ -35,12 +35,12 @@ async fn startup_recursive_scan_emits_photo_added() {
     // Collect two PhotoAdded events (for a.jpg, nested/b.jpeg)
     let mut added: Vec<PathBuf> = Vec::new();
     while added.len() < 2 {
-        if let Some(InventoryEvent::PhotoAdded(p)) =
+        if let Some(InventoryEvent::PhotoAdded(info)) =
             tokio::time::timeout(std::time::Duration::from_secs(5), inv_rx.recv())
                 .await
                 .expect("timeout waiting for inventory event")
         {
-            added.push(p);
+            added.push(info.path);
         }
     }
 
@@ -83,12 +83,12 @@ async fn invalid_photo_is_deleted_and_emits_removed() {
     // Wait for startup scan to pick up the file
     let mut saw_added = false;
     while !saw_added {
-        if let Some(InventoryEvent::PhotoAdded(p)) =
+        if let Some(InventoryEvent::PhotoAdded(info)) =
             tokio::time::timeout(std::time::Duration::from_secs(5), inv_rx.recv())
                 .await
                 .expect("timeout waiting for inventory event")
         {
-            if p == bad {
+            if info.path == bad {
                 saw_added = true;
             }
         }
@@ -163,12 +163,12 @@ async fn startup_shuffle_is_deterministic_with_seed() {
 
     let mut actual: Vec<PathBuf> = Vec::new();
     while actual.len() < 2 {
-        if let Some(InventoryEvent::PhotoAdded(p)) =
+        if let Some(InventoryEvent::PhotoAdded(info)) =
             tokio::time::timeout(std::time::Duration::from_secs(5), inv_rx.recv())
                 .await
                 .expect("timeout waiting for inventory event")
         {
-            actual.push(p);
+            actual.push(info.path);
         }
     }
 
