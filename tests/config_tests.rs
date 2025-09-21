@@ -12,13 +12,28 @@ photo-library-path: "/photos"
 }
 
 #[test]
-fn parse_snake_case_aliases() {
+fn parse_snake_case_rejected() {
     let yaml = r#"
 photo_library_path: "/p"
 "#;
-    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(cfg.photo_library_path, PathBuf::from("/p"));
-    assert!((cfg.oversample - 1.0).abs() < f32::EPSILON);
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("unknown field"), "unexpected error: {err}");
+}
+
+#[test]
+fn studio_alias_keys_rejected() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  type: studio
+  bevel-width: 4.0
+"#;
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("unknown field"), "unexpected error: {err}");
 }
 
 #[test]

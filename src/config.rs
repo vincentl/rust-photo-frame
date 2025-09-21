@@ -7,7 +7,7 @@ use serde::Deserialize;
 use image::RgbaImage;
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct MattingOptions {
     #[serde(default = "MattingOptions::default_minimum_percentage")]
     pub minimum_mat_percentage: f32,
@@ -43,10 +43,7 @@ pub enum MattingMode {
         backend: BlurBackend,
     },
     Studio {
-        #[serde(
-            default = "MattingMode::default_studio_bevel_width_px",
-            alias = "bevel-width"
-        )]
+        #[serde(default = "MattingMode::default_studio_bevel_width_px")]
         bevel_width_px: f32,
         #[serde(default = "MattingMode::default_studio_highlight_strength")]
         highlight_strength: f32,
@@ -54,10 +51,7 @@ pub enum MattingMode {
         shadow_strength: f32,
         #[serde(default = "MattingMode::default_studio_bevel_angle")]
         bevel_angle_deg: f32,
-        #[serde(
-            default = "MattingMode::default_studio_linen_intensity",
-            alias = "texture-strength"
-        )]
+        #[serde(default = "MattingMode::default_studio_linen_intensity")]
         linen_intensity: f32,
         #[serde(default = "MattingMode::default_studio_linen_scale")]
         linen_scale_px: f32,
@@ -216,10 +210,9 @@ impl MattingMode {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct Configuration {
     /// Root directory to scan recursively for images.
-    #[serde(alias = "photo_library_path")]
     pub photo_library_path: PathBuf,
     /// GPU render oversample factor relative to screen size (1.0 = native).
     pub oversample: f32,
