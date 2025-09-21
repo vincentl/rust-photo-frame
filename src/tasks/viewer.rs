@@ -1279,8 +1279,8 @@ fn render_studio_mat(
     }
 
     let linen_strength = linen_intensity.clamp(0.0, 1.0);
-    let linen_scale = linen_scale_px.max(64.0);
-    let linen_amp = 0.02 + linen_strength * 0.02;
+    let linen_scale = linen_scale_px.max(48.0);
+    let linen_amp = 0.015 + linen_strength * 0.085;
     let rotation = linen_rotation_deg.to_radians();
     let cos_r = rotation.cos();
     let sin_r = rotation.sin();
@@ -1314,12 +1314,20 @@ fn render_studio_mat(
         let linen = if linen_strength > 0.0 {
             let u = rx / linen_scale;
             let v = ry / linen_scale;
-            let jitter_u = fbm_noise(coarse_seed, v * 5.1, v * 3.7, 4) * 0.1 - 0.05;
-            let jitter_v = fbm_noise(fine_seed, u * 4.6, u * 3.3, 4) * 0.1 - 0.05;
-            let warp = (std::f32::consts::TAU * (u + jitter_u)).sin() * 0.5;
-            let weft = (std::f32::consts::TAU * (v + jitter_v)).sin() * 0.5;
-            let fiber = fbm_noise(fiber_seed, u * 22.0, v * 22.0, 3) - 0.5;
-            (1.0 + linen_amp * (warp + weft) + linen_amp * 0.45 * fiber).clamp(0.94, 1.06)
+            let jitter_u = fbm_noise(coarse_seed, v * 4.7, v * 3.1, 4) * 0.12 - 0.06;
+            let jitter_v = fbm_noise(fine_seed, u * 4.1, u * 3.9, 4) * 0.12 - 0.06;
+
+            let warp = (std::f32::consts::TAU * (u + jitter_u)).sin();
+            let weft = (std::f32::consts::TAU * (v + jitter_v)).sin();
+            let warp_detail = (std::f32::consts::TAU * (u * 2.0 + jitter_v * 0.5)).sin();
+            let weft_detail = (std::f32::consts::TAU * (v * 2.0 + jitter_u * 0.5)).sin();
+            let warp_band = warp.abs() - 0.63;
+            let weft_band = weft.abs() - 0.63;
+            let cross = warp * weft * 0.35;
+            let detail = (warp_detail + weft_detail) * 0.18;
+            let fiber = (fbm_noise(fiber_seed, u * 18.0, v * 18.0, 4) - 0.5) * 0.6;
+            let weave = warp_band + weft_band + cross + detail + fiber;
+            (1.0 + linen_amp * weave).clamp(1.0 - linen_amp * 2.2, 1.0 + linen_amp * 2.0)
         } else {
             1.0
         };
@@ -1414,19 +1422,21 @@ fn render_studio_mat(
             normal = normalize3(normal);
             let dot = normal[0] * light[0] + normal[1] * light[1] + normal[2] * light[2];
             let mut shade = if dot >= 0.0 {
-                0.88 + highlight_scale * dot
+                0.9 + highlight_scale * dot
             } else {
-                0.88 - shadow_scale * (-dot)
+                0.9 - shadow_scale * (-dot)
             };
             let depth = (edge_distance / bevel_px).clamp(0.0, 1.0);
-            shade *= lerp(1.04, 0.94, depth);
-            shade = shade.clamp(0.0, 1.0);
+            let inner_brighten = lerp(1.12, 0.92, depth);
+            shade = (shade * inner_brighten).clamp(0.0, 1.0);
             let dist_outer = (px - outer_min_x)
                 .min(outer_max_x - px)
                 .min(py - outer_min_y)
                 .min(outer_max_y - py)
                 .max(0.0);
-            let blend = smoothstep(dist_outer.clamp(0.0, 1.0));
+            let falloff = 1.0 - depth;
+            let blend =
+                (smoothstep(dist_outer.clamp(0.0, 1.0)) * smoothstep(falloff)).clamp(0.0, 1.0);
             for c in 0..3 {
                 let bevel_color = shade;
                 let value = lerp(base_color[c], bevel_color, blend).clamp(0.0, 1.0);
