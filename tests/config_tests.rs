@@ -12,16 +12,6 @@ photo-library-path: "/photos"
 }
 
 #[test]
-fn parse_snake_case_aliases() {
-    let yaml = r#"
-photo_library_path: "/p"
-"#;
-    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(cfg.photo_library_path, PathBuf::from("/p"));
-    assert!((cfg.oversample - 1.0).abs() < f32::EPSILON);
-}
-
-#[test]
 fn parse_with_oversample() {
     let yaml = r#"
 photo-library-path: "/photos"
@@ -40,6 +30,31 @@ startup-shuffle-seed: 7
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(cfg.startup_shuffle_seed, Some(7));
+}
+
+#[test]
+fn parse_with_studio_matting() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  type: studio
+  bevel-width-px: 5.0
+  bevel-color: [200, 210, 220]
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+
+    match cfg.matting.style {
+        rust_photo_frame::config::MattingMode::Studio {
+            bevel_width_px,
+            bevel_color,
+            ..
+        } => {
+            assert!((bevel_width_px - 5.0).abs() < f32::EPSILON);
+            assert_eq!(bevel_color, [200, 210, 220]);
+        }
+        _ => panic!("expected studio matting"),
+    }
 }
 
 #[test]

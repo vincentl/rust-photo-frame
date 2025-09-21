@@ -1,4 +1,4 @@
-use crate::config::{MattingMode, MattingOptions};
+use crate::config::{FixedImageFit, MattingMode, MattingOptions};
 use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
 use crate::processing::blur::apply_blur;
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
@@ -150,7 +150,95 @@ pub fn run_windowed(
 
         let (canvas_w, canvas_h) = compute_canvas_size(screen_w, screen_h, oversample, max_dim);
         let margin = (matting.minimum_mat_percentage / 100.0).clamp(0.0, 0.45);
-        let mut background = match matting.style {
+        let max_upscale = matting.max_upscale_factor.max(1.0);
+        let avg_color = average_color(&src);
+
+        if let MattingMode::Studio {
+            bevel_width_px,
+            bevel_color,
+        } = &matting.style
+        {
+            let mut bevel_px = bevel_width_px.max(0.0);
+            let margin_x = (canvas_w as f32 * margin).round();
+            let margin_y = (canvas_h as f32 * margin).round();
+            let inner_w = (canvas_w as f32 - 2.0 * margin_x).max(1.0);
+            let inner_h = (canvas_h as f32 - 2.0 * margin_y).max(1.0);
+            let max_bevel = 0.5 * inner_w.min(inner_h).max(0.0);
+            if max_bevel <= 0.0 {
+                bevel_px = 0.0;
+            } else {
+                bevel_px = bevel_px.min(max_bevel);
+            }
+            let photo_space_w = (canvas_w as f32 - 2.0 * (margin_x + bevel_px)).max(1.0);
+            let photo_space_h = (canvas_h as f32 - 2.0 * (margin_y + bevel_px)).max(1.0);
+
+            let iw = width.max(1) as f32;
+            let ih = height.max(1) as f32;
+            let mut scale = (photo_space_w / iw)
+                .min(photo_space_h / ih)
+                .min(max_upscale);
+            if !scale.is_finite() || scale <= 0.0 {
+                scale = 1.0;
+            }
+            let max_photo_w = photo_space_w.floor().max(1.0);
+            let max_photo_h = photo_space_h.floor().max(1.0);
+            let mut photo_w = (iw * scale).round().clamp(1.0, max_photo_w);
+            let mut photo_h = (ih * scale).round().clamp(1.0, max_photo_h);
+            photo_w = photo_w.clamp(1.0, canvas_w as f32);
+            photo_h = photo_h.clamp(1.0, canvas_h as f32);
+            let photo_w = photo_w as u32;
+            let photo_h = photo_h as u32;
+            let (offset_x, offset_y) = center_offset(photo_w, photo_h, canvas_w, canvas_h);
+
+            let main_img: Cow<'_, RgbaImage> = if photo_w == width && photo_h == height {
+                Cow::Borrowed(&src)
+            } else {
+                Cow::Owned(imageops::resize(
+                    &src,
+                    photo_w,
+                    photo_h,
+                    imageops::FilterType::Triangle,
+                ))
+            };
+
+            let canvas = render_studio_mat(
+                canvas_w,
+                canvas_h,
+                offset_x,
+                offset_y,
+                photo_w,
+                photo_h,
+                main_img.as_ref(),
+                avg_color,
+                bevel_px,
+                *bevel_color,
+            );
+
+            let canvas = ImagePlane {
+                width: canvas_w,
+                height: canvas_h,
+                pixels: canvas.into_raw(),
+            };
+
+            return Some(MatResult { path, canvas });
+        }
+
+        let (final_w, final_h) =
+            resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
+        let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
+
+        let main_img: Cow<'_, RgbaImage> = if final_w == width && final_h == height {
+            Cow::Borrowed(&src)
+        } else {
+            Cow::Owned(imageops::resize(
+                &src,
+                final_w,
+                final_h,
+                imageops::FilterType::Triangle,
+            ))
+        };
+
+        let mut background = match &matting.style {
             MattingMode::FixedColor { color } => {
                 let px = Rgba([color[0], color[1], color[2], 255]);
                 RgbaImage::from_pixel(canvas_w, canvas_h, px)
@@ -173,7 +261,7 @@ pub fn run_windowed(
                     imageops::overlay(&mut canvas, &bg, bg_x as i64, bg_y as i64);
                     bg = canvas;
                 }
-                if sigma > 0.0 {
+                if *sigma > 0.0 {
                     let limit = max_sample_dim
                         .filter(|v| *v > 0)
                         .unwrap_or_else(|| {
@@ -190,7 +278,7 @@ pub fn run_windowed(
                         .max(1);
 
                     let mut sample = bg;
-                    let mut sigma_px = sigma;
+                    let mut sigma_px = *sigma;
                     let canvas_max = canvas_w.max(canvas_h).max(1);
                     if canvas_max > limit {
                         let scale = (limit as f32) / (canvas_max as f32);
@@ -207,7 +295,7 @@ pub fn run_windowed(
                         sigma_px *= scale.max(0.01);
                     }
 
-                    let mut blurred: RgbaImage = apply_blur(&sample, sigma_px, backend);
+                    let mut blurred: RgbaImage = apply_blur(&sample, sigma_px, *backend);
                     if blurred.width() != canvas_w || blurred.height() != canvas_h {
                         blurred = imageops::resize(
                             &blurred,
@@ -221,18 +309,86 @@ pub fn run_windowed(
                     bg
                 }
             }
+            MattingMode::Studio { .. } => unreachable!(),
+            MattingMode::FixedImage { fit, .. } => {
+                if let Some(bg) = matting.runtime.fixed_image.as_ref() {
+                    let bg_img: &RgbaImage = bg.as_ref();
+                    match fit {
+                        FixedImageFit::Stretch => imageops::resize(
+                            bg_img,
+                            canvas_w,
+                            canvas_h,
+                            imageops::FilterType::CatmullRom,
+                        ),
+                        FixedImageFit::Cover => {
+                            let (bg_w, bg_h) = resize_to_cover(
+                                canvas_w,
+                                canvas_h,
+                                bg_img.width(),
+                                bg_img.height(),
+                                max_dim,
+                            );
+                            let mut resized = imageops::resize(
+                                bg_img,
+                                bg_w,
+                                bg_h,
+                                imageops::FilterType::CatmullRom,
+                            );
+                            if bg_w > canvas_w || bg_h > canvas_h {
+                                let crop_x = (bg_w.saturating_sub(canvas_w)) / 2;
+                                let crop_y = (bg_h.saturating_sub(canvas_h)) / 2;
+                                resized = imageops::crop_imm(
+                                    &resized, crop_x, crop_y, canvas_w, canvas_h,
+                                )
+                                .to_image();
+                            } else if bg_w < canvas_w || bg_h < canvas_h {
+                                let mut canvas = RgbaImage::from_pixel(
+                                    canvas_w,
+                                    canvas_h,
+                                    average_color_rgba(bg_img),
+                                );
+                                let (ox, oy) = center_offset(bg_w, bg_h, canvas_w, canvas_h);
+                                imageops::overlay(&mut canvas, &resized, ox as i64, oy as i64);
+                                resized = canvas;
+                            }
+                            resized
+                        }
+                        FixedImageFit::Contain => {
+                            let (bg_w, bg_h) = resize_to_contain(
+                                canvas_w,
+                                canvas_h,
+                                bg_img.width(),
+                                bg_img.height(),
+                                max_dim,
+                            );
+                            let resized = imageops::resize(
+                                bg_img,
+                                bg_w,
+                                bg_h,
+                                imageops::FilterType::CatmullRom,
+                            );
+                            let mut canvas = RgbaImage::from_pixel(
+                                canvas_w,
+                                canvas_h,
+                                average_color_rgba(bg_img),
+                            );
+                            let (ox, oy) = center_offset(bg_w, bg_h, canvas_w, canvas_h);
+                            imageops::overlay(&mut canvas, &resized, ox as i64, oy as i64);
+                            canvas
+                        }
+                    }
+                } else {
+                    RgbaImage::from_pixel(canvas_w, canvas_h, Rgba([0, 0, 0, 255]))
+                }
+            }
         };
 
-        let max_upscale = matting.max_upscale_factor.max(1.0);
-        let (final_w, final_h) =
-            resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
-        let main_img = if final_w == width && final_h == height {
-            src
-        } else {
-            imageops::resize(&src, final_w, final_h, imageops::FilterType::Triangle)
-        };
-        let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
-        imageops::overlay(&mut background, &main_img, offset_x as i64, offset_y as i64);
+        imageops::overlay(
+            &mut background,
+            main_img.as_ref(),
+            offset_x as i64,
+            offset_y as i64,
+        );
 
         let canvas = ImagePlane {
             width: canvas_w,
@@ -936,6 +1092,8 @@ pub fn run_windowed(
             a: 1.0,
         },
         MattingMode::Blur { .. } => wgpu::Color::BLACK,
+        MattingMode::Studio { .. } => wgpu::Color::BLACK,
+        MattingMode::FixedImage { .. } => wgpu::Color::BLACK,
     };
     let mut app = App {
         from_loader,
@@ -1020,10 +1178,264 @@ fn resize_to_cover(
     (w as u32, h as u32)
 }
 
+fn resize_to_contain(
+    canvas_w: u32,
+    canvas_h: u32,
+    src_w: u32,
+    src_h: u32,
+    max_dim: u32,
+) -> (u32, u32) {
+    let iw = src_w.max(1) as f32;
+    let ih = src_h.max(1) as f32;
+    let cw = canvas_w.max(1) as f32;
+    let ch = canvas_h.max(1) as f32;
+    let scale = (cw / iw).min(ch / ih).max(0.0);
+    let scale = if scale.is_finite() { scale } else { 1.0 };
+    let w = (iw * scale).round().clamp(1.0, max_dim as f32);
+    let h = (ih * scale).round().clamp(1.0, max_dim as f32);
+    (w as u32, h as u32)
+}
+
 fn center_offset(inner_w: u32, inner_h: u32, outer_w: u32, outer_h: u32) -> (u32, u32) {
     let ox = outer_w.saturating_sub(inner_w) / 2;
     let oy = outer_h.saturating_sub(inner_h) / 2;
     (ox, oy)
+}
+
+fn average_color(img: &RgbaImage) -> [f32; 3] {
+    let mut accum = [0f64; 3];
+    let mut total = 0f64;
+    for pixel in img.pixels() {
+        let alpha = (pixel[3] as f64) / 255.0;
+        if alpha <= 0.0 {
+            continue;
+        }
+        total += alpha;
+        for c in 0..3 {
+            accum[c] += (pixel[c] as f64) * alpha;
+        }
+    }
+    if total <= f64::EPSILON {
+        return [0.1, 0.1, 0.1];
+    }
+    [
+        (accum[0] / (255.0 * total)) as f32,
+        (accum[1] / (255.0 * total)) as f32,
+        (accum[2] / (255.0 * total)) as f32,
+    ]
+}
+
+fn average_color_rgba(img: &RgbaImage) -> Rgba<u8> {
+    let avg = average_color(img);
+    Rgba([
+        (avg[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+        (avg[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+        (avg[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+        255,
+    ])
+}
+
+fn render_studio_mat(
+    canvas_w: u32,
+    canvas_h: u32,
+    photo_x: u32,
+    photo_y: u32,
+    photo_w: u32,
+    photo_h: u32,
+    photo: &RgbaImage,
+    mat_color: [f32; 3],
+    bevel_width_px: f32,
+    bevel_color: [u8; 3],
+) -> RgbaImage {
+    let mut bevel_px = bevel_width_px.max(0.0);
+    let max_border = photo_x
+        .min(photo_y)
+        .min(canvas_w.saturating_sub(photo_x.saturating_add(photo_w)))
+        .min(canvas_h.saturating_sub(photo_y.saturating_add(photo_h))) as f32;
+    if bevel_px > 0.0 {
+        bevel_px = bevel_px.min(max_border.max(0.0));
+    } else {
+        bevel_px = 0.0;
+    }
+
+    let window_x = photo_x as f32;
+    let window_y = photo_y as f32;
+    let window_max_x = window_x + photo_w.max(1) as f32;
+    let window_max_y = window_y + photo_h.max(1) as f32;
+
+    let mat_rgb = [
+        srgb_u8(mat_color[0]),
+        srgb_u8(mat_color[1]),
+        srgb_u8(mat_color[2]),
+    ];
+    let bevel_rgb_f32 = [
+        bevel_color[0] as f32 / 255.0,
+        bevel_color[1] as f32 / 255.0,
+        bevel_color[2] as f32 / 255.0,
+    ];
+    let light_dir = normalize3([-0.55, -0.65, 0.52]);
+    let ambient = 0.88;
+    let diffuse = 0.18;
+
+    let mut mat = RgbaImage::new(canvas_w, canvas_h);
+    for (x, y, pixel) in mat.enumerate_pixels_mut() {
+        let px = x as f32 + 0.5;
+        let py = y as f32 + 0.5;
+
+        let inside_window =
+            px >= window_x && px < window_max_x && py >= window_y && py < window_max_y;
+
+        if inside_window {
+            let u = if photo_w == 0 {
+                0.0
+            } else {
+                ((px - window_x) / photo_w as f32).clamp(0.0, 1.0)
+            };
+            let v = if photo_h == 0 {
+                0.0
+            } else {
+                ((py - window_y) / photo_h as f32).clamp(0.0, 1.0)
+            };
+            let sample_x = (u * (photo_w.max(1) as f32 - 1.0)).clamp(0.0, photo_w as f32 - 1.0);
+            let sample_y = (v * (photo_h.max(1) as f32 - 1.0)).clamp(0.0, photo_h as f32 - 1.0);
+            let sample = sample_bilinear(photo, sample_x, sample_y);
+
+            for c in 0..3 {
+                pixel[c] = srgb_u8(sample[c]);
+            }
+            pixel[3] = 255;
+            continue;
+        }
+
+        if bevel_px > 0.0 {
+            let dx = if px < window_x {
+                window_x - px
+            } else if px >= window_max_x {
+                px - window_max_x
+            } else {
+                0.0
+            };
+            let dy = if py < window_y {
+                window_y - py
+            } else if py >= window_max_y {
+                py - window_max_y
+            } else {
+                0.0
+            };
+
+            if dx < bevel_px && dy < bevel_px {
+                let max_offset = dx.max(dy).clamp(0.0, bevel_px);
+                let depth = if bevel_px <= f32::EPSILON {
+                    0.0
+                } else {
+                    (1.0 - max_offset / bevel_px).clamp(0.0, 1.0)
+                };
+
+                let nearest_x = px.clamp(window_x, window_max_x);
+                let nearest_y = py.clamp(window_y, window_max_y);
+                let mut dir = [nearest_x - px, nearest_y - py];
+                let dir_len_sq = dir[0] * dir[0] + dir[1] * dir[1];
+                if dir_len_sq > 1e-6 {
+                    let inv_len = dir_len_sq.sqrt().recip();
+                    dir[0] *= inv_len;
+                    dir[1] *= inv_len;
+                } else if dx > dy {
+                    dir = [if px < window_x { 1.0 } else { -1.0 }, 0.0];
+                } else {
+                    dir = [0.0, if py < window_y { 1.0 } else { -1.0 }];
+                }
+
+                let mut normal = [dir[0], dir[1], 1.0];
+                normal = normalize3(normal);
+                let mut shade = ambient + diffuse * dot3(normal, light_dir).max(0.0);
+                shade += 0.1 * depth.powf(2.0);
+                shade = shade.clamp(0.82, 1.08);
+
+                let mat_mix = (1.0 - depth).powf(3.0) * 0.35;
+                let mat_mix = mat_mix.clamp(0.0, 1.0);
+
+                let mut color = [0u8; 3];
+                for c in 0..3 {
+                    let base = lerp(bevel_rgb_f32[c], mat_color[c], mat_mix);
+                    let shaded = (base * shade).clamp(0.0, 1.0);
+                    color[c] = srgb_u8(shaded);
+                }
+
+                pixel[0] = color[0];
+                pixel[1] = color[1];
+                pixel[2] = color[2];
+                pixel[3] = 255;
+                continue;
+            }
+        }
+
+        pixel[0] = mat_rgb[0];
+        pixel[1] = mat_rgb[1];
+        pixel[2] = mat_rgb[2];
+        pixel[3] = 255;
+    }
+
+    mat
+}
+
+fn srgb_u8(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn normalize3(mut v: [f32; 3]) -> [f32; 3] {
+    let len_sq = dot3(v, v);
+    if len_sq > 1e-6 {
+        let inv_len = len_sq.sqrt().recip();
+        v[0] *= inv_len;
+        v[1] *= inv_len;
+        v[2] *= inv_len;
+        v
+    } else {
+        [0.0, 0.0, 1.0]
+    }
+}
+
+fn sample_bilinear(img: &RgbaImage, x: f32, y: f32) -> [f32; 3] {
+    let w = img.width();
+    let h = img.height();
+    if w == 0 || h == 0 {
+        return [0.0, 0.0, 0.0];
+    }
+    let max_x = (w - 1) as f32;
+    let max_y = (h - 1) as f32;
+    let xf = x.clamp(0.0, max_x);
+    let yf = y.clamp(0.0, max_y);
+    let x0 = xf.floor() as u32;
+    let y0 = yf.floor() as u32;
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let tx = xf - x0 as f32;
+    let ty = yf - y0 as f32;
+
+    let p00 = img.get_pixel(x0, y0);
+    let p10 = img.get_pixel(x1, y0);
+    let p01 = img.get_pixel(x0, y1);
+    let p11 = img.get_pixel(x1, y1);
+
+    let mut result = [0.0f32; 3];
+    for c in 0..3 {
+        let c00 = p00[c] as f32 / 255.0;
+        let c10 = p10[c] as f32 / 255.0;
+        let c01 = p01[c] as f32 / 255.0;
+        let c11 = p11[c] as f32 / 255.0;
+        let c0 = lerp(c00, c10, tx);
+        let c1 = lerp(c01, c11, tx);
+        result[c] = lerp(c0, c1, ty);
+    }
+    result
 }
 
 fn compute_cover_rect(
