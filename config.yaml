@@ -28,3 +28,15 @@ matting:
 #   sigma: 20.0
 #   max-sample-dim: 1536
 #   backend: neon        # options: cpu, neon (defaults to cpu)
+
+button:
+  enabled: true
+  device-path: null
+  key-code: KEY_POWER
+  short-max-ms: 2000
+  long-threshold-ms: 8000
+  grab-device: true
+  output-name: null
+  use-wlr-randr: true
+  use-vcgencmd-fallback: true
+  shutdown-command: systemctl poweroff

@@ -1,3 +1,4 @@
+pub mod button;
 pub mod config;
 pub mod events;
 pub mod processing;

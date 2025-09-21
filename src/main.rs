@@ -1,3 +1,4 @@
+mod button;
 mod config;
 mod events;
 mod processing;
@@ -14,7 +15,7 @@ use humantime::{format_rfc3339, parse_rfc3339};
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::time::SystemTime;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -115,6 +116,24 @@ async fn main() -> Result<()> {
     }
 
     let mut tasks = JoinSet::new();
+
+    // GPIO button task (runs independently and observes cancellation)
+    let (button_shutdown_tx, button_shutdown_rx) = oneshot::channel();
+    {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            cancel.cancelled().await;
+            let _ = button_shutdown_tx.send(());
+        });
+    }
+    tasks.spawn({
+        let button_cfg = cfg.button.clone();
+        async move {
+            crate::button::spawn_button_task(button_cfg, button_shutdown_rx)
+                .await
+                .context("button task failed")
+        }
+    });
 
     // PhotoFiles
     tasks.spawn({
