@@ -91,10 +91,10 @@
 - [ ] **Photo rendering**
   - [ ] Matting options:
     - [x] Fixed color mat (configurable).
-    - [ ] Studio mat (average color + textured bevel).
+    - [x] Studio mat (average color + textured bevel).
     - [x] Blur mat (scaled background fill).
     - [x] Configurable minimum mat size.
-    - [ ] Fixed background image that is scaled to fit screen and images are overlayed
+    - [x] Fixed background image that is scaled to fit screen and images are overlayed
 - [ ] **User web interface**
   - [ ] Local web server for configuration (cloud, mats, screen schedule, photo timing).
   - [ ] Access limited to local network.
