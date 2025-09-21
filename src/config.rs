@@ -1,25 +1,33 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 
+use image::RgbaImage;
+
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case")]
 pub struct MattingOptions {
     #[serde(default = "MattingOptions::default_minimum_percentage")]
     pub minimum_mat_percentage: f32,
-    #[serde(
-        default = "MattingOptions::default_max_upscale_factor",
-        deserialize_with = "MattingOptions::deserialize_max_upscale"
-    )]
+    #[serde(default = "MattingOptions::default_max_upscale_factor")]
     pub max_upscale_factor: f32,
-    #[serde(flatten, default)]
+    #[serde(default, flatten)]
     pub style: MattingMode,
+    #[serde(default, skip_deserializing)]
+    pub runtime: MattingRuntime,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MattingRuntime {
+    pub fixed_image: Option<Arc<RgbaImage>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum MattingMode {
+    #[serde(rename = "fixed-color")]
     FixedColor {
         #[serde(default = "MattingMode::default_color")]
         color: [u8; 3],
@@ -27,10 +35,27 @@ pub enum MattingMode {
     Blur {
         #[serde(default = "MattingMode::default_blur_sigma")]
         sigma: f32,
-        #[serde(default)]
+        #[serde(default, rename = "max-sample-dim")]
         max_sample_dim: Option<u32>,
         #[serde(default)]
         backend: BlurBackend,
+    },
+    Studio {
+        #[serde(
+            default = "MattingMode::default_studio_bevel_width_px",
+            rename = "bevel-width-px"
+        )]
+        bevel_width_px: f32,
+        #[serde(
+            default = "MattingMode::default_studio_bevel_color",
+            rename = "bevel-color"
+        )]
+        bevel_color: [u8; 3],
+    },
+    FixedImage {
+        path: PathBuf,
+        #[serde(default)]
+        fit: FixedImageFit,
     },
 }
 
@@ -41,9 +66,23 @@ pub enum BlurBackend {
     Neon,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FixedImageFit {
+    Cover,
+    Contain,
+    Stretch,
+}
+
 impl Default for BlurBackend {
     fn default() -> Self {
         Self::Cpu
+    }
+}
+
+impl Default for FixedImageFit {
+    fn default() -> Self {
+        Self::Cover
     }
 }
 
@@ -53,6 +92,7 @@ impl Default for MattingOptions {
             minimum_mat_percentage: Self::default_minimum_percentage(),
             max_upscale_factor: Self::default_max_upscale_factor(),
             style: MattingMode::default(),
+            runtime: MattingRuntime::default(),
         }
     }
 }
@@ -66,12 +106,23 @@ impl MattingOptions {
         1.0
     }
 
-    fn deserialize_max_upscale<'de, D>(deserializer: D) -> Result<f32, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let factor = f32::deserialize(deserializer)?;
-        Ok(factor.max(1.0))
+    pub fn prepare_runtime(&mut self) -> Result<()> {
+        self.runtime = MattingRuntime::default();
+        match &self.style {
+            MattingMode::FixedImage { path, .. } => {
+                let img = image::open(path)
+                    .with_context(|| {
+                        format!(
+                            "failed to load fixed background image at {}",
+                            path.display()
+                        )
+                    })?
+                    .to_rgba8();
+                self.runtime.fixed_image = Some(Arc::new(img));
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -96,13 +147,20 @@ impl MattingMode {
     pub const fn default_blur_max_sample_dim() -> u32 {
         2048
     }
+
+    const fn default_studio_bevel_width_px() -> f32 {
+        3.0
+    }
+
+    const fn default_studio_bevel_color() -> [u8; 3] {
+        [255, 255, 255]
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct Configuration {
     /// Root directory to scan recursively for images.
-    #[serde(alias = "photo_library_path")]
     pub photo_library_path: PathBuf,
     /// GPU render oversample factor relative to screen size (1.0 = native).
     pub oversample: f32,
@@ -127,7 +185,7 @@ impl Configuration {
     }
 
     /// Validate runtime invariants that cannot be expressed via serde defaults alone.
-    pub fn validated(self) -> Result<Self> {
+    pub fn validated(mut self) -> Result<Self> {
         ensure!(
             self.viewer_preload_count > 0,
             "viewer-preload-count must be greater than zero"
@@ -139,6 +197,13 @@ impl Configuration {
         ensure!(self.oversample > 0.0, "oversample must be positive");
         ensure!(self.fade_ms > 0, "fade-ms must be greater than zero");
         ensure!(self.dwell_ms > 0, "dwell-ms must be greater than zero");
+        self.matting.max_upscale_factor = self
+            .matting
+            .max_upscale_factor
+            .max(MattingOptions::default_max_upscale_factor());
+        self.matting
+            .prepare_runtime()
+            .context("failed to prepare matting resources")?;
         Ok(self)
     }
 }
