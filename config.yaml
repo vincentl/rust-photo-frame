@@ -31,6 +31,7 @@ matting:
 
 button:
   enabled: true
+  # Leave as null to auto-detect the Pi 5 `pwr_button` device
   device-path: null
   key-code: KEY_POWER
   short-max-ms: 2000
