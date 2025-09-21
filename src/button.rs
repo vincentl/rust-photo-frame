@@ -29,13 +29,13 @@ pub async fn spawn_button_task(
 
     let target_key = parse_key(&cfg.key_code)?;
 
-    let open_fut = open_button_device(&cfg);
+    let open_fut = open_button_device(&cfg, target_key);
     tokio::pin!(open_fut);
 
     let mut device = tokio::select! {
-        result = &mut open_fut => result.context("open gpio-keys device")?,
+        result = &mut open_fut => result.context("open power button input device")?,
         _ = &mut shutdown_signal => {
-            tracing::info!("Shutdown requested before GPIO button device was ready");
+            tracing::info!("Shutdown requested before power button input device was ready");
             return Ok(());
         }
     };
@@ -149,14 +149,14 @@ fn parse_key(code: &str) -> Result<Key> {
     Key::from_str(code).map_err(|_| ButtonTaskError::UnknownKey(code.to_string()).into())
 }
 
-async fn open_button_device(cfg: &ButtonConfig) -> Result<Device> {
+async fn open_button_device(cfg: &ButtonConfig, target_key: Key) -> Result<Device> {
     let mut delay = INITIAL_RETRY_DELAY;
     loop {
-        match try_open_device(cfg) {
+        match try_open_device(cfg, target_key) {
             Ok(device) => return Ok(device),
             Err(err) => {
                 tracing::warn!(
-                    "GPIO button device unavailable: {err:?}; retrying in {}s",
+                    "Power button input device unavailable: {err:?}; retrying in {}s",
                     delay.as_secs()
                 );
                 time::sleep(delay).await;
@@ -166,24 +166,44 @@ async fn open_button_device(cfg: &ButtonConfig) -> Result<Device> {
     }
 }
 
-fn try_open_device(cfg: &ButtonConfig) -> Result<Device> {
+fn try_open_device(cfg: &ButtonConfig, target_key: Key) -> Result<Device> {
     if let Some(path) = cfg.device_path.as_ref() {
         return Device::open(path).with_context(|| format!("open {}", path.display()));
     }
 
     for (path, device) in evdev::enumerate() {
-        if device_matches(&device) {
+        if device_matches(&device, target_key) {
             tracing::info!("Using input device {}", path.display());
             return Device::open(&path).with_context(|| format!("open {}", path.display()));
         }
     }
 
-    Err(anyhow!("no gpio-keys input device found"))
+    Err(anyhow!("no compatible power button input device found"))
 }
 
-fn device_matches(device: &Device) -> bool {
+fn device_matches(device: &Device, target_key: Key) -> bool {
     let name = device.name().unwrap_or("").to_ascii_lowercase();
-    name.contains("gpio") && name.contains("key")
+
+    if !name_matches(&name) {
+        return false;
+    }
+
+    device
+        .supported_keys()
+        .map(|keys| keys.contains(target_key))
+        .unwrap_or(false)
+}
+
+fn name_matches(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    trimmed.contains("pwr_button")
+        || (trimmed.contains("power") && trimmed.contains("button"))
+        || trimmed.contains("shutdown")
+        || (trimmed.contains("gpio") && trimmed.contains("key"))
 }
 
 async fn toggle_screen(
