@@ -1274,8 +1274,8 @@ fn render_studio_mat(
         bevel_color[2] as f32 / 255.0,
     ];
     let light_dir = normalize3([-0.55, -0.65, 0.52]);
-    let ambient = 0.72;
-    let diffuse = 0.28;
+    let ambient = 0.88;
+    let diffuse = 0.18;
 
     let mut mat = RgbaImage::new(canvas_w, canvas_h);
     for (x, y, pixel) in mat.enumerate_pixels_mut() {
@@ -1348,13 +1348,15 @@ fn render_studio_mat(
                 let mut normal = [dir[0], dir[1], 1.0];
                 normal = normalize3(normal);
                 let mut shade = ambient + diffuse * dot3(normal, light_dir).max(0.0);
-                shade += 0.12 * depth.powf(2.0);
-                shade = shade.clamp(0.0, 1.1);
+                shade += 0.1 * depth.powf(2.0);
+                shade = shade.clamp(0.82, 1.08);
 
-                let blend = depth.powf(0.6);
+                let mat_mix = (1.0 - depth).powf(3.0) * 0.35;
+                let mat_mix = mat_mix.clamp(0.0, 1.0);
+
                 let mut color = [0u8; 3];
                 for c in 0..3 {
-                    let base = lerp(mat_color[c], bevel_rgb_f32[c], blend);
+                    let base = lerp(bevel_rgb_f32[c], mat_color[c], mat_mix);
                     let shaded = (base * shade).clamp(0.0, 1.0);
                     color[c] = srgb_u8(shaded);
                 }
