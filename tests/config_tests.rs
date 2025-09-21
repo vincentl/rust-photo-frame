@@ -33,6 +33,49 @@ startup-shuffle-seed: 7
 }
 
 #[test]
+fn parse_with_studio_matting() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  type: studio
+  bevel-width-px: 5.0
+  linen-intensity: 0.4
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+
+    match cfg.matting.style {
+        rust_photo_frame::config::MattingMode::Studio {
+            bevel_width_px,
+            linen_intensity,
+            ..
+        } => {
+            assert!((bevel_width_px - 5.0).abs() < f32::EPSILON);
+            assert!((linen_intensity - 0.4).abs() < f32::EPSILON);
+        }
+        _ => panic!("expected studio matting"),
+    }
+}
+
+#[test]
+fn matting_rejects_unknown_fields() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  type: studio
+  bevel-width-px: 4.0
+  unexpected: 1
+"#;
+
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown field"),
+        "unexpected error: {}",
+        err
+    );
+}
+
+#[test]
 fn validated_rejects_zero_preload() {
     let cfg = Configuration {
         viewer_preload_count: 0,
