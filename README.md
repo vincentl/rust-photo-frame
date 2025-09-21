@@ -93,7 +93,7 @@ The `matting` table chooses how the background behind each photo is prepared.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `bevel-width` | float | `3.0` | Visible width of the white bevel band in pixels. |
+| `bevel-width-px` | float | `3.0` | Visible width of the white bevel band in pixels. The renderer clamps this value to the available mat border if the photo touches an edge. |
 | `highlight-strength` | float | `1.0` | Intensity of the light-side bevel shading (0–1). |
 | `shadow-strength` | float | `1.0` | Intensity of the shadow-side bevel shading (0–1). |
 | `bevel-angle-deg` | float | `45.0` | Angle of the beveled cut used to shape the lighting falloff. |
