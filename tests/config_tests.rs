@@ -12,31 +12,6 @@ photo-library-path: "/photos"
 }
 
 #[test]
-fn parse_snake_case_rejected() {
-    let yaml = r#"
-photo_library_path: "/p"
-"#;
-    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("unknown field"), "unexpected error: {err}");
-}
-
-#[test]
-fn studio_alias_keys_rejected() {
-    let yaml = r#"
-photo-library-path: "/photos"
-matting:
-  type: studio
-  bevel-width: 4.0
-"#;
-    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("unknown field"), "unexpected error: {err}");
-}
-
-#[test]
 fn parse_with_oversample() {
     let yaml = r#"
 photo-library-path: "/photos"

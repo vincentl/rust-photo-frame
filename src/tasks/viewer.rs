@@ -1435,22 +1435,28 @@ fn render_studio_mat(
             let dist_right = (px - window_max_x).max(0.0);
             let dist_top = (window_y - py).max(0.0);
             let dist_bottom = (py - window_max_y).max(0.0);
-            let edge_distance = dist_left
-                .max(dist_right)
-                .max(dist_top)
-                .max(dist_bottom)
-                .min(bevel_px);
 
-            let (edge_normal_xy, _) =
-                if dist_left >= dist_right && dist_left >= dist_top && dist_left >= dist_bottom {
-                    ([-1.0, 0.0], dist_left)
-                } else if dist_right >= dist_top && dist_right >= dist_bottom {
-                    ([1.0, 0.0], dist_right)
-                } else if dist_top >= dist_bottom {
-                    ([0.0, -1.0], dist_top)
-                } else {
-                    ([0.0, 1.0], dist_bottom)
-                };
+            let mut edge_normal_xy = [-1.0, 0.0];
+            let mut raw_distance = dist_left;
+            if dist_right > raw_distance {
+                edge_normal_xy = [1.0, 0.0];
+                raw_distance = dist_right;
+            }
+            if dist_top > raw_distance {
+                edge_normal_xy = [0.0, -1.0];
+                raw_distance = dist_top;
+            }
+            if dist_bottom > raw_distance {
+                edge_normal_xy = [0.0, 1.0];
+                raw_distance = dist_bottom;
+            }
+
+            let edge_distance = raw_distance.min(bevel_px);
+            let depth = if bevel_px <= f32::EPSILON {
+                0.0
+            } else {
+                (edge_distance / bevel_px).clamp(0.0, 1.0)
+            };
 
             let mut normal = [
                 edge_normal_xy[0] * bevel_xy,
@@ -1459,25 +1465,25 @@ fn render_studio_mat(
             ];
             normal = normalize3(normal);
             let dot = normal[0] * light[0] + normal[1] * light[1] + normal[2] * light[2];
-            let mut shade = if dot >= 0.0 {
-                0.9 + highlight_scale * dot
+            let directional = if dot >= 0.0 {
+                highlight_scale * dot
             } else {
-                0.9 - shadow_scale * (-dot)
+                shadow_scale * dot
             };
-            let depth = (edge_distance / bevel_px).clamp(0.0, 1.0);
-            let inner_brighten = lerp(1.12, 0.92, depth);
-            shade = (shade * inner_brighten).clamp(0.0, 1.0);
+            let gradient = lerp(1.1, 0.94, depth);
+            let bevel_value = (0.9 + directional) * gradient;
+
+            let inner_mix = (1.0 - depth).clamp(0.0, 1.0);
             let dist_outer = (px - outer_min_x)
                 .min(outer_max_x - px)
                 .min(py - outer_min_y)
                 .min(outer_max_y - py)
                 .max(0.0);
-            let falloff = 1.0 - depth;
-            let blend =
-                (smoothstep(dist_outer.clamp(0.0, 1.0)) * smoothstep(falloff)).clamp(0.0, 1.0);
+            let feather = smoothstep(dist_outer.clamp(0.0, 1.0));
+            let mix = (inner_mix * feather).clamp(0.0, 1.0);
+
             for c in 0..3 {
-                let bevel_color = shade;
-                let value = lerp(base_color[c], bevel_color, blend).clamp(0.0, 1.0);
+                let value = lerp(base_color[c], bevel_value.clamp(0.0, 1.0), mix);
                 pixel[c] = srgb_u8(value);
             }
             pixel[3] = 255;
