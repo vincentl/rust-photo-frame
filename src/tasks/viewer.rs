@@ -156,7 +156,7 @@ pub fn run_windowed(
         let avg_color = average_color(&src);
 
         if let MattingMode::Studio {
-            bevel_width,
+            bevel_width_px,
             highlight_strength,
             shadow_strength,
             bevel_angle_deg,
@@ -168,7 +168,7 @@ pub fn run_windowed(
             shadow_offset_px,
         } = &matting.style
         {
-            let mut bevel_px = bevel_width.max(0.0);
+            let mut bevel_px = bevel_width_px.max(0.0);
             let margin_x = (canvas_w as f32 * margin).round();
             let margin_y = (canvas_h as f32 * margin).round();
             let inner_w = (canvas_w as f32 - 2.0 * margin_x).max(1.0);
@@ -1268,7 +1268,7 @@ fn render_studio_mat(
     photo_h: u32,
     photo: &RgbaImage,
     avg_color: [f32; 3],
-    bevel_width: f32,
+    bevel_width_px: f32,
     bevel_angle_deg: f32,
     highlight_strength: f32,
     shadow_strength: f32,
@@ -1286,7 +1286,7 @@ fn render_studio_mat(
     let fine_seed = seed.rotate_left(17) ^ 0xa076_1d64_78bd_642f;
     let fiber_seed = seed.rotate_left(29) ^ 0xe703_7ed1_a0b4_28db;
 
-    let mut bevel_px = bevel_width.max(0.0);
+    let mut bevel_px = bevel_width_px.max(0.0);
     let max_border = photo_x
         .min(photo_y)
         .min(canvas_w.saturating_sub(photo_x.saturating_add(photo_w)))

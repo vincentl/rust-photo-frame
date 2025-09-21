@@ -43,8 +43,11 @@ pub enum MattingMode {
         backend: BlurBackend,
     },
     Studio {
-        #[serde(default = "MattingMode::default_studio_bevel_width")]
-        bevel_width: f32,
+        #[serde(
+            default = "MattingMode::default_studio_bevel_width_px",
+            alias = "bevel-width"
+        )]
+        bevel_width_px: f32,
         #[serde(default = "MattingMode::default_studio_highlight_strength")]
         highlight_strength: f32,
         #[serde(default = "MattingMode::default_studio_shadow_strength")]
@@ -171,7 +174,7 @@ impl MattingMode {
         2048
     }
 
-    const fn default_studio_bevel_width() -> f32 {
+    const fn default_studio_bevel_width_px() -> f32 {
         3.0
     }
 
