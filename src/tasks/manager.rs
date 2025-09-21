@@ -150,7 +150,10 @@ impl PlaylistState {
         let mut rest: Vec<PathBuf> = Vec::new();
         let mut multiplicities: Vec<(PathBuf, usize)> = Vec::new();
 
-        for info in self.known.values() {
+        let mut infos: Vec<&PhotoInfo> = self.known.values().collect();
+        infos.sort_by(|a, b| a.path.cmp(&b.path));
+
+        for info in infos {
             let multiplicity = self.options.multiplicity_for(info.created_at, now);
             if multiplicity == 0 {
                 continue;
