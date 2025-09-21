@@ -24,12 +24,12 @@ matting:
 #   sigma: 20.0
 #   max-sample-dim: 1536
 #   backend: neon        # options: cpu, neon (defaults to cpu)
-# Example studio mat with a subtle bevel derived from the photo colors:
+# Example studio mat with a crisp white bevel:
 # matting:
 #   type: studio
 #   minimum-mat-percentage: 3.5
-#   bevel-width-px: 3.0
-#   linen-intensity: 0.6
+#   bevel-width-px: 4.0
+#   bevel-color: [255, 255, 255]
 # Example fixed background image scaled to cover the screen:
 # matting:
 #   type: fixed-image

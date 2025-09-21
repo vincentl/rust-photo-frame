@@ -47,50 +47,10 @@ pub enum MattingMode {
         )]
         bevel_width_px: f32,
         #[serde(
-            default = "MattingMode::default_studio_highlight_strength",
-            rename = "highlight-strength"
+            default = "MattingMode::default_studio_bevel_color",
+            rename = "bevel-color"
         )]
-        highlight_strength: f32,
-        #[serde(
-            default = "MattingMode::default_studio_shadow_strength",
-            rename = "shadow-strength"
-        )]
-        shadow_strength: f32,
-        #[serde(
-            default = "MattingMode::default_studio_bevel_angle",
-            rename = "bevel-angle-deg"
-        )]
-        bevel_angle_deg: f32,
-        #[serde(
-            default = "MattingMode::default_studio_linen_intensity",
-            rename = "linen-intensity"
-        )]
-        linen_intensity: f32,
-        #[serde(
-            default = "MattingMode::default_studio_linen_scale",
-            rename = "linen-scale-px"
-        )]
-        linen_scale_px: f32,
-        #[serde(
-            default = "MattingMode::default_studio_linen_rotation",
-            rename = "linen-rotation-deg"
-        )]
-        linen_rotation_deg: f32,
-        #[serde(
-            default = "MattingMode::default_studio_light_dir",
-            rename = "light-dir"
-        )]
-        light_dir: [f32; 3],
-        #[serde(
-            default = "MattingMode::default_studio_shadow_radius",
-            rename = "shadow-radius-px"
-        )]
-        shadow_radius_px: f32,
-        #[serde(
-            default = "MattingMode::default_studio_shadow_offset",
-            rename = "shadow-offset-px"
-        )]
-        shadow_offset_px: f32,
+        bevel_color: [u8; 3],
     },
     FixedImage {
         path: PathBuf,
@@ -192,40 +152,8 @@ impl MattingMode {
         3.0
     }
 
-    const fn default_studio_highlight_strength() -> f32 {
-        1.0
-    }
-
-    const fn default_studio_shadow_strength() -> f32 {
-        1.0
-    }
-
-    const fn default_studio_bevel_angle() -> f32 {
-        45.0
-    }
-
-    const fn default_studio_linen_intensity() -> f32 {
-        0.7
-    }
-
-    const fn default_studio_linen_scale() -> f32 {
-        900.0
-    }
-
-    const fn default_studio_linen_rotation() -> f32 {
-        12.0
-    }
-
-    const fn default_studio_light_dir() -> [f32; 3] {
-        [-0.6, -0.8, 0.2]
-    }
-
-    const fn default_studio_shadow_radius() -> f32 {
-        1.0
-    }
-
-    const fn default_studio_shadow_offset() -> f32 {
-        0.75
+    const fn default_studio_bevel_color() -> [u8; 3] {
+        [255, 255, 255]
     }
 }
 
