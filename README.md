@@ -93,18 +93,10 @@ The `matting` table chooses how the background behind each photo is prepared.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `bevel-width-px` | float | `3.0` | Visible width of the white bevel band in pixels. The renderer clamps this value to the available mat border if the photo touches an edge. |
-| `highlight-strength` | float | `1.0` | Intensity of the light-side bevel shading (0–1). |
-| `shadow-strength` | float | `1.0` | Intensity of the shadow-side bevel shading (0–1). |
-| `bevel-angle-deg` | float | `45.0` | Angle of the beveled cut used to shape the lighting falloff. |
-| `linen-intensity` | float | `0.7` | Strength of the linen weave luminance modulation (0–1). Alias: `texture-strength`. |
-| `linen-scale-px` | float | `900.0` | Approximate pixel scale of the linen weave repeat. |
-| `linen-rotation-deg` | float | `12.0` | Rotation of the linen texture in degrees. |
-| `light-dir` | `[x, y, z]` array | `[-0.6, -0.8, 0.2]` | Normalized light direction used for bevel shading. |
-| `shadow-radius-px` | float | `1.0` | Radius of the soft drop shadow that falls onto the photo. |
-| `shadow-offset-px` | float | `0.75` | Offset of the inner drop shadow projected into the photo (pixels along the bevel normal). |
+| `bevel-width-px` | float | `3.0` | Visible width of the bevel band in pixels. The renderer clamps this value to the available mat border if the photo touches an edge. |
+| `bevel-color` | `[r, g, b]` array | `[255, 255, 255]` | RGB values (0–255) used for the bevel band. |
 
-The studio mat derives a uniform base color from the photo’s average RGB, applies a subtle linen weave in luminance only, renders a mitred white bevel using the supplied lighting parameters, and reveals the photo flush against the bevel (no overlap) with a soft inner shadow for depth.
+The studio mat derives a uniform base color from the photo’s average RGB, renders a crisp mitred bevel band with the configured width and color, and reveals the photo flush against that inner frame.
 
 #### `type: fixed-image`
 

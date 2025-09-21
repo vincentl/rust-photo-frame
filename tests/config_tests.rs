@@ -39,7 +39,7 @@ photo-library-path: "/photos"
 matting:
   type: studio
   bevel-width-px: 5.0
-  linen-intensity: 0.4
+  bevel-color: [200, 210, 220]
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -47,11 +47,11 @@ matting:
     match cfg.matting.style {
         rust_photo_frame::config::MattingMode::Studio {
             bevel_width_px,
-            linen_intensity,
+            bevel_color,
             ..
         } => {
             assert!((bevel_width_px - 5.0).abs() < f32::EPSILON);
-            assert!((linen_intensity - 0.4).abs() < f32::EPSILON);
+            assert_eq!(bevel_color, [200, 210, 220]);
         }
         _ => panic!("expected studio matting"),
     }
