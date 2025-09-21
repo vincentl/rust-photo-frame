@@ -101,6 +101,60 @@ impl MattingMode {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
+pub struct ButtonConfig {
+    pub enabled: bool,
+    pub device_path: Option<PathBuf>,
+    pub key_code: String,
+    pub short_max_ms: u64,
+    pub long_threshold_ms: u64,
+    pub grab_device: bool,
+    pub output_name: Option<String>,
+    pub use_wlr_randr: bool,
+    pub use_vcgencmd_fallback: bool,
+    pub shutdown_command: String,
+}
+
+impl Default for ButtonConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            device_path: None,
+            key_code: "KEY_POWER".to_string(),
+            short_max_ms: 2000,
+            long_threshold_ms: 8000,
+            grab_device: true,
+            output_name: None,
+            use_wlr_randr: true,
+            use_vcgencmd_fallback: true,
+            shutdown_command: "systemctl poweroff".to_string(),
+        }
+    }
+}
+
+impl ButtonConfig {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.key_code.trim().is_empty(),
+            "button.key-code must not be empty"
+        );
+        ensure!(
+            !self.shutdown_command.trim().is_empty(),
+            "button.shutdown-command must not be empty"
+        );
+        ensure!(
+            self.short_max_ms > 0,
+            "button.short-max-ms must be greater than zero"
+        );
+        ensure!(
+            self.long_threshold_ms > self.short_max_ms,
+            "button.long-threshold-ms must be greater than button.short-max-ms"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
 pub struct Configuration {
     /// Root directory to scan recursively for images.
     #[serde(alias = "photo_library_path")]
@@ -121,6 +175,8 @@ pub struct Configuration {
     pub matting: MattingOptions,
     /// Playlist weighting options for how frequently new photos repeat.
     pub playlist: PlaylistOptions,
+    /// GPIO button handling configuration.
+    pub button: ButtonConfig,
 }
 
 impl Configuration {
@@ -143,6 +199,7 @@ impl Configuration {
         ensure!(self.fade_ms > 0, "fade-ms must be greater than zero");
         ensure!(self.dwell_ms > 0, "dwell-ms must be greater than zero");
         self.playlist.validate()?;
+        self.button.validate()?;
         Ok(self)
     }
 }
@@ -159,6 +216,7 @@ impl Default for Configuration {
             startup_shuffle_seed: None,
             matting: MattingOptions::default(),
             playlist: PlaylistOptions::default(),
+            button: ButtonConfig::default(),
         }
     }
 }
