@@ -109,19 +109,16 @@ impl MattingOptions {
 
     pub fn prepare_runtime(&mut self) -> Result<()> {
         self.runtime = MattingRuntime::default();
-        match &self.style {
-            MattingMode::FixedImage { path, .. } => {
-                let img = image::open(path)
-                    .with_context(|| {
-                        format!(
-                            "failed to load fixed background image at {}",
-                            path.display()
-                        )
-                    })?
-                    .to_rgba8();
-                self.runtime.fixed_image = Some(Arc::new(img));
-            }
-            _ => {}
+        if let MattingMode::FixedImage { path, .. } = &self.style {
+            let img = image::open(path)
+                .with_context(|| {
+                    format!(
+                        "failed to load fixed background image at {}",
+                        path.display()
+                    )
+                })?
+                .to_rgba8();
+            self.runtime.fixed_image = Some(Arc::new(img));
         }
         Ok(())
     }
