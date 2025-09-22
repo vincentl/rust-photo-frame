@@ -51,10 +51,15 @@ playlist:
   half-life: 3 days # How quickly that multiplicity decays back toward 1
 
 matting:
-  minimum-mat-percentage: 0.0 # % of each screen edge reserved for mat border
-  max-upscale-factor: 1.0 # Limit for enlarging images when applying mats
-  type: fixed-color
-  color: [0, 0, 0]
+  type: random # Set to a specific option key to pin a single mat
+  options:
+    fixed-color:
+      minimum-mat-percentage: 0.0 # % of each screen edge reserved for the mat border
+      max-upscale-factor: 1.0 # Limit for enlarging images when applying mats
+      color: [0, 0, 0]
+    blur:
+      minimum-mat-percentage: 4.0
+      sigma: 18.0
 ```
 
 ### Top-level keys
@@ -104,21 +109,48 @@ The command prints the multiplicity assigned to each discovered photo and the fi
 
 ### Matting configuration
 
-The `matting` table chooses how the background behind each photo is prepared.
+The `matting` table chooses how the background behind each photo is prepared. Each entry lives under `matting.options` and is keyed by the mat type (`fixed-color`, `blur`, `studio`, or `fixed-image`). Set `matting.type` to one of those keys to lock in a single style, or to `random` to shuffle between every configured option on a per-photo basis. The configuration is invalid if `matting.type` is `random` and no options are provided, or if the selected key is missing from `matting.options`.
+
+A single studio mat:
+
+```yaml
+matting:
+  type: studio
+  options:
+    studio:
+      minimum-mat-percentage: 3.5
+      bevel-width-px: 4.0
+```
+
+Random rotation between two mats:
+
+```yaml
+matting:
+  type: random
+  options:
+    fixed-color:
+      minimum-mat-percentage: 0.0
+      color: [0, 0, 0]
+    blur:
+      minimum-mat-percentage: 6.0
+      sigma: 18.0
+```
+
+Each `matting.options` entry accepts the following shared knobs:
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `minimum-mat-percentage` | float | `0.0` | Fraction (0–45%) of each screen edge reserved for the mat border. |
 | `max-upscale-factor` | float | `1.0` | Maximum enlargement factor when fitting inside the mat; `1.0` disables upscaling. |
-| `type` | string | `fixed-color` | Mat style to render. The value selects one of the variants below. |
+| map key | string | — | Mat style to render. Use `fixed-color`, `blur`, `studio`, or `fixed-image`. |
 
-#### `type: fixed-color`
+#### `fixed-color`
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `color` | `[r, g, b]` array | `[0, 0, 0]` | The RGB values (0–255) used to fill the mat background. |
 
-#### `type: blur`
+#### `blur`
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -126,7 +158,7 @@ The `matting` table chooses how the background behind each photo is prepared.
 | `max-sample-dim` | integer or `null` | `null` (defaults to `2048` on 64-bit ARM builds, otherwise unlimited) | Optional cap on the background texture size used for the blur. When set, the background is downscaled to this maximum dimension before blurring and then upscaled back to the screen size, preserving the soft-focus look while reducing CPU cost on small GPUs. |
 | `backend` | string | `cpu` | Blur implementation to use. Set to `cpu` for the high-quality software renderer (default) or `neon` to request the vector-accelerated path on 64-bit ARM. When `neon` is selected but unsupported at runtime, the code automatically falls back to the CPU backend. |
 
-#### `type: studio`
+#### `studio`
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -135,7 +167,7 @@ The `matting` table chooses how the background behind each photo is prepared.
 
 The studio mat derives a uniform base color from the photo’s average RGB, renders a mitred bevel band with the configured width and color, blends a hint of the mat pigment along the outer lip, and shades the bevel from a fixed light direction so it reads as a cut paper core. The photo then sits flush against that inner frame.
 
-#### `type: fixed-image`
+#### `fixed-image`
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
