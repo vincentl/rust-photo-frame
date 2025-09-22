@@ -264,7 +264,7 @@ pub fn run_windowed(
                 if *sigma > 0.0 {
                     let limit = max_sample_dim
                         .filter(|v| *v > 0)
-                        .unwrap_or_else(|| {
+                        .unwrap_or({
                             #[cfg(target_arch = "aarch64")]
                             {
                                 MattingMode::default_blur_max_sample_dim()
@@ -1235,6 +1235,8 @@ fn average_color_rgba(img: &RgbaImage) -> Rgba<u8> {
     ])
 }
 
+#[allow(clippy::too_many_arguments)]
+// The mat renderer needs the full geometry and color context to avoid heap allocations.
 fn render_studio_mat(
     canvas_w: u32,
     canvas_h: u32,
@@ -1263,11 +1265,6 @@ fn render_studio_mat(
     let window_max_x = window_x + photo_w.max(1) as f32;
     let window_max_y = window_y + photo_h.max(1) as f32;
 
-    let mat_rgb = [
-        srgb_u8(mat_color[0]),
-        srgb_u8(mat_color[1]),
-        srgb_u8(mat_color[2]),
-    ];
     let bevel_rgb_f32 = [
         bevel_color[0] as f32 / 255.0,
         bevel_color[1] as f32 / 255.0,
@@ -1369,9 +1366,23 @@ fn render_studio_mat(
             }
         }
 
-        pixel[0] = mat_rgb[0];
-        pixel[1] = mat_rgb[1];
-        pixel[2] = mat_rgb[2];
+        let warp_period = 5.6f32;
+        let weft_period = 5.2f32;
+        let warp_phase = ((px + py * 0.12) / warp_period).fract();
+        let weft_phase = ((py + px * 0.08) / weft_period).fract();
+        let warp_profile = weave_thread_profile(warp_phase);
+        let weft_profile = weave_thread_profile(weft_phase);
+        let warp_centered = warp_profile - 0.5;
+        let weft_centered = weft_profile - 0.5;
+        let cross_highlight = warp_profile * weft_profile - 0.25;
+        let fabric_variation = warp_centered * 0.08 - weft_centered * 0.06 + cross_highlight * 0.12;
+        let grain = (weave_grain(x, y) - 0.5) * 0.025;
+        let shade = (1.0 + fabric_variation + grain).clamp(0.9, 1.1);
+
+        for c in 0..3 {
+            let tinted = (mat_color[c] * shade).clamp(0.0, 1.0);
+            pixel[c] = srgb_u8(tinted);
+        }
         pixel[3] = 255;
     }
 
@@ -1401,6 +1412,19 @@ fn normalize3(mut v: [f32; 3]) -> [f32; 3] {
     } else {
         [0.0, 0.0, 1.0]
     }
+}
+
+fn weave_thread_profile(phase: f32) -> f32 {
+    let dist = (phase - 0.5).abs() * 2.0;
+    let base = (1.0 - dist).clamp(0.0, 1.0);
+    base * base * (3.0 - 2.0 * base)
+}
+
+fn weave_grain(x: u32, y: u32) -> f32 {
+    let mut hash = x.wrapping_mul(0x045d_9f3b) ^ y.wrapping_mul(0x27d4_eb2d);
+    hash ^= hash.rotate_left(13);
+    hash = hash.wrapping_mul(0x1656_67b1);
+    ((hash >> 8) & 0xffff) as f32 / 65535.0
 }
 
 fn sample_bilinear(img: &RgbaImage, x: f32, y: f32) -> [f32; 3] {

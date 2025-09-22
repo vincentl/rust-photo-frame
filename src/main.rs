@@ -136,7 +136,6 @@ async fn main() -> Result<()> {
         let to_load_tx = to_load_tx.clone();
         let cancel = cancel.clone();
         let playlist = cfg.playlist.clone();
-        let now_override = now_override;
         let seed_override = playlist_seed;
         async move {
             tasks::manager::run(
