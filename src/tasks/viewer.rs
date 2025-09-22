@@ -1263,11 +1263,6 @@ fn render_studio_mat(
     let window_max_x = window_x + photo_w.max(1) as f32;
     let window_max_y = window_y + photo_h.max(1) as f32;
 
-    let mat_rgb = [
-        srgb_u8(mat_color[0]),
-        srgb_u8(mat_color[1]),
-        srgb_u8(mat_color[2]),
-    ];
     let bevel_rgb_f32 = [
         bevel_color[0] as f32 / 255.0,
         bevel_color[1] as f32 / 255.0,
@@ -1278,6 +1273,8 @@ fn render_studio_mat(
     let diffuse = 0.18;
 
     let mut mat = RgbaImage::new(canvas_w, canvas_h);
+    let canvas_diag = (canvas_w as f32).hypot(canvas_h as f32).max(1.0);
+    let thread_spacing = 5.4f32;
     for (x, y, pixel) in mat.enumerate_pixels_mut() {
         let px = x as f32 + 0.5;
         let py = y as f32 + 0.5;
@@ -1369,13 +1366,67 @@ fn render_studio_mat(
             }
         }
 
-        pixel[0] = mat_rgb[0];
-        pixel[1] = mat_rgb[1];
-        pixel[2] = mat_rgb[2];
+        let weave = shade_mat_weave(px, py, thread_spacing, canvas_diag, mat_color);
+        pixel[0] = srgb_u8(weave[0]);
+        pixel[1] = srgb_u8(weave[1]);
+        pixel[2] = srgb_u8(weave[2]);
         pixel[3] = 255;
     }
 
     mat
+}
+
+fn shade_mat_weave(
+    px: f32,
+    py: f32,
+    thread_spacing: f32,
+    canvas_diag: f32,
+    mat_color: [f32; 3],
+) -> [f32; 3] {
+    let spacing = thread_spacing.max(1.0);
+    let warp_phase = (px / spacing).fract();
+    let weft_phase = (py / spacing).fract();
+    let warp_profile = thread_profile(warp_phase);
+    let weft_profile = thread_profile(weft_phase);
+
+    let thread_x = (px / spacing).floor() as i32;
+    let thread_y = (py / spacing).floor() as i32;
+    let weave_jitter = hash2(thread_x, thread_y) - 0.5;
+    let subtle_cross = ((px + py) * 0.024).sin() * ((px - py) * 0.021).sin();
+
+    let weave_mix =
+        (warp_profile * 0.6 + weft_profile * 0.4) + weave_jitter * 0.14 + subtle_cross * 0.08;
+    let weave_mix = weave_mix.clamp(-0.55, 0.55);
+
+    let diagonal_falloff = (((px + py) / canvas_diag) - 0.5) * 0.06;
+    let highlight = (1.0 + weave_mix * 0.08 + diagonal_falloff).clamp(0.86, 1.12);
+
+    let mut shaded = [0.0; 3];
+    for c in 0..3 {
+        let color_variation = hash2(
+            thread_x + (c as i32 + 1) * 97,
+            thread_y + (c as i32 + 1) * 57,
+        ) - 0.5;
+        let channel_offset = color_variation * 0.012;
+        let value = (mat_color[c] * highlight + channel_offset).clamp(0.0, 1.0);
+        shaded[c] = value;
+    }
+    shaded
+}
+
+fn thread_profile(phase: f32) -> f32 {
+    let centered = (phase - 0.5).abs();
+    let ridge = (0.5 - centered).max(0.0) * 2.0;
+    ridge.powf(2.6)
+}
+
+fn hash2(x: i32, y: i32) -> f32 {
+    let mut n = (x as u32).wrapping_mul(0x1f1f1f1f) ^ (y as u32).wrapping_mul(0x45d9f3b);
+    n = n.wrapping_add(0x9e3779b9);
+    n ^= n >> 15;
+    n = n.wrapping_mul(0x85ebca6b);
+    n ^= n >> 13;
+    ((n & 0x00ff_ffff) as f32) / 16777215.0
 }
 
 fn srgb_u8(value: f32) -> u8 {
