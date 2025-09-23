@@ -7,3 +7,4 @@ pub mod tasks {
     pub mod manager;
     pub mod viewer;
 }
+pub mod wifi_setup;

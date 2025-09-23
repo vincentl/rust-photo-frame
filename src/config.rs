@@ -900,6 +900,8 @@ pub struct Configuration {
     pub matting: MattingConfig,
     /// Playlist weighting options for how frequently new photos repeat.
     pub playlist: PlaylistOptions,
+    /// Wi-Fi setup fallback flow for Raspberry Pi first boot scenarios.
+    pub wifi_setup: WifiSetupConfig,
 }
 
 impl Configuration {
@@ -925,6 +927,7 @@ impl Configuration {
             .prepare_runtime()
             .context("invalid matting configuration")?;
         self.playlist.validate()?;
+        self.wifi_setup.validate()?;
         Ok(self)
     }
 }
@@ -941,6 +944,105 @@ impl Default for Configuration {
             startup_shuffle_seed: None,
             matting: MattingConfig::default(),
             playlist: PlaylistOptions::default(),
+            wifi_setup: WifiSetupConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct WifiSetupConfig {
+    /// Whether the application should perform Wi-Fi connectivity checks and host the setup portal.
+    pub enabled: bool,
+    /// Wireless interface name used for both hotspot and client connections.
+    pub wifi_interface: String,
+    /// Friendly SSID broadcast while in setup hotspot mode.
+    pub hotspot_ssid: String,
+    /// WPA2 password used for the setup hotspot.
+    pub hotspot_password: String,
+    /// Command (executable + args) that enables the hotspot on `wifi-interface`.
+    pub hotspot_start_command: Vec<String>,
+    /// Command (executable + args) that disables the hotspot on `wifi-interface`.
+    pub hotspot_stop_command: Vec<String>,
+    /// Address to bind the local setup HTTP server to.
+    pub portal_bind_address: String,
+    /// TCP port for the setup HTTP server.
+    pub portal_port: u16,
+    /// Hostname or IP displayed to the user for the setup portal.
+    pub portal_hostname: String,
+    /// Path to the wpa_supplicant configuration file that should receive new networks.
+    pub wpa_supplicant_path: PathBuf,
+    /// Optional override for invoking wpa_cli (defaults to `wpa_cli` in PATH).
+    pub wpa_cli_path: Option<PathBuf>,
+    /// Timeout in seconds for checking connectivity after credentials are applied.
+    pub connection_check_timeout_secs: u64,
+    /// Poll interval in seconds while waiting for the device to come online.
+    pub connection_check_interval_secs: u64,
+    /// Optional command to restart the photo frame service after a successful Wi-Fi join.
+    pub restart_command: Vec<String>,
+}
+
+impl WifiSetupConfig {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.hotspot_ssid.trim().is_empty(),
+            "wifi-setup.hotspot-ssid must not be empty"
+        );
+        ensure!(
+            !self.hotspot_password.trim().is_empty(),
+            "wifi-setup.hotspot-password must not be empty"
+        );
+        ensure!(
+            !self.portal_bind_address.trim().is_empty(),
+            "wifi-setup.portal-bind-address must not be empty"
+        );
+        ensure!(
+            !self.portal_hostname.trim().is_empty(),
+            "wifi-setup.portal-hostname must not be empty"
+        );
+        ensure!(
+            self.portal_port > 0,
+            "wifi-setup.portal-port must be greater than zero"
+        );
+        ensure!(
+            self.connection_check_timeout_secs >= self.connection_check_interval_secs,
+            "wifi-setup.connection-check-timeout-secs must be >= connection-check-interval-secs"
+        );
+        Ok(())
+    }
+
+    pub fn portal_url(&self) -> String {
+        format!("http://{}:{}", self.portal_hostname, self.portal_port)
+    }
+}
+
+impl Default for WifiSetupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            wifi_interface: "wlan0".to_string(),
+            hotspot_ssid: "Frame Setup".to_string(),
+            hotspot_password: "framesetup".to_string(),
+            hotspot_start_command: vec![
+                "sudo".to_string(),
+                "systemctl".to_string(),
+                "start".to_string(),
+                "frame-hotspot.service".to_string(),
+            ],
+            hotspot_stop_command: vec![
+                "sudo".to_string(),
+                "systemctl".to_string(),
+                "stop".to_string(),
+                "frame-hotspot.service".to_string(),
+            ],
+            portal_bind_address: "0.0.0.0".to_string(),
+            portal_port: 8080,
+            portal_hostname: "10.0.0.1".to_string(),
+            wpa_supplicant_path: PathBuf::from("/etc/wpa_supplicant/wpa_supplicant.conf"),
+            wpa_cli_path: None,
+            connection_check_timeout_secs: 45,
+            connection_check_interval_secs: 3,
+            restart_command: Vec::new(),
         }
     }
 }
