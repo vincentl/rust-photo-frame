@@ -179,6 +179,10 @@ The studio mat derives a uniform base color from the photo’s average RGB, rend
 
 The fixed background image is loaded once at startup and reused for every slide, ensuring smooth transitions even with large source files.
 
+## References
+
+- **Procedural studio mat weave texture.** The studio mat renderer synthesizes a paper-like weave by blending smooth warp and weft thread profiles with low-cost hashed grain noise, following the approach outlined by Iñigo Quílez in his article ["Weave"](https://iquilezles.org/articles/weave/).
+
 ## License
 
 This project is licensed under the **MIT License**.
