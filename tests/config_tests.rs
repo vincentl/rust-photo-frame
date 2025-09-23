@@ -49,11 +49,15 @@ matting:
             bevel_width_px,
             bevel_color,
             texture_strength,
+            warp_period_px,
+            weft_period_px,
             ..
         } => {
             assert!((bevel_width_px - 5.0).abs() < f32::EPSILON);
             assert_eq!(bevel_color, [200, 210, 220]);
             assert!((texture_strength - 1.0).abs() < f32::EPSILON);
+            assert!((warp_period_px - 5.6).abs() < f32::EPSILON);
+            assert!((weft_period_px - 5.2).abs() < f32::EPSILON);
         }
         _ => panic!("expected studio matting"),
     }
@@ -75,6 +79,31 @@ matting:
             texture_strength, ..
         } => {
             assert!((texture_strength - 0.35).abs() < f32::EPSILON);
+        }
+        _ => panic!("expected studio matting"),
+    }
+}
+
+#[test]
+fn parse_studio_with_custom_weave_periods() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  type: studio
+  warp-period-px: 8.5
+  weft-period-px: 4.25
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+
+    match cfg.matting.style {
+        rust_photo_frame::config::MattingMode::Studio {
+            warp_period_px,
+            weft_period_px,
+            ..
+        } => {
+            assert!((warp_period_px - 8.5).abs() < f32::EPSILON);
+            assert!((weft_period_px - 4.25).abs() < f32::EPSILON);
         }
         _ => panic!("expected studio matting"),
     }

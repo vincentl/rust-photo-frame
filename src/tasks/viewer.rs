@@ -157,6 +157,8 @@ pub fn run_windowed(
             bevel_width_px,
             bevel_color,
             texture_strength,
+            warp_period_px,
+            weft_period_px,
         } = &matting.style
         {
             let mut bevel_px = bevel_width_px.max(0.0);
@@ -214,6 +216,8 @@ pub fn run_windowed(
                 bevel_px,
                 *bevel_color,
                 *texture_strength,
+                *warp_period_px,
+                *weft_period_px,
             );
 
             let canvas = ImagePlane {
@@ -1251,6 +1255,8 @@ fn render_studio_mat(
     bevel_width_px: f32,
     bevel_color: [u8; 3],
     texture_strength: f32,
+    warp_period_px: f32,
+    weft_period_px: f32,
 ) -> RgbaImage {
     let mut bevel_px = bevel_width_px.max(0.0);
     let max_border = photo_x
@@ -1277,6 +1283,8 @@ fn render_studio_mat(
     let ambient = 0.88;
     let diffuse = 0.18;
     let texture_strength = texture_strength.clamp(0.0, 2.0);
+    let warp_period = warp_period_px.max(0.5);
+    let weft_period = weft_period_px.max(0.5);
 
     let mut mat = RgbaImage::new(canvas_w, canvas_h);
     for (x, y, pixel) in mat.enumerate_pixels_mut() {
@@ -1370,8 +1378,6 @@ fn render_studio_mat(
             }
         }
 
-        let warp_period = 5.6f32;
-        let weft_period = 5.2f32;
         let warp_noise = (weave_grain(x, y) - 0.5) * 0.65;
         let weft_noise = (weave_grain(x.wrapping_add(17), y.wrapping_add(113)) - 0.5) * 0.65;
         let warp_phase = ((px + warp_noise) / warp_period).fract();
