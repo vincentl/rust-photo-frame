@@ -58,15 +58,15 @@ pub enum MattingMode {
         )]
         texture_strength: f32,
         #[serde(
-            default = "MattingMode::default_studio_warp_period_px",
-            rename = "warp-period-px"
+            default = "MattingMode::default_studio_thread_width_px",
+            rename = "thread-width-px"
         )]
-        warp_period_px: f32,
+        thread_width_px: f32,
         #[serde(
-            default = "MattingMode::default_studio_weft_period_px",
-            rename = "weft-period-px"
+            default = "MattingMode::default_studio_void_width_px",
+            rename = "void-width-px"
         )]
-        weft_period_px: f32,
+        void_width_px: f32,
     },
     FixedImage {
         path: PathBuf,
@@ -173,12 +173,12 @@ impl MattingMode {
         1.0
     }
 
-    const fn default_studio_warp_period_px() -> f32 {
-        22.0
+    const fn default_studio_thread_width_px() -> f32 {
+        11.0
     }
 
-    const fn default_studio_weft_period_px() -> f32 {
-        22.0
+    const fn default_studio_void_width_px() -> f32 {
+        11.0
     }
 }
 

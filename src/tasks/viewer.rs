@@ -157,8 +157,8 @@ pub fn run_windowed(
             bevel_width_px,
             bevel_color,
             texture_strength,
-            warp_period_px,
-            weft_period_px,
+            thread_width_px,
+            void_width_px,
         } = &matting.style
         {
             let mut bevel_px = bevel_width_px.max(0.0);
@@ -216,8 +216,8 @@ pub fn run_windowed(
                 bevel_width_px: bevel_px,
                 bevel_color: *bevel_color,
                 texture_strength: *texture_strength,
-                warp_period_px: *warp_period_px,
-                weft_period_px: *weft_period_px,
+                thread_width_px: *thread_width_px,
+                void_width_px: *void_width_px,
             });
 
             let canvas = ImagePlane {
@@ -1253,8 +1253,8 @@ struct RenderStudioMatArgs<'a> {
     bevel_width_px: f32,
     bevel_color: [u8; 3],
     texture_strength: f32,
-    warp_period_px: f32,
-    weft_period_px: f32,
+    thread_width_px: f32,
+    void_width_px: f32,
 }
 
 fn render_studio_mat(args: RenderStudioMatArgs<'_>) -> RgbaImage {
@@ -1270,8 +1270,8 @@ fn render_studio_mat(args: RenderStudioMatArgs<'_>) -> RgbaImage {
         bevel_width_px,
         bevel_color,
         texture_strength,
-        warp_period_px,
-        weft_period_px,
+        thread_width_px,
+        void_width_px,
     } = args;
     let mut bevel_px = bevel_width_px.max(0.0);
     let max_border = photo_x
@@ -1304,15 +1304,21 @@ fn render_studio_mat(args: RenderStudioMatArgs<'_>) -> RgbaImage {
     let diffuse = 0.18;
 
     let clarity = texture_strength.clamp(0.0, 3.0);
-    let warp_period = if warp_period_px.is_finite() {
-        warp_period_px.max(1.0)
+    let thread_width = if thread_width_px.is_finite() {
+        thread_width_px.max(0.0)
     } else {
-        1.0
+        0.0
     };
-    let weft_period = if weft_period_px.is_finite() {
-        weft_period_px.max(1.0)
+    let void_width = if void_width_px.is_finite() {
+        void_width_px.max(0.0)
     } else {
-        1.0
+        0.0
+    };
+    let total_width = thread_width + void_width;
+    let thread_ratio = if total_width > f32::EPSILON {
+        (thread_width / total_width).clamp(0.0, 1.0)
+    } else {
+        0.0
     };
     let texture_enabled = clarity > f32::EPSILON;
 
@@ -1409,13 +1415,13 @@ fn render_studio_mat(args: RenderStudioMatArgs<'_>) -> RgbaImage {
         }
 
         if texture_enabled {
-            let warp_profile = weave_thread_profile(px, warp_period);
-            let weft_profile = weave_thread_profile(py, weft_period);
+            let warp_profile = weave_thread_profile(px, thread_width, void_width);
+            let weft_profile = weave_thread_profile(py, thread_width, void_width);
             let cross_profile = warp_profile * weft_profile;
 
-            let warp_centered = warp_profile - 0.5;
-            let weft_centered = weft_profile - 0.5;
-            let cross_centered = cross_profile - 0.25;
+            let warp_centered = warp_profile - 0.5 * thread_ratio;
+            let weft_centered = weft_profile - 0.5 * thread_ratio;
+            let cross_centered = cross_profile - 0.25 * thread_ratio * thread_ratio;
 
             let weave_contrast =
                 (cross_centered * 0.62 + warp_centered * 0.22 - weft_centered * 0.18) * 0.32;
@@ -1467,13 +1473,32 @@ fn normalize3(mut v: [f32; 3]) -> [f32; 3] {
     }
 }
 
-fn weave_thread_profile(coord: f32, period_px: f32) -> f32 {
-    if !period_px.is_finite() || period_px <= f32::EPSILON {
-        return 0.5;
+fn weave_thread_profile(coord: f32, thread_width_px: f32, void_width_px: f32) -> f32 {
+    let thread_width = if thread_width_px.is_finite() {
+        thread_width_px.max(0.0)
+    } else {
+        0.0
+    };
+    let void_width = if void_width_px.is_finite() {
+        void_width_px.max(0.0)
+    } else {
+        0.0
+    };
+    let period = thread_width + void_width;
+    if period <= f32::EPSILON || thread_width <= f32::EPSILON {
+        return 0.0;
     }
-    let normalized = (coord / period_px).fract();
-    let distance = (normalized - 0.5).abs() * 2.0;
-    let base = (1.0 - distance).max(0.0);
+    let normalized = (coord.rem_euclid(period)) / period;
+    let thread_ratio = (thread_width / period).clamp(0.0, 1.0);
+    if thread_ratio <= f32::EPSILON {
+        return 0.0;
+    }
+    let half_span = 0.5 * thread_ratio;
+    let distance = (normalized - 0.5).abs();
+    if distance >= half_span {
+        return 0.0;
+    }
+    let base = ((half_span - distance) / half_span).clamp(0.0, 1.0);
     // Apply a smooth cubic falloff for a softer highlight profile.
     base * base * (3.0 - 2.0 * base)
 }

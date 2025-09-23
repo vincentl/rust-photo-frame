@@ -133,8 +133,8 @@ The `matting` table chooses how the background behind each photo is prepared.
 | `bevel-width-px` | float | `3.0` | Visible width of the bevel band in pixels. The renderer clamps this value to the available mat border if the photo touches an edge. |
 | `bevel-color` | `[r, g, b]` array | `[255, 255, 255]` | RGB values (0–255) used for the bevel band. |
 | `texture-strength` | float | `1.0` | Multiplier controlling the contrast of the woven paper texture. Lower values mute the pattern; set to `0.0` to disable the texture entirely. |
-| `warp-period-px` | float | `22.0` | Spacing, in pixels, between repeating warp threads running horizontally across the mat. Larger values widen the horizontal thread pattern. |
-| `weft-period-px` | float | `22.0` | Spacing, in pixels, between repeating weft threads running vertically down the mat. Larger values widen the vertical thread pattern. |
+| `thread-width-px` | float | `11.0` | Width, in pixels, of each simulated paper thread highlight. The same width is applied to both the horizontal (warp) and vertical (weft) strands. |
+| `void-width-px` | float | `11.0` | Size, in pixels, of the gap between adjacent threads. Applies uniformly to both warp and weft directions and determines how much mat color shows between fibers. |
 
 The studio mat derives a uniform base color from the photo’s average RGB, renders a mitred bevel band with the configured width and color, blends a hint of the mat pigment along the outer lip, and shades the bevel from a fixed light direction so it reads as a cut paper core. The configurable texture controls add a woven fiber effect that reacts to the simulated lighting before the photo sits flush against that inner frame.
 
