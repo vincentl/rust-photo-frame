@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{ensure, Context, Result};
+use rand::distributions::{Distribution, WeightedIndex};
 use rand::seq::IteratorRandom;
 use rand::Rng;
 use serde::de::{self, DeserializeOwned, DeserializeSeed, Deserializer, MapAccess, Visitor};
@@ -879,6 +880,220 @@ impl MattingMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransitionKind {
+    Fade,
+    Wipe,
+    Push,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TransitionSelection {
+    Fade,
+    Wipe,
+    Push,
+    Random,
+}
+
+impl Default for TransitionSelection {
+    fn default() -> Self {
+        Self::Fade
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct TransitionConfig {
+    #[serde(rename = "type")]
+    pub selection: TransitionSelection,
+    #[serde(rename = "duration-ms")]
+    pub duration_ms: u64,
+    pub fade: FadeTransitionOptions,
+    pub wipe: WipeTransitionOptions,
+    pub push: PushTransitionOptions,
+    pub random: RandomTransitionOptions,
+}
+
+impl TransitionConfig {
+    const fn default_duration_ms() -> u64 {
+        400
+    }
+
+    pub fn choose_kind<R: Rng + ?Sized>(&self, rng: &mut R) -> TransitionKind {
+        match self.selection {
+            TransitionSelection::Fade => TransitionKind::Fade,
+            TransitionSelection::Wipe => TransitionKind::Wipe,
+            TransitionSelection::Push => TransitionKind::Push,
+            TransitionSelection::Random => {
+                let weights = self.random.weights();
+                let indices = [
+                    TransitionKind::Fade,
+                    TransitionKind::Wipe,
+                    TransitionKind::Push,
+                ];
+                match WeightedIndex::new(weights.iter().copied()) {
+                    Ok(dist) => indices[dist.sample(rng)],
+                    Err(_) => TransitionKind::Fade,
+                }
+            }
+        }
+    }
+
+    pub fn fade_options(&self) -> &FadeTransitionOptions {
+        &self.fade
+    }
+
+    pub fn wipe_options(&self) -> &WipeTransitionOptions {
+        &self.wipe
+    }
+
+    pub fn push_options(&self) -> &PushTransitionOptions {
+        &self.push
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(self.duration_ms > 0, "transition.duration-ms must be > 0");
+        if matches!(self.selection, TransitionSelection::Random) {
+            self.random.validate()?;
+        }
+        self.wipe.validate()?;
+        Ok(())
+    }
+}
+
+impl Default for TransitionConfig {
+    fn default() -> Self {
+        Self {
+            selection: TransitionSelection::Fade,
+            duration_ms: Self::default_duration_ms(),
+            fade: FadeTransitionOptions::default(),
+            wipe: WipeTransitionOptions::default(),
+            push: PushTransitionOptions::default(),
+            random: RandomTransitionOptions::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct FadeTransitionOptions {
+    #[serde(rename = "through-black")]
+    pub through_black: bool,
+}
+
+impl Default for FadeTransitionOptions {
+    fn default() -> Self {
+        Self {
+            through_black: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct WipeTransitionOptions {
+    #[serde(rename = "angle-deg")]
+    pub angle_deg: f32,
+    #[serde(rename = "softness-px")]
+    pub softness_px: f32,
+    pub reverse: bool,
+}
+
+impl WipeTransitionOptions {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.softness_px >= 0.0,
+            "transition.wipe.softness-px must be >= 0"
+        );
+        Ok(())
+    }
+}
+
+impl Default for WipeTransitionOptions {
+    fn default() -> Self {
+        Self {
+            angle_deg: 0.0,
+            softness_px: 32.0,
+            reverse: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct PushTransitionOptions {
+    pub direction: SlideDirection,
+}
+
+impl Default for PushTransitionOptions {
+    fn default() -> Self {
+        Self {
+            direction: SlideDirection::Left,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SlideDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl SlideDirection {
+    pub const fn unit(self) -> [f32; 2] {
+        match self {
+            SlideDirection::Left => [-1.0, 0.0],
+            SlideDirection::Right => [1.0, 0.0],
+            SlideDirection::Up => [0.0, -1.0],
+            SlideDirection::Down => [0.0, 1.0],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct RandomTransitionOptions {
+    #[serde(rename = "fade-weight")]
+    pub fade_weight: f32,
+    #[serde(rename = "wipe-weight")]
+    pub wipe_weight: f32,
+    #[serde(rename = "push-weight")]
+    pub push_weight: f32,
+}
+
+impl RandomTransitionOptions {
+    fn weights(&self) -> [f32; 3] {
+        [
+            self.fade_weight.max(0.0),
+            self.wipe_weight.max(0.0),
+            self.push_weight.max(0.0),
+        ]
+    }
+
+    fn validate(&self) -> Result<()> {
+        let weights = self.weights();
+        ensure!(
+            weights.iter().any(|w| *w > 0.0),
+            "transition.random requires at least one positive weight",
+        );
+        Ok(())
+    }
+}
+
+impl Default for RandomTransitionOptions {
+    fn default() -> Self {
+        Self {
+            fade_weight: 1.0,
+            wipe_weight: 1.0,
+            push_weight: 1.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct Configuration {
@@ -886,8 +1101,8 @@ pub struct Configuration {
     pub photo_library_path: PathBuf,
     /// GPU render oversample factor relative to screen size (1.0 = native).
     pub oversample: f32,
-    /// Cross-fade duration in milliseconds.
-    pub fade_ms: u64,
+    /// Transition configuration for switching between images.
+    pub transition: TransitionConfig,
     /// Time an image remains fully visible before starting a transition, in ms.
     pub dwell_ms: u64,
     /// How many images the viewer preloads/keeps pending.
@@ -919,12 +1134,12 @@ impl Configuration {
             "loader-max-concurrent-decodes must be greater than zero"
         );
         ensure!(self.oversample > 0.0, "oversample must be positive");
-        ensure!(self.fade_ms > 0, "fade-ms must be greater than zero");
         ensure!(self.dwell_ms > 0, "dwell-ms must be greater than zero");
         self.matting
             .prepare_runtime()
             .context("invalid matting configuration")?;
         self.playlist.validate()?;
+        self.transition.validate()?;
         Ok(self)
     }
 }
@@ -934,7 +1149,7 @@ impl Default for Configuration {
         Self {
             photo_library_path: PathBuf::new(),
             oversample: 1.0,
-            fade_ms: 400,
+            transition: TransitionConfig::default(),
             dwell_ms: 2000,
             viewer_preload_count: 3,
             loader_max_concurrent_decodes: 4,
