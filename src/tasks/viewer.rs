@@ -156,6 +156,9 @@ pub fn run_windowed(
         if let MattingMode::Studio {
             bevel_width_px,
             bevel_color,
+            texture_strength,
+            warp_period_px,
+            weft_period_px,
         } = &matting.style
         {
             let mut bevel_px = bevel_width_px.max(0.0);
@@ -212,6 +215,9 @@ pub fn run_windowed(
                 avg_color,
                 bevel_px,
                 *bevel_color,
+                *texture_strength,
+                *warp_period_px,
+                *weft_period_px,
             );
 
             let canvas = ImagePlane {
@@ -264,7 +270,7 @@ pub fn run_windowed(
                 if *sigma > 0.0 {
                     let limit = max_sample_dim
                         .filter(|v| *v > 0)
-                        .unwrap_or_else(|| {
+                        .unwrap_or({
                             #[cfg(target_arch = "aarch64")]
                             {
                                 MattingMode::default_blur_max_sample_dim()
@@ -1235,6 +1241,8 @@ fn average_color_rgba(img: &RgbaImage) -> Rgba<u8> {
     ])
 }
 
+#[allow(clippy::too_many_arguments)]
+// The mat renderer needs the full geometry and color context to avoid heap allocations.
 fn render_studio_mat(
     canvas_w: u32,
     canvas_h: u32,
@@ -1246,6 +1254,9 @@ fn render_studio_mat(
     mat_color: [f32; 3],
     bevel_width_px: f32,
     bevel_color: [u8; 3],
+    texture_strength: f32,
+    warp_period_px: f32,
+    weft_period_px: f32,
 ) -> RgbaImage {
     let mut bevel_px = bevel_width_px.max(0.0);
     let max_border = photo_x
@@ -1263,11 +1274,6 @@ fn render_studio_mat(
     let window_max_x = window_x + photo_w.max(1) as f32;
     let window_max_y = window_y + photo_h.max(1) as f32;
 
-    let mat_rgb = [
-        srgb_u8(mat_color[0]),
-        srgb_u8(mat_color[1]),
-        srgb_u8(mat_color[2]),
-    ];
     let bevel_rgb_f32 = [
         bevel_color[0] as f32 / 255.0,
         bevel_color[1] as f32 / 255.0,
@@ -1276,6 +1282,9 @@ fn render_studio_mat(
     let light_dir = normalize3([-0.55, -0.65, 0.52]);
     let ambient = 0.88;
     let diffuse = 0.18;
+    let texture_strength = texture_strength.clamp(0.0, 2.0);
+    let warp_period = warp_period_px.max(0.5);
+    let weft_period = weft_period_px.max(0.5);
 
     let mut mat = RgbaImage::new(canvas_w, canvas_h);
     for (x, y, pixel) in mat.enumerate_pixels_mut() {
@@ -1369,9 +1378,27 @@ fn render_studio_mat(
             }
         }
 
-        pixel[0] = mat_rgb[0];
-        pixel[1] = mat_rgb[1];
-        pixel[2] = mat_rgb[2];
+        let warp_noise = (weave_grain(x, y) - 0.5) * 0.65;
+        let weft_noise = (weave_grain(x.wrapping_add(17), y.wrapping_add(113)) - 0.5) * 0.65;
+        let warp_phase = ((px + warp_noise) / warp_period).fract();
+        let weft_phase = ((py + weft_noise) / weft_period).fract();
+        let warp_profile = weave_thread_profile(warp_phase);
+        let weft_profile = weave_thread_profile(weft_phase);
+        let warp_centered = warp_profile - 0.5;
+        let weft_centered = weft_profile - 0.5;
+        let cross_highlight = warp_profile * weft_profile - 0.25;
+        let thread_mix = (warp_centered * 0.08 - weft_centered * 0.06 + cross_highlight * 0.12)
+            * texture_strength;
+        let grain_strength = texture_strength.min(1.0);
+        let grain =
+            (weave_grain(x.wrapping_add(137), y.wrapping_add(197)) - 0.5) * 0.025 * grain_strength;
+        let envelope = 0.1 * texture_strength.min(1.2);
+        let shade = (1.0 + thread_mix + grain).clamp(1.0 - envelope, 1.0 + envelope);
+
+        for c in 0..3 {
+            let tinted = (mat_color[c] * shade).clamp(0.0, 1.0);
+            pixel[c] = srgb_u8(tinted);
+        }
         pixel[3] = 255;
     }
 
@@ -1401,6 +1428,19 @@ fn normalize3(mut v: [f32; 3]) -> [f32; 3] {
     } else {
         [0.0, 0.0, 1.0]
     }
+}
+
+fn weave_thread_profile(phase: f32) -> f32 {
+    let dist = (phase - 0.5).abs() * 2.0;
+    let base = (1.0 - dist).clamp(0.0, 1.0);
+    base * base * (3.0 - 2.0 * base)
+}
+
+fn weave_grain(x: u32, y: u32) -> f32 {
+    let mut hash = x.wrapping_mul(0x045d_9f3b) ^ y.wrapping_mul(0x27d4_eb2d);
+    hash ^= hash.rotate_left(13);
+    hash = hash.wrapping_mul(0x1656_67b1);
+    ((hash >> 8) & 0xffff) as f32 / 65535.0
 }
 
 fn sample_bilinear(img: &RgbaImage, x: f32, y: f32) -> [f32; 3] {
