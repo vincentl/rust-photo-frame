@@ -48,10 +48,33 @@ matting:
         rust_photo_frame::config::MattingMode::Studio {
             bevel_width_px,
             bevel_color,
+            texture_strength,
             ..
         } => {
             assert!((bevel_width_px - 5.0).abs() < f32::EPSILON);
             assert_eq!(bevel_color, [200, 210, 220]);
+            assert!((texture_strength - 1.0).abs() < f32::EPSILON);
+        }
+        _ => panic!("expected studio matting"),
+    }
+}
+
+#[test]
+fn parse_studio_with_custom_texture_strength() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  type: studio
+  texture-strength: 0.35
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+
+    match cfg.matting.style {
+        rust_photo_frame::config::MattingMode::Studio {
+            texture_strength, ..
+        } => {
+            assert!((texture_strength - 0.35).abs() < f32::EPSILON);
         }
         _ => panic!("expected studio matting"),
     }
