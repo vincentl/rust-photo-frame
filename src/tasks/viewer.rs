@@ -156,6 +156,7 @@ pub fn run_windowed(
         if let MattingMode::Studio {
             bevel_width_px,
             bevel_color,
+            texture_strength,
         } = &matting.style
         {
             let mut bevel_px = bevel_width_px.max(0.0);
@@ -212,6 +213,7 @@ pub fn run_windowed(
                 avg_color,
                 bevel_px,
                 *bevel_color,
+                *texture_strength,
             );
 
             let canvas = ImagePlane {
@@ -1248,6 +1250,7 @@ fn render_studio_mat(
     mat_color: [f32; 3],
     bevel_width_px: f32,
     bevel_color: [u8; 3],
+    texture_strength: f32,
 ) -> RgbaImage {
     let mut bevel_px = bevel_width_px.max(0.0);
     let max_border = photo_x
@@ -1273,6 +1276,7 @@ fn render_studio_mat(
     let light_dir = normalize3([-0.55, -0.65, 0.52]);
     let ambient = 0.88;
     let diffuse = 0.18;
+    let texture_strength = texture_strength.clamp(0.0, 2.0);
 
     let mut mat = RgbaImage::new(canvas_w, canvas_h);
     for (x, y, pixel) in mat.enumerate_pixels_mut() {
@@ -1368,16 +1372,22 @@ fn render_studio_mat(
 
         let warp_period = 5.6f32;
         let weft_period = 5.2f32;
-        let warp_phase = ((px + py * 0.12) / warp_period).fract();
-        let weft_phase = ((py + px * 0.08) / weft_period).fract();
+        let warp_noise = (weave_grain(x, y) - 0.5) * 0.65;
+        let weft_noise = (weave_grain(x.wrapping_add(17), y.wrapping_add(113)) - 0.5) * 0.65;
+        let warp_phase = ((px + warp_noise) / warp_period).fract();
+        let weft_phase = ((py + weft_noise) / weft_period).fract();
         let warp_profile = weave_thread_profile(warp_phase);
         let weft_profile = weave_thread_profile(weft_phase);
         let warp_centered = warp_profile - 0.5;
         let weft_centered = weft_profile - 0.5;
         let cross_highlight = warp_profile * weft_profile - 0.25;
-        let fabric_variation = warp_centered * 0.08 - weft_centered * 0.06 + cross_highlight * 0.12;
-        let grain = (weave_grain(x, y) - 0.5) * 0.025;
-        let shade = (1.0 + fabric_variation + grain).clamp(0.9, 1.1);
+        let thread_mix = (warp_centered * 0.08 - weft_centered * 0.06 + cross_highlight * 0.12)
+            * texture_strength;
+        let grain_strength = texture_strength.min(1.0);
+        let grain =
+            (weave_grain(x.wrapping_add(137), y.wrapping_add(197)) - 0.5) * 0.025 * grain_strength;
+        let envelope = 0.1 * texture_strength.min(1.2);
+        let shade = (1.0 + thread_mix + grain).clamp(1.0 - envelope, 1.0 + envelope);
 
         for c in 0..3 {
             let tinted = (mat_color[c] * shade).clamp(0.0, 1.0);

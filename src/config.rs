@@ -52,6 +52,11 @@ pub enum MattingMode {
             rename = "bevel-color"
         )]
         bevel_color: [u8; 3],
+        #[serde(
+            default = "MattingMode::default_studio_texture_strength",
+            rename = "texture-strength"
+        )]
+        texture_strength: f32,
     },
     FixedImage {
         path: PathBuf,
@@ -152,6 +157,10 @@ impl MattingMode {
 
     const fn default_studio_bevel_color() -> [u8; 3] {
         [255, 255, 255]
+    }
+
+    const fn default_studio_texture_strength() -> f32 {
+        1.0
     }
 }
 
