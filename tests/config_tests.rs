@@ -84,7 +84,11 @@ matting:
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
 
-    match cfg.matting.style {
+    let mat = cfg
+        .matting
+        .primary_option()
+        .expect("expected primary matting option");
+    match mat.style {
         rust_photo_frame::config::MattingMode::Studio {
             texture_strength, ..
         } => {
@@ -106,7 +110,11 @@ matting:
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
 
-    match cfg.matting.style {
+    let mat = cfg
+        .matting
+        .primary_option()
+        .expect("expected primary matting option");
+    match mat.style {
         rust_photo_frame::config::MattingMode::Studio {
             warp_period_px,
             weft_period_px,
