@@ -7,22 +7,38 @@ use std::time::{Duration, SystemTime};
 use anyhow::{ensure, Context, Result};
 use rand::seq::IteratorRandom;
 use rand::Rng;
+use schemars::gen::SchemaGenerator;
+use schemars::schema::{
+    InstanceType, Metadata, ObjectValidation, Schema, SchemaObject, SingleOrVec,
+};
+use schemars::{schema_for, JsonSchema};
 use serde::de::{self, DeserializeOwned, DeserializeSeed, Deserializer, MapAccess, Visitor};
-use serde::Deserialize;
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 
 use image::RgbaImage;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
+#[schemars(rename_all = "kebab-case")]
 pub struct MattingOptions {
     #[serde(default = "MattingOptions::default_minimum_percentage")]
+    #[schemars(
+        description = "Minimum matte thickness as a percentage of the shorter image dimension."
+    )]
     pub minimum_mat_percentage: f32,
     #[serde(default = "MattingOptions::default_max_upscale_factor")]
+    #[schemars(
+        description = "Maximum scale factor the matte may upscale the source image before rendering."
+    )]
     pub max_upscale_factor: f32,
     #[serde(default, flatten)]
+    #[schemars(flatten)]
     pub style: MattingMode,
     #[serde(default, skip_deserializing)]
+    #[serde(skip_serializing)]
+    #[schemars(skip)]
     pub runtime: MattingRuntime,
 }
 
@@ -30,6 +46,74 @@ pub struct MattingOptions {
 pub struct MattingConfig {
     selection: MattingSelection,
     options: BTreeMap<MattingKind, MattingOptions>,
+}
+
+impl Serialize for MattingConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("MattingConfig", 2)?;
+        let selection = match self.selection {
+            MattingSelection::Fixed(kind) => kind.as_str().to_string(),
+            MattingSelection::Random => "random".to_string(),
+        };
+        state.serialize_field("type", &selection)?;
+        state.serialize_field("options", &self.options)?;
+        state.end()
+    }
+}
+
+impl JsonSchema for MattingConfig {
+    fn schema_name() -> String {
+        "MattingConfig".to_string()
+    }
+
+    fn json_schema(gen: &mut SchemaGenerator) -> Schema {
+        let mut schema = SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Object))),
+            metadata: Some(Box::new(Metadata {
+                description: Some(
+                    "Controls how photo mattes are generated and which matte style is active."
+                        .into(),
+                ),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        let mut validation = ObjectValidation::default();
+        validation.required.insert("type".to_string());
+        validation
+            .properties
+            .insert("type".to_string(), MattingKind::json_schema(gen));
+
+        let mut options_obj = SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Object))),
+            metadata: Some(Box::new(Metadata {
+                description: Some("Per-style tuning parameters keyed by their matte type.".into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        let option_schema = MattingOptions::json_schema(gen);
+        let mut options_validation = ObjectValidation::default();
+        for kind in MattingKind::ALL {
+            options_validation
+                .properties
+                .insert(kind.as_str().to_string(), option_schema.clone());
+        }
+        options_validation.additional_properties = Some(Box::new(option_schema));
+        options_obj.object = Some(Box::new(options_validation));
+
+        validation
+            .properties
+            .insert("options".to_string(), Schema::Object(options_obj));
+
+        schema.object = Some(Box::new(validation));
+        Schema::Object(schema)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,20 +170,66 @@ pub enum MattingKind {
     FixedImage,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl Serialize for MattingKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl JsonSchema for MattingKind {
+    fn schema_name() -> String {
+        "MattingKind".to_string()
+    }
+
+    fn json_schema(_: &mut schemars::gen::SchemaGenerator) -> Schema {
+        let schema = SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
+            enum_values: Some(
+                MattingKind::ALL
+                    .iter()
+                    .map(|kind| serde_json::Value::String(kind.as_str().to_string()))
+                    .collect(),
+            ),
+            metadata: Some(Box::new(Metadata {
+                description: Some(
+                    "Matte rendering strategy. Choose from the supported options to control how backgrounds are generated.".into(),
+                ),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        Schema::Object(schema)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "kebab-case")]
+#[schemars(tag = "type", rename_all = "kebab-case")]
 pub enum MattingMode {
     #[serde(rename = "fixed-color")]
+    #[schemars(rename = "fixed-color")]
     FixedColor {
         #[serde(default = "MattingMode::default_color")]
+        #[schemars(
+            description = "RGB color used when the matte is rendered as a solid background."
+        )]
         color: [u8; 3],
     },
     Blur {
         #[serde(default = "MattingMode::default_blur_sigma")]
+        #[schemars(description = "Gaussian blur sigma applied to the background sample.")]
         sigma: f32,
         #[serde(default, rename = "max-sample-dim")]
+        #[schemars(
+            description = "Optional maximum dimension (in pixels) sampled from the source image for background blur.",
+            rename = "max-sample-dim"
+        )]
         max_sample_dim: Option<u32>,
         #[serde(default)]
+        #[schemars(description = "Preferred backend used to compute the blur effect.")]
         backend: BlurBackend,
     },
     Studio {
@@ -107,9 +237,17 @@ pub enum MattingMode {
             default = "MattingMode::default_studio_bevel_width_px",
             rename = "bevel-width-px"
         )]
+        #[schemars(
+            description = "Width in pixels of the simulated mat bevel edge.",
+            rename = "bevel-width-px"
+        )]
         bevel_width_px: f32,
         #[serde(
             default = "MattingMode::default_studio_bevel_color",
+            rename = "bevel-color"
+        )]
+        #[schemars(
+            description = "RGB color for the simulated mat bevel edge.",
             rename = "bevel-color"
         )]
         bevel_color: [u8; 3],
@@ -117,9 +255,17 @@ pub enum MattingMode {
             default = "MattingMode::default_studio_texture_strength",
             rename = "texture-strength"
         )]
+        #[schemars(
+            description = "Strength of the studio mat paper texture (0.0 = smooth, 1.0 = default weave).",
+            rename = "texture-strength"
+        )]
         texture_strength: f32,
         #[serde(
             default = "MattingMode::default_studio_warp_period_px",
+            rename = "warp-period-px"
+        )]
+        #[schemars(
+            description = "Distance in pixels between vertical warp threads.",
             rename = "warp-period-px"
         )]
         warp_period_px: f32,
@@ -127,24 +273,36 @@ pub enum MattingMode {
             default = "MattingMode::default_studio_weft_period_px",
             rename = "weft-period-px"
         )]
+        #[schemars(
+            description = "Distance in pixels between horizontal weft threads.",
+            rename = "weft-period-px"
+        )]
         weft_period_px: f32,
     },
     FixedImage {
+        #[schemars(
+            description = "Filesystem path to the background image that will be matted behind the photo."
+        )]
         path: PathBuf,
         #[serde(default)]
+        #[schemars(
+            description = "How the fixed image background should be scaled relative to the display."
+        )]
         fit: FixedImageFit,
     },
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
+#[schemars(rename_all = "kebab-case")]
 pub enum BlurBackend {
     Cpu,
     Neon,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
+#[schemars(rename_all = "kebab-case")]
 pub enum FixedImageFit {
     Cover,
     Contain,
@@ -879,26 +1037,42 @@ impl MattingMode {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case", default)]
+#[schemars(rename_all = "kebab-case")]
 pub struct Configuration {
     /// Root directory to scan recursively for images.
+    #[schemars(
+        description = "Root directory that will be scanned recursively for playable photos."
+    )]
     pub photo_library_path: PathBuf,
     /// GPU render oversample factor relative to screen size (1.0 = native).
+    #[schemars(description = "Render oversample factor relative to the display resolution.")]
     pub oversample: f32,
     /// Cross-fade duration in milliseconds.
+    #[schemars(description = "Cross-fade duration between photos in milliseconds.")]
     pub fade_ms: u64,
     /// Time an image remains fully visible before starting a transition, in ms.
+    #[schemars(
+        description = "Time in milliseconds that a photo remains fully visible before transitioning."
+    )]
     pub dwell_ms: u64,
     /// How many images the viewer preloads/keeps pending.
+    #[schemars(description = "Number of upcoming photos decoded in advance by the viewer.")]
     pub viewer_preload_count: usize,
     /// Maximum number of concurrent image decodes in the loader.
+    #[schemars(description = "Maximum number of concurrent decoder tasks allowed.")]
     pub loader_max_concurrent_decodes: usize,
     /// Optional deterministic seed for initial photo shuffle.
+    #[schemars(description = "Optional deterministic seed for the initial photo ordering.")]
     pub startup_shuffle_seed: Option<u64>,
     /// Matting configuration for displayed photos.
+    #[schemars(description = "Controls the matte rendering mode and per-style tuning options.")]
     pub matting: MattingConfig,
     /// Playlist weighting options for how frequently new photos repeat.
+    #[schemars(
+        description = "Playlist weighting parameters controlling how frequently photos repeat."
+    )]
     pub playlist: PlaylistOptions,
 }
 
@@ -929,6 +1103,10 @@ impl Configuration {
     }
 }
 
+pub fn configuration_schema() -> schemars::schema::RootSchema {
+    schema_for!(Configuration)
+}
+
 impl Default for Configuration {
     fn default() -> Self {
         Self {
@@ -945,13 +1123,21 @@ impl Default for Configuration {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case", default)]
+#[schemars(rename_all = "kebab-case")]
 pub struct PlaylistOptions {
     /// Initial multiplicity for brand new photos.
+    #[schemars(
+        description = "Initial weighting factor applied to new photos when generating playlists."
+    )]
     pub new_multiplicity: u32,
     /// Half-life duration controlling the exponential decay of multiplicity.
     #[serde(with = "humantime_serde")]
+    #[schemars(
+        description = "Duration over which a photo's playlist weight halves.",
+        with = "String"
+    )]
     pub half_life: Duration,
 }
 

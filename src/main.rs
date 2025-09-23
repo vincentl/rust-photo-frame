@@ -1,6 +1,8 @@
 mod config;
+mod config_repo;
 mod events;
 mod processing;
+mod web;
 mod tasks {
     pub mod files;
     pub mod loader;
@@ -12,6 +14,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use humantime::{format_rfc3339, parse_rfc3339};
 use std::io::{self, Read};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
@@ -80,14 +83,24 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let cancel = CancellationToken::new();
+
+    let config_repo = config_repo::ConfigRepository::open(&config).with_context(|| {
+        format!(
+            "failed to initialize configuration repository rooted at {}",
+            config.display()
+        )
+    })?;
+    let server_addr: SocketAddr = ([0, 0, 0, 0], 8080).into();
+    let config_schema = config::configuration_schema();
+    let web_server = web::spawn(config_repo, config_schema, cancel.clone(), server_addr);
+
     // Channels (small/bounded)
     let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(128); // Files -> Manager
     let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(64); // Manager/Loader -> Files
     let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(4); // Manager -> Loader (allow a few in-flight requests)
     let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count); // Loader  -> Viewer (prefetch up to cfg.viewer_preload_count)
     let (displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(64); // Viewer  -> Manager
-
-    let cancel = CancellationToken::new();
 
     // Ctrl-D/Ctrl-C cancel the pipeline
     {
@@ -184,6 +197,10 @@ async fn main() -> Result<()> {
             Ok(Err(e)) => tracing::error!("task error: {e:?}"),
             Err(e) => tracing::error!("join error: {e}"),
         }
+    }
+
+    if let Err(err) = web_server.await {
+        tracing::warn!("configuration server join error: {err}");
     }
 
     Ok(())
