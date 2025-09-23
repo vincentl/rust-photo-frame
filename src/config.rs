@@ -11,7 +11,7 @@ use serde::de::{self, DeserializeOwned, DeserializeSeed, Deserializer, MapAccess
 use serde::Deserialize;
 use serde_yaml::Value as YamlValue;
 
-use image::RgbaImage;
+use crate::processing::fixed_image::FixedImageBackground;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -40,7 +40,7 @@ pub enum MattingSelection {
 
 #[derive(Debug, Clone, Default)]
 pub struct MattingRuntime {
-    pub fixed_image: Option<Arc<RgbaImage>>,
+    pub fixed_image: Option<Arc<FixedImageBackground>>,
 }
 
 impl MattingKind {
@@ -143,7 +143,7 @@ pub enum BlurBackend {
     Neon,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FixedImageFit {
     Cover,
@@ -189,15 +189,13 @@ impl MattingOptions {
             .max(Self::default_max_upscale_factor());
         self.runtime = MattingRuntime::default();
         if let MattingMode::FixedImage { path, .. } = &self.style {
-            let img = image::open(path)
-                .with_context(|| {
-                    format!(
-                        "failed to load fixed background image at {}",
-                        path.display()
-                    )
-                })?
-                .to_rgba8();
-            self.runtime.fixed_image = Some(Arc::new(img));
+            let background = FixedImageBackground::new(path.clone()).with_context(|| {
+                format!(
+                    "failed to prepare fixed background image at {}",
+                    path.display()
+                )
+            })?;
+            self.runtime.fixed_image = Some(Arc::new(background));
         }
         Ok(())
     }
