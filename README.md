@@ -164,6 +164,9 @@ Each `matting.options` entry accepts the following shared knobs:
 | --- | --- | --- | --- |
 | `bevel-width-px` | float | `3.0` | Visible width of the bevel band in pixels. The renderer clamps this value to the available mat border if the photo touches an edge. |
 | `bevel-color` | `[r, g, b]` array | `[255, 255, 255]` | RGB values (0–255) used for the bevel band. |
+| `texture-strength` | float | `1.0` | Strength of the simulated paper texture (0.0 disables the effect, 1.0 keeps the default weave). |
+| `warp-period-px` | float | `5.6` | Horizontal spacing between vertical warp threads in pixels. |
+| `weft-period-px` | float | `5.2` | Vertical spacing between horizontal weft threads in pixels. |
 
 The studio mat derives a uniform base color from the photo’s average RGB, renders a mitred bevel band with the configured width and color, blends a hint of the mat pigment along the outer lip, and shades the bevel from a fixed light direction so it reads as a cut paper core. The photo then sits flush against that inner frame.
 
