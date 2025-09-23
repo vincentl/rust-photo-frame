@@ -1,4 +1,4 @@
-use rust_photo_frame::config::Configuration;
+use rust_photo_frame::config::{Configuration, MattingKind, MattingSelection};
 use std::path::PathBuf;
 
 #[test]
@@ -38,13 +38,23 @@ fn parse_with_studio_matting() {
 photo-library-path: "/photos"
 matting:
   type: studio
-  bevel-width-px: 5.0
-  bevel-color: [200, 210, 220]
+  options:
+    studio:
+      bevel-width-px: 5.0
+      bevel-color: [200, 210, 220]
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
 
-    match cfg.matting.style {
+    let options = cfg.matting.options();
+    assert_eq!(
+        cfg.matting.selection(),
+        MattingSelection::Fixed(MattingKind::Studio)
+    );
+    let mat = options
+        .get(&MattingKind::Studio)
+        .expect("expected studio matting option");
+    match mat.style {
         rust_photo_frame::config::MattingMode::Studio {
             bevel_width_px,
             bevel_color,
@@ -107,6 +117,72 @@ matting:
         }
         _ => panic!("expected studio matting"),
     }
+}
+
+#[test]
+fn parse_random_matting_configuration() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  type: random
+  options:
+    fixed-color:
+      color: [10, 20, 30]
+    blur:
+      minimum-mat-percentage: 7.5
+      sigma: 12.0
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(cfg.matting.selection(), MattingSelection::Random);
+    let options = cfg.matting.options();
+    assert_eq!(options.len(), 2);
+    let fixed = options
+        .get(&MattingKind::FixedColor)
+        .expect("expected fixed-color mat option");
+    if let rust_photo_frame::config::MattingMode::FixedColor { color } = fixed.style {
+        assert_eq!(color, [10, 20, 30]);
+    } else {
+        panic!("expected fixed-color matting");
+    }
+    let blur = options
+        .get(&MattingKind::Blur)
+        .expect("expected blur mat option");
+    if let rust_photo_frame::config::MattingMode::Blur { sigma, .. } = blur.style {
+        assert!((sigma - 12.0).abs() < f32::EPSILON);
+        assert!((blur.minimum_mat_percentage - 7.5).abs() < f32::EPSILON);
+    } else {
+        panic!("expected blur matting");
+    }
+}
+
+#[test]
+fn random_matting_without_options_is_rejected() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  type: random
+"#;
+
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(err.to_string().contains("matting.options"));
+}
+
+#[test]
+fn selecting_missing_option_is_rejected() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  type: studio
+  options:
+    blur:
+      sigma: 12.0
+"#;
+
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("matting.type studio must match a key"));
 }
 
 #[test]

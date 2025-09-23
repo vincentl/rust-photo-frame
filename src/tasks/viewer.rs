@@ -1,8 +1,9 @@
-use crate::config::{FixedImageFit, MattingMode, MattingOptions};
+use crate::config::{FixedImageFit, MattingConfig, MattingMode, MattingOptions};
 use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
 use crate::processing::blur::apply_blur;
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
 use image::{imageops, Rgba, RgbaImage};
+use rand::thread_rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -505,7 +506,7 @@ pub fn run_windowed(
         pending: VecDeque<ImgTex>,
         preload_count: usize,
         oversample: f32,
-        matting: MattingOptions,
+        matting: MattingConfig,
         mat_pipeline: MattingPipeline,
         mat_inflight: usize,
         ready_results: VecDeque<MatResult>,
@@ -1027,12 +1028,14 @@ pub fn run_windowed(
                     self.deferred_images.push_front(img);
                     break;
                 };
+                let mut rng = thread_rng();
+                let matting = self.matting.choose_option(&mut rng);
                 let params = MatParams {
                     screen_w: gpu.config.width.max(1),
                     screen_h: gpu.config.height.max(1),
                     oversample: self.oversample,
                     max_dim: gpu.limits.max_texture_dimension_2d,
-                    matting: self.matting.clone(),
+                    matting,
                 };
                 let task = MatTask { image: img, params };
                 match self.mat_pipeline.try_submit(task) {
@@ -1090,17 +1093,17 @@ pub fn run_windowed(
         .max(1);
     let pipeline_capacity = cfg.viewer_preload_count.max(2);
     let mat_pipeline = MattingPipeline::new(worker_count, pipeline_capacity);
-    let clear_color = match &cfg.matting.style {
-        MattingMode::FixedColor { color } => wgpu::Color {
+    let clear_color = cfg
+        .matting
+        .primary_option()
+        .and_then(MattingOptions::fixed_color)
+        .map(|color| wgpu::Color {
             r: (color[0] as f64) / 255.0,
             g: (color[1] as f64) / 255.0,
             b: (color[2] as f64) / 255.0,
             a: 1.0,
-        },
-        MattingMode::Blur { .. } => wgpu::Color::BLACK,
-        MattingMode::Studio { .. } => wgpu::Color::BLACK,
-        MattingMode::FixedImage { .. } => wgpu::Color::BLACK,
-    };
+        })
+        .unwrap_or(wgpu::Color::BLACK);
     let mut app = App {
         from_loader,
         to_manager_displayed,
