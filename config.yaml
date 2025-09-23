@@ -34,6 +34,9 @@ matting:
 #   minimum-mat-percentage: 3.5
 #   bevel-width-px: 4.0
 #   bevel-color: [255, 255, 255]
+#   texture-strength: 1.0
+#   warp-period-px: 22.0
+#   weft-period-px: 22.0
 # Example fixed background image scaled to cover the screen:
 # matting:
 #   type: fixed-image

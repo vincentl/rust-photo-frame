@@ -156,6 +156,9 @@ pub fn run_windowed(
         if let MattingMode::Studio {
             bevel_width_px,
             bevel_color,
+            texture_strength,
+            warp_period_px,
+            weft_period_px,
         } = &matting.style
         {
             let mut bevel_px = bevel_width_px.max(0.0);
@@ -201,18 +204,21 @@ pub fn run_windowed(
                 ))
             };
 
-            let canvas = render_studio_mat(
+            let canvas = render_studio_mat(RenderStudioMatArgs {
                 canvas_w,
                 canvas_h,
-                offset_x,
-                offset_y,
+                photo_x: offset_x,
+                photo_y: offset_y,
                 photo_w,
                 photo_h,
-                main_img.as_ref(),
-                avg_color,
-                bevel_px,
-                *bevel_color,
-            );
+                photo: main_img.as_ref(),
+                mat_color: avg_color,
+                bevel_width_px: bevel_px,
+                bevel_color: *bevel_color,
+                texture_strength: *texture_strength,
+                warp_period_px: *warp_period_px,
+                weft_period_px: *weft_period_px,
+            });
 
             let canvas = ImagePlane {
                 width: canvas_w,
@@ -264,7 +270,7 @@ pub fn run_windowed(
                 if *sigma > 0.0 {
                     let limit = max_sample_dim
                         .filter(|v| *v > 0)
-                        .unwrap_or_else(|| {
+                        .unwrap_or({
                             #[cfg(target_arch = "aarch64")]
                             {
                                 MattingMode::default_blur_max_sample_dim()
@@ -1235,18 +1241,38 @@ fn average_color_rgba(img: &RgbaImage) -> Rgba<u8> {
     ])
 }
 
-fn render_studio_mat(
+struct RenderStudioMatArgs<'a> {
     canvas_w: u32,
     canvas_h: u32,
     photo_x: u32,
     photo_y: u32,
     photo_w: u32,
     photo_h: u32,
-    photo: &RgbaImage,
+    photo: &'a RgbaImage,
     mat_color: [f32; 3],
     bevel_width_px: f32,
     bevel_color: [u8; 3],
-) -> RgbaImage {
+    texture_strength: f32,
+    warp_period_px: f32,
+    weft_period_px: f32,
+}
+
+fn render_studio_mat(args: RenderStudioMatArgs<'_>) -> RgbaImage {
+    let RenderStudioMatArgs {
+        canvas_w,
+        canvas_h,
+        photo_x,
+        photo_y,
+        photo_w,
+        photo_h,
+        photo,
+        mat_color,
+        bevel_width_px,
+        bevel_color,
+        texture_strength,
+        warp_period_px,
+        weft_period_px,
+    } = args;
     let mut bevel_px = bevel_width_px.max(0.0);
     let max_border = photo_x
         .min(photo_y)
@@ -1276,6 +1302,19 @@ fn render_studio_mat(
     let light_dir = normalize3([-0.55, -0.65, 0.52]);
     let ambient = 0.88;
     let diffuse = 0.18;
+
+    let clarity = texture_strength.clamp(0.0, 3.0);
+    let warp_period = if warp_period_px.is_finite() {
+        warp_period_px.max(1.0)
+    } else {
+        1.0
+    };
+    let weft_period = if weft_period_px.is_finite() {
+        weft_period_px.max(1.0)
+    } else {
+        1.0
+    };
+    let texture_enabled = clarity > f32::EPSILON;
 
     let mut mat = RgbaImage::new(canvas_w, canvas_h);
     for (x, y, pixel) in mat.enumerate_pixels_mut() {
@@ -1369,9 +1408,34 @@ fn render_studio_mat(
             }
         }
 
-        pixel[0] = mat_rgb[0];
-        pixel[1] = mat_rgb[1];
-        pixel[2] = mat_rgb[2];
+        if texture_enabled {
+            let warp_profile = weave_thread_profile(px, warp_period);
+            let weft_profile = weave_thread_profile(py, weft_period);
+            let cross_profile = warp_profile * weft_profile;
+
+            let warp_centered = warp_profile - 0.5;
+            let weft_centered = weft_profile - 0.5;
+            let cross_centered = cross_profile - 0.25;
+
+            let weave_contrast =
+                (cross_centered * 0.62 + warp_centered * 0.22 - weft_centered * 0.18) * 0.32;
+            let weave_directional = (warp_centered - weft_centered) * 0.12;
+            let mut shade = 1.0 + clarity * (weave_contrast + weave_directional);
+            shade = shade.clamp(0.75, 1.25);
+
+            let sheen = (cross_profile - 0.3).max(0.0).powf(1.35) * 0.18 * clarity;
+            let sheen = sheen.clamp(0.0, 0.35);
+
+            for c in 0..3 {
+                let tinted = lerp(mat_color[c], 1.0, sheen);
+                let shaded = (tinted * shade).clamp(0.0, 1.0);
+                pixel[c] = srgb_u8(shaded);
+            }
+        } else {
+            pixel[0] = mat_rgb[0];
+            pixel[1] = mat_rgb[1];
+            pixel[2] = mat_rgb[2];
+        }
         pixel[3] = 255;
     }
 
@@ -1401,6 +1465,17 @@ fn normalize3(mut v: [f32; 3]) -> [f32; 3] {
     } else {
         [0.0, 0.0, 1.0]
     }
+}
+
+fn weave_thread_profile(coord: f32, period_px: f32) -> f32 {
+    if !period_px.is_finite() || period_px <= f32::EPSILON {
+        return 0.5;
+    }
+    let normalized = (coord / period_px).fract();
+    let distance = (normalized - 0.5).abs() * 2.0;
+    let base = (1.0 - distance).max(0.0);
+    // Apply a smooth cubic falloff for a softer highlight profile.
+    base * base * (3.0 - 2.0 * base)
 }
 
 fn sample_bilinear(img: &RgbaImage, x: f32, y: f32) -> [f32; 3] {

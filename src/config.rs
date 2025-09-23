@@ -52,6 +52,21 @@ pub enum MattingMode {
             rename = "bevel-color"
         )]
         bevel_color: [u8; 3],
+        #[serde(
+            default = "MattingMode::default_studio_texture_strength",
+            rename = "texture-strength"
+        )]
+        texture_strength: f32,
+        #[serde(
+            default = "MattingMode::default_studio_warp_period_px",
+            rename = "warp-period-px"
+        )]
+        warp_period_px: f32,
+        #[serde(
+            default = "MattingMode::default_studio_weft_period_px",
+            rename = "weft-period-px"
+        )]
+        weft_period_px: f32,
     },
     FixedImage {
         path: PathBuf,
@@ -109,19 +124,16 @@ impl MattingOptions {
 
     pub fn prepare_runtime(&mut self) -> Result<()> {
         self.runtime = MattingRuntime::default();
-        match &self.style {
-            MattingMode::FixedImage { path, .. } => {
-                let img = image::open(path)
-                    .with_context(|| {
-                        format!(
-                            "failed to load fixed background image at {}",
-                            path.display()
-                        )
-                    })?
-                    .to_rgba8();
-                self.runtime.fixed_image = Some(Arc::new(img));
-            }
-            _ => {}
+        if let MattingMode::FixedImage { path, .. } = &self.style {
+            let img = image::open(path)
+                .with_context(|| {
+                    format!(
+                        "failed to load fixed background image at {}",
+                        path.display()
+                    )
+                })?
+                .to_rgba8();
+            self.runtime.fixed_image = Some(Arc::new(img));
         }
         Ok(())
     }
@@ -155,6 +167,18 @@ impl MattingMode {
 
     const fn default_studio_bevel_color() -> [u8; 3] {
         [255, 255, 255]
+    }
+
+    const fn default_studio_texture_strength() -> f32 {
+        1.0
+    }
+
+    const fn default_studio_warp_period_px() -> f32 {
+        22.0
+    }
+
+    const fn default_studio_weft_period_px() -> f32 {
+        22.0
     }
 }
 
