@@ -7,8 +7,9 @@ use std::time::{Duration, SystemTime};
 use anyhow::{ensure, Context, Result};
 use rand::seq::IteratorRandom;
 use rand::Rng;
-use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, Visitor};
+use serde::de::{self, DeserializeOwned, DeserializeSeed, Deserializer, MapAccess, Visitor};
 use serde::Deserialize;
+use serde_yaml::Value as YamlValue;
 
 use image::RgbaImage;
 
@@ -238,6 +239,15 @@ impl MattingOptions {
                 bevel_color: base
                     .bevel_color
                     .unwrap_or_else(MattingMode::default_studio_bevel_color),
+                texture_strength: base
+                    .texture_strength
+                    .unwrap_or_else(MattingMode::default_studio_texture_strength),
+                warp_period_px: base
+                    .warp_period_px
+                    .unwrap_or_else(MattingMode::default_studio_warp_period_px),
+                weft_period_px: base
+                    .weft_period_px
+                    .unwrap_or_else(MattingMode::default_studio_weft_period_px),
             },
             MattingKind::FixedImage => MattingMode::FixedImage {
                 path: base.path.expect("fixed-image matting must supply a path"),
@@ -271,8 +281,164 @@ struct MattingOptionBuilder {
     blur_backend: Option<BlurBackend>,
     bevel_width_px: Option<f32>,
     bevel_color: Option<[u8; 3]>,
+    texture_strength: Option<f32>,
+    warp_period_px: Option<f32>,
+    weft_period_px: Option<f32>,
     path: Option<PathBuf>,
     fixed_image_fit: Option<FixedImageFit>,
+}
+
+fn inline_value_to<T, E>(value: YamlValue) -> Result<T, E>
+where
+    T: DeserializeOwned,
+    E: de::Error,
+{
+    serde_yaml::from_value(value).map_err(|err| de::Error::custom(err.to_string()))
+}
+
+fn apply_inline_field<E>(
+    builder: &mut MattingOptionBuilder,
+    kind: MattingKind,
+    key: &str,
+    value: YamlValue,
+) -> Result<(), E>
+where
+    E: de::Error,
+{
+    match key {
+        "minimum-mat-percentage" => {
+            if builder.minimum_mat_percentage.is_some() {
+                return Err(de::Error::duplicate_field("minimum-mat-percentage"));
+            }
+            builder.minimum_mat_percentage = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "max-upscale-factor" => {
+            if builder.max_upscale_factor.is_some() {
+                return Err(de::Error::duplicate_field("max-upscale-factor"));
+            }
+            builder.max_upscale_factor = Some(inline_value_to::<f32, E>(value)?);
+        }
+        other => match kind {
+            MattingKind::FixedColor => match other {
+                "color" => {
+                    if builder.color.is_some() {
+                        return Err(de::Error::duplicate_field("color"));
+                    }
+                    builder.color = Some(inline_value_to::<[u8; 3], E>(value)?);
+                }
+                _ => {
+                    return Err(de::Error::unknown_field(
+                        other,
+                        &["color", "minimum-mat-percentage", "max-upscale-factor"],
+                    ));
+                }
+            },
+            MattingKind::Blur => match other {
+                "sigma" => {
+                    if builder.sigma.is_some() {
+                        return Err(de::Error::duplicate_field("sigma"));
+                    }
+                    builder.sigma = Some(inline_value_to::<f32, E>(value)?);
+                }
+                "max-sample-dim" => {
+                    if builder.max_sample_dim.is_some() {
+                        return Err(de::Error::duplicate_field("max-sample-dim"));
+                    }
+                    builder.max_sample_dim = Some(inline_value_to::<u32, E>(value)?);
+                }
+                "backend" => {
+                    if builder.blur_backend.is_some() {
+                        return Err(de::Error::duplicate_field("backend"));
+                    }
+                    builder.blur_backend = Some(inline_value_to::<BlurBackend, E>(value)?);
+                }
+                _ => {
+                    return Err(de::Error::unknown_field(
+                        other,
+                        &[
+                            "sigma",
+                            "max-sample-dim",
+                            "backend",
+                            "minimum-mat-percentage",
+                            "max-upscale-factor",
+                        ],
+                    ));
+                }
+            },
+            MattingKind::Studio => match other {
+                "bevel-width-px" => {
+                    if builder.bevel_width_px.is_some() {
+                        return Err(de::Error::duplicate_field("bevel-width-px"));
+                    }
+                    builder.bevel_width_px = Some(inline_value_to::<f32, E>(value)?);
+                }
+                "bevel-color" => {
+                    if builder.bevel_color.is_some() {
+                        return Err(de::Error::duplicate_field("bevel-color"));
+                    }
+                    builder.bevel_color = Some(inline_value_to::<[u8; 3], E>(value)?);
+                }
+                "texture-strength" => {
+                    if builder.texture_strength.is_some() {
+                        return Err(de::Error::duplicate_field("texture-strength"));
+                    }
+                    builder.texture_strength = Some(inline_value_to::<f32, E>(value)?);
+                }
+                "warp-period-px" => {
+                    if builder.warp_period_px.is_some() {
+                        return Err(de::Error::duplicate_field("warp-period-px"));
+                    }
+                    builder.warp_period_px = Some(inline_value_to::<f32, E>(value)?);
+                }
+                "weft-period-px" => {
+                    if builder.weft_period_px.is_some() {
+                        return Err(de::Error::duplicate_field("weft-period-px"));
+                    }
+                    builder.weft_period_px = Some(inline_value_to::<f32, E>(value)?);
+                }
+                _ => {
+                    return Err(de::Error::unknown_field(
+                        other,
+                        &[
+                            "bevel-width-px",
+                            "bevel-color",
+                            "texture-strength",
+                            "warp-period-px",
+                            "weft-period-px",
+                            "minimum-mat-percentage",
+                            "max-upscale-factor",
+                        ],
+                    ));
+                }
+            },
+            MattingKind::FixedImage => match other {
+                "path" => {
+                    if builder.path.is_some() {
+                        return Err(de::Error::duplicate_field("path"));
+                    }
+                    builder.path = Some(inline_value_to::<PathBuf, E>(value)?);
+                }
+                "fit" => {
+                    if builder.fixed_image_fit.is_some() {
+                        return Err(de::Error::duplicate_field("fit"));
+                    }
+                    builder.fixed_image_fit = Some(inline_value_to::<FixedImageFit, E>(value)?);
+                }
+                _ => {
+                    return Err(de::Error::unknown_field(
+                        other,
+                        &[
+                            "path",
+                            "fit",
+                            "minimum-mat-percentage",
+                            "max-upscale-factor",
+                        ],
+                    ));
+                }
+            },
+        },
+    }
+    Ok(())
 }
 
 impl Default for MattingConfig {
@@ -310,6 +476,7 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
     {
         let mut selection: Option<MattingSelection> = None;
         let mut options: Option<BTreeMap<MattingKind, MattingOptions>> = None;
+        let mut inline_fields: Vec<(String, YamlValue)> = Vec::new();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "type" => {
@@ -325,38 +492,57 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
                     }
                     options = Some(map.next_value_seed(MattingOptionsMapSeed)?);
                 }
-                other => {
-                    return Err(de::Error::unknown_field(other, &["type", "options"]));
+                _ => {
+                    let value = map.next_value::<YamlValue>()?;
+                    inline_fields.push((key, value));
                 }
             }
         }
 
-        let options = options.unwrap_or_default();
+        let mut options = options.unwrap_or_default();
+
+        let selection = selection.ok_or_else(|| de::Error::missing_field("type"))?;
+
+        match selection {
+            MattingSelection::Random => {
+                if !inline_fields.is_empty() {
+                    return Err(de::Error::custom(
+                        "matting.type random does not support inline matting fields",
+                    ));
+                }
+            }
+            MattingSelection::Fixed(kind) => {
+                if options.is_empty() {
+                    let mut builder = MattingOptionBuilder::default();
+                    for (field, value) in std::mem::take(&mut inline_fields) {
+                        apply_inline_field::<A::Error>(&mut builder, kind, &field, value)?;
+                    }
+                    if matches!(kind, MattingKind::FixedImage) && builder.path.is_none() {
+                        return Err(de::Error::missing_field("path"));
+                    }
+                    let option = MattingOptions::with_kind(kind, builder);
+                    options.insert(kind, option);
+                } else {
+                    if !inline_fields.is_empty() {
+                        return Err(de::Error::custom(
+                            "matting configuration cannot mix inline fields with matting.options",
+                        ));
+                    }
+                    if !options.contains_key(&kind) {
+                        return Err(de::Error::custom(format!(
+                            "matting.type {} must match a key in matting.options",
+                            kind
+                        )));
+                    }
+                }
+            }
+        }
+
         if options.is_empty() {
             return Err(de::Error::custom(
                 "matting.options must include at least one entry",
             ));
         }
-
-        let selection = match selection.ok_or_else(|| de::Error::missing_field("type"))? {
-            MattingSelection::Random => {
-                if options.is_empty() {
-                    return Err(de::Error::custom(
-                        "matting.type random requires at least one matting option",
-                    ));
-                }
-                MattingSelection::Random
-            }
-            MattingSelection::Fixed(kind) => {
-                if !options.contains_key(&kind) {
-                    return Err(de::Error::custom(format!(
-                        "matting.type {} must match a key in matting.options",
-                        kind
-                    )));
-                }
-                MattingSelection::Fixed(kind)
-            }
-        };
 
         Ok(MattingConfig { selection, options })
     }
@@ -530,12 +716,33 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
                             }
                             builder.bevel_color = Some(map.next_value()?);
                         }
+                        "texture-strength" => {
+                            if builder.texture_strength.is_some() {
+                                return Err(de::Error::duplicate_field("texture-strength"));
+                            }
+                            builder.texture_strength = Some(map.next_value()?);
+                        }
+                        "warp-period-px" => {
+                            if builder.warp_period_px.is_some() {
+                                return Err(de::Error::duplicate_field("warp-period-px"));
+                            }
+                            builder.warp_period_px = Some(map.next_value()?);
+                        }
+                        "weft-period-px" => {
+                            if builder.weft_period_px.is_some() {
+                                return Err(de::Error::duplicate_field("weft-period-px"));
+                            }
+                            builder.weft_period_px = Some(map.next_value()?);
+                        }
                         _ => {
                             return Err(de::Error::unknown_field(
                                 other,
                                 &[
                                     "bevel-width-px",
                                     "bevel-color",
+                                    "texture-strength",
+                                    "warp-period-px",
+                                    "weft-period-px",
                                     "minimum-mat-percentage",
                                     "max-upscale-factor",
                                 ],
