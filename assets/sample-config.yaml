@@ -18,3 +18,27 @@ loader-max-concurrent-decodes: 4
 
 # GPU render oversample factor (1.0 = native to screen)
 oversample: 1.0
+
+# First-run Wi-Fi setup portal (used on Raspberry Pi)
+wifi-setup:
+  enabled: true
+  wifi-interface: wlan0
+  hotspot-ssid: Frame Setup
+  hotspot-password: framesetup
+  hotspot-start-command:
+    - sudo
+    - systemctl
+    - start
+    - frame-hotspot.service
+  hotspot-stop-command:
+    - sudo
+    - systemctl
+    - stop
+    - frame-hotspot.service
+  portal-bind-address: 0.0.0.0
+  portal-port: 8080
+  portal-hostname: 10.0.0.1
+  wpa-supplicant-path: /etc/wpa_supplicant/wpa_supplicant.conf
+  connection-check-timeout-secs: 45
+  connection-check-interval-secs: 3
+  restart-command: []
