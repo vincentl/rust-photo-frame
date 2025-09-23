@@ -181,7 +181,7 @@ The fixed background image is loaded once at startup and reused for every slide,
 
 ## References
 
-- **Procedural studio mat weave texture.** The studio mat renderer synthesizes a paper-like weave by blending smooth warp and weft thread profiles with low-cost hashed grain noise, following the approach outlined by Iñigo Quílez in his article ["Weave"](https://iquilezles.org/articles/weave/).
+- **Procedural studio mat weave texture.** Our weave shading is adapted from Mike Cauchi’s breakdown of tillable cloth shading, which layers sine-profiled warp/weft threads with randomized grain to keep the pattern from banding. See ["Research – Tillable Images and Cloth Shading"](https://www.mikecauchiart.com/single-post/2017/01/23/research-tillable-images-and-cloth-shading).
 
 ## License
 
