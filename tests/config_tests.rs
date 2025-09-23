@@ -1,4 +1,6 @@
-use rust_photo_frame::config::{Configuration, MattingKind, MattingSelection};
+use rust_photo_frame::config::{
+    Configuration, MattingKind, MattingSelection, TransitionKind, TransitionSelection,
+};
 use std::path::PathBuf;
 
 #[test]
@@ -191,6 +193,81 @@ matting:
     assert!(err
         .to_string()
         .contains("matting.type studio must match a key"));
+}
+
+#[test]
+fn parse_inline_fade_transition() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  type: fade
+  duration-ms: 750
+  through-black: true
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(
+        cfg.transition.selection(),
+        TransitionSelection::Fixed(TransitionKind::Fade)
+    );
+    let options = cfg.transition.options();
+    let fade = options
+        .get(&TransitionKind::Fade)
+        .expect("expected fade transition option");
+    assert_eq!(fade.duration().as_millis(), 750);
+    match fade.mode() {
+        rust_photo_frame::config::TransitionMode::Fade(cfg) => {
+            assert!(cfg.through_black);
+        }
+        _ => panic!("expected fade transition"),
+    }
+}
+
+#[test]
+fn parse_random_transition_configuration() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  type: random
+  options:
+    fade:
+      duration-ms: 450
+    wipe:
+      duration-ms: 600
+      angle-deg: 90.0
+      softness: 0.1
+    push:
+      duration-ms: 640
+      angle-deg: 0.0
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(cfg.transition.selection(), TransitionSelection::Random);
+    let options = cfg.transition.options();
+    assert_eq!(options.len(), 3);
+    let wipe = options
+        .get(&TransitionKind::Wipe)
+        .expect("expected wipe transition option");
+    assert_eq!(wipe.duration().as_millis(), 600);
+    match wipe.mode() {
+        rust_photo_frame::config::TransitionMode::Wipe(cfg) => {
+            assert!((cfg.angle_deg - 90.0).abs() < f32::EPSILON);
+            assert!((cfg.softness - 0.1).abs() < f32::EPSILON);
+        }
+        _ => panic!("expected wipe transition"),
+    }
+}
+
+#[test]
+fn random_transition_without_options_is_rejected() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  type: random
+"#;
+
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(err.to_string().contains("transition.options"));
 }
 
 #[test]

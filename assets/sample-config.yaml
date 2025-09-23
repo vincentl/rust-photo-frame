@@ -5,9 +5,11 @@
 photo-library-path: /absolute/path/to/your/photo/library
 
 # Render/transition settings
-# Cross-fade duration in milliseconds
-fade-ms: 400
-# Dwell time (ms) the current image remains fully displayed before fading
+# Configure the transition between photos
+transition:
+  type: fade
+  duration-ms: 400
+# Dwell time (ms) the current image remains fully displayed before the next transition
 dwell-ms: 2000
 
 # Viewer buffering and pipeline backpressure

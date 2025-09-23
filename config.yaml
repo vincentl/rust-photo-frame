@@ -1,9 +1,21 @@
 photo-library-path: /Users/vincent/rust-photo-frame/photo-library-test
 
 # Render/transition settings
-# Cross-fade duration in milliseconds
-fade-ms: 400
-# Dwell time (ms) the current image remains fully displayed before fading
+# Transition behavior between photos
+transition:
+  type: random
+  options:
+    fade:
+      duration-ms: 400
+    wipe:
+      duration-ms: 550
+      angle-deg: 45.0
+      softness: 0.08
+    push:
+      duration-ms: 520
+      angle-deg: 0.0
+      randomize-direction: true
+# Dwell time (ms) the current image remains fully displayed before the next transition
 dwell-ms: 2000
 # Number of images to preload in the viewer (aligns with channel capacity)
 viewer-preload-count: 3

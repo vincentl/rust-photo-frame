@@ -78,7 +78,9 @@ Place a YAML file and pass its path as the CLI argument. Example:
 photo-library-path: /path/to/photos
 
 # Render/transition settings
-fade-ms: 400 # Cross-fade duration (ms)
+transition:
+  type: fade # fade | wipe | push | random
+  duration-ms: 400 # Duration for the selected transition
 dwell-ms: 2000 # Time an image remains fully visible (ms)
 viewer-preload-count: 3 # Images the viewer preloads; also sets viewer channel capacity
 loader-max-concurrent-decodes: 4 # Concurrent decodes in the loader
@@ -106,7 +108,7 @@ matting:
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `photo-library-path` | string | `""` | Root directory that will be scanned recursively for photos. |
-| `fade-ms` | integer | `400` | Cross-fade transition duration in milliseconds. |
+| `transition` | mapping | see below | Controls how the viewer transitions between photos. |
 | `dwell-ms` | integer | `2000` | Time an image remains fully visible before the next fade begins. |
 | `viewer-preload-count` | integer | `3` | Number of prepared images the viewer keeps queued; controls GPU upload backlog. |
 | `loader-max-concurrent-decodes` | integer | `4` | Maximum number of CPU decodes that can run in parallel. |
@@ -145,6 +147,47 @@ The command prints the multiplicity assigned to each discovered photo and the fi
 | --- | --- | --- | --- |
 | `new-multiplicity` | integer | `3` | Number of copies a brand-new photo receives in the next playlist cycle. |
 | `half-life` | duration string | `1 day` | Exponential half-life governing how quickly the multiplicity decays toward `1`. Accepts human-friendly strings via [`humantime`](https://docs.rs/humantime). |
+
+### Transition configuration
+
+The `transition` block controls how the viewer blends between photos. Set `transition.type` to one of the supported transitions or to `random` to choose among multiple configured options. When `type` is `random`, list the available transitions under `transition.options` keyed by their type.
+
+Example fixed wipe configuration:
+
+```yaml
+transition:
+  type: wipe
+  duration-ms: 600
+  angle-deg: 120.0
+  softness: 0.12
+  randomize-direction: true
+```
+
+Randomized mix:
+
+```yaml
+transition:
+  type: random
+  options:
+    fade:
+      duration-ms: 500
+    wipe:
+      duration-ms: 600
+      angle-deg: 45.0
+      angle-jitter-deg: 30.0
+    push:
+      duration-ms: 650
+      angle-deg: 0.0
+      randomize-direction: true
+```
+
+Each option accepts the following fields:
+
+| Transition | Fields |
+| --- | --- |
+| `fade` | `duration-ms` (transition length), `through-black` (bool, fade via black before revealing the next image). |
+| `wipe` | `duration-ms`, `angle-deg` (direction of the wipe), `angle-jitter-deg` (random +/- degrees per transition), `softness` (0–0.5 edge feather), `reverse` (invert direction), `randomize-direction` (randomly flip 180°). |
+| `push` | `duration-ms`, `angle-deg`, `angle-jitter-deg`, `reverse`, `randomize-direction`. |
 
 ### Matting configuration
 
