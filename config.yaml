@@ -29,22 +29,13 @@ matting:
       sigma: 20.0
       max-sample-dim: 1536
       backend: neon # options: cpu, neon (defaults to cpu)
-# To keep a single mat style, set `type` to the matching option key and list only that entry.
-# Example studio mat with a crisp white bevel:
-# matting:
-#   type: studio
-#   options:
-#     studio:
-#       minimum-mat-percentage: 3.5
-#       bevel-width-px: 4.0
-#       bevel-color: [255, 255, 255]
-#       texture-strength: 0.6       # 0.0 for smooth paper, 1.0 default weave
-#       warp-period-px: 5.6         # spacing between vertical warp threads in px
-#       weft-period-px: 5.2         # spacing between horizontal weft threads in px
-# Example fixed background image scaled to cover the screen:
-# matting:
-#   type: fixed-image
-#   options:
-#     fixed-image:
-#       path: /path/to/background.png
-#       fit: cover             # options: cover, contain, stretch
+    studio:
+      minimum-mat-percentage: 8.0
+      bevel-width-px: 4.0
+      bevel-color: [255, 255, 255]
+      texture-strength: 1.0 # 0.0 for smooth paper, 1.0 default weave
+      warp-period-px: 5.6 # spacing between vertical warp threads in px
+      weft-period-px: 5.2 # spacing between horizontal weft threads in px
+    fixed-image:
+      path: /path/to/background.png
+      fit: cover # options: cover, contain, stretch
