@@ -11,6 +11,8 @@ viewer-preload-count: 3
 oversample: 1.0
 # Concurrent image decodes in loader
 loader-max-concurrent-decodes: 4
+# Optional deterministic seed for the initial shuffle (set to null for random)
+startup-shuffle-seed: null
 
 playlist:
   new-multiplicity: 3
