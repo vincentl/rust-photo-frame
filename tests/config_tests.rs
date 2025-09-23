@@ -1,4 +1,6 @@
-use rust_photo_frame::config::{Configuration, MattingKind, MattingSelection};
+use rust_photo_frame::config::{
+    Configuration, MattingKind, MattingSelection, TransitionConfig, TransitionSelection,
+};
 use std::path::PathBuf;
 
 #[test]
@@ -9,6 +11,8 @@ photo-library-path: "/photos"
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(cfg.photo_library_path, PathBuf::from("/photos"));
     assert!((cfg.oversample - 1.0).abs() < f32::EPSILON);
+    assert_eq!(cfg.transition.selection, TransitionSelection::Fade);
+    assert_eq!(cfg.transition.duration_ms, 400);
 }
 
 #[test]
@@ -20,6 +24,7 @@ oversample: 1.5
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(cfg.photo_library_path, PathBuf::from("/photos"));
     assert!((cfg.oversample - 1.5).abs() < f32::EPSILON);
+    assert_eq!(cfg.transition.selection, TransitionSelection::Fade);
 }
 
 #[test]
@@ -30,6 +35,34 @@ startup-shuffle-seed: 7
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(cfg.startup_shuffle_seed, Some(7));
+}
+
+#[test]
+fn parse_custom_transition_configuration() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  type: wipe
+  duration-ms: 750
+  wipe:
+    angle-deg: 30.0
+    softness-px: 16.0
+    reverse: true
+  random:
+    fade-weight: 2.0
+    wipe-weight: 0.5
+    push-weight: 3.0
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(cfg.transition.selection, TransitionSelection::Wipe);
+    assert_eq!(cfg.transition.duration_ms, 750);
+    assert!((cfg.transition.wipe.angle_deg - 30.0).abs() < f32::EPSILON);
+    assert!((cfg.transition.wipe.softness_px - 16.0).abs() < f32::EPSILON);
+    assert!(cfg.transition.wipe.reverse);
+    assert!((cfg.transition.random.fade_weight - 2.0).abs() < f32::EPSILON);
+    assert!((cfg.transition.random.wipe_weight - 0.5).abs() < f32::EPSILON);
+    assert!((cfg.transition.random.push_weight - 3.0).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -212,6 +245,15 @@ fn validated_rejects_invalid_numeric_ranges() {
 
     let cfg = Configuration {
         oversample: 0.0,
+        ..Default::default()
+    };
+    assert!(cfg.validated().is_err());
+
+    let cfg = Configuration {
+        transition: TransitionConfig {
+            duration_ms: 0,
+            ..Default::default()
+        },
         ..Default::default()
     };
     assert!(cfg.validated().is_err());

@@ -39,7 +39,21 @@ Place a YAML file and pass its path as the CLI argument. Example:
 photo-library-path: /path/to/photos
 
 # Render/transition settings
-fade-ms: 400 # Cross-fade duration (ms)
+transition:
+  type: fade # fade, wipe, push, or random
+  duration-ms: 400 # Transition duration (ms)
+  fade:
+    through-black: false # Optional fade-to-black midpoint
+  wipe:
+    angle-deg: 0.0 # Angle of the wipe front
+    softness-px: 32.0 # Soft-edge width
+    reverse: false # Flip wipe direction
+  push:
+    direction: left # Slide direction for push transitions
+  random:
+    fade-weight: 1.0 # Relative chance of picking fade
+    wipe-weight: 1.0 # Relative chance of picking wipe
+    push-weight: 1.0 # Relative chance of picking push
 dwell-ms: 2000 # Time an image remains fully visible (ms)
 viewer-preload-count: 3 # Images the viewer preloads; also sets viewer channel capacity
 loader-max-concurrent-decodes: 4 # Concurrent decodes in the loader
@@ -67,14 +81,32 @@ matting:
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `photo-library-path` | string | `""` | Root directory that will be scanned recursively for photos. |
-| `fade-ms` | integer | `400` | Cross-fade transition duration in milliseconds. |
-| `dwell-ms` | integer | `2000` | Time an image remains fully visible before the next fade begins. |
+| `transition` | mapping | see below | Controls which transition mode is active and its parameters. |
+| `dwell-ms` | integer | `2000` | Time an image remains fully visible before the next transition begins. |
 | `viewer-preload-count` | integer | `3` | Number of prepared images the viewer keeps queued; controls GPU upload backlog. |
 | `loader-max-concurrent-decodes` | integer | `4` | Maximum number of CPU decodes that can run in parallel. |
 | `oversample` | float | `1.0` | Render target scale relative to the screen; values >1.0 reduce aliasing but cost GPU time. |
 | `startup-shuffle-seed` | integer or `null` | `null` | Optional deterministic seed used for the initial photo shuffle. |
 | `playlist` | mapping | see below | Controls how aggressively new photos repeat before settling into the long-term cadence. |
 | `matting` | mapping | see below | Controls how mats are generated around each photo. |
+| `transition` | mapping | see below | Chooses the transition mode between photos and its tuning parameters. |
+
+### Transition configuration
+
+The `transition` block mirrors the matting configuration style: set `transition.type` to one of the supported modes, then tune that mode's sub-table. When `transition.type` is `random`, the viewer shuffles between the configured modes according to the weights in `transition.random`.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `type` | string | `fade` | Active transition. Use `fade`, `wipe`, `push`, or `random`. |
+| `duration-ms` | integer | `400` | Duration of the transition animation. Must be greater than zero. |
+| `fade.through-black` | boolean | `false` | When enabled the fade darkens to black before revealing the next image. |
+| `wipe.angle-deg` | float | `0.0` | Angle (in degrees) of the wipe front measured clockwise from the positive X axis. |
+| `wipe.softness-px` | float | `32.0` | Width of the feathered edge along the wipe front, in pixels. Set to `0` for a hard edge. |
+| `wipe.reverse` | boolean | `false` | When `true`, the wipe travels in the opposite direction. |
+| `push.direction` | string | `left` | Direction the outgoing photo travels. Use `left`, `right`, `up`, or `down`. |
+| `random.fade-weight` | float | `1.0` | Relative probability of choosing the fade effect when `transition.type` is `random`. |
+| `random.wipe-weight` | float | `1.0` | Relative probability of choosing the wipe effect when `transition.type` is `random`. |
+| `random.push-weight` | float | `1.0` | Relative probability of choosing the push effect when `transition.type` is `random`. |
 
 ### Playlist weighting
 
