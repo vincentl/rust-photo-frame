@@ -218,6 +218,10 @@ The studio mat derives a uniform base color from the photo’s average RGB, rend
 
 The fixed background image is loaded once at startup and reused for every slide, ensuring smooth transitions even with large source files.
 
+## References
+
+- **Procedural studio mat weave texture.** Our weave shading is adapted from Mike Cauchi’s breakdown of tillable cloth shading, which layers sine-profiled warp/weft threads with randomized grain to keep the pattern from banding. See ["Research – Tillable Images and Cloth Shading"](https://www.mikecauchiart.com/single-post/2017/01/23/research-tillable-images-and-cloth-shading).
+
 ## License
 
 This project is licensed under the **MIT License**.
