@@ -1,21 +1,46 @@
 # Photoframe
 
-A Rust-based digital photo frame application designed to run on a Raspberry Pi.
+A Rust-based digital photo frame pipeline tuned for Raspberry Pi hardware. It watches your photo library, weights the playlist so new images appear more frequently, and renders each slide with configurable matting and transitions.
 
-## Status
+## Project Status
 
-This project is **alpha and under development**
+This project is **alpha and under active development**. Expect rough edges and incomplete documentation.
 
-## Features (Tier 1)
+## Table of Contents
 
-- Recursive/scoped directory scanning (configurable)
-- Image type filtering (jpg/png/gif/webp/bmp/tiff)
-- Circular buffer (infinite loop)
-- Fixed per-image delay (configurable)
-- Weighted playlist that repeats new photos using an exponential half-life decay
-- Error handling and structured logging
+1. [Quickstart](#quickstart)
+2. [Architecture Overview](#architecture-overview)
+3. [Features](#features)
+4. [Configuration](#configuration)
+5. [Playlist Weighting](#playlist-weighting)
+6. [Matting Configuration](#matting-configuration)
+7. [License](#license)
 
-## Event Flow
+## Quickstart
+
+### Prerequisites _(TODO: document Raspberry Pi OS version, GPU requirements, and external dependencies)_
+
+### Build & Run
+
+```bash
+cargo run --release -- <path/to/config.yaml>
+```
+
+The binary accepts several optional CLI flags for playlist testing and determinism:
+
+| Flag | Description |
+| --- | --- |
+| `--playlist-now <RFC3339>` | Overrides `SystemTime::now()` when computing playlist weights. Useful for reproducible simulations. |
+| `--playlist-dry-run <ITERATIONS>` | Emits a textual preview of the weighted playlist order without launching the UI. |
+| `--playlist-seed <SEED>` | Forces deterministic playlist shuffling for both dry-run and live modes. |
+
+### Deployment _(TODO: outline systemd service, auto-start configuration, and graceful shutdown strategy)_
+
+### Testing _(TODO: enumerate unit/integration test commands and GPU validation steps)_
+
+## Architecture Overview
+
+The runtime is composed of four asynchronous tasks orchestrated by `main.rs`. They communicate over bounded channels to keep memory predictable and to respect GPU/CPU parallelism limits.
 
 ```mermaid
 flowchart LR
@@ -24,12 +49,26 @@ flowchart LR
   MAIN --> LOAD[PhotoLoader]
   MAIN --> VIEW[PhotoViewer]
 
-  FILES -->|add/remove| MAN
+  FILES -->|inventory updates| MAN
   MAN -->|invalid photo| FILES
-  MAN -->|load| LOAD
-  LOAD -->|loaded| VIEW
+  MAN -->|photo requests| LOAD
+  LOAD -->|decoded image| VIEW
   LOAD -->|invalid photo| FILES
+  VIEW -->|displayed event| MAN
 ```
+
+## Features
+
+### Tier 1 (implemented)
+
+- Recursive/scoped directory scanning (configurable)
+- Image type filtering (jpg/png/gif/webp/bmp/tiff)
+- Circular buffer (infinite loop)
+- Fixed per-image delay (configurable)
+- Weighted playlist that repeats new photos using an exponential half-life decay
+- Error handling and structured logging
+
+### Tier 2+ _(TODO: summarize roadmap items from `Roadmap.md` and planned UX polish)_
 
 ## Configuration
 
