@@ -323,3 +323,30 @@ transition:
         .to_string()
         .contains("requires push.angle-jitter-deg >= 0"));
 }
+
+#[test]
+fn push_transition_vertical_axis_defaults_to_vertical_push() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  type: push
+  duration-ms: 725
+  vertical-axis: true
+  reverse: true
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let option = cfg
+        .transition
+        .options()
+        .get(&TransitionKind::Push)
+        .expect("expected push transition option");
+    assert_eq!(option.duration().as_millis(), 725);
+    match option.mode() {
+        rust_photo_frame::config::TransitionMode::Push(push) => {
+            assert!((push.angle_deg - 90.0).abs() < f32::EPSILON);
+            assert!(push.reverse);
+        }
+        _ => panic!("expected push transition"),
+    }
+}
