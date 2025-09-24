@@ -134,11 +134,11 @@ impl FixedImageBackground {
             FixedImageFit::Cover => {
                 let (bg_w, bg_h) =
                     resize_to_cover(canvas_w, canvas_h, source.width(), source.height(), max_dim);
-                let mut resized = resize_rgba(&source, bg_w, bg_h)?;
+                let resized = resize_rgba(&source, bg_w, bg_h)?;
                 if bg_w > canvas_w || bg_h > canvas_h {
                     let crop_x = (bg_w.saturating_sub(canvas_w)) / 2;
                     let crop_y = (bg_h.saturating_sub(canvas_h)) / 2;
-                    imageops::crop_imm(&mut resized, crop_x, crop_y, canvas_w, canvas_h).to_image()
+                    imageops::crop_imm(&resized, crop_x, crop_y, canvas_w, canvas_h).to_image()
                 } else if bg_w < canvas_w || bg_h < canvas_h {
                     let mut canvas = RgbaImage::from_pixel(canvas_w, canvas_h, avg);
                     let (ox, oy) = center_offset(bg_w, bg_h, canvas_w, canvas_h);
