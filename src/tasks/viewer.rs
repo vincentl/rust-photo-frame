@@ -1,6 +1,6 @@
 use crate::config::{
-    MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionKind,
-    TransitionMode, TransitionOptions,
+    MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionKind, TransitionMode,
+    TransitionOptions,
 };
 use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
 use crate::processing::blur::apply_blur;
