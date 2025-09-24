@@ -105,17 +105,15 @@ matting:
 
 ### Top-level keys
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `photo-library-path` | string | `""` | Root directory that will be scanned recursively for photos. |
-| `transition` | mapping | see below | Controls how the viewer transitions between photos. |
-| `dwell-ms` | integer | `2000` | Time an image remains fully visible before the next fade begins. |
-| `viewer-preload-count` | integer | `3` | Number of prepared images the viewer keeps queued; controls GPU upload backlog. |
-| `loader-max-concurrent-decodes` | integer | `4` | Maximum number of CPU decodes that can run in parallel. |
-| `oversample` | float | `1.0` | Render target scale relative to the screen; values >1.0 reduce aliasing but cost GPU time. |
-| `startup-shuffle-seed` | integer or `null` | `null` | Optional deterministic seed used for the initial photo shuffle. |
-| `playlist` | mapping | see below | Controls how aggressively new photos repeat before settling into the long-term cadence. |
-| `matting` | mapping | see below | Controls how mats are generated around each photo. |
+- **`photo-library-path`** _(string, default `""`)_ – Root directory that will be scanned recursively for photos.
+- **`transition`** _(mapping, see [Transition configuration](#transition-configuration))_ – Controls how the viewer blends between photos.
+- **`dwell-ms`** _(integer, default `2000`)_ – Time an image remains fully visible before the next fade begins.
+- **`viewer-preload-count`** _(integer, default `3`)_ – Number of prepared images the viewer keeps queued; controls GPU upload backlog.
+- **`loader-max-concurrent-decodes`** _(integer, default `4`)_ – Maximum number of CPU decodes that can run in parallel.
+- **`oversample`** _(float, default `1.0`)_ – Render target scale relative to the screen; values >1.0 reduce aliasing but cost GPU time.
+- **`startup-shuffle-seed`** _(integer or `null`, default `null`)_ – Optional deterministic seed used for the initial photo shuffle.
+- **`playlist`** _(mapping, see [Playlist weighting](#playlist-weighting))_ – Controls how aggressively new photos repeat before settling into the long-term cadence.
+- **`matting`** _(mapping, see [Matting configuration](#matting-configuration))_ – Controls how mats are generated around each photo.
 
 ### Playlist weighting
 
@@ -143,10 +141,10 @@ cargo run --release -- \
 
 The command prints the multiplicity assigned to each discovered photo and the first 32 scheduled entries according to the weighted queue. Run with `RUST_LOG=info` (or `debug` for per-photo weights) during a normal session to watch the manager log the same multiplicity calculations as the playlist rebuilds.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `new-multiplicity` | integer | `3` | Number of copies a brand-new photo receives in the next playlist cycle. |
-| `half-life` | duration string | `1 day` | Exponential half-life governing how quickly the multiplicity decays toward `1`. Accepts human-friendly strings via [`humantime`](https://docs.rs/humantime). |
+Key options inside the `playlist` mapping:
+
+- **`new-multiplicity`** _(integer, default `3`)_ – Number of copies a brand-new photo receives in the next playlist cycle.
+- **`half-life`** _(duration string, default `1 day`)_ – Exponential half-life governing how quickly the multiplicity decays toward `1`. Accepts human-friendly strings via [`humantime`](https://docs.rs/humantime).
 
 ### Transition configuration
 
@@ -183,11 +181,23 @@ transition:
 
 Each option accepts the following fields:
 
-| Transition | Fields |
-| --- | --- |
-| `fade` | `duration-ms` (transition length), `through-black` (bool, fade via black before revealing the next image). |
-| `wipe` | `duration-ms`, `angle-deg` (direction of the wipe), `angle-jitter-deg` (random +/- degrees per transition), `softness` (0–0.5 edge feather), `reverse` (invert direction), `randomize-direction` (randomly flip 180°). |
-| `push` | `duration-ms`, `angle-deg`, `angle-jitter-deg`, `reverse`, `randomize-direction`, `vertical-axis`. |
+- **`fade`**
+  - `duration-ms`: Transition length in milliseconds.
+  - `through-black` _(bool)_: Fade via black before revealing the next image.
+- **`wipe`**
+  - `duration-ms`
+  - `angle-deg`: Direction of the wipe.
+  - `angle-jitter-deg`: Random +/- degrees per transition.
+  - `softness`: Edge feather between `0.0` and `0.5`.
+  - `reverse`: Invert direction.
+  - `randomize-direction`: Randomly flip the wipe direction by 180°.
+- **`push`**
+  - `duration-ms`
+  - `angle-deg`
+  - `angle-jitter-deg`
+  - `reverse`
+  - `randomize-direction`
+  - `vertical-axis`: Switch to vertical motion instead of horizontal.
 
 Use `vertical-axis: true` with the push transition to move images vertically instead of horizontally. Combine it with `reverse: true` to push upward, or `randomize-direction: true` to shuffle between up and down. Providing an explicit `angle-deg` continues to override the base direction if you need diagonal pushes.
 
@@ -222,44 +232,34 @@ matting:
 
 Each `matting.options` entry accepts the following shared knobs:
 
-| Key | Type | Default | Notes |
-| --- | --- | --- | --- |
-| `minimum-mat-percentage` | float | `0.0` | Fraction (0–45%) of each screen edge reserved for the mat border. |
-| `max-upscale-factor` | float | `1.0` | Maximum enlargement factor when fitting inside the mat; `1.0` disables upscaling. |
-| map key | string | — | Mat style to render. Use `fixed-color`, `blur`, `studio`, or `fixed-image`. |
+- **`minimum-mat-percentage`** _(float, default `0.0`)_ – Fraction (0–45%) of each screen edge reserved for the mat border.
+- **`max-upscale-factor`** _(float, default `1.0`)_ – Maximum enlargement factor when fitting inside the mat; `1.0` disables upscaling.
+- **map key** _(string)_ – Mat style to render. Use `fixed-color`, `blur`, `studio`, or `fixed-image`.
 
 #### `fixed-color`
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `color` | `[r, g, b]` array | `[0, 0, 0]` | The RGB values (0–255) used to fill the mat background. |
+- `color` _(array `[r, g, b]`, default `[0, 0, 0]`)_ – RGB values (0–255) used to fill the mat background.
 
 #### `blur`
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `sigma` | float | `20.0` | Gaussian blur radius applied to a scaled copy of the photo that covers the screen. |
-| `max-sample-dim` | integer or `null` | `null` (defaults to `2048` on 64-bit ARM builds, otherwise unlimited) | Optional cap on the background texture size used for the blur. When set, the background is downscaled to this maximum dimension before blurring and then upscaled back to the screen size, preserving the soft-focus look while reducing CPU cost on small GPUs. |
-| `backend` | string | `cpu` | Blur implementation to use. Set to `cpu` for the high-quality software renderer (default) or `neon` to request the vector-accelerated path on 64-bit ARM. When `neon` is selected but unsupported at runtime, the code automatically falls back to the CPU backend. |
+- `sigma` _(float, default `20.0`)_ – Gaussian blur radius applied to a scaled copy of the photo that covers the screen.
+- `max-sample-dim` _(integer or `null`, default `null`; defaults to `2048` on 64-bit ARM builds, otherwise unlimited)_ – Optional cap on the background texture size used for the blur. When set, the background is downscaled to this maximum dimension before blurring and then upscaled back to the screen size, preserving the soft-focus look while reducing CPU cost on small GPUs.
+- `backend` _(string, default `cpu`)_ – Blur implementation to use. Set to `cpu` for the high-quality software renderer (default) or `neon` to request the vector-accelerated path on 64-bit ARM. When `neon` is selected but unsupported at runtime, the code automatically falls back to the CPU backend.
 
 #### `studio`
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `bevel-width-px` | float | `3.0` | Visible width of the bevel band in pixels. The renderer clamps this value to the available mat border if the photo touches an edge. |
-| `bevel-color` | `[r, g, b]` array | `[255, 255, 255]` | RGB values (0–255) used for the bevel band. |
-| `texture-strength` | float | `1.0` | Strength of the simulated paper texture (0.0 disables the effect, 1.0 keeps the default weave). |
-| `warp-period-px` | float | `5.6` | Horizontal spacing between vertical warp threads in pixels. |
-| `weft-period-px` | float | `5.2` | Vertical spacing between horizontal weft threads in pixels. |
+- `bevel-width-px` _(float, default `3.0`)_ – Visible width of the bevel band in pixels. The renderer clamps this value to the available mat border if the photo touches an edge.
+- `bevel-color` _(array `[r, g, b]`, default `[255, 255, 255]`)_ – RGB values (0–255) used for the bevel band.
+- `texture-strength` _(float, default `1.0`)_ – Strength of the simulated paper texture (`0.0` disables the effect, `1.0` keeps the default weave).
+- `warp-period-px` _(float, default `5.6`)_ – Horizontal spacing between vertical warp threads in pixels.
+- `weft-period-px` _(float, default `5.2`)_ – Vertical spacing between horizontal weft threads in pixels.
 
 The studio mat derives a uniform base color from the photo’s average RGB, renders a mitred bevel band with the configured width and color, blends a hint of the mat pigment along the outer lip, and shades the bevel from a fixed light direction so it reads as a cut paper core. The photo then sits flush against that inner frame.
 
 #### `fixed-image`
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `path` | string | (required) | Filesystem path to the background image that should appear behind every photo. |
-| `fit` | string | `cover` | How the background image is scaled to the canvas. Options: `cover` (default, fills while cropping as needed), `contain` (letterboxes to preserve the whole image), or `stretch` (distorts to exactly fill). |
+- `path` _(string, required)_ – Filesystem path to the background image that should appear behind every photo.
+- `fit` _(string, default `cover`)_ – How the background image is scaled to the canvas. Options: `cover` (default, fills while cropping as needed), `contain` (letterboxes to preserve the whole image), or `stretch` (distorts to exactly fill).
 
 The fixed background image is loaded once at startup and reused for every slide, ensuring smooth transitions even with large source files.
 
