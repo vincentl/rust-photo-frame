@@ -293,3 +293,33 @@ fn validated_rejects_invalid_numeric_ranges() {
     };
     assert!(cfg.validated().is_err());
 }
+
+#[test]
+fn wipe_transition_rejects_negative_jitter() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  type: wipe
+  angle-jitter-deg: -15.0
+"#;
+
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("requires wipe.angle-jitter-deg >= 0"));
+}
+
+#[test]
+fn push_transition_rejects_negative_jitter() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  type: push
+  angle-jitter-deg: -30.0
+"#;
+
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("requires push.angle-jitter-deg >= 0"));
+}
