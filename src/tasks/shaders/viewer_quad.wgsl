@@ -97,8 +97,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let leading = clamp(progress - softness, 0.0, progress);
         let trailing = clamp(progress + softness, progress, 1.0);
         let end = max(trailing, leading + 1e-3);
-        let smooth = smoothstep(leading, end, normalized);
-        mask = 1.0 - smooth;
+        let smooth_mask = smoothstep(leading, end, normalized);
+        mask = 1.0 - smooth_mask;
       }
       color = current * (1.0 - mask) + next * mask;
     }
