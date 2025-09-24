@@ -80,6 +80,9 @@ photo-library-path: /path/to/photos
 # Render/transition settings
 fade-ms: 400 # Cross-fade duration (ms)
 dwell-ms: 2000 # Time an image remains fully visible (ms)
+transition:
+  type: cross-fade # Options: cross-fade, push, wipe
+  # direction: left # For push/wipe transitions: left, right, up, or down
 viewer-preload-count: 3 # Images the viewer preloads; also sets viewer channel capacity
 loader-max-concurrent-decodes: 4 # Concurrent decodes in the loader
 oversample: 1.0 # GPU render oversample vs. screen size
@@ -106,14 +109,29 @@ matting:
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `photo-library-path` | string | `""` | Root directory that will be scanned recursively for photos. |
-| `fade-ms` | integer | `400` | Cross-fade transition duration in milliseconds. |
+| `fade-ms` | integer | `400` | Transition duration in milliseconds. |
 | `dwell-ms` | integer | `2000` | Time an image remains fully visible before the next fade begins. |
+| `transition` | mapping | `type: cross-fade` | Selects the animation between photos. See [Transition animations](#transition-animations). |
 | `viewer-preload-count` | integer | `3` | Number of prepared images the viewer keeps queued; controls GPU upload backlog. |
 | `loader-max-concurrent-decodes` | integer | `4` | Maximum number of CPU decodes that can run in parallel. |
 | `oversample` | float | `1.0` | Render target scale relative to the screen; values >1.0 reduce aliasing but cost GPU time. |
 | `startup-shuffle-seed` | integer or `null` | `null` | Optional deterministic seed used for the initial photo shuffle. |
 | `playlist` | mapping | see below | Controls how aggressively new photos repeat before settling into the long-term cadence. |
 | `matting` | mapping | see below | Controls how mats are generated around each photo. |
+
+### Transition animations
+
+Use the `transition` block to choose how the viewer advances between photos:
+
+```yaml
+transition:
+  type: push
+  direction: down
+```
+
+* `type` accepts `cross-fade`, `push`, or `wipe`. If omitted the default is `cross-fade`.
+* `direction` applies to `push` and `wipe` transitions and is optional. Valid values are `left`, `right`, `up`, and `down`; the default is `left`.
+* `fade-ms` still controls the animation duration for every transition type.
 
 ### Playlist weighting
 

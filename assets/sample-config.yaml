@@ -9,6 +9,9 @@ photo-library-path: /absolute/path/to/your/photo/library
 fade-ms: 400
 # Dwell time (ms) the current image remains fully displayed before fading
 dwell-ms: 2000
+transition:
+  type: cross-fade # Options: cross-fade, push, wipe
+  # direction: left # For push/wipe transitions: left, right, up, or down
 
 # Viewer buffering and pipeline backpressure
 # Number of images the viewer preloads; also sets viewer channel capacity

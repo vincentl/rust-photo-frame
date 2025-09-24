@@ -1,4 +1,6 @@
-use crate::config::{MattingConfig, MattingMode, MattingOptions};
+use crate::config::{
+    MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionDirection,
+};
 use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
@@ -446,8 +448,9 @@ pub fn run_windowed(
         gpu: Option<GpuCtx>,
         current: Option<ImgTex>,
         next: Option<ImgTex>,
-        fade_start: Option<std::time::Instant>,
-        fade_ms: u64,
+        transition_start: Option<std::time::Instant>,
+        transition_ms: u64,
+        transition: TransitionConfig,
         displayed_at: Option<std::time::Instant>,
         dwell_ms: u64,
         pending: VecDeque<ImgTex>,
@@ -468,7 +471,7 @@ pub fn run_windowed(
             self.deferred_images.clear();
             self.current = None;
             self.next = None;
-            self.fade_start = None;
+            self.transition_start = None;
             self.displayed_at = None;
             self.mat_inflight = 0;
             let monitor = event_loop.primary_monitor();
@@ -819,60 +822,252 @@ pub fn run_windowed(
                     });
                     rpass.set_pipeline(&gpu.pipeline);
                     rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                    if let Some(start) = self.fade_start {
-                        let mut t = ((start.elapsed().as_millis() as f32)
-                            / (self.fade_ms as f32).max(1.0))
-                        .clamp(0.0, 1.0);
-                        t = t * t * (3.0 - 2.0 * t);
-                        if let Some(cur) = &self.current {
-                            let (dx, dy, dw, dh) = compute_cover_rect(
-                                cur.plane.w,
-                                cur.plane.h,
-                                gpu.config.width,
-                                gpu.config.height,
-                            );
-                            let uni = Uniforms {
-                                screen_w: gpu.config.width as f32,
-                                screen_h: gpu.config.height as f32,
-                                dest_x: dx,
-                                dest_y: dy,
-                                dest_w: dw,
-                                dest_h: dh,
-                                alpha: 1.0 - t,
-                                _pad: [0.0; 3],
-                            };
-                            gpu.queue
-                                .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                            rpass.set_bind_group(1, &cur.plane.bind, &[]);
-                            rpass.draw(0..6, 0..1);
+                    if let Some(start) = self.transition_start {
+                        let elapsed = start.elapsed();
+                        let duration_ms = (self.transition_ms as f32).max(1.0);
+                        let raw_t = (elapsed.as_millis() as f32) / duration_ms;
+                        let clamped = raw_t.clamp(0.0, 1.0);
+                        let eased = clamped * clamped * (3.0 - 2.0 * clamped);
+                        let screen_w_px = gpu.config.width.max(1);
+                        let screen_h_px = gpu.config.height.max(1);
+                        let screen_w = screen_w_px as f32;
+                        let screen_h = screen_h_px as f32;
+                        rpass.set_scissor_rect(0, 0, screen_w_px, screen_h_px);
+                        match &self.transition {
+                            TransitionConfig::CrossFade => {
+                                if let Some(cur) = &self.current {
+                                    let (dx, dy, dw, dh) = compute_cover_rect(
+                                        cur.plane.w,
+                                        cur.plane.h,
+                                        gpu.config.width,
+                                        gpu.config.height,
+                                    );
+                                    let uni = Uniforms {
+                                        screen_w,
+                                        screen_h,
+                                        dest_x: dx,
+                                        dest_y: dy,
+                                        dest_w: dw,
+                                        dest_h: dh,
+                                        alpha: 1.0 - eased,
+                                        _pad: [0.0; 3],
+                                    };
+                                    gpu.queue.write_buffer(
+                                        &gpu.uniform_buf,
+                                        0,
+                                        bytemuck::bytes_of(&uni),
+                                    );
+                                    rpass.set_bind_group(1, &cur.plane.bind, &[]);
+                                    rpass.draw(0..6, 0..1);
+                                }
+                                if let Some(next) = &self.next {
+                                    let (dx, dy, dw, dh) = compute_cover_rect(
+                                        next.plane.w,
+                                        next.plane.h,
+                                        gpu.config.width,
+                                        gpu.config.height,
+                                    );
+                                    let uni = Uniforms {
+                                        screen_w,
+                                        screen_h,
+                                        dest_x: dx,
+                                        dest_y: dy,
+                                        dest_w: dw,
+                                        dest_h: dh,
+                                        alpha: eased,
+                                        _pad: [0.0; 3],
+                                    };
+                                    gpu.queue.write_buffer(
+                                        &gpu.uniform_buf,
+                                        0,
+                                        bytemuck::bytes_of(&uni),
+                                    );
+                                    rpass.set_bind_group(1, &next.plane.bind, &[]);
+                                    rpass.draw(0..6, 0..1);
+                                }
+                            }
+                            TransitionConfig::Push { direction } => {
+                                let direction = *direction;
+                                if let Some(cur) = &self.current {
+                                    let (dx, dy, dw, dh) = compute_cover_rect(
+                                        cur.plane.w,
+                                        cur.plane.h,
+                                        gpu.config.width,
+                                        gpu.config.height,
+                                    );
+                                    let mut dest_x = dx;
+                                    let mut dest_y = dy;
+                                    match direction {
+                                        TransitionDirection::Left => dest_x += eased * screen_w,
+                                        TransitionDirection::Right => dest_x -= eased * screen_w,
+                                        TransitionDirection::Up => dest_y += eased * screen_h,
+                                        TransitionDirection::Down => dest_y -= eased * screen_h,
+                                    }
+                                    let uni = Uniforms {
+                                        screen_w,
+                                        screen_h,
+                                        dest_x,
+                                        dest_y,
+                                        dest_w: dw,
+                                        dest_h: dh,
+                                        alpha: 1.0,
+                                        _pad: [0.0; 3],
+                                    };
+                                    gpu.queue.write_buffer(
+                                        &gpu.uniform_buf,
+                                        0,
+                                        bytemuck::bytes_of(&uni),
+                                    );
+                                    rpass.set_bind_group(1, &cur.plane.bind, &[]);
+                                    rpass.draw(0..6, 0..1);
+                                }
+                                if let Some(next) = &self.next {
+                                    let (dx, dy, dw, dh) = compute_cover_rect(
+                                        next.plane.w,
+                                        next.plane.h,
+                                        gpu.config.width,
+                                        gpu.config.height,
+                                    );
+                                    let mut dest_x = dx;
+                                    let mut dest_y = dy;
+                                    match direction {
+                                        TransitionDirection::Left => {
+                                            dest_x += (eased - 1.0) * screen_w
+                                        }
+                                        TransitionDirection::Right => {
+                                            dest_x += (1.0 - eased) * screen_w
+                                        }
+                                        TransitionDirection::Up => {
+                                            dest_y += (eased - 1.0) * screen_h
+                                        }
+                                        TransitionDirection::Down => {
+                                            dest_y += (1.0 - eased) * screen_h
+                                        }
+                                    }
+                                    let uni = Uniforms {
+                                        screen_w,
+                                        screen_h,
+                                        dest_x,
+                                        dest_y,
+                                        dest_w: dw,
+                                        dest_h: dh,
+                                        alpha: 1.0,
+                                        _pad: [0.0; 3],
+                                    };
+                                    gpu.queue.write_buffer(
+                                        &gpu.uniform_buf,
+                                        0,
+                                        bytemuck::bytes_of(&uni),
+                                    );
+                                    rpass.set_bind_group(1, &next.plane.bind, &[]);
+                                    rpass.draw(0..6, 0..1);
+                                }
+                            }
+                            TransitionConfig::Wipe { direction } => {
+                                let direction = *direction;
+                                if let Some(cur) = &self.current {
+                                    let (dx, dy, dw, dh) = compute_cover_rect(
+                                        cur.plane.w,
+                                        cur.plane.h,
+                                        gpu.config.width,
+                                        gpu.config.height,
+                                    );
+                                    let uni = Uniforms {
+                                        screen_w,
+                                        screen_h,
+                                        dest_x: dx,
+                                        dest_y: dy,
+                                        dest_w: dw,
+                                        dest_h: dh,
+                                        alpha: 1.0,
+                                        _pad: [0.0; 3],
+                                    };
+                                    gpu.queue.write_buffer(
+                                        &gpu.uniform_buf,
+                                        0,
+                                        bytemuck::bytes_of(&uni),
+                                    );
+                                    rpass.set_bind_group(1, &cur.plane.bind, &[]);
+                                    rpass.draw(0..6, 0..1);
+                                }
+                                if let Some(next) = &self.next {
+                                    let (dx, dy, dw, dh) = compute_cover_rect(
+                                        next.plane.w,
+                                        next.plane.h,
+                                        gpu.config.width,
+                                        gpu.config.height,
+                                    );
+                                    match direction {
+                                        TransitionDirection::Left | TransitionDirection::Right => {
+                                            let mut width =
+                                                (screen_w * eased).round().clamp(0.0, screen_w)
+                                                    as u32;
+                                            width = width.min(screen_w_px);
+                                            if width > 0 {
+                                                let mut x = 0u32;
+                                                if let TransitionDirection::Right = direction {
+                                                    x = screen_w_px.saturating_sub(width);
+                                                }
+                                                rpass.set_scissor_rect(x, 0, width, screen_h_px);
+                                                let uni = Uniforms {
+                                                    screen_w,
+                                                    screen_h,
+                                                    dest_x: dx,
+                                                    dest_y: dy,
+                                                    dest_w: dw,
+                                                    dest_h: dh,
+                                                    alpha: 1.0,
+                                                    _pad: [0.0; 3],
+                                                };
+                                                gpu.queue.write_buffer(
+                                                    &gpu.uniform_buf,
+                                                    0,
+                                                    bytemuck::bytes_of(&uni),
+                                                );
+                                                rpass.set_bind_group(1, &next.plane.bind, &[]);
+                                                rpass.draw(0..6, 0..1);
+                                            }
+                                        }
+                                        TransitionDirection::Up | TransitionDirection::Down => {
+                                            let mut height =
+                                                (screen_h * eased).round().clamp(0.0, screen_h)
+                                                    as u32;
+                                            height = height.min(screen_h_px);
+                                            if height > 0 {
+                                                let mut y = 0u32;
+                                                if let TransitionDirection::Down = direction {
+                                                    y = screen_h_px.saturating_sub(height);
+                                                }
+                                                rpass.set_scissor_rect(0, y, screen_w_px, height);
+                                                let uni = Uniforms {
+                                                    screen_w,
+                                                    screen_h,
+                                                    dest_x: dx,
+                                                    dest_y: dy,
+                                                    dest_w: dw,
+                                                    dest_h: dh,
+                                                    alpha: 1.0,
+                                                    _pad: [0.0; 3],
+                                                };
+                                                gpu.queue.write_buffer(
+                                                    &gpu.uniform_buf,
+                                                    0,
+                                                    bytemuck::bytes_of(&uni),
+                                                );
+                                                rpass.set_bind_group(1, &next.plane.bind, &[]);
+                                                rpass.draw(0..6, 0..1);
+                                            }
+                                        }
+                                    }
+                                    rpass.set_scissor_rect(0, 0, screen_w_px, screen_h_px);
+                                }
+                            }
                         }
-                        if let Some(next) = &self.next {
-                            let (dx, dy, dw, dh) = compute_cover_rect(
-                                next.plane.w,
-                                next.plane.h,
-                                gpu.config.width,
-                                gpu.config.height,
-                            );
-                            let uni = Uniforms {
-                                screen_w: gpu.config.width as f32,
-                                screen_h: gpu.config.height as f32,
-                                dest_x: dx,
-                                dest_y: dy,
-                                dest_w: dw,
-                                dest_h: dh,
-                                alpha: t,
-                                _pad: [0.0; 3],
-                            };
-                            gpu.queue
-                                .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                            rpass.set_bind_group(1, &next.plane.bind, &[]);
-                            rpass.draw(0..6, 0..1);
-                        }
-                        if t >= 1.0 {
+                        if raw_t >= 1.0 {
                             if let Some(next) = self.next.take() {
                                 let path = next.path.clone();
                                 self.current = Some(next);
-                                self.fade_start = None;
+                                self.transition_start = None;
                                 self.displayed_at = Some(std::time::Instant::now());
                                 info!(
                                     "transition_end path={} queue_depth={}",
@@ -881,7 +1076,7 @@ pub fn run_windowed(
                                 );
                                 let _ = self.to_manager_displayed.try_send(Displayed(path));
                             } else {
-                                self.fade_start = None;
+                                self.transition_start = None;
                             }
                         }
                     } else if let Some(cur) = &self.current {
@@ -995,7 +1190,7 @@ pub fn run_windowed(
                     }
                 }
             }
-            if self.current.is_none() && self.fade_start.is_none() {
+            if self.current.is_none() && self.transition_start.is_none() {
                 if let Some(first) = self.pending.pop_front() {
                     info!("first_image path={}", first.path.display());
                     self.current = Some(first);
@@ -1008,7 +1203,7 @@ pub fn run_windowed(
                 }
             }
             // If dwell elapsed and we have pending, stage next and start fade
-            if self.fade_start.is_none() {
+            if self.transition_start.is_none() {
                 if let Some(shown_at) = self.displayed_at {
                     if shown_at.elapsed() >= std::time::Duration::from_millis(self.dwell_ms) {
                         if self.next.is_none() {
@@ -1022,7 +1217,7 @@ pub fn run_windowed(
                             }
                         }
                         if self.next.is_some() {
-                            self.fade_start = Some(std::time::Instant::now());
+                            self.transition_start = Some(std::time::Instant::now());
                         }
                     }
                 }
@@ -1059,8 +1254,9 @@ pub fn run_windowed(
         gpu: None,
         current: None,
         next: None,
-        fade_start: None,
-        fade_ms: cfg.fade_ms,
+        transition_start: None,
+        transition_ms: cfg.fade_ms,
+        transition: cfg.transition.clone(),
         displayed_at: None,
         dwell_ms: cfg.dwell_ms,
         pending: VecDeque::new(),

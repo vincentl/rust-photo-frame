@@ -877,6 +877,42 @@ impl MattingMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TransitionDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Default for TransitionDirection {
+    fn default() -> Self {
+        Self::Left
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum TransitionConfig {
+    #[serde(rename = "cross-fade")]
+    CrossFade,
+    Push {
+        #[serde(default)]
+        direction: TransitionDirection,
+    },
+    Wipe {
+        #[serde(default)]
+        direction: TransitionDirection,
+    },
+}
+
+impl Default for TransitionConfig {
+    fn default() -> Self {
+        Self::CrossFade
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct Configuration {
@@ -894,6 +930,8 @@ pub struct Configuration {
     pub loader_max_concurrent_decodes: usize,
     /// Optional deterministic seed for initial photo shuffle.
     pub startup_shuffle_seed: Option<u64>,
+    /// Transition animation configuration.
+    pub transition: TransitionConfig,
     /// Matting configuration for displayed photos.
     pub matting: MattingConfig,
     /// Playlist weighting options for how frequently new photos repeat.
@@ -937,6 +975,7 @@ impl Default for Configuration {
             viewer_preload_count: 3,
             loader_max_concurrent_decodes: 4,
             startup_shuffle_seed: None,
+            transition: TransitionConfig::default(),
             matting: MattingConfig::default(),
             playlist: PlaylistOptions::default(),
         }

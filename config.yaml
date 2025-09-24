@@ -5,6 +5,9 @@ photo-library-path: /Users/vincent/rust-photo-frame/photo-library-test
 fade-ms: 400
 # Dwell time (ms) the current image remains fully displayed before fading
 dwell-ms: 2000
+transition:
+  type: cross-fade # Options: cross-fade, push, wipe
+  # direction: left # For push/wipe transitions: left, right, up, or down
 # Number of images to preload in the viewer (aligns with channel capacity)
 viewer-preload-count: 3
 # GPU decode/render oversample factor (1.0 = native to screen)
