@@ -88,9 +88,18 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let inv_span = U.params0.w;
       let softness = clamp(U.params1.x, 0.0, 0.5);
       let normalized = clamp((dot(U.params0.xy, screen_pos) - min_proj) * inv_span, 0.0, 1.0);
-      let start = clamp(progress - softness, 0.0, 1.0);
-      let end = clamp(progress + softness, 0.0, 1.0);
-      let mask = smoothstep(start, end, normalized);
+      var mask = 0.0;
+      if (progress <= 0.0) {
+        mask = 0.0;
+      } else if (progress >= 1.0) {
+        mask = 1.0;
+      } else {
+        let leading = clamp(progress - softness, 0.0, progress);
+        let trailing = clamp(progress + softness, progress, 1.0);
+        let end = max(trailing, leading + 1e-3);
+        let smooth = smoothstep(leading, end, normalized);
+        mask = 1.0 - smooth;
+      }
       color = current * (1.0 - mask) + next * mask;
     }
     case 3u: {

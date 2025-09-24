@@ -187,7 +187,9 @@ Each option accepts the following fields:
 | --- | --- |
 | `fade` | `duration-ms` (transition length), `through-black` (bool, fade via black before revealing the next image). |
 | `wipe` | `duration-ms`, `angle-deg` (direction of the wipe), `angle-jitter-deg` (random +/- degrees per transition), `softness` (0–0.5 edge feather), `reverse` (invert direction), `randomize-direction` (randomly flip 180°). |
-| `push` | `duration-ms`, `angle-deg`, `angle-jitter-deg`, `reverse`, `randomize-direction`. |
+| `push` | `duration-ms`, `angle-deg`, `angle-jitter-deg`, `reverse`, `randomize-direction`, `vertical-axis`. |
+
+Use `vertical-axis: true` with the push transition to move images vertically instead of horizontally. Combine it with `reverse: true` to push upward, or `randomize-direction: true` to shuffle between up and down. Providing an explicit `angle-deg` continues to override the base direction if you need diagonal pushes.
 
 ### Matting configuration
 

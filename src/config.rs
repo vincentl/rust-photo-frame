@@ -1104,12 +1104,19 @@ impl TransitionOptions {
                 randomize_direction: builder.wipe_randomize_direction.unwrap_or(false),
                 softness: builder.wipe_softness.unwrap_or(0.05),
             }),
-            TransitionKind::Push => TransitionMode::Push(PushTransition {
-                angle_deg: builder.push_angle_deg.unwrap_or(0.0),
-                angle_jitter_deg: builder.push_angle_jitter_deg.unwrap_or(0.0),
-                reverse: builder.push_reverse.unwrap_or(false),
-                randomize_direction: builder.push_randomize_direction.unwrap_or(false),
-            }),
+            TransitionKind::Push => {
+                let vertical_axis = builder.push_vertical_axis.unwrap_or(false);
+                let angle =
+                    builder
+                        .push_angle_deg
+                        .unwrap_or(if vertical_axis { 90.0 } else { 0.0 });
+                TransitionMode::Push(PushTransition {
+                    angle_deg: angle,
+                    angle_jitter_deg: builder.push_angle_jitter_deg.unwrap_or(0.0),
+                    reverse: builder.push_reverse.unwrap_or(false),
+                    randomize_direction: builder.push_randomize_direction.unwrap_or(false),
+                })
+            }
         };
         let mut option = Self {
             kind,
@@ -1409,6 +1416,7 @@ struct TransitionOptionBuilder {
     push_angle_jitter_deg: Option<f32>,
     push_reverse: Option<bool>,
     push_randomize_direction: Option<bool>,
+    push_vertical_axis: Option<bool>,
 }
 
 fn apply_transition_inline_field<E: de::Error>(
@@ -1456,6 +1464,9 @@ fn apply_transition_inline_field<E: de::Error>(
                 _ => {}
             }
         }
+        "vertical-axis" if matches!(kind, TransitionKind::Push) => {
+            builder.push_vertical_axis = Some(inline_value_to::<bool, E>(value)?);
+        }
         "softness" if matches!(kind, TransitionKind::Wipe) => {
             builder.wipe_softness = Some(inline_value_to::<f32, E>(value)?);
         }
@@ -1470,6 +1481,7 @@ fn apply_transition_inline_field<E: de::Error>(
                     "reverse",
                     "randomize-direction",
                     "softness",
+                    "vertical-axis",
                 ],
             ));
         }
