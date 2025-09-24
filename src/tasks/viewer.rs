@@ -1,11 +1,14 @@
-use crate::config::{MattingConfig, MattingMode, MattingOptions};
+use crate::config::{
+    MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionKind, TransitionMode,
+    TransitionOptions,
+};
 use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::{center_offset, resize_to_cover};
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
 use image::{imageops, Rgba, RgbaImage};
-use rand::thread_rng;
+use rand::{thread_rng, Rng};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -26,15 +29,14 @@ pub fn run_windowed(
 
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Uniforms {
-        screen_w: f32,
-        screen_h: f32,
-        dest_x: f32,
-        dest_y: f32,
-        dest_w: f32,
-        dest_h: f32,
-        alpha: f32,
-        _pad: [f32; 3],
+    struct TransitionUniforms {
+        screen_size: [f32; 2],
+        progress: f32,
+        kind: u32,
+        current_dest: [f32; 4],
+        next_dest: [f32; 4],
+        params0: [f32; 4],
+        params1: [f32; 4],
     }
 
     struct GpuCtx {
@@ -48,7 +50,8 @@ pub fn run_windowed(
         img_bind_layout: wgpu::BindGroupLayout,
         sampler: wgpu::Sampler,
         pipeline: wgpu::RenderPipeline,
-        loading: Option<(wgpu::BindGroup, u32, u32)>,
+        blank_plane: TexturePlane,
+        loading: Option<TexturePlane>,
     }
 
     struct TexturePlane {
@@ -85,6 +88,19 @@ pub fn run_windowed(
     struct MatResult {
         path: std::path::PathBuf,
         canvas: ImagePlane,
+    }
+
+    struct TransitionState {
+        started_at: std::time::Instant,
+        duration: std::time::Duration,
+        kind: TransitionKind,
+        variant: ActiveTransition,
+    }
+
+    enum ActiveTransition {
+        Fade { through_black: bool },
+        Wipe { normal: [f32; 2], softness: f32 },
+        Push { direction: [f32; 2] },
     }
 
     struct MattingPipeline {
@@ -353,6 +369,88 @@ pub fn run_windowed(
         Some(MatResult { path, canvas })
     }
 
+    impl TransitionState {
+        fn new(
+            option: TransitionOptions,
+            started_at: std::time::Instant,
+            rng: &mut impl Rng,
+        ) -> Self {
+            let duration = option.duration();
+            let kind = option.kind();
+            let mode = option.mode().clone();
+            let variant = match mode {
+                TransitionMode::Fade(cfg) => ActiveTransition::Fade {
+                    through_black: cfg.through_black,
+                },
+                TransitionMode::Wipe(cfg) => {
+                    let mut angle = cfg.angle_deg;
+                    if cfg.angle_jitter_deg.abs() > f32::EPSILON {
+                        let jitter = rng.gen_range(-cfg.angle_jitter_deg..=cfg.angle_jitter_deg);
+                        angle += jitter;
+                    }
+                    if cfg.randomize_direction && rng.gen_bool(0.5) {
+                        angle += 180.0;
+                    }
+                    if cfg.reverse {
+                        angle += 180.0;
+                    }
+                    let (sin, cos) = angle.to_radians().sin_cos();
+                    let mut normal = [cos, sin];
+                    let len = (normal[0] * normal[0] + normal[1] * normal[1]).sqrt();
+                    if len > f32::EPSILON {
+                        normal[0] /= len;
+                        normal[1] /= len;
+                    } else {
+                        normal = [1.0, 0.0];
+                    }
+                    ActiveTransition::Wipe {
+                        normal,
+                        softness: cfg.softness,
+                    }
+                }
+                TransitionMode::Push(cfg) => {
+                    let mut angle = cfg.angle_deg;
+                    if cfg.angle_jitter_deg.abs() > f32::EPSILON {
+                        let jitter = rng.gen_range(-cfg.angle_jitter_deg..=cfg.angle_jitter_deg);
+                        angle += jitter;
+                    }
+                    if cfg.randomize_direction && rng.gen_bool(0.5) {
+                        angle += 180.0;
+                    }
+                    if cfg.reverse {
+                        angle += 180.0;
+                    }
+                    let (sin, cos) = angle.to_radians().sin_cos();
+                    let mut direction = [cos, sin];
+                    let len = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
+                    if len > f32::EPSILON {
+                        direction[0] /= len;
+                        direction[1] /= len;
+                    } else {
+                        direction = [1.0, 0.0];
+                    }
+                    ActiveTransition::Push { direction }
+                }
+            };
+            Self {
+                started_at,
+                duration,
+                kind,
+                variant,
+            }
+        }
+
+        fn progress(&self) -> f32 {
+            let elapsed = self.started_at.elapsed();
+            let total = self.duration.as_secs_f32().max(1e-3);
+            (elapsed.as_secs_f32() / total).clamp(0.0, 1.0)
+        }
+
+        fn is_complete(&self) -> bool {
+            self.started_at.elapsed() >= self.duration
+        }
+    }
+
     fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
         let ImagePlane {
             width,
@@ -446,19 +544,20 @@ pub fn run_windowed(
         gpu: Option<GpuCtx>,
         current: Option<ImgTex>,
         next: Option<ImgTex>,
-        fade_start: Option<std::time::Instant>,
-        fade_ms: u64,
+        transition_state: Option<TransitionState>,
         displayed_at: Option<std::time::Instant>,
         dwell_ms: u64,
         pending: VecDeque<ImgTex>,
         preload_count: usize,
         oversample: f32,
         matting: MattingConfig,
+        transition_cfg: TransitionConfig,
         mat_pipeline: MattingPipeline,
         mat_inflight: usize,
         ready_results: VecDeque<MatResult>,
         deferred_images: VecDeque<PreparedImageCpu>,
         clear_color: wgpu::Color,
+        rng: rand::rngs::ThreadRng,
     }
 
     impl ApplicationHandler for App {
@@ -468,7 +567,7 @@ pub fn run_windowed(
             self.deferred_images.clear();
             self.current = None;
             self.next = None;
-            self.fade_start = None;
+            self.transition_state = None;
             self.displayed_at = None;
             self.mat_inflight = 0;
             let monitor = event_loop.primary_monitor();
@@ -523,7 +622,7 @@ pub fn run_windowed(
             // Resources for quad
             let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("viewer-uniforms"),
-                size: std::mem::size_of::<Uniforms>() as u64,
+                size: std::mem::size_of::<TransitionUniforms>() as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -589,7 +688,7 @@ pub fn run_windowed(
             });
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("pipeline-layout"),
-                bind_group_layouts: &[&uniform_layout, &img_bind_layout],
+                bind_group_layouts: &[&uniform_layout, &img_bind_layout, &img_bind_layout],
                 push_constant_ranges: &[],
             });
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -617,117 +716,73 @@ pub fn run_windowed(
                 multiview: None,
                 cache: None,
             });
+            let make_plane = |label: &str, width: u32, height: u32, data: &[u8]| -> TexturePlane {
+                let w = width.max(1);
+                let h = height.max(1);
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * w),
+                        rows_per_image: Some(h),
+                    },
+                    wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &img_bind_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&sampler),
+                        },
+                    ],
+                });
+                TexturePlane { bind, w, h }
+            };
+
+            let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
+
             // Try to create a loading overlay texture from embedded PNG; fallback to 1x1 white
             let loading_png: &[u8] = include_bytes!("../../assets/ui/loading.png");
             let loading_rgba = image::load_from_memory(loading_png)
                 .ok()
                 .map(|dynimg| dynimg.to_rgba8());
             let loading = if let Some(img) = loading_rgba {
-                let lw = img.width();
-                let lh = img.height();
-                let tex = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("loading-texture"),
-                    size: wgpu::Extent3d {
-                        width: lw,
-                        height: lh,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                let bytes = img.as_raw();
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &tex,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    bytes,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4 * lw),
-                        rows_per_image: Some(lh),
-                    },
-                    wgpu::Extent3d {
-                        width: lw,
-                        height: lh,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("loading-bind"),
-                    layout: &img_bind_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&sampler),
-                        },
-                    ],
-                });
-                Some((bind, lw, lh))
+                let lw = img.width().max(1);
+                let lh = img.height().max(1);
+                Some(make_plane("loading-texture", lw, lh, img.as_raw()))
             } else {
-                let lw = 1u32;
-                let lh = 1u32;
-                let tex = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("loading-pixel"),
-                    size: wgpu::Extent3d {
-                        width: lw,
-                        height: lh,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                let white = [255u8, 255, 255, 255];
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &tex,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &white,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4),
-                        rows_per_image: Some(1),
-                    },
-                    wgpu::Extent3d {
-                        width: lw,
-                        height: lh,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("loading-bind"),
-                    layout: &img_bind_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&sampler),
-                        },
-                    ],
-                });
-                Some((bind, lw, lh))
+                Some(make_plane("loading-fallback", 1, 1, &[255, 255, 255, 255]))
             };
 
             self.window = Some(window);
@@ -742,6 +797,7 @@ pub fn run_windowed(
                 img_bind_layout,
                 sampler,
                 pipeline,
+                blank_plane,
                 loading,
             });
             self.current = None;
@@ -818,99 +874,79 @@ pub fn run_windowed(
                         timestamp_writes: None,
                     });
                     rpass.set_pipeline(&gpu.pipeline);
-                    rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                    if let Some(start) = self.fade_start {
-                        let mut t = ((start.elapsed().as_millis() as f32)
-                            / (self.fade_ms as f32).max(1.0))
-                        .clamp(0.0, 1.0);
-                        t = t * t * (3.0 - 2.0 * t);
+                    let screen_w = gpu.config.width as f32;
+                    let screen_h = gpu.config.height as f32;
+                    let mut uniforms = TransitionUniforms {
+                        screen_size: [screen_w, screen_h],
+                        progress: 0.0,
+                        kind: 0,
+                        current_dest: [0.0; 4],
+                        next_dest: [0.0; 4],
+                        params0: [0.0; 4],
+                        params1: [0.0; 4],
+                    };
+                    let mut current_bind = &gpu.blank_plane.bind;
+                    let mut next_bind = &gpu.blank_plane.bind;
+                    let mut have_draw = false;
+
+                    if let Some(state) = &self.transition_state {
                         if let Some(cur) = &self.current {
-                            let (dx, dy, dw, dh) = compute_cover_rect(
+                            let rect = compute_cover_rect(
                                 cur.plane.w,
                                 cur.plane.h,
                                 gpu.config.width,
                                 gpu.config.height,
                             );
-                            let uni = Uniforms {
-                                screen_w: gpu.config.width as f32,
-                                screen_h: gpu.config.height as f32,
-                                dest_x: dx,
-                                dest_y: dy,
-                                dest_w: dw,
-                                dest_h: dh,
-                                alpha: 1.0 - t,
-                                _pad: [0.0; 3],
-                            };
-                            gpu.queue
-                                .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                            rpass.set_bind_group(1, &cur.plane.bind, &[]);
-                            rpass.draw(0..6, 0..1);
+                            uniforms.current_dest = rect_to_uniform(rect);
+                            current_bind = &cur.plane.bind;
+                            have_draw = true;
                         }
                         if let Some(next) = &self.next {
-                            let (dx, dy, dw, dh) = compute_cover_rect(
+                            let rect = compute_cover_rect(
                                 next.plane.w,
                                 next.plane.h,
                                 gpu.config.width,
                                 gpu.config.height,
                             );
-                            let uni = Uniforms {
-                                screen_w: gpu.config.width as f32,
-                                screen_h: gpu.config.height as f32,
-                                dest_x: dx,
-                                dest_y: dy,
-                                dest_w: dw,
-                                dest_h: dh,
-                                alpha: t,
-                                _pad: [0.0; 3],
-                            };
-                            gpu.queue
-                                .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                            rpass.set_bind_group(1, &next.plane.bind, &[]);
-                            rpass.draw(0..6, 0..1);
+                            uniforms.next_dest = rect_to_uniform(rect);
+                            next_bind = &next.plane.bind;
+                            have_draw = true;
                         }
-                        if t >= 1.0 {
-                            if let Some(next) = self.next.take() {
-                                let path = next.path.clone();
-                                self.current = Some(next);
-                                self.fade_start = None;
-                                self.displayed_at = Some(std::time::Instant::now());
-                                info!(
-                                    "transition_end path={} queue_depth={}",
-                                    path.display(),
-                                    self.pending.len()
-                                );
-                                let _ = self.to_manager_displayed.try_send(Displayed(path));
-                            } else {
-                                self.fade_start = None;
+                        let mut progress = state.progress();
+                        progress = progress * progress * (3.0 - 2.0 * progress);
+                        uniforms.progress = progress;
+                        uniforms.kind = state.kind.as_index();
+                        match &state.variant {
+                            ActiveTransition::Fade { through_black } => {
+                                uniforms.params0[0] = if *through_black { 1.0 } else { 0.0 };
+                            }
+                            ActiveTransition::Wipe { normal, softness } => {
+                                let (min_proj, inv_span) =
+                                    compute_wipe_span(*normal, screen_w, screen_h);
+                                uniforms.params0 = [normal[0], normal[1], min_proj, inv_span];
+                                uniforms.params1[0] = *softness;
+                            }
+                            ActiveTransition::Push { direction } => {
+                                let diag = (screen_w * screen_w + screen_h * screen_h).sqrt();
+                                uniforms.params0[0] = direction[0] * diag;
+                                uniforms.params0[1] = direction[1] * diag;
                             }
                         }
                     } else if let Some(cur) = &self.current {
-                        let (dx, dy, dw, dh) = compute_cover_rect(
+                        let rect = compute_cover_rect(
                             cur.plane.w,
                             cur.plane.h,
                             gpu.config.width,
                             gpu.config.height,
                         );
-                        let uni = Uniforms {
-                            screen_w: gpu.config.width as f32,
-                            screen_h: gpu.config.height as f32,
-                            dest_x: dx,
-                            dest_y: dy,
-                            dest_w: dw,
-                            dest_h: dh,
-                            alpha: 1.0,
-                            _pad: [0.0; 3],
-                        };
-                        gpu.queue
-                            .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                        rpass.set_bind_group(1, &cur.plane.bind, &[]);
-                        rpass.draw(0..6, 0..1);
-                    } else if let Some((bind, lw, lh)) = &gpu.loading {
-                        // Draw loading overlay centered scaled to a reasonable fraction
-                        let sw = gpu.config.width as f32;
-                        let sh = gpu.config.height as f32;
-                        let iw = *lw as f32;
-                        let ih = *lh as f32;
+                        uniforms.current_dest = rect_to_uniform(rect);
+                        current_bind = &cur.plane.bind;
+                        have_draw = true;
+                    } else if let Some(loading) = gpu.loading.as_ref() {
+                        let sw = screen_w;
+                        let sh = screen_h;
+                        let iw = loading.w as f32;
+                        let ih = loading.h as f32;
                         let maxw = sw * 0.4;
                         let maxh = sh * 0.2;
                         let scale = (maxw / iw).min(maxh / ih).min(1.0);
@@ -918,19 +954,17 @@ pub fn run_windowed(
                         let dh = (ih * scale).clamp(0.0, sh);
                         let dx = (sw - dw) * 0.5;
                         let dy = (sh - dh) * 0.5;
-                        let uni = Uniforms {
-                            screen_w: sw,
-                            screen_h: sh,
-                            dest_x: dx,
-                            dest_y: dy,
-                            dest_w: dw,
-                            dest_h: dh,
-                            alpha: 1.0,
-                            _pad: [0.0; 3],
-                        };
+                        uniforms.current_dest = [dx, dy, dw, dh];
+                        current_bind = &loading.bind;
+                        have_draw = true;
+                    }
+
+                    if have_draw {
                         gpu.queue
-                            .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uni));
-                        rpass.set_bind_group(1, bind, &[]);
+                            .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+                        rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                        rpass.set_bind_group(1, current_bind, &[]);
+                        rpass.set_bind_group(2, next_bind, &[]);
                         rpass.draw(0..6, 0..1);
                     }
                     drop(rpass);
@@ -995,7 +1029,7 @@ pub fn run_windowed(
                     }
                 }
             }
-            if self.current.is_none() && self.fade_start.is_none() {
+            if self.current.is_none() && self.transition_state.is_none() {
                 if let Some(first) = self.pending.pop_front() {
                     info!("first_image path={}", first.path.display());
                     self.current = Some(first);
@@ -1007,22 +1041,58 @@ pub fn run_windowed(
                     }
                 }
             }
-            // If dwell elapsed and we have pending, stage next and start fade
-            if self.fade_start.is_none() {
+            if self
+                .transition_state
+                .as_ref()
+                .is_some_and(TransitionState::is_complete)
+            {
+                let state = self
+                    .transition_state
+                    .take()
+                    .expect("transition state should exist when complete");
+                if let Some(next) = self.next.take() {
+                    let path = next.path.clone();
+                    self.current = Some(next);
+                    self.displayed_at = Some(std::time::Instant::now());
+                    info!(
+                        "transition_end kind={} path={} queue_depth={}",
+                        state.kind,
+                        path.display(),
+                        self.pending.len()
+                    );
+                    let _ = self.to_manager_displayed.try_send(Displayed(path));
+                }
+            }
+            if self.transition_state.is_none() {
                 if let Some(shown_at) = self.displayed_at {
                     if shown_at.elapsed() >= std::time::Duration::from_millis(self.dwell_ms) {
                         if self.next.is_none() {
                             if let Some(stage) = self.pending.pop_front() {
                                 info!(
-                                    "transition_start path={} queue_depth={}",
+                                    "transition_stage path={} queue_depth={}",
                                     stage.path.display(),
                                     self.pending.len()
                                 );
                                 self.next = Some(stage);
                             }
                         }
-                        if self.next.is_some() {
-                            self.fade_start = Some(std::time::Instant::now());
+                        if self.next.is_some() && self.current.is_some() {
+                            let option = self.transition_cfg.choose_option(&mut self.rng);
+                            let kind = option.kind();
+                            let state = TransitionState::new(
+                                option,
+                                std::time::Instant::now(),
+                                &mut self.rng,
+                            );
+                            if let Some(next) = &self.next {
+                                info!(
+                                    "transition_start kind={} path={} queue_depth={}",
+                                    kind,
+                                    next.path.display(),
+                                    self.pending.len()
+                                );
+                            }
+                            self.transition_state = Some(state);
                         }
                     }
                 }
@@ -1059,19 +1129,20 @@ pub fn run_windowed(
         gpu: None,
         current: None,
         next: None,
-        fade_start: None,
-        fade_ms: cfg.fade_ms,
+        transition_state: None,
         displayed_at: None,
         dwell_ms: cfg.dwell_ms,
         pending: VecDeque::new(),
         preload_count: cfg.viewer_preload_count,
         oversample: cfg.oversample,
         matting: cfg.matting.clone(),
+        transition_cfg: cfg.transition.clone(),
         mat_pipeline,
         mat_inflight: 0,
         ready_results: VecDeque::new(),
         deferred_images: VecDeque::new(),
         clear_color,
+        rng: thread_rng(),
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -1370,4 +1441,26 @@ fn compute_cover_rect(
     let x = (sw - w) * 0.5;
     let y = (sh - h) * 0.5;
     (x, y, w, h)
+}
+
+fn rect_to_uniform(rect: (f32, f32, f32, f32)) -> [f32; 4] {
+    [rect.0, rect.1, rect.2, rect.3]
+}
+
+fn compute_wipe_span(normal: [f32; 2], screen_w: f32, screen_h: f32) -> (f32, f32) {
+    let corners = [
+        [0.0, 0.0],
+        [screen_w, 0.0],
+        [0.0, screen_h],
+        [screen_w, screen_h],
+    ];
+    let mut min_proj = f32::MAX;
+    let mut max_proj = f32::MIN;
+    for corner in corners {
+        let proj = normal[0] * corner[0] + normal[1] * corner[1];
+        min_proj = min_proj.min(proj);
+        max_proj = max_proj.max(proj);
+    }
+    let span = (max_proj - min_proj).abs().max(1e-3);
+    (min_proj, 1.0 / span)
 }
