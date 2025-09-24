@@ -1062,6 +1062,13 @@ impl TransitionOptions {
                         self.kind
                     ));
                 }
+                ensure!(
+                    wipe.angle_jitter_deg >= 0.0,
+                    format!(
+                        "transition option {} requires wipe.angle-jitter-deg >= 0",
+                        self.kind
+                    )
+                );
             }
             TransitionMode::Push(push) => {
                 if !push.angle_deg.is_finite() || !push.angle_jitter_deg.is_finite() {
@@ -1070,12 +1077,19 @@ impl TransitionOptions {
                         self.kind
                     ));
                 }
+                ensure!(
+                    push.angle_jitter_deg >= 0.0,
+                    format!(
+                        "transition option {} requires push.angle-jitter-deg >= 0",
+                        self.kind
+                    )
+                );
             }
         }
         Ok(())
     }
 
-    fn with_kind(kind: TransitionKind, builder: TransitionOptionBuilder) -> Self {
+    fn with_kind(kind: TransitionKind, builder: TransitionOptionBuilder) -> Result<Self> {
         let duration_ms = builder
             .duration_ms
             .unwrap_or_else(|| TransitionOptions::default_for(kind).duration_ms);
@@ -1097,11 +1111,35 @@ impl TransitionOptions {
                 randomize_direction: builder.push_randomize_direction.unwrap_or(false),
             }),
         };
-        Self {
+        let mut option = Self {
             kind,
             duration_ms,
             mode,
+        };
+
+        match &mut option.mode {
+            TransitionMode::Fade(_) => {}
+            TransitionMode::Wipe(cfg) => {
+                ensure!(
+                    cfg.angle_jitter_deg >= 0.0,
+                    format!(
+                        "transition option {} requires wipe.angle-jitter-deg >= 0",
+                        kind
+                    )
+                );
+            }
+            TransitionMode::Push(cfg) => {
+                ensure!(
+                    cfg.angle_jitter_deg >= 0.0,
+                    format!(
+                        "transition option {} requires push.angle-jitter-deg >= 0",
+                        kind
+                    )
+                );
+            }
         }
+
+        Ok(option)
     }
 }
 
@@ -1226,7 +1264,8 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
                             value,
                         )?;
                     }
-                    let option = TransitionOptions::with_kind(kind, builder);
+                    let option = TransitionOptions::with_kind(kind, builder)
+                        .map_err(|err| de::Error::custom(err.to_string()))?;
                     options.insert(kind, option);
                 } else {
                     if !inline_fields.is_empty() {
@@ -1352,7 +1391,8 @@ impl<'de> Visitor<'de> for TransitionOptionVisitor {
             let value = map.next_value::<YamlValue>()?;
             apply_transition_inline_field::<A::Error>(&mut builder, self.kind, &key, value)?;
         }
-        Ok(TransitionOptions::with_kind(self.kind, builder))
+        TransitionOptions::with_kind(self.kind, builder)
+            .map_err(|err| de::Error::custom(err.to_string()))
     }
 }
 
