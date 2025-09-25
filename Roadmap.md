@@ -1,5 +1,22 @@
 # Photo Frame Project Roadmap
 
+## Major Missing Items
+
+[ ] cloud sync
+[ ] setup framework
+[ ] details on physical frame
+[ ] details on Pi parts
+
+# My To Do
+
+[X] Pick a bevel options and merge it
+[X] Start a task to enable random matting - will need to allow different minimum matting values per type, how to specify each? Code allow all and select one or random
+[ ] Continue work on button setup script
+[ ] Start new task for button interpretation - 1 vs 2 clicks
+[ ] Test pi on with new button location
+[ ] Start a task on how to do cloud sync
+[ ] Test fixed image background
+
 ## Software Subproject
 
 - [ ] **Remote administration & observability**

@@ -1,24 +1,38 @@
 # Photoframe
 
-A Rust-based digital photo frame pipeline tuned for Raspberry Pi hardware. It watches your photo library, weights the playlist so new images appear more frequently, and renders each slide with configurable matting and transitions.
-
-## Project Status
-
-This project is **alpha and under active development**. Expect rough edges and incomplete documentation.
+A digital photo frame driver implemented in Rust with a pipeline tuned for Raspberry Pi hardware. It watches a photo library, weights the playlist so new images appear more frequently, and renders each slide with configurable matting, transitions, and photo effects.
 
 ## Table of Contents
 
-1. [Quickstart](#quickstart)
-2. [Architecture Overview](#architecture-overview)
-3. [Features](#features)
-4. [Configuration](#configuration)
-5. [Playlist Weighting](#playlist-weighting)
-6. [Matting Configuration](#matting-configuration)
-7. [License](#license)
+1. [Hardware](#hardware)
+2. [Frame Setup](#frame-setup)
+3. [Architecture Overview](#architecture-overview)
+4. [Features](#features)
+5. [Configuration](#configuration)
+6. [Playlist Weighting](#playlist-weighting)
+7. [Matting Configuration](#matting-configuration)
+8. [References](#references)
+9. [License](#license)
 
-## Quickstart
+## Hardware
 
-### Prerequisites _(TODO: document Raspberry Pi OS version, GPU requirements, and external dependencies)_
+TODO - overview of hardware
+
+- Raspberry Pi 5 with at least 4GiB RAM
+- 4K monitor
+- Pi power plan
+- HDMI cable
+- SD card
+- Mouting plan
+- Frame
+
+## Frame Setup
+
+TODO - overview of setup
+
+### Configure pi
+
+TODO - flash and scripts
 
 ### Build & Run
 
@@ -33,10 +47,6 @@ The binary accepts several optional CLI flags for playlist testing and determini
 | `--playlist-now <RFC3339>`        | Overrides `SystemTime::now()` when computing playlist weights. Useful for reproducible simulations. |
 | `--playlist-dry-run <ITERATIONS>` | Emits a textual preview of the weighted playlist order without launching the UI.                    |
 | `--playlist-seed <SEED>`          | Forces deterministic playlist shuffling for both dry-run and live modes.                            |
-
-### Deployment _(TODO: outline systemd service, auto-start configuration, and graceful shutdown strategy)_
-
-### Testing _(TODO: enumerate unit/integration test commands and GPU validation steps)_
 
 ## Architecture Overview
 
@@ -61,17 +71,14 @@ flowchart LR
 
 ## Features
 
-### Tier 1 (implemented)
-
-- Recursive/scoped directory scanning (configurable)
-- Image type filtering (jpg/png/gif/webp/bmp/tiff)
-- Circular buffer (infinite loop)
-- Fixed per-image delay (configurable)
-- Weighted playlist that repeats new photos using an exponential half-life decay
-- Error handling and structured logging
-- Optional photo-affect stage for print simulation shading inspired by soft-proofing research
-
-### Tier 2+ _(TODO: summarize roadmap items from `Roadmap.md` and planned UX polish)_
+- Recursively scans a configurable photo library directory
+  - Detects changes from external synchronization processes
+    - Automatically adds new photos to the playlist
+    - Removes deleted photos from the playlist
+  - Prioritizes newer photos with user-configurable display rates
+- Configurable matting, transitions, and photo effects
+- Supports multiple image formats: JPG, PNG, GIF, WebP, BMP, TIFF
+- Robust error handling with structured logging
 
 ## Configuration
 
