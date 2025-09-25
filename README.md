@@ -249,6 +249,12 @@ Each transition exposes a focused set of fields:
   - `reverse`: Invert the base direction.
   - `randomize-direction`: Randomly flip the direction by 180°.
   - `vertical-axis`: When `true`, move vertically instead of horizontally.
+- **`e-ink`**
+  - `duration-ms`: Transition length in milliseconds.
+  - `flash-count`: Number of alternating black/flash-color pulses to run before the reveal (capped at 6).
+  - `reveal-portion`: Fraction of the timeline (0.05–0.95) spent on the flashing prep before stripes begin revealing the next image.
+  - `stripe-count`: How many horizontal bands sweep in to reveal the next photo; higher values mimic finer e-ink refresh passes.
+  - `flash-color`: `[r, g, b]` color (0–255) used for the light flash phase before the black inversion.
 
 Use `vertical-axis: true` with the push transition to move images vertically instead of horizontally. Combine it with `reverse: true` to push upward, or `randomize-direction: true` to shuffle between up and down. Providing an explicit `angle-deg` continues to override the base direction if you need diagonal pushes.
 
