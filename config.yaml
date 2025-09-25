@@ -8,6 +8,8 @@ photo-library-path: /absolute/path/to/your/photo/library
 transition:
   # List one or more transition kinds to rotate between.
   types: [fade, wipe, push, e-ink]
+  # Choose how to iterate through the transition types: random or round-robin.
+  type-selection: random
   options:
     fade:
       duration-ms: 450
@@ -52,6 +54,8 @@ playlist:
 # Matting settings
 matting:
   types: [fixed-color, blur, studio, fixed-image]
+  # Choose how to iterate through the matting types: random or round-robin.
+  type-selection: random
   options:
     fixed-color:
       color: [0, 0, 0]
