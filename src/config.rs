@@ -33,10 +33,10 @@ pub struct MattingConfig {
     options: BTreeMap<MattingKind, MattingOptions>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MattingSelection {
     Fixed(MattingKind),
-    Random,
+    Random(Vec<MattingKind>),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -473,17 +473,38 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut selection: Option<MattingSelection> = None;
+        let mut requested_types: Option<Vec<MattingKind>> = None;
+        let mut legacy_type: Option<LegacyMattingType> = None;
         let mut options: Option<BTreeMap<MattingKind, MattingOptions>> = None;
         let mut inline_fields: Vec<(String, YamlValue)> = Vec::new();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "type" => {
-                    if selection.is_some() {
+                    if legacy_type.is_some() {
                         return Err(de::Error::duplicate_field("type"));
                     }
+                    if requested_types.is_some() {
+                        return Err(de::Error::custom(
+                            "matting configuration cannot mix type and types",
+                        ));
+                    }
                     let raw: String = map.next_value()?;
-                    selection = Some(parse_matting_selection(&raw).map_err(de::Error::custom)?);
+                    legacy_type = Some(parse_legacy_matting_type(&raw).map_err(de::Error::custom)?);
+                }
+                "types" => {
+                    if requested_types.is_some() {
+                        return Err(de::Error::duplicate_field("types"));
+                    }
+                    if legacy_type.is_some() {
+                        return Err(de::Error::custom(
+                            "matting configuration cannot mix type and types",
+                        ));
+                    }
+                    let raw: Vec<String> = map.next_value()?;
+                    requested_types = Some(
+                        parse_matting_types(raw)
+                            .map_err(|err| de::Error::custom(err.to_string()))?,
+                    );
                 }
                 "options" => {
                     if options.is_some() {
@@ -500,17 +521,52 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
 
         let mut options = options.unwrap_or_default();
 
-        let selection = selection.ok_or_else(|| de::Error::missing_field("type"))?;
+        let types = if let Some(types) = requested_types {
+            types
+        } else if let Some(selection) = legacy_type {
+            match selection {
+                LegacyMattingType::Fixed(kind) => vec![kind],
+                LegacyMattingType::Random => options.keys().copied().collect(),
+            }
+        } else {
+            return Err(de::Error::missing_field("types"));
+        };
 
-        match selection {
-            MattingSelection::Random => {
+        if types.is_empty() {
+            if matches!(legacy_type, Some(LegacyMattingType::Random)) {
+                return Err(de::Error::custom(
+                    "matting.type random requires matting.options to specify at least one entry",
+                ));
+            }
+            return Err(de::Error::custom(
+                "matting.types must include at least one entry",
+            ));
+        }
+
+        let selection = if types.len() == 1 {
+            MattingSelection::Fixed(types[0])
+        } else {
+            MattingSelection::Random(types.clone())
+        };
+
+        match &selection {
+            MattingSelection::Random(kinds) => {
                 if !inline_fields.is_empty() {
                     return Err(de::Error::custom(
-                        "matting.type random does not support inline matting fields",
+                        "matting.types with multiple entries do not support inline matting fields",
                     ));
+                }
+                for kind in kinds {
+                    if !options.contains_key(kind) {
+                        return Err(de::Error::custom(format!(
+                            "matting.types entry {} must match a key in matting.options",
+                            kind
+                        )));
+                    }
                 }
             }
             MattingSelection::Fixed(kind) => {
+                let kind = *kind;
                 if options.is_empty() {
                     let mut builder = MattingOptionBuilder::default();
                     for (field, value) in std::mem::take(&mut inline_fields) {
@@ -529,7 +585,7 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
                     }
                     if !options.contains_key(&kind) {
                         return Err(de::Error::custom(format!(
-                            "matting.type {} must match a key in matting.options",
+                            "matting.types entry {} must match a key in matting.options",
                             kind
                         )));
                     }
@@ -547,20 +603,61 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
     }
 }
 
-fn parse_matting_selection(raw: &str) -> Result<MattingSelection> {
-    if raw == "random" {
-        return Ok(MattingSelection::Random);
+fn parse_matting_types(raw: Vec<String>) -> Result<Vec<MattingKind>> {
+    if raw.is_empty() {
+        return Err(anyhow::anyhow!(
+            "matting.types must include at least one entry",
+        ));
     }
-    for kind in MattingKind::ALL {
-        if raw == kind.as_str() {
-            return Ok(MattingSelection::Fixed(*kind));
+
+    let mut kinds = Vec::new();
+    for entry in raw {
+        if entry == "random" {
+            return Err(anyhow::anyhow!("matting.types may not include 'random'"));
+        }
+        let kind = MattingKind::ALL
+            .iter()
+            .find(|candidate| entry == candidate.as_str())
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown matting type '{}', expected one of: {}",
+                    entry,
+                    MattingKind::NAMES.join(", ")
+                )
+            })?;
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
         }
     }
-    Err(anyhow::anyhow!(
-        "unknown matting type '{}', expected one of: random, {}",
-        raw,
-        MattingKind::NAMES.join(", ")
-    ))
+
+    Ok(kinds)
+}
+
+#[derive(Clone, Copy)]
+enum LegacyMattingType {
+    Fixed(MattingKind),
+    Random,
+}
+
+fn parse_legacy_matting_type(raw: &str) -> Result<LegacyMattingType> {
+    if raw == "random" {
+        return Ok(LegacyMattingType::Random);
+    }
+
+    let kind = MattingKind::ALL
+        .iter()
+        .find(|candidate| raw == candidate.as_str())
+        .copied()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown matting type '{}', expected one of: {}",
+                raw,
+                MattingKind::NAMES.join(", ")
+            )
+        })?;
+
+    Ok(LegacyMattingType::Fixed(kind))
 }
 
 struct MattingOptionsMapSeed;
@@ -789,7 +886,7 @@ impl MattingConfig {
     #[allow(dead_code)]
     /// Exposed for integration tests to introspect the parsed selection strategy.
     pub fn selection(&self) -> MattingSelection {
-        self.selection
+        self.selection.clone()
     }
 
     #[allow(dead_code)]
@@ -799,9 +896,9 @@ impl MattingConfig {
     }
 
     pub fn primary_option(&self) -> Option<&MattingOptions> {
-        match self.selection {
-            MattingSelection::Fixed(kind) => self.options.get(&kind),
-            MattingSelection::Random => self.options.values().next(),
+        match &self.selection {
+            MattingSelection::Fixed(kind) => self.options.get(kind),
+            MattingSelection::Random(kinds) => kinds.iter().find_map(|kind| self.options.get(kind)),
         }
     }
 
@@ -819,18 +916,23 @@ impl MattingConfig {
     }
 
     pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> MattingOptions {
-        match self.selection {
+        match &self.selection {
             MattingSelection::Fixed(kind) => self
                 .options
-                .get(&kind)
+                .get(kind)
                 .cloned()
                 .expect("validated fixed matting should have selected option"),
-            MattingSelection::Random => self
-                .options
-                .values()
-                .choose(rng)
-                .cloned()
-                .expect("validated random matting should have options"),
+            MattingSelection::Random(kinds) => {
+                let kind = kinds
+                    .iter()
+                    .copied()
+                    .choose(rng)
+                    .expect("validated random matting should have options");
+                self.options
+                    .get(&kind)
+                    .cloned()
+                    .expect("validated random matting should have matching option")
+            }
         }
     }
 }
@@ -878,10 +980,10 @@ impl MattingMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransitionSelection {
     Fixed(TransitionKind),
-    Random,
+    Random(Vec<TransitionKind>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -959,7 +1061,7 @@ impl Default for TransitionConfig {
 impl TransitionConfig {
     #[allow(dead_code)]
     pub fn selection(&self) -> TransitionSelection {
-        self.selection
+        self.selection.clone()
     }
 
     #[allow(dead_code)]
@@ -969,25 +1071,32 @@ impl TransitionConfig {
 
     #[allow(dead_code)]
     pub fn primary_option(&self) -> Option<&TransitionOptions> {
-        match self.selection {
-            TransitionSelection::Fixed(kind) => self.options.get(&kind),
-            TransitionSelection::Random => self.options.values().next(),
+        match &self.selection {
+            TransitionSelection::Fixed(kind) => self.options.get(kind),
+            TransitionSelection::Random(kinds) => {
+                kinds.iter().find_map(|kind| self.options.get(kind))
+            }
         }
     }
 
     pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> TransitionOptions {
-        match self.selection {
+        match &self.selection {
             TransitionSelection::Fixed(kind) => self
                 .options
-                .get(&kind)
+                .get(kind)
                 .cloned()
                 .expect("validated fixed transition should have selected option"),
-            TransitionSelection::Random => self
-                .options
-                .values()
-                .choose(rng)
-                .cloned()
-                .expect("validated random transition should have options"),
+            TransitionSelection::Random(kinds) => {
+                let kind = kinds
+                    .iter()
+                    .copied()
+                    .choose(rng)
+                    .expect("validated random transition should have options");
+                self.options
+                    .get(&kind)
+                    .cloned()
+                    .expect("validated random transition should have matching option")
+            }
         }
     }
 
@@ -999,15 +1108,23 @@ impl TransitionConfig {
         for option in self.options.values_mut() {
             option.normalize()?;
         }
-        match self.selection {
+        match &self.selection {
             TransitionSelection::Fixed(kind) => ensure!(
-                self.options.contains_key(&kind),
+                self.options.contains_key(kind),
                 format!(
-                    "transition.type {} must match a key in transition.options",
+                    "transition.types entry {} must match a key in transition.options",
                     kind
                 )
             ),
-            TransitionSelection::Random => {}
+            TransitionSelection::Random(kinds) => {
+                for kind in kinds {
+                    ensure!(
+                        self.options.contains_key(kind),
+                        "transition.types entry {} must match a key in transition.options",
+                        kind
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -1347,17 +1464,39 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut selection: Option<TransitionSelection> = None;
+        let mut requested_types: Option<Vec<TransitionKind>> = None;
+        let mut legacy_type: Option<LegacyTransitionType> = None;
         let mut options: Option<BTreeMap<TransitionKind, TransitionOptions>> = None;
         let mut inline_fields: Vec<(String, YamlValue)> = Vec::new();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "type" => {
-                    if selection.is_some() {
+                    if legacy_type.is_some() {
                         return Err(de::Error::duplicate_field("type"));
                     }
+                    if requested_types.is_some() {
+                        return Err(de::Error::custom(
+                            "transition configuration cannot mix type and types",
+                        ));
+                    }
                     let raw: String = map.next_value()?;
-                    selection = Some(parse_transition_selection(&raw).map_err(de::Error::custom)?);
+                    legacy_type =
+                        Some(parse_legacy_transition_type(&raw).map_err(de::Error::custom)?);
+                }
+                "types" => {
+                    if requested_types.is_some() {
+                        return Err(de::Error::duplicate_field("types"));
+                    }
+                    if legacy_type.is_some() {
+                        return Err(de::Error::custom(
+                            "transition configuration cannot mix type and types",
+                        ));
+                    }
+                    let raw: Vec<String> = map.next_value()?;
+                    requested_types = Some(
+                        parse_transition_types(raw)
+                            .map_err(|err| de::Error::custom(err.to_string()))?,
+                    );
                 }
                 "options" => {
                     if options.is_some() {
@@ -1373,17 +1512,52 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
         }
 
         let mut options = options.unwrap_or_default();
-        let selection = selection.ok_or_else(|| de::Error::missing_field("type"))?;
+        let types = if let Some(types) = requested_types {
+            types
+        } else if let Some(selection) = legacy_type {
+            match selection {
+                LegacyTransitionType::Fixed(kind) => vec![kind],
+                LegacyTransitionType::Random => options.keys().copied().collect(),
+            }
+        } else {
+            return Err(de::Error::missing_field("types"));
+        };
 
-        match selection {
-            TransitionSelection::Random => {
+        if types.is_empty() {
+            if matches!(legacy_type, Some(LegacyTransitionType::Random)) {
+                return Err(de::Error::custom(
+                    "transition.type random requires transition.options to specify at least one entry",
+                ));
+            }
+            return Err(de::Error::custom(
+                "transition.types must include at least one entry",
+            ));
+        }
+
+        let selection = if types.len() == 1 {
+            TransitionSelection::Fixed(types[0])
+        } else {
+            TransitionSelection::Random(types.clone())
+        };
+
+        match &selection {
+            TransitionSelection::Random(kinds) => {
                 if !inline_fields.is_empty() {
                     return Err(de::Error::custom(
-                        "transition.type random does not support inline transition fields",
+                        "transition.types with multiple entries do not support inline transition fields",
                     ));
+                }
+                for kind in kinds {
+                    if !options.contains_key(kind) {
+                        return Err(de::Error::custom(format!(
+                            "transition.types entry {} must match a key in transition.options",
+                            kind
+                        )));
+                    }
                 }
             }
             TransitionSelection::Fixed(kind) => {
+                let kind = *kind;
                 if options.is_empty() {
                     let mut builder = TransitionOptionBuilder::default();
                     for (field, value) in std::mem::take(&mut inline_fields) {
@@ -1405,7 +1579,7 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
                     }
                     if !options.contains_key(&kind) {
                         return Err(de::Error::custom(format!(
-                            "transition.type {} must match a key in transition.options",
+                            "transition.types entry {} must match a key in transition.options",
                             kind
                         )));
                     }
@@ -1423,20 +1597,61 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
     }
 }
 
-fn parse_transition_selection(raw: &str) -> Result<TransitionSelection> {
-    if raw == "random" {
-        return Ok(TransitionSelection::Random);
+fn parse_transition_types(raw: Vec<String>) -> Result<Vec<TransitionKind>> {
+    if raw.is_empty() {
+        return Err(anyhow::anyhow!(
+            "transition.types must include at least one entry",
+        ));
     }
-    for kind in TransitionKind::ALL {
-        if raw == kind.as_str() {
-            return Ok(TransitionSelection::Fixed(*kind));
+
+    let mut kinds = Vec::new();
+    for entry in raw {
+        if entry == "random" {
+            return Err(anyhow::anyhow!("transition.types may not include 'random'"));
+        }
+        let kind = TransitionKind::ALL
+            .iter()
+            .find(|candidate| entry == candidate.as_str())
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown transition type '{}', expected one of: {}",
+                    entry,
+                    TransitionKind::NAMES.join(", ")
+                )
+            })?;
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
         }
     }
-    Err(anyhow::anyhow!(
-        "unknown transition type '{}', expected one of: random, {}",
-        raw,
-        TransitionKind::NAMES.join(", ")
-    ))
+
+    Ok(kinds)
+}
+
+#[derive(Clone, Copy)]
+enum LegacyTransitionType {
+    Fixed(TransitionKind),
+    Random,
+}
+
+fn parse_legacy_transition_type(raw: &str) -> Result<LegacyTransitionType> {
+    if raw == "random" {
+        return Ok(LegacyTransitionType::Random);
+    }
+
+    let kind = TransitionKind::ALL
+        .iter()
+        .find(|candidate| raw == candidate.as_str())
+        .copied()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown transition type '{}', expected one of: {}",
+                raw,
+                TransitionKind::NAMES.join(", ")
+            )
+        })?;
+
+    Ok(LegacyTransitionType::Fixed(kind))
 }
 
 struct TransitionOptionsMapSeed;
