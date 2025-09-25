@@ -17,6 +17,7 @@ transition:
   #     flash-count: 3
   #     reveal-portion: 0.55
   #     stripe-count: 24
+  #     flash-color: [255, 255, 255]
 # Dwell time (ms) the current image remains fully displayed before the next transition
 dwell-ms: 2000
 

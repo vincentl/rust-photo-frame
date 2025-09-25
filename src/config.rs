@@ -1143,6 +1143,7 @@ impl TransitionOptions {
                         .eink_reveal_portion
                         .unwrap_or(defaults.reveal_portion),
                     stripe_count: builder.eink_stripe_count.unwrap_or(defaults.stripe_count),
+                    flash_color: builder.eink_flash_color.unwrap_or(defaults.flash_color),
                 })
             }
         };
@@ -1249,6 +1250,7 @@ pub struct EInkTransition {
     pub flash_count: u32,
     pub reveal_portion: f32,
     pub stripe_count: u32,
+    pub flash_color: [u8; 3],
 }
 
 impl Default for EInkTransition {
@@ -1257,6 +1259,7 @@ impl Default for EInkTransition {
             flash_count: 3,
             reveal_portion: 0.55,
             stripe_count: 24,
+            flash_color: [255, 255, 255],
         }
     }
 }
@@ -1479,6 +1482,7 @@ struct TransitionOptionBuilder {
     eink_flash_count: Option<u32>,
     eink_reveal_portion: Option<f32>,
     eink_stripe_count: Option<u32>,
+    eink_flash_color: Option<[u8; 3]>,
 }
 
 fn apply_transition_inline_field<E: de::Error>(
@@ -1541,6 +1545,9 @@ fn apply_transition_inline_field<E: de::Error>(
         "stripe-count" if matches!(kind, TransitionKind::EInk) => {
             builder.eink_stripe_count = Some(inline_value_to::<u32, E>(value)?);
         }
+        "flash-color" if matches!(kind, TransitionKind::EInk) => {
+            builder.eink_flash_color = Some(inline_value_to::<[u8; 3], E>(value)?);
+        }
         _ => {
             return Err(de::Error::unknown_field(
                 field,
@@ -1556,6 +1563,7 @@ fn apply_transition_inline_field<E: de::Error>(
                     "flash-count",
                     "reveal-portion",
                     "stripe-count",
+                    "flash-color",
                 ],
             ));
         }
