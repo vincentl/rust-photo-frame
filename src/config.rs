@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -1061,34 +1062,10 @@ impl TransitionOptions {
                     ));
                 }
                 wipe.softness = wipe.softness.clamp(0.0, 0.5);
-                if !wipe.angle_deg.is_finite() || !wipe.angle_jitter_deg.is_finite() {
-                    return Err(anyhow::anyhow!(
-                        "transition option {} has invalid wipe angle configuration",
-                        self.kind
-                    ));
-                }
-                ensure!(
-                    wipe.angle_jitter_deg >= 0.0,
-                    format!(
-                        "transition option {} requires wipe.angle-jitter-deg >= 0",
-                        self.kind
-                    )
-                );
+                wipe.angles.normalize(self.kind)?;
             }
             TransitionMode::Push(push) => {
-                if !push.angle_deg.is_finite() || !push.angle_jitter_deg.is_finite() {
-                    return Err(anyhow::anyhow!(
-                        "transition option {} has invalid push angle configuration",
-                        self.kind
-                    ));
-                }
-                ensure!(
-                    push.angle_jitter_deg >= 0.0,
-                    format!(
-                        "transition option {} requires push.angle-jitter-deg >= 0",
-                        self.kind
-                    )
-                );
+                push.angles.normalize(self.kind)?;
             }
             TransitionMode::EInk(eink) => {
                 if !eink.reveal_portion.is_finite() {
@@ -1116,25 +1093,20 @@ impl TransitionOptions {
                 through_black: builder.fade_through_black.unwrap_or(false),
             }),
             TransitionKind::Wipe => TransitionMode::Wipe(WipeTransition {
-                angle_deg: builder.wipe_angle_deg.unwrap_or(0.0),
-                angle_jitter_deg: builder.wipe_angle_jitter_deg.unwrap_or(0.0),
-                reverse: builder.wipe_reverse.unwrap_or(false),
-                randomize_direction: builder.wipe_randomize_direction.unwrap_or(false),
+                angles: AnglePicker::from_parts(
+                    builder.wipe_angle_list_deg,
+                    builder.wipe_angle_selection,
+                    builder.wipe_angle_jitter_deg,
+                ),
                 softness: builder.wipe_softness.unwrap_or(0.05),
             }),
-            TransitionKind::Push => {
-                let vertical_axis = builder.push_vertical_axis.unwrap_or(false);
-                let angle =
-                    builder
-                        .push_angle_deg
-                        .unwrap_or(if vertical_axis { 90.0 } else { 0.0 });
-                TransitionMode::Push(PushTransition {
-                    angle_deg: angle,
-                    angle_jitter_deg: builder.push_angle_jitter_deg.unwrap_or(0.0),
-                    reverse: builder.push_reverse.unwrap_or(false),
-                    randomize_direction: builder.push_randomize_direction.unwrap_or(false),
-                })
-            }
+            TransitionKind::Push => TransitionMode::Push(PushTransition {
+                angles: AnglePicker::from_parts(
+                    builder.push_angle_list_deg,
+                    builder.push_angle_selection,
+                    builder.push_angle_jitter_deg,
+                ),
+            }),
             TransitionKind::EInk => {
                 let defaults = EInkTransition::default();
                 TransitionMode::EInk(EInkTransition {
@@ -1156,22 +1128,10 @@ impl TransitionOptions {
         match &mut option.mode {
             TransitionMode::Fade(_) => {}
             TransitionMode::Wipe(cfg) => {
-                ensure!(
-                    cfg.angle_jitter_deg >= 0.0,
-                    format!(
-                        "transition option {} requires wipe.angle-jitter-deg >= 0",
-                        kind
-                    )
-                );
+                cfg.angles.normalize(kind)?;
             }
             TransitionMode::Push(cfg) => {
-                ensure!(
-                    cfg.angle_jitter_deg >= 0.0,
-                    format!(
-                        "transition option {} requires push.angle-jitter-deg >= 0",
-                        kind
-                    )
-                );
+                cfg.angles.normalize(kind)?;
             }
             TransitionMode::EInk(eink) => {
                 if !eink.reveal_portion.is_finite() {
@@ -1200,47 +1160,148 @@ pub enum TransitionMode {
     EInk(EInkTransition),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AngleSelection {
+    Random,
+    RoundRobin,
+}
+
+#[derive(Debug, Clone)]
+struct AnglePickerRuntime {
+    next_index: Arc<AtomicUsize>,
+}
+
+impl Default for AnglePickerRuntime {
+    fn default() -> Self {
+        Self {
+            next_index: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AnglePicker {
+    pub angles_deg: Vec<f32>,
+    pub selection: AngleSelection,
+    pub jitter_deg: f32,
+    runtime: AnglePickerRuntime,
+}
+
+impl Default for AnglePicker {
+    fn default() -> Self {
+        Self {
+            angles_deg: vec![0.0],
+            selection: AngleSelection::Random,
+            jitter_deg: 0.0,
+            runtime: AnglePickerRuntime::default(),
+        }
+    }
+}
+
+impl AnglePicker {
+    fn from_parts(
+        angles_deg: Option<Vec<f32>>,
+        selection: Option<AngleSelection>,
+        jitter_deg: Option<f32>,
+    ) -> Self {
+        let picker = Self {
+            angles_deg: angles_deg.unwrap_or_else(|| vec![0.0]),
+            selection: selection.unwrap_or(AngleSelection::Random),
+            jitter_deg: jitter_deg.unwrap_or(0.0),
+            runtime: AnglePickerRuntime::default(),
+        };
+        picker
+    }
+
+    fn normalize(&mut self, kind: TransitionKind) -> Result<()> {
+        ensure!(
+            !self.angles_deg.is_empty(),
+            format!(
+                "transition option {} requires angle-list-degrees to include at least one entry",
+                kind
+            )
+        );
+        for angle in &self.angles_deg {
+            ensure!(
+                angle.is_finite(),
+                format!(
+                    "transition option {} has non-finite values in angle-list-degrees",
+                    kind
+                )
+            );
+        }
+        ensure!(
+            self.jitter_deg.is_finite(),
+            format!(
+                "transition option {} has non-finite angle-jitter-degrees",
+                kind
+            )
+        );
+        ensure!(
+            self.jitter_deg >= 0.0,
+            format!(
+                "transition option {} requires angle-jitter-degrees >= 0",
+                kind
+            )
+        );
+        Ok(())
+    }
+
+    pub(crate) fn pick_angle(&self, rng: &mut impl Rng) -> f32 {
+        let base_angle = if self.angles_deg.len() == 1 {
+            self.angles_deg[0]
+        } else {
+            match self.selection {
+                AngleSelection::Random => {
+                    let index = rng.gen_range(0..self.angles_deg.len());
+                    self.angles_deg[index]
+                }
+                AngleSelection::RoundRobin => {
+                    let index = self.runtime.next_index.fetch_add(1, Ordering::Relaxed)
+                        % self.angles_deg.len();
+                    self.angles_deg[index]
+                }
+            }
+        };
+        if self.jitter_deg.abs() > f32::EPSILON {
+            let jitter = rng.gen_range(-self.jitter_deg..=self.jitter_deg);
+            base_angle + jitter
+        } else {
+            base_angle
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FadeTransition {
     pub through_black: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct WipeTransition {
-    pub angle_deg: f32,
-    pub angle_jitter_deg: f32,
-    pub reverse: bool,
-    pub randomize_direction: bool,
+    pub angles: AnglePicker,
     pub softness: f32,
 }
 
 impl Default for WipeTransition {
     fn default() -> Self {
         Self {
-            angle_deg: 0.0,
-            angle_jitter_deg: 0.0,
-            reverse: false,
-            randomize_direction: false,
+            angles: AnglePicker::default(),
             softness: 0.05,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PushTransition {
-    pub angle_deg: f32,
-    pub angle_jitter_deg: f32,
-    pub reverse: bool,
-    pub randomize_direction: bool,
+    pub angles: AnglePicker,
 }
 
 impl Default for PushTransition {
     fn default() -> Self {
         Self {
-            angle_deg: 0.0,
-            angle_jitter_deg: 0.0,
-            reverse: false,
-            randomize_direction: false,
+            angles: AnglePicker::default(),
         }
     }
 }
@@ -1469,16 +1530,13 @@ impl<'de> Visitor<'de> for TransitionOptionVisitor {
 struct TransitionOptionBuilder {
     duration_ms: Option<u64>,
     fade_through_black: Option<bool>,
-    wipe_angle_deg: Option<f32>,
+    wipe_angle_list_deg: Option<Vec<f32>>,
+    wipe_angle_selection: Option<AngleSelection>,
     wipe_angle_jitter_deg: Option<f32>,
-    wipe_reverse: Option<bool>,
-    wipe_randomize_direction: Option<bool>,
     wipe_softness: Option<f32>,
-    push_angle_deg: Option<f32>,
+    push_angle_list_deg: Option<Vec<f32>>,
+    push_angle_selection: Option<AngleSelection>,
     push_angle_jitter_deg: Option<f32>,
-    push_reverse: Option<bool>,
-    push_randomize_direction: Option<bool>,
-    push_vertical_axis: Option<bool>,
     eink_flash_count: Option<u32>,
     eink_reveal_portion: Option<f32>,
     eink_stripe_count: Option<u32>,
@@ -1498,40 +1556,29 @@ fn apply_transition_inline_field<E: de::Error>(
         "through-black" if matches!(kind, TransitionKind::Fade) => {
             builder.fade_through_black = Some(inline_value_to::<bool, E>(value)?);
         }
-        "angle-deg" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
-            let angle = inline_value_to::<f32, E>(value)?;
+        "angle-list-degrees" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
+            let angles = inline_value_to::<Vec<f32>, E>(value)?;
             match kind {
-                TransitionKind::Wipe => builder.wipe_angle_deg = Some(angle),
-                TransitionKind::Push => builder.push_angle_deg = Some(angle),
+                TransitionKind::Wipe => builder.wipe_angle_list_deg = Some(angles),
+                TransitionKind::Push => builder.push_angle_list_deg = Some(angles),
                 _ => {}
             }
         }
-        "angle-jitter-deg" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
+        "angle-selection" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
+            let selection = inline_value_to::<AngleSelection, E>(value)?;
+            match kind {
+                TransitionKind::Wipe => builder.wipe_angle_selection = Some(selection),
+                TransitionKind::Push => builder.push_angle_selection = Some(selection),
+                _ => {}
+            }
+        }
+        "angle-jitter-degrees" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
             let jitter = inline_value_to::<f32, E>(value)?;
             match kind {
                 TransitionKind::Wipe => builder.wipe_angle_jitter_deg = Some(jitter),
                 TransitionKind::Push => builder.push_angle_jitter_deg = Some(jitter),
                 _ => {}
             }
-        }
-        "reverse" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
-            let reverse = inline_value_to::<bool, E>(value)?;
-            match kind {
-                TransitionKind::Wipe => builder.wipe_reverse = Some(reverse),
-                TransitionKind::Push => builder.push_reverse = Some(reverse),
-                _ => {}
-            }
-        }
-        "randomize-direction" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
-            let randomize = inline_value_to::<bool, E>(value)?;
-            match kind {
-                TransitionKind::Wipe => builder.wipe_randomize_direction = Some(randomize),
-                TransitionKind::Push => builder.push_randomize_direction = Some(randomize),
-                _ => {}
-            }
-        }
-        "vertical-axis" if matches!(kind, TransitionKind::Push) => {
-            builder.push_vertical_axis = Some(inline_value_to::<bool, E>(value)?);
         }
         "softness" if matches!(kind, TransitionKind::Wipe) => {
             builder.wipe_softness = Some(inline_value_to::<f32, E>(value)?);
@@ -1554,12 +1601,10 @@ fn apply_transition_inline_field<E: de::Error>(
                 &[
                     "duration-ms",
                     "through-black",
-                    "angle-deg",
-                    "angle-jitter-deg",
-                    "reverse",
-                    "randomize-direction",
+                    "angle-list-degrees",
+                    "angle-selection",
+                    "angle-jitter-degrees",
                     "softness",
-                    "vertical-axis",
                     "flash-count",
                     "reveal-portion",
                     "stripe-count",
