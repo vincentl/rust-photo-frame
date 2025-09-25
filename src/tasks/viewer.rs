@@ -397,17 +397,7 @@ pub fn run_windowed(
                     through_black: cfg.through_black,
                 },
                 TransitionMode::Wipe(cfg) => {
-                    let mut angle = cfg.angle_deg;
-                    if cfg.angle_jitter_deg.abs() > f32::EPSILON {
-                        let jitter = rng.gen_range(-cfg.angle_jitter_deg..=cfg.angle_jitter_deg);
-                        angle += jitter;
-                    }
-                    if cfg.randomize_direction && rng.gen_bool(0.5) {
-                        angle += 180.0;
-                    }
-                    if cfg.reverse {
-                        angle += 180.0;
-                    }
+                    let angle = cfg.angles.pick_angle(rng);
                     let (sin, cos) = angle.to_radians().sin_cos();
                     let mut normal = [cos, sin];
                     let len = (normal[0] * normal[0] + normal[1] * normal[1]).sqrt();
@@ -423,17 +413,7 @@ pub fn run_windowed(
                     }
                 }
                 TransitionMode::Push(cfg) => {
-                    let mut angle = cfg.angle_deg;
-                    if cfg.angle_jitter_deg.abs() > f32::EPSILON {
-                        let jitter = rng.gen_range(-cfg.angle_jitter_deg..=cfg.angle_jitter_deg);
-                        angle += jitter;
-                    }
-                    if cfg.randomize_direction && rng.gen_bool(0.5) {
-                        angle += 180.0;
-                    }
-                    if cfg.reverse {
-                        angle += 180.0;
-                    }
+                    let angle = cfg.angles.pick_angle(rng);
                     let (sin, cos) = angle.to_radians().sin_cos();
                     let mut direction = [cos, sin];
                     let len = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
