@@ -1,11 +1,12 @@
 use crate::config::{
-    MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionKind, TransitionMode,
-    TransitionOptions,
+    MattingConfig, MattingMode, MattingOptions, PhotoEffectsConfig, TransitionConfig,
+    TransitionKind, TransitionMode, TransitionOptions,
 };
 use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::{center_offset, resize_to_cover};
+use crate::processing::photo_effects::apply_photo_effects;
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
 use image::{imageops, Rgba, RgbaImage};
 use rand::{thread_rng, Rng};
@@ -72,6 +73,7 @@ pub fn run_windowed(
         oversample: f32,
         max_dim: u32,
         matting: MattingOptions,
+        photo_effects: PhotoEffectsConfig,
     }
 
     struct MatTask {
@@ -144,6 +146,19 @@ pub fn run_windowed(
         }
     }
 
+    fn apply_photo_adjustments<'a>(
+        image: Cow<'a, RgbaImage>,
+        effects: &PhotoEffectsConfig,
+        oversample: f32,
+    ) -> Cow<'a, RgbaImage> {
+        if !effects.has_enabled_effects() {
+            return image;
+        }
+        let mut owned = image.into_owned();
+        apply_photo_effects(&mut owned, effects, oversample);
+        Cow::Owned(owned)
+    }
+
     fn process_mat_task(task: MatTask) -> Option<MatResult> {
         let MatTask { image, params } = task;
         let PreparedImageCpu {
@@ -162,6 +177,7 @@ pub fn run_windowed(
             oversample,
             max_dim,
             matting,
+            photo_effects,
         } = params;
         if screen_w == 0 || screen_h == 0 {
             return None;
@@ -223,6 +239,8 @@ pub fn run_windowed(
                 ))
             };
 
+            let main_img = apply_photo_adjustments(main_img, &photo_effects, oversample);
+
             let canvas = render_studio_mat(
                 canvas_w,
                 canvas_h,
@@ -262,6 +280,7 @@ pub fn run_windowed(
                 imageops::FilterType::Triangle,
             ))
         };
+        let main_img = apply_photo_adjustments(main_img, &photo_effects, oversample);
 
         let mut background = match &matting.style {
             MattingMode::FixedColor { color } => {
@@ -551,6 +570,7 @@ pub fn run_windowed(
         preload_count: usize,
         oversample: f32,
         matting: MattingConfig,
+        photo_effects: PhotoEffectsConfig,
         transition_cfg: TransitionConfig,
         mat_pipeline: MattingPipeline,
         mat_inflight: usize,
@@ -1017,6 +1037,7 @@ pub fn run_windowed(
                     oversample: self.oversample,
                     max_dim: gpu.limits.max_texture_dimension_2d,
                     matting,
+                    photo_effects: self.photo_effects.clone(),
                 };
                 let task = MatTask { image: img, params };
                 match self.mat_pipeline.try_submit(task) {
@@ -1136,6 +1157,7 @@ pub fn run_windowed(
         preload_count: cfg.viewer_preload_count,
         oversample: cfg.oversample,
         matting: cfg.matting.clone(),
+        photo_effects: cfg.photo_effects.clone(),
         transition_cfg: cfg.transition.clone(),
         mat_pipeline,
         mat_inflight: 0,
