@@ -234,11 +234,12 @@ transition:
       duration-ms: 450
     wipe:
       duration-ms: 600
-      angle-deg: 90.0
+      angle-list-degrees: [90.0]
       softness: 0.1
     push:
       duration-ms: 640
-      angle-deg: 0.0
+      angle-list-degrees: [0.0, 180.0]
+      angle-selection: round-robin
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -251,10 +252,28 @@ transition:
     assert_eq!(wipe.duration().as_millis(), 600);
     match wipe.mode() {
         rust_photo_frame::config::TransitionMode::Wipe(cfg) => {
-            assert!((cfg.angle_deg - 90.0).abs() < f32::EPSILON);
+            assert_eq!(cfg.angles.angles_deg, vec![90.0]);
+            assert_eq!(
+                cfg.angles.selection,
+                rust_photo_frame::config::AngleSelection::Random
+            );
             assert!((cfg.softness - 0.1).abs() < f32::EPSILON);
         }
         _ => panic!("expected wipe transition"),
+    }
+
+    let push = options
+        .get(&TransitionKind::Push)
+        .expect("expected push transition option");
+    match push.mode() {
+        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+            assert_eq!(cfg.angles.angles_deg, vec![0.0, 180.0]);
+            assert_eq!(
+                cfg.angles.selection,
+                rust_photo_frame::config::AngleSelection::RoundRobin
+            );
+        }
+        _ => panic!("expected push transition"),
     }
 }
 
@@ -300,13 +319,13 @@ fn wipe_transition_rejects_negative_jitter() {
 photo-library-path: "/photos"
 transition:
   type: wipe
-  angle-jitter-deg: -15.0
+  angle-jitter-degrees: -15.0
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
     assert!(err
         .to_string()
-        .contains("requires wipe.angle-jitter-deg >= 0"));
+        .contains("requires angle-jitter-degrees >= 0"));
 }
 
 #[test]
@@ -315,24 +334,24 @@ fn push_transition_rejects_negative_jitter() {
 photo-library-path: "/photos"
 transition:
   type: push
-  angle-jitter-deg: -30.0
+  angle-jitter-degrees: -30.0
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
     assert!(err
         .to_string()
-        .contains("requires push.angle-jitter-deg >= 0"));
+        .contains("requires angle-jitter-degrees >= 0"));
 }
 
 #[test]
-fn push_transition_vertical_axis_defaults_to_vertical_push() {
+fn push_transition_configures_multiple_angles() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
   type: push
   duration-ms: 725
-  vertical-axis: true
-  reverse: true
+  angle-list-degrees: [90.0, 270.0]
+  angle-selection: round-robin
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -344,8 +363,11 @@ transition:
     assert_eq!(option.duration().as_millis(), 725);
     match option.mode() {
         rust_photo_frame::config::TransitionMode::Push(push) => {
-            assert!((push.angle_deg - 90.0).abs() < f32::EPSILON);
-            assert!(push.reverse);
+            assert_eq!(push.angles.angles_deg, vec![90.0, 270.0]);
+            assert_eq!(
+                push.angles.selection,
+                rust_photo_frame::config::AngleSelection::RoundRobin
+            );
         }
         _ => panic!("expected push transition"),
     }
