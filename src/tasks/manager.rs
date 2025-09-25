@@ -115,6 +115,8 @@ struct PlaylistState {
     dirty: bool,
     now_override: Option<SystemTime>,
     last_sent: Option<PathBuf>,
+    held_repeat: Option<PathBuf>,
+    held_requires_requeue: bool,
 }
 
 impl PlaylistState {
@@ -128,6 +130,8 @@ impl PlaylistState {
             dirty: true,
             now_override,
             last_sent: None,
+            held_repeat: None,
+            held_requires_requeue: false,
         }
     }
 
@@ -209,37 +213,45 @@ impl PlaylistState {
     }
 
     fn peek(&mut self) -> Option<&PathBuf> {
+        if self.queue.is_empty() {
+            if let Some(held) = self.held_repeat.take() {
+                self.queue.push_front(held);
+                self.held_requires_requeue = false;
+            } else {
+                return None;
+            }
+        }
+
         if let Some(last) = self.last_sent.clone() {
-            if let Some(front) = self.queue.front() {
-                if front == &last {
-                    let Some(held) = self.queue.pop_front() else {
-                        return None;
-                    };
-                    let mut rebuilt = false;
+            if self
+                .queue
+                .front()
+                .map(|front| front == &last)
+                .unwrap_or(false)
+            {
+                if self.held_repeat.is_none() {
+                    let held = self.queue.pop_front()?;
+                    self.held_repeat = Some(held);
+                    self.held_requires_requeue = true;
 
                     if self.queue.is_empty() {
                         self.ensure_ready();
-                        rebuilt = true;
+                        self.held_requires_requeue = false;
                     }
 
-                    if let Some(idx) = self.queue.iter().position(|p| p != &last) {
-                        if idx > 0 {
-                            if let Some(candidate) = self.queue.remove(idx) {
-                                self.queue.push_front(candidate);
-                            }
+                    if let Some(idx) = self.queue.iter().position(|path| path != &last) {
+                        if let Some(candidate) = self.queue.remove(idx) {
+                            self.queue.push_front(candidate);
                         }
+                    } else if let Some(held) = self.held_repeat.take() {
+                        // Nothing but repeats remain; restore and accept the duplicate.
+                        self.queue.push_front(held);
+                        self.held_requires_requeue = false;
                     }
-
-                    match self.queue.front() {
-                        Some(next) if next != &last => {
-                            if !rebuilt {
-                                self.queue.insert(1, held);
-                            }
-                        }
-                        _ => {
-                            self.queue.push_front(held);
-                        }
-                    }
+                } else if let Some(held) = self.held_repeat.take() {
+                    // Stack already full, so allow the repeat that was on hold.
+                    self.queue.push_front(held);
+                    self.held_requires_requeue = false;
                 }
             }
         }
@@ -260,12 +272,24 @@ impl PlaylistState {
         {
             self.queue.pop_front();
             self.last_sent = Some(sent.to_path_buf());
+            if let Some(held) = self.held_repeat.take() {
+                if self.held_requires_requeue {
+                    self.queue.push_front(held);
+                }
+                self.held_requires_requeue = false;
+            }
             return;
         }
         if let Some(pos) = self.queue.iter().position(|p| p == sent) {
             self.queue.remove(pos);
         }
         self.last_sent = Some(sent.to_path_buf());
+        if let Some(held) = self.held_repeat.take() {
+            if self.held_requires_requeue {
+                self.queue.push_front(held);
+            }
+            self.held_requires_requeue = false;
+        }
     }
 
     fn record_add(&mut self, info: PhotoInfo) {
