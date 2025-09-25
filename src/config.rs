@@ -33,11 +33,57 @@ pub struct MattingConfig {
     options: BTreeMap<MattingKind, MattingOptions>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TypeSelection {
+    Random,
+    RoundRobin,
+}
+
+#[derive(Debug, Clone)]
+pub struct RoundRobinState {
+    next_index: Arc<AtomicUsize>,
+}
+
+impl Default for RoundRobinState {
+    fn default() -> Self {
+        Self {
+            next_index: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl RoundRobinState {
+    fn next(&self, len: usize) -> usize {
+        self.next_index.fetch_add(1, Ordering::Relaxed) % len
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum MattingSelection {
     Fixed(MattingKind),
     Random(Vec<MattingKind>),
+    RoundRobin {
+        kinds: Vec<MattingKind>,
+        runtime: RoundRobinState,
+    },
 }
+
+impl PartialEq for MattingSelection {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (MattingSelection::Fixed(a), MattingSelection::Fixed(b)) => a == b,
+            (MattingSelection::Random(a), MattingSelection::Random(b)) => a == b,
+            (
+                MattingSelection::RoundRobin { kinds: a, .. },
+                MattingSelection::RoundRobin { kinds: b, .. },
+            ) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for MattingSelection {}
 
 #[derive(Debug, Clone, Default)]
 pub struct MattingRuntime {
@@ -476,6 +522,7 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
         let mut requested_types: Option<Vec<MattingKind>> = None;
         let mut legacy_type: Option<LegacyMattingType> = None;
         let mut options: Option<BTreeMap<MattingKind, MattingOptions>> = None;
+        let mut type_selection: Option<TypeSelection> = None;
         let mut inline_fields: Vec<(String, YamlValue)> = Vec::new();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
@@ -512,11 +559,28 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
                     }
                     options = Some(map.next_value_seed(MattingOptionsMapSeed)?);
                 }
+                "type-selection" => {
+                    if type_selection.is_some() {
+                        return Err(de::Error::duplicate_field("type-selection"));
+                    }
+                    if legacy_type.is_some() {
+                        return Err(de::Error::custom(
+                            "matting configuration cannot mix type-selection with legacy type",
+                        ));
+                    }
+                    type_selection = Some(map.next_value()?);
+                }
                 _ => {
                     let value = map.next_value::<YamlValue>()?;
                     inline_fields.push((key, value));
                 }
             }
+        }
+
+        if type_selection.is_some() && requested_types.is_none() {
+            return Err(de::Error::custom(
+                "matting.type-selection requires matting.types",
+            ));
         }
 
         let mut options = options.unwrap_or_default();
@@ -546,11 +610,17 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
         let selection = if types.len() == 1 {
             MattingSelection::Fixed(types[0])
         } else {
-            MattingSelection::Random(types.clone())
+            match type_selection.unwrap_or(TypeSelection::Random) {
+                TypeSelection::Random => MattingSelection::Random(types.clone()),
+                TypeSelection::RoundRobin => MattingSelection::RoundRobin {
+                    kinds: types.clone(),
+                    runtime: RoundRobinState::default(),
+                },
+            }
         };
 
         match &selection {
-            MattingSelection::Random(kinds) => {
+            MattingSelection::Random(kinds) | MattingSelection::RoundRobin { kinds, .. } => {
                 if !inline_fields.is_empty() {
                     return Err(de::Error::custom(
                         "matting.types with multiple entries do not support inline matting fields",
@@ -899,6 +969,9 @@ impl MattingConfig {
         match &self.selection {
             MattingSelection::Fixed(kind) => self.options.get(kind),
             MattingSelection::Random(kinds) => kinds.iter().find_map(|kind| self.options.get(kind)),
+            MattingSelection::RoundRobin { kinds, .. } => {
+                kinds.first().and_then(|kind| self.options.get(kind))
+            }
         }
     }
 
@@ -932,6 +1005,14 @@ impl MattingConfig {
                     .get(&kind)
                     .cloned()
                     .expect("validated random matting should have matching option")
+            }
+            MattingSelection::RoundRobin { kinds, runtime } => {
+                let index = runtime.next(kinds.len());
+                let kind = kinds[index];
+                self.options
+                    .get(&kind)
+                    .cloned()
+                    .expect("validated round-robin matting should have matching option")
             }
         }
     }
@@ -980,11 +1061,31 @@ impl MattingMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum TransitionSelection {
     Fixed(TransitionKind),
     Random(Vec<TransitionKind>),
+    RoundRobin {
+        kinds: Vec<TransitionKind>,
+        runtime: RoundRobinState,
+    },
 }
+
+impl PartialEq for TransitionSelection {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TransitionSelection::Fixed(a), TransitionSelection::Fixed(b)) => a == b,
+            (TransitionSelection::Random(a), TransitionSelection::Random(b)) => a == b,
+            (
+                TransitionSelection::RoundRobin { kinds: a, .. },
+                TransitionSelection::RoundRobin { kinds: b, .. },
+            ) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for TransitionSelection {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransitionKind {
@@ -1076,6 +1177,9 @@ impl TransitionConfig {
             TransitionSelection::Random(kinds) => {
                 kinds.iter().find_map(|kind| self.options.get(kind))
             }
+            TransitionSelection::RoundRobin { kinds, .. } => {
+                kinds.first().and_then(|kind| self.options.get(kind))
+            }
         }
     }
 
@@ -1097,6 +1201,14 @@ impl TransitionConfig {
                     .cloned()
                     .expect("validated random transition should have matching option")
             }
+            TransitionSelection::RoundRobin { kinds, runtime } => {
+                let index = runtime.next(kinds.len());
+                let kind = kinds[index];
+                self.options
+                    .get(&kind)
+                    .cloned()
+                    .expect("validated round-robin transition should have matching option")
+            }
         }
     }
 
@@ -1116,7 +1228,7 @@ impl TransitionConfig {
                     kind
                 )
             ),
-            TransitionSelection::Random(kinds) => {
+            TransitionSelection::Random(kinds) | TransitionSelection::RoundRobin { kinds, .. } => {
                 for kind in kinds {
                     ensure!(
                         self.options.contains_key(kind),
@@ -1467,6 +1579,7 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
         let mut requested_types: Option<Vec<TransitionKind>> = None;
         let mut legacy_type: Option<LegacyTransitionType> = None;
         let mut options: Option<BTreeMap<TransitionKind, TransitionOptions>> = None;
+        let mut type_selection: Option<TypeSelection> = None;
         let mut inline_fields: Vec<(String, YamlValue)> = Vec::new();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
@@ -1504,11 +1617,28 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
                     }
                     options = Some(map.next_value_seed(TransitionOptionsMapSeed)?);
                 }
+                "type-selection" => {
+                    if type_selection.is_some() {
+                        return Err(de::Error::duplicate_field("type-selection"));
+                    }
+                    if legacy_type.is_some() {
+                        return Err(de::Error::custom(
+                            "transition configuration cannot mix type-selection with legacy type",
+                        ));
+                    }
+                    type_selection = Some(map.next_value()?);
+                }
                 _ => {
                     let value = map.next_value::<YamlValue>()?;
                     inline_fields.push((key, value));
                 }
             }
+        }
+
+        if type_selection.is_some() && requested_types.is_none() {
+            return Err(de::Error::custom(
+                "transition.type-selection requires transition.types",
+            ));
         }
 
         let mut options = options.unwrap_or_default();
@@ -1537,11 +1667,17 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
         let selection = if types.len() == 1 {
             TransitionSelection::Fixed(types[0])
         } else {
-            TransitionSelection::Random(types.clone())
+            match type_selection.unwrap_or(TypeSelection::Random) {
+                TypeSelection::Random => TransitionSelection::Random(types.clone()),
+                TypeSelection::RoundRobin => TransitionSelection::RoundRobin {
+                    kinds: types.clone(),
+                    runtime: RoundRobinState::default(),
+                },
+            }
         };
 
         match &selection {
-            TransitionSelection::Random(kinds) => {
+            TransitionSelection::Random(kinds) | TransitionSelection::RoundRobin { kinds, .. } => {
                 if !inline_fields.is_empty() {
                     return Err(de::Error::custom(
                         "transition.types with multiple entries do not support inline transition fields",

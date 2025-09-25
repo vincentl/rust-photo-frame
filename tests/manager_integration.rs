@@ -21,7 +21,7 @@ async fn manager_ignores_spurious_remove_and_sends_load_on_add() {
         cancel.clone(),
         PlaylistOptions::default(),
         None,
-        None,
+        Some(42),
     ));
 
     // Spurious remove for path never added
@@ -72,7 +72,7 @@ async fn manager_rotates_actual_sent_item() {
         cancel.clone(),
         PlaylistOptions::default(),
         None,
-        None,
+        Some(42),
     ));
 
     let initial_a = PathBuf::from("/photos/a.jpg");
