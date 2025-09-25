@@ -37,15 +37,15 @@ pub struct MattingConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum TypeSelection {
     Random,
-    RoundRobin,
+    Sequential,
 }
 
 #[derive(Debug, Clone)]
-pub struct RoundRobinState {
+pub struct SequentialState {
     next_index: Arc<AtomicUsize>,
 }
 
-impl Default for RoundRobinState {
+impl Default for SequentialState {
     fn default() -> Self {
         Self {
             next_index: Arc::new(AtomicUsize::new(0)),
@@ -53,7 +53,7 @@ impl Default for RoundRobinState {
     }
 }
 
-impl RoundRobinState {
+impl SequentialState {
     fn next(&self, len: usize) -> usize {
         self.next_index.fetch_add(1, Ordering::Relaxed) % len
     }
@@ -63,9 +63,9 @@ impl RoundRobinState {
 pub enum MattingSelection {
     Fixed(MattingKind),
     Random(Vec<MattingKind>),
-    RoundRobin {
+    Sequential {
         kinds: Vec<MattingKind>,
-        runtime: RoundRobinState,
+        runtime: SequentialState,
     },
 }
 
@@ -75,8 +75,8 @@ impl PartialEq for MattingSelection {
             (MattingSelection::Fixed(a), MattingSelection::Fixed(b)) => a == b,
             (MattingSelection::Random(a), MattingSelection::Random(b)) => a == b,
             (
-                MattingSelection::RoundRobin { kinds: a, .. },
-                MattingSelection::RoundRobin { kinds: b, .. },
+                MattingSelection::Sequential { kinds: a, .. },
+                MattingSelection::Sequential { kinds: b, .. },
             ) => a == b,
             _ => false,
         }
@@ -144,8 +144,8 @@ pub enum MattingMode {
     Blur {
         #[serde(default = "MattingMode::default_blur_sigma")]
         sigma: f32,
-        #[serde(default, rename = "max-sample-dim")]
-        max_sample_dim: Option<u32>,
+        #[serde(default, rename = "max-sample-dimension")]
+        max_sample_dimension: Option<u32>,
         #[serde(default)]
         backend: BlurBackend,
     },
@@ -274,7 +274,7 @@ impl MattingOptions {
             },
             MattingKind::Blur => MattingMode::Blur {
                 sigma: base.sigma.unwrap_or_else(MattingMode::default_blur_sigma),
-                max_sample_dim: base.max_sample_dim,
+                max_sample_dimension: base.max_sample_dimension,
                 backend: base.blur_backend.unwrap_or_default(),
             },
             MattingKind::Studio => MattingMode::Studio {
@@ -322,7 +322,7 @@ struct MattingOptionBuilder {
     max_upscale_factor: Option<f32>,
     color: Option<[u8; 3]>,
     sigma: Option<f32>,
-    max_sample_dim: Option<u32>,
+    max_sample_dimension: Option<u32>,
     blur_backend: Option<BlurBackend>,
     bevel_width_px: Option<f32>,
     bevel_color: Option<[u8; 3]>,
@@ -385,11 +385,11 @@ where
                     }
                     builder.sigma = Some(inline_value_to::<f32, E>(value)?);
                 }
-                "max-sample-dim" => {
-                    if builder.max_sample_dim.is_some() {
-                        return Err(de::Error::duplicate_field("max-sample-dim"));
+                "max-sample-dimension" => {
+                    if builder.max_sample_dimension.is_some() {
+                        return Err(de::Error::duplicate_field("max-sample-dimension"));
                     }
-                    builder.max_sample_dim = Some(inline_value_to::<u32, E>(value)?);
+                    builder.max_sample_dimension = Some(inline_value_to::<u32, E>(value)?);
                 }
                 "backend" => {
                     if builder.blur_backend.is_some() {
@@ -402,7 +402,7 @@ where
                         other,
                         &[
                             "sigma",
-                            "max-sample-dim",
+                            "max-sample-dimension",
                             "backend",
                             "minimum-mat-percentage",
                             "max-upscale-factor",
@@ -612,15 +612,15 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
         } else {
             match type_selection.unwrap_or(TypeSelection::Random) {
                 TypeSelection::Random => MattingSelection::Random(types.clone()),
-                TypeSelection::RoundRobin => MattingSelection::RoundRobin {
+                TypeSelection::Sequential => MattingSelection::Sequential {
                     kinds: types.clone(),
-                    runtime: RoundRobinState::default(),
+                    runtime: SequentialState::default(),
                 },
             }
         };
 
         match &selection {
-            MattingSelection::Random(kinds) | MattingSelection::RoundRobin { kinds, .. } => {
+            MattingSelection::Random(kinds) | MattingSelection::Sequential { kinds, .. } => {
                 if !inline_fields.is_empty() {
                     return Err(de::Error::custom(
                         "matting.types with multiple entries do not support inline matting fields",
@@ -844,11 +844,11 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
                             }
                             builder.sigma = Some(map.next_value()?);
                         }
-                        "max-sample-dim" => {
-                            if builder.max_sample_dim.is_some() {
-                                return Err(de::Error::duplicate_field("max-sample-dim"));
+                        "max-sample-dimension" => {
+                            if builder.max_sample_dimension.is_some() {
+                                return Err(de::Error::duplicate_field("max-sample-dimension"));
                             }
-                            builder.max_sample_dim = Some(map.next_value()?);
+                            builder.max_sample_dimension = Some(map.next_value()?);
                         }
                         "backend" => {
                             if builder.blur_backend.is_some() {
@@ -861,7 +861,7 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
                                 other,
                                 &[
                                     "sigma",
-                                    "max-sample-dim",
+                                    "max-sample-dimension",
                                     "backend",
                                     "minimum-mat-percentage",
                                     "max-upscale-factor",
@@ -969,7 +969,7 @@ impl MattingConfig {
         match &self.selection {
             MattingSelection::Fixed(kind) => self.options.get(kind),
             MattingSelection::Random(kinds) => kinds.iter().find_map(|kind| self.options.get(kind)),
-            MattingSelection::RoundRobin { kinds, .. } => {
+            MattingSelection::Sequential { kinds, .. } => {
                 kinds.first().and_then(|kind| self.options.get(kind))
             }
         }
@@ -1006,13 +1006,13 @@ impl MattingConfig {
                     .cloned()
                     .expect("validated random matting should have matching option")
             }
-            MattingSelection::RoundRobin { kinds, runtime } => {
+            MattingSelection::Sequential { kinds, runtime } => {
                 let index = runtime.next(kinds.len());
                 let kind = kinds[index];
                 self.options
                     .get(&kind)
                     .cloned()
-                    .expect("validated round-robin matting should have matching option")
+                    .expect("validated sequential matting should have matching option")
             }
         }
     }
@@ -1036,7 +1036,7 @@ impl MattingMode {
     }
 
     #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
-    pub const fn default_blur_max_sample_dim() -> u32 {
+    pub const fn default_blur_max_sample_dimension() -> u32 {
         2048
     }
 
@@ -1065,9 +1065,9 @@ impl MattingMode {
 pub enum TransitionSelection {
     Fixed(TransitionKind),
     Random(Vec<TransitionKind>),
-    RoundRobin {
+    Sequential {
         kinds: Vec<TransitionKind>,
-        runtime: RoundRobinState,
+        runtime: SequentialState,
     },
 }
 
@@ -1077,8 +1077,8 @@ impl PartialEq for TransitionSelection {
             (TransitionSelection::Fixed(a), TransitionSelection::Fixed(b)) => a == b,
             (TransitionSelection::Random(a), TransitionSelection::Random(b)) => a == b,
             (
-                TransitionSelection::RoundRobin { kinds: a, .. },
-                TransitionSelection::RoundRobin { kinds: b, .. },
+                TransitionSelection::Sequential { kinds: a, .. },
+                TransitionSelection::Sequential { kinds: b, .. },
             ) => a == b,
             _ => false,
         }
@@ -1177,7 +1177,7 @@ impl TransitionConfig {
             TransitionSelection::Random(kinds) => {
                 kinds.iter().find_map(|kind| self.options.get(kind))
             }
-            TransitionSelection::RoundRobin { kinds, .. } => {
+            TransitionSelection::Sequential { kinds, .. } => {
                 kinds.first().and_then(|kind| self.options.get(kind))
             }
         }
@@ -1201,13 +1201,13 @@ impl TransitionConfig {
                     .cloned()
                     .expect("validated random transition should have matching option")
             }
-            TransitionSelection::RoundRobin { kinds, runtime } => {
+            TransitionSelection::Sequential { kinds, runtime } => {
                 let index = runtime.next(kinds.len());
                 let kind = kinds[index];
                 self.options
                     .get(&kind)
                     .cloned()
-                    .expect("validated round-robin transition should have matching option")
+                    .expect("validated sequential transition should have matching option")
             }
         }
     }
@@ -1228,7 +1228,7 @@ impl TransitionConfig {
                     kind
                 )
             ),
-            TransitionSelection::Random(kinds) | TransitionSelection::RoundRobin { kinds, .. } => {
+            TransitionSelection::Random(kinds) | TransitionSelection::Sequential { kinds, .. } => {
                 for kind in kinds {
                     ensure!(
                         self.options.contains_key(kind),
@@ -1393,7 +1393,7 @@ pub enum TransitionMode {
 #[serde(rename_all = "kebab-case")]
 pub enum AngleSelection {
     Random,
-    RoundRobin,
+    Sequential,
 }
 
 #[derive(Debug, Clone)]
@@ -1486,7 +1486,7 @@ impl AnglePicker {
                     let index = rng.gen_range(0..self.angles_deg.len());
                     self.angles_deg[index]
                 }
-                AngleSelection::RoundRobin => {
+                AngleSelection::Sequential => {
                     let index = self.runtime.next_index.fetch_add(1, Ordering::Relaxed)
                         % self.angles_deg.len();
                     self.angles_deg[index]
@@ -1669,15 +1669,15 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
         } else {
             match type_selection.unwrap_or(TypeSelection::Random) {
                 TypeSelection::Random => TransitionSelection::Random(types.clone()),
-                TypeSelection::RoundRobin => TransitionSelection::RoundRobin {
+                TypeSelection::Sequential => TransitionSelection::Sequential {
                     kinds: types.clone(),
-                    runtime: RoundRobinState::default(),
+                    runtime: SequentialState::default(),
                 },
             }
         };
 
         match &selection {
-            TransitionSelection::Random(kinds) | TransitionSelection::RoundRobin { kinds, .. } => {
+            TransitionSelection::Random(kinds) | TransitionSelection::Sequential { kinds, .. } => {
                 if !inline_fields.is_empty() {
                     return Err(de::Error::custom(
                         "transition.types with multiple entries do not support inline transition fields",
