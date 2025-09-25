@@ -77,3 +77,29 @@ matting:
       minimum-mat-percentage: 6.0
       path: /absolute/path/to/background.png
       fit: cover # options: cover, contain, stretch
+
+# First-run Wi-Fi setup portal
+wifi-setup:
+  enabled: true
+  wifi-interface: wlan0
+  hotspot-ssid: Frame Setup
+  hotspot-password: framesetup
+  hotspot-start-command:
+    - sudo
+    - systemctl
+    - start
+    - frame-hotspot.service
+  hotspot-stop-command:
+    - sudo
+    - systemctl
+    - stop
+    - frame-hotspot.service
+  portal-bind-address: 0.0.0.0
+  portal-port: 8080
+  portal-hostname: 10.0.0.1
+  wpa-supplicant-path: /etc/wpa_supplicant/wpa_supplicant.conf
+  # Uncomment to override wpa_cli path
+  # wpa-cli-path: /usr/sbin/wpa_cli
+  connection-check-timeout-secs: 45
+  connection-check-interval-secs: 3
+  restart-command: []

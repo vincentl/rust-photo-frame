@@ -1,6 +1,7 @@
 mod config;
 mod events;
 mod processing;
+mod wifi_setup;
 mod tasks {
     pub mod files;
     pub mod loader;
@@ -74,6 +75,14 @@ async fn main() -> Result<()> {
         config.display(),
         cfg
     );
+
+    match wifi_setup::ensure_connected(&cfg.wifi_setup).await? {
+        wifi_setup::EnsureResult::AlreadyConnected => {}
+        wifi_setup::EnsureResult::RestartRequired => {
+            wifi_setup::restart_application(&cfg.wifi_setup).await?;
+            return Ok(());
+        }
+    }
 
     if let Some(iterations) = playlist_dry_run {
         run_playlist_dry_run(&cfg, iterations, now_override, playlist_seed)?;
