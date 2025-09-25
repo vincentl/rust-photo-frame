@@ -207,3 +207,50 @@ fn simulate_playlist_avoids_back_to_back_repeats_when_possible() {
         "playlist should not schedule the same photo twice in a row"
     );
 }
+
+#[test]
+fn simulate_playlist_with_two_photos_rotates_between_them() {
+    let options = PlaylistOptions {
+        new_multiplicity: 4,
+        half_life: Duration::from_secs(120),
+    };
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(3_000_000);
+    let alpha = PathBuf::from("alpha.jpg");
+    let beta = PathBuf::from("beta.jpg");
+    let photos = vec![
+        photo_info(alpha.clone(), now - Duration::from_secs(30)),
+        photo_info(beta.clone(), now - Duration::from_secs(40)),
+    ];
+
+    let plan = manager::simulate_playlist(photos, options, now, 12, Some(11));
+
+    assert!(plan.len() >= 4, "expected multiple scheduled items");
+    assert!(
+        plan.windows(2).all(|pair| pair[0] != pair[1]),
+        "two-photo playlist should alternate when possible"
+    );
+    assert!(plan.contains(&alpha) && plan.contains(&beta));
+}
+
+#[test]
+fn simulate_playlist_allows_repeats_when_only_one_photo_exists() {
+    let options = PlaylistOptions {
+        new_multiplicity: 5,
+        half_life: Duration::from_secs(60),
+    };
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(4_000_000);
+    let solo = PathBuf::from("solo.jpg");
+    let photos = vec![photo_info(solo.clone(), now - Duration::from_secs(10))];
+
+    let plan = manager::simulate_playlist(photos, options, now, 6, Some(3));
+
+    assert!(
+        plan.len() >= 2,
+        "expected repeated scheduling for single photo"
+    );
+    assert!(plan.iter().all(|p| p == &solo));
+    assert!(
+        plan.windows(2).any(|pair| pair[0] == pair[1]),
+        "single photo should be allowed to repeat"
+    );
+}
