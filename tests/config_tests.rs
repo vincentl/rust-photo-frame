@@ -39,7 +39,7 @@ fn parse_with_studio_matting() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  type: studio
+  types: [studio]
   options:
     studio:
       bevel-width-px: 5.0
@@ -80,7 +80,7 @@ fn parse_studio_with_custom_texture_strength() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  type: studio
+  types: [studio]
   texture-strength: 0.35
 "#;
 
@@ -105,7 +105,7 @@ fn parse_studio_with_custom_weave_periods() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  type: studio
+  types: [studio]
   warp-period-px: 8.5
   weft-period-px: 4.25
 "#;
@@ -134,7 +134,7 @@ fn parse_random_matting_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  type: random
+  types: [fixed-color, blur]
   options:
     fixed-color:
       color: [10, 20, 30]
@@ -144,7 +144,10 @@ matting:
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(cfg.matting.selection(), MattingSelection::Random);
+    assert_eq!(
+        cfg.matting.selection(),
+        MattingSelection::Random(vec![MattingKind::FixedColor, MattingKind::Blur])
+    );
     let options = cfg.matting.options();
     assert_eq!(options.len(), 2);
     let fixed = options
@@ -171,11 +174,13 @@ fn random_matting_without_options_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  type: random
+  types: [fixed-color, blur]
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(err.to_string().contains("matting.options"));
+    assert!(err
+        .to_string()
+        .contains("matting.types entry fixed-color must match a key"));
 }
 
 #[test]
@@ -183,7 +188,7 @@ fn selecting_missing_option_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  type: studio
+  types: [studio]
   options:
     blur:
       sigma: 12.0
@@ -192,7 +197,28 @@ matting:
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
     assert!(err
         .to_string()
-        .contains("matting.type studio must match a key"));
+        .contains("matting.types entry studio must match a key"));
+}
+
+#[test]
+fn parse_legacy_random_matting_type_uses_option_keys() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  type: random
+  options:
+    fixed-color:
+      color: [5, 15, 25]
+    blur:
+      sigma: 9.0
+      minimum-mat-percentage: 4.0
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(
+        cfg.matting.selection(),
+        MattingSelection::Random(vec![MattingKind::FixedColor, MattingKind::Blur])
+    );
 }
 
 #[test]
@@ -200,7 +226,7 @@ fn parse_inline_fade_transition() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  type: fade
+  types: [fade]
   duration-ms: 750
   through-black: true
 "#;
@@ -228,7 +254,7 @@ fn parse_random_transition_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  type: random
+  types: [fade, wipe, push]
   options:
     fade:
       duration-ms: 450
@@ -243,7 +269,14 @@ transition:
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(cfg.transition.selection(), TransitionSelection::Random);
+    assert_eq!(
+        cfg.transition.selection(),
+        TransitionSelection::Random(vec![
+            TransitionKind::Fade,
+            TransitionKind::Wipe,
+            TransitionKind::Push,
+        ])
+    );
     let options = cfg.transition.options();
     assert_eq!(options.len(), 3);
     let wipe = options
@@ -282,11 +315,34 @@ fn random_transition_without_options_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  type: random
+  types: [fade, wipe]
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(err.to_string().contains("transition.options"));
+    assert!(err
+        .to_string()
+        .contains("transition.types entry fade must match a key"));
+}
+
+#[test]
+fn parse_legacy_random_transition_type_uses_option_keys() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  type: random
+  options:
+    wipe:
+      duration-ms: 520
+    push:
+      duration-ms: 480
+      angle-deg: 30.0
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(
+        cfg.transition.selection(),
+        TransitionSelection::Random(vec![TransitionKind::Wipe, TransitionKind::Push])
+    );
 }
 
 #[test]
@@ -318,7 +374,7 @@ fn wipe_transition_rejects_negative_jitter() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  type: wipe
+  types: [wipe]
   angle-jitter-degrees: -15.0
 "#;
 
@@ -333,7 +389,7 @@ fn push_transition_rejects_negative_jitter() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  type: push
+  types: [push]
   angle-jitter-degrees: -30.0
 "#;
 
@@ -348,7 +404,7 @@ fn push_transition_configures_multiple_angles() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  type: push
+  types: [push]
   duration-ms: 725
   angle-list-degrees: [90.0, 270.0]
   angle-selection: round-robin

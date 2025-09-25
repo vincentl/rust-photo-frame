@@ -3,7 +3,7 @@ photo-library-path: /Users/vincent/rust-photo-frame/photo-library-test
 # Render/transition settings
 # Transition behavior between photos
 transition:
-  type: random
+  types: [fade, wipe, push]
   options:
     fade:
       duration-ms: 400
@@ -33,7 +33,7 @@ playlist:
 
 # Matting settings
 matting:
-  type: random
+  types: [fixed-color, blur, studio, fixed-image]
   options:
     fixed-color:
       color: [0, 0, 0]
