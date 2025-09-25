@@ -115,7 +115,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let flashes = max(U.params0.x, 0.0);
       let reveal_start = clamp(U.params0.y, 0.05, 0.95);
       let stripes = max(U.params0.z, 1.0);
-      let seed = U.params1.xy;
+      let seed = vec2<f32>(U.params0.w, U.params1.x);
+      let flash_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
       let prep_ratio = progress / max(reveal_start, 1e-3);
       if (progress < reveal_start) {
         let segments = flashes * 2.0 + 1.0;
@@ -124,8 +125,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var flash_color = current;
         if (stage_u > 0u) {
           let toggle = (stage_u & 1u) == 1u;
-          let tone = select(1.0, 0.0, toggle);
-          flash_color = vec4<f32>(vec3<f32>(tone), 1.0);
+          if (toggle) {
+            flash_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+          } else {
+            flash_color = vec4<f32>(flash_rgb, 1.0);
+          }
         }
         let stage_pos = fract(prep_ratio * segments);
         let flash_mix = smoothstep(0.15, 0.85, stage_pos);
@@ -138,7 +142,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let noise = fract(sin(dot(noise_vec, vec2<f32>(12.9898, 78.233))) * 43758.5453);
         let gate = clamp(reveal_ratio * 1.15 - stripe_phase * 0.85 + noise * 0.25, 0.0, 1.0);
         let mask = smoothstep(0.25, 0.75, gate);
-        let ghost = mix(current, vec4<f32>(1.0, 1.0, 1.0, 1.0), 0.55);
+        let ghost = mix(current, vec4<f32>(flash_rgb, 1.0), 0.55);
         color = mix(ghost, next, mask);
       }
     }
