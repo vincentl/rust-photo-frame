@@ -111,12 +111,47 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let mask = step(0.5, next.a);
       color = current * (1.0 - mask) + next * mask;
     }
+    case 4u: {
+      let flashes = max(U.params0.x, 0.0);
+      let reveal_start = clamp(U.params0.y, 0.05, 0.95);
+      let stripes = max(U.params0.z, 1.0);
+      let seed = vec2<f32>(U.params0.w, U.params1.x);
+      let flash_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
+      let prep_ratio = progress / max(reveal_start, 1e-3);
+      if (progress < reveal_start) {
+        let segments = flashes * 2.0 + 1.0;
+        let staged = clamp(floor(prep_ratio * segments), 0.0, segments);
+        let stage_u = u32(staged);
+        var flash_color = current;
+        if (stage_u > 0u) {
+          let toggle = (stage_u & 1u) == 1u;
+          if (toggle) {
+            flash_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+          } else {
+            flash_color = vec4<f32>(flash_rgb, 1.0);
+          }
+        }
+        let stage_pos = fract(prep_ratio * segments);
+        let flash_mix = smoothstep(0.15, 0.85, stage_pos);
+        color = mix(current, flash_color, clamp(flash_mix, 0.0, 1.0));
+      } else {
+        let reveal_ratio = (progress - reveal_start) / max(1.0 - reveal_start, 1e-3);
+        let stripe_idx = floor(in.screen_uv.y * stripes);
+        let stripe_phase = stripe_idx / stripes;
+        let noise_vec = vec2<f32>(stripe_idx, floor(in.screen_uv.x * stripes)) + seed;
+        let noise = fract(sin(dot(noise_vec, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+        let gate = clamp(reveal_ratio * 1.15 - stripe_phase * 0.85 + noise * 0.25, 0.0, 1.0);
+        let mask = smoothstep(0.25, 0.75, gate);
+        let ghost = mix(current, vec4<f32>(flash_rgb, 1.0), 0.55);
+        color = mix(ghost, next, mask);
+      }
+    }
     default: {
       color = current;
     }
   }
   var alpha = max(max(current.a, next.a), color.a);
-  if (U.kind == 1u && U.params0.x > 0.5) {
+  if ((U.kind == 1u && U.params0.x > 0.5) || U.kind == 4u) {
     alpha = 1.0;
   }
   return vec4<f32>(color.rgb, clamp(alpha, 0.0, 1.0));
