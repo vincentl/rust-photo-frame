@@ -98,9 +98,22 @@ pub fn run_windowed(
     }
 
     enum ActiveTransition {
-        Fade { through_black: bool },
-        Wipe { normal: [f32; 2], softness: f32 },
-        Push { direction: [f32; 2] },
+        Fade {
+            through_black: bool,
+        },
+        Wipe {
+            normal: [f32; 2],
+            softness: f32,
+        },
+        Push {
+            direction: [f32; 2],
+        },
+        EInk {
+            flash_count: u32,
+            reveal_portion: f32,
+            stripe_count: u32,
+            noise_seed: [f32; 2],
+        },
     }
 
     struct MattingPipeline {
@@ -431,6 +444,12 @@ pub fn run_windowed(
                     }
                     ActiveTransition::Push { direction }
                 }
+                TransitionMode::EInk(cfg) => ActiveTransition::EInk {
+                    flash_count: cfg.flash_count,
+                    reveal_portion: cfg.reveal_portion.clamp(0.05, 0.95),
+                    stripe_count: cfg.stripe_count.max(1),
+                    noise_seed: [rng.gen(), rng.gen()],
+                },
             };
             Self {
                 started_at,
@@ -930,6 +949,18 @@ pub fn run_windowed(
                                 let diag = (screen_w * screen_w + screen_h * screen_h).sqrt();
                                 uniforms.params0[0] = direction[0] * diag;
                                 uniforms.params0[1] = direction[1] * diag;
+                            }
+                            ActiveTransition::EInk {
+                                flash_count,
+                                reveal_portion,
+                                stripe_count,
+                                noise_seed,
+                            } => {
+                                uniforms.params0[0] = (*flash_count).min(6) as f32;
+                                uniforms.params0[1] = *reveal_portion;
+                                uniforms.params0[2] = (*stripe_count).max(1) as f32;
+                                uniforms.params1[0] = noise_seed[0];
+                                uniforms.params1[1] = noise_seed[1];
                             }
                         }
                     } else if let Some(cur) = &self.current {

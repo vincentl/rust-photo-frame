@@ -888,17 +888,19 @@ pub enum TransitionKind {
     Fade,
     Wipe,
     Push,
+    EInk,
 }
 
 impl TransitionKind {
-    const ALL: &'static [Self] = &[Self::Fade, Self::Wipe, Self::Push];
-    const NAMES: &'static [&'static str] = &["fade", "wipe", "push"];
+    const ALL: &'static [Self] = &[Self::Fade, Self::Wipe, Self::Push, Self::EInk];
+    const NAMES: &'static [&'static str] = &["fade", "wipe", "push", "e-ink"];
 
     fn as_str(&self) -> &'static str {
         match self {
             Self::Fade => "fade",
             Self::Wipe => "wipe",
             Self::Push => "push",
+            Self::EInk => "e-ink",
         }
     }
 
@@ -907,6 +909,7 @@ impl TransitionKind {
             Self::Fade => 1,
             Self::Wipe => 2,
             Self::Push => 3,
+            Self::EInk => 4,
         }
     }
 }
@@ -1018,14 +1021,16 @@ pub struct TransitionOptions {
 
 impl TransitionOptions {
     fn default_for(kind: TransitionKind) -> Self {
+        let (duration_ms, mode) = match kind {
+            TransitionKind::Fade => (400, TransitionMode::Fade(FadeTransition::default())),
+            TransitionKind::Wipe => (400, TransitionMode::Wipe(WipeTransition::default())),
+            TransitionKind::Push => (400, TransitionMode::Push(PushTransition::default())),
+            TransitionKind::EInk => (1600, TransitionMode::EInk(EInkTransition::default())),
+        };
         Self {
             kind,
-            duration_ms: 400,
-            mode: match kind {
-                TransitionKind::Fade => TransitionMode::Fade(FadeTransition::default()),
-                TransitionKind::Wipe => TransitionMode::Wipe(WipeTransition::default()),
-                TransitionKind::Push => TransitionMode::Push(PushTransition::default()),
-            },
+            duration_ms,
+            mode,
         }
     }
 
@@ -1085,6 +1090,19 @@ impl TransitionOptions {
                     )
                 );
             }
+            TransitionMode::EInk(eink) => {
+                if !eink.reveal_portion.is_finite() {
+                    return Err(anyhow::anyhow!(
+                        "transition option {} has non-finite e-ink.reveal-portion",
+                        self.kind
+                    ));
+                }
+                eink.reveal_portion = eink.reveal_portion.clamp(0.05, 0.95);
+                if eink.stripe_count == 0 {
+                    eink.stripe_count = 1;
+                }
+                eink.flash_count = eink.flash_count.min(6);
+            }
         }
         Ok(())
     }
@@ -1117,6 +1135,16 @@ impl TransitionOptions {
                     randomize_direction: builder.push_randomize_direction.unwrap_or(false),
                 })
             }
+            TransitionKind::EInk => {
+                let defaults = EInkTransition::default();
+                TransitionMode::EInk(EInkTransition {
+                    flash_count: builder.eink_flash_count.unwrap_or(defaults.flash_count),
+                    reveal_portion: builder
+                        .eink_reveal_portion
+                        .unwrap_or(defaults.reveal_portion),
+                    stripe_count: builder.eink_stripe_count.unwrap_or(defaults.stripe_count),
+                })
+            }
         };
         let mut option = Self {
             kind,
@@ -1144,6 +1172,19 @@ impl TransitionOptions {
                     )
                 );
             }
+            TransitionMode::EInk(eink) => {
+                if !eink.reveal_portion.is_finite() {
+                    return Err(anyhow::anyhow!(
+                        "transition option {} has non-finite e-ink.reveal-portion",
+                        kind
+                    ));
+                }
+                eink.reveal_portion = eink.reveal_portion.clamp(0.05, 0.95);
+                if eink.stripe_count == 0 {
+                    eink.stripe_count = 1;
+                }
+                eink.flash_count = eink.flash_count.min(6);
+            }
         }
 
         Ok(option)
@@ -1155,6 +1196,7 @@ pub enum TransitionMode {
     Fade(FadeTransition),
     Wipe(WipeTransition),
     Push(PushTransition),
+    EInk(EInkTransition),
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1198,6 +1240,23 @@ impl Default for PushTransition {
             angle_jitter_deg: 0.0,
             reverse: false,
             randomize_direction: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EInkTransition {
+    pub flash_count: u32,
+    pub reveal_portion: f32,
+    pub stripe_count: u32,
+}
+
+impl Default for EInkTransition {
+    fn default() -> Self {
+        Self {
+            flash_count: 3,
+            reveal_portion: 0.55,
+            stripe_count: 24,
         }
     }
 }
@@ -1417,6 +1476,9 @@ struct TransitionOptionBuilder {
     push_reverse: Option<bool>,
     push_randomize_direction: Option<bool>,
     push_vertical_axis: Option<bool>,
+    eink_flash_count: Option<u32>,
+    eink_reveal_portion: Option<f32>,
+    eink_stripe_count: Option<u32>,
 }
 
 fn apply_transition_inline_field<E: de::Error>(
@@ -1470,6 +1532,15 @@ fn apply_transition_inline_field<E: de::Error>(
         "softness" if matches!(kind, TransitionKind::Wipe) => {
             builder.wipe_softness = Some(inline_value_to::<f32, E>(value)?);
         }
+        "flash-count" if matches!(kind, TransitionKind::EInk) => {
+            builder.eink_flash_count = Some(inline_value_to::<u32, E>(value)?);
+        }
+        "reveal-portion" if matches!(kind, TransitionKind::EInk) => {
+            builder.eink_reveal_portion = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "stripe-count" if matches!(kind, TransitionKind::EInk) => {
+            builder.eink_stripe_count = Some(inline_value_to::<u32, E>(value)?);
+        }
         _ => {
             return Err(de::Error::unknown_field(
                 field,
@@ -1482,6 +1553,9 @@ fn apply_transition_inline_field<E: de::Error>(
                     "randomize-direction",
                     "softness",
                     "vertical-axis",
+                    "flash-count",
+                    "reveal-portion",
+                    "stripe-count",
                 ],
             ));
         }
