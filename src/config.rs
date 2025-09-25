@@ -1018,6 +1018,428 @@ impl MattingConfig {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PhotoAffectConfig {
+    selection: PhotoAffectSelection,
+    options: BTreeMap<PhotoAffectKind, PhotoAffectMode>,
+}
+
+#[derive(Debug, Clone)]
+pub enum PhotoAffectSelection {
+    Disabled,
+    Fixed(PhotoAffectKind),
+    Random(Vec<PhotoAffectKind>),
+    RoundRobin {
+        kinds: Vec<PhotoAffectKind>,
+        runtime: RoundRobinState,
+    },
+}
+
+impl Default for PhotoAffectSelection {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PhotoAffectKind {
+    Print3d,
+}
+
+impl PhotoAffectKind {
+    const ALL: &'static [Self] = &[Self::Print3d];
+    const NAMES: &'static [&'static str] = &["print-3d"];
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Print3d => "print-3d",
+        }
+    }
+}
+
+impl fmt::Display for PhotoAffectKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for PhotoAffectKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        for kind in Self::ALL {
+            if raw == kind.as_str() {
+                return Ok(*kind);
+            }
+        }
+        Err(de::Error::unknown_variant(&raw, Self::NAMES))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum PhotoAffectMode {
+    Print3d(Print3dOptions),
+}
+
+impl PhotoAffectMode {
+    fn kind(&self) -> PhotoAffectKind {
+        match self {
+            Self::Print3d(_) => PhotoAffectKind::Print3d,
+        }
+    }
+
+    fn default_for(kind: PhotoAffectKind) -> Self {
+        match kind {
+            PhotoAffectKind::Print3d => Self::Print3d(Print3dOptions::default()),
+        }
+    }
+
+    fn sanitize(&mut self) {
+        match self {
+            Self::Print3d(options) => options.sanitize(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct Print3dOptions {
+    #[serde(
+        default = "Print3dOptions::default_relief_strength",
+        rename = "relief-strength"
+    )]
+    pub relief_strength: f32,
+    #[serde(
+        default = "Print3dOptions::default_light_azimuth",
+        rename = "light-azimuth-degrees"
+    )]
+    pub light_azimuth_degrees: f32,
+    #[serde(
+        default = "Print3dOptions::default_light_elevation",
+        rename = "light-elevation-degrees"
+    )]
+    pub light_elevation_degrees: f32,
+    #[serde(default = "Print3dOptions::default_ambient")]
+    pub ambient: f32,
+    #[serde(default = "Print3dOptions::default_diffuse")]
+    pub diffuse: f32,
+    #[serde(
+        default = "Print3dOptions::default_specular_strength",
+        rename = "specular-strength"
+    )]
+    pub specular_strength: f32,
+    #[serde(
+        default = "Print3dOptions::default_specular_shininess",
+        rename = "specular-shininess"
+    )]
+    pub specular_shininess: f32,
+    #[serde(
+        default = "Print3dOptions::default_shadow_floor",
+        rename = "shadow-floor"
+    )]
+    pub shadow_floor: f32,
+    #[serde(
+        default = "Print3dOptions::default_highlight_gain",
+        rename = "highlight-gain"
+    )]
+    pub highlight_gain: f32,
+}
+
+impl Default for Print3dOptions {
+    fn default() -> Self {
+        Self {
+            relief_strength: Self::default_relief_strength(),
+            light_azimuth_degrees: Self::default_light_azimuth(),
+            light_elevation_degrees: Self::default_light_elevation(),
+            ambient: Self::default_ambient(),
+            diffuse: Self::default_diffuse(),
+            specular_strength: Self::default_specular_strength(),
+            specular_shininess: Self::default_specular_shininess(),
+            shadow_floor: Self::default_shadow_floor(),
+            highlight_gain: Self::default_highlight_gain(),
+        }
+    }
+}
+
+impl Print3dOptions {
+    const fn default_relief_strength() -> f32 {
+        1.6
+    }
+
+    const fn default_light_azimuth() -> f32 {
+        135.0
+    }
+
+    const fn default_light_elevation() -> f32 {
+        55.0
+    }
+
+    const fn default_ambient() -> f32 {
+        0.35
+    }
+
+    const fn default_diffuse() -> f32 {
+        0.65
+    }
+
+    const fn default_specular_strength() -> f32 {
+        0.25
+    }
+
+    const fn default_specular_shininess() -> f32 {
+        24.0
+    }
+
+    const fn default_shadow_floor() -> f32 {
+        0.15
+    }
+
+    const fn default_highlight_gain() -> f32 {
+        0.35
+    }
+
+    fn sanitize(&mut self) {
+        self.relief_strength = self.relief_strength.clamp(0.0, 12.0);
+        self.light_azimuth_degrees = self.light_azimuth_degrees.rem_euclid(360.0);
+        self.light_elevation_degrees = self.light_elevation_degrees.clamp(5.0, 85.0);
+        self.ambient = self.ambient.clamp(0.0, 1.0);
+        self.diffuse = self.diffuse.clamp(0.0, 1.0);
+        if self.ambient + self.diffuse <= f32::EPSILON {
+            self.ambient = Self::default_ambient();
+            self.diffuse = Self::default_diffuse();
+        }
+        self.specular_strength = self.specular_strength.clamp(0.0, 2.0);
+        self.specular_shininess = self.specular_shininess.clamp(1.0, 128.0);
+        self.shadow_floor = self.shadow_floor.clamp(0.0, 1.0);
+        self.highlight_gain = self.highlight_gain.clamp(0.0, 2.0);
+    }
+}
+
+impl<'de> Deserialize<'de> for PhotoAffectConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(PhotoAffectConfigVisitor)
+    }
+}
+
+struct PhotoAffectConfigVisitor;
+
+impl<'de> Visitor<'de> for PhotoAffectConfigVisitor {
+    type Value = PhotoAffectConfig;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a photo-affect configuration map")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut requested_types: Option<Vec<PhotoAffectKind>> = None;
+        let mut type_selection: Option<TypeSelection> = None;
+        let mut options: Option<BTreeMap<PhotoAffectKind, PhotoAffectMode>> = None;
+
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "types" => {
+                    if requested_types.is_some() {
+                        return Err(de::Error::duplicate_field("types"));
+                    }
+                    let raw: Vec<String> = map.next_value()?;
+                    let mut kinds = Vec::new();
+                    for entry in raw {
+                        let kind = PhotoAffectKind::ALL
+                            .iter()
+                            .find(|candidate| entry == candidate.as_str())
+                            .copied()
+                            .ok_or_else(|| {
+                                de::Error::custom(format!(
+                                    "unknown photo-affect type '{}' expected one of: {}",
+                                    entry,
+                                    PhotoAffectKind::NAMES.join(", ")
+                                ))
+                            })?;
+                        if !kinds.contains(&kind) {
+                            kinds.push(kind);
+                        }
+                    }
+                    requested_types = Some(kinds);
+                }
+                "type-selection" => {
+                    if type_selection.is_some() {
+                        return Err(de::Error::duplicate_field("type-selection"));
+                    }
+                    type_selection = Some(map.next_value()?);
+                }
+                "options" => {
+                    if options.is_some() {
+                        return Err(de::Error::duplicate_field("options"));
+                    }
+                    options = Some(map.next_value_seed(PhotoAffectOptionsMapSeed)?);
+                }
+                other => {
+                    return Err(de::Error::unknown_field(
+                        other,
+                        &["types", "type-selection", "options"],
+                    ));
+                }
+            }
+        }
+
+        if requested_types.is_none() && type_selection.is_some() {
+            return Err(de::Error::custom(
+                "photo-affects.type-selection requires photo-affects.types",
+            ));
+        }
+
+        let types = requested_types.unwrap_or_default();
+        let mut options = options.unwrap_or_default();
+
+        if types.is_empty() {
+            if !options.is_empty() {
+                for mode in options.values_mut() {
+                    mode.sanitize();
+                }
+            }
+            return Ok(PhotoAffectConfig {
+                selection: PhotoAffectSelection::Disabled,
+                options,
+            });
+        }
+
+        for kind in &types {
+            options
+                .entry(*kind)
+                .or_insert_with(|| PhotoAffectMode::default_for(*kind));
+        }
+
+        let selection = if types.len() == 1 {
+            PhotoAffectSelection::Fixed(types[0])
+        } else {
+            match type_selection.unwrap_or(TypeSelection::Random) {
+                TypeSelection::Random => PhotoAffectSelection::Random(types.clone()),
+                TypeSelection::RoundRobin => PhotoAffectSelection::RoundRobin {
+                    kinds: types.clone(),
+                    runtime: RoundRobinState::default(),
+                },
+            }
+        };
+
+        for mode in options.values_mut() {
+            mode.sanitize();
+        }
+
+        Ok(PhotoAffectConfig { selection, options })
+    }
+}
+
+struct PhotoAffectOptionsMapSeed;
+
+impl<'de> DeserializeSeed<'de> for PhotoAffectOptionsMapSeed {
+    type Value = BTreeMap<PhotoAffectKind, PhotoAffectMode>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(PhotoAffectOptionsMapVisitor)
+    }
+}
+
+struct PhotoAffectOptionsMapVisitor;
+
+impl<'de> Visitor<'de> for PhotoAffectOptionsMapVisitor {
+    type Value = BTreeMap<PhotoAffectKind, PhotoAffectMode>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a map of photo affect options keyed by type")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut options = BTreeMap::new();
+        while let Some(kind) = map.next_key::<PhotoAffectKind>()? {
+            if options.contains_key(&kind) {
+                return Err(de::Error::custom(format!(
+                    "duplicate photo-affect option for type {}",
+                    kind
+                )));
+            }
+            let option = map.next_value_seed(PhotoAffectOptionSeed { kind })?;
+            if option.kind() != kind {
+                return Err(de::Error::custom(format!(
+                    "photo-affect option for key {} does not match its configuration",
+                    kind
+                )));
+            }
+            options.insert(kind, option);
+        }
+        Ok(options)
+    }
+}
+
+struct PhotoAffectOptionSeed {
+    kind: PhotoAffectKind,
+}
+
+impl<'de> DeserializeSeed<'de> for PhotoAffectOptionSeed {
+    type Value = PhotoAffectMode;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match self.kind {
+            PhotoAffectKind::Print3d => {
+                let opts = Print3dOptions::deserialize(deserializer)?;
+                Ok(PhotoAffectMode::Print3d(opts))
+            }
+        }
+    }
+}
+
+impl PhotoAffectConfig {
+    pub fn prepare_runtime(&mut self) -> Result<()> {
+        for mode in self.options.values_mut() {
+            mode.sanitize();
+        }
+        Ok(())
+    }
+
+    pub fn next_kind(&self) -> Option<PhotoAffectKind> {
+        match &self.selection {
+            PhotoAffectSelection::Disabled => None,
+            PhotoAffectSelection::Fixed(kind) => Some(*kind),
+            PhotoAffectSelection::Random(kinds) => {
+                let mut rng = rand::thread_rng();
+                kinds.iter().copied().choose(&mut rng)
+            }
+            PhotoAffectSelection::RoundRobin { kinds, runtime } => {
+                if kinds.is_empty() {
+                    None
+                } else {
+                    let idx = runtime.next(kinds.len());
+                    kinds.get(idx).copied()
+                }
+            }
+        }
+    }
+
+    pub fn options_for(&self, kind: PhotoAffectKind) -> Option<&PhotoAffectMode> {
+        self.options.get(&kind)
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self.selection, PhotoAffectSelection::Disabled)
+    }
+}
+
 impl Default for MattingMode {
     fn default() -> Self {
         Self::FixedColor {
@@ -1434,13 +1856,12 @@ impl AnglePicker {
         selection: Option<AngleSelection>,
         jitter_deg: Option<f32>,
     ) -> Self {
-        let picker = Self {
+        Self {
             angles_deg: angles_deg.unwrap_or_else(|| vec![0.0]),
             selection: selection.unwrap_or(AngleSelection::Random),
             jitter_deg: jitter_deg.unwrap_or(0.0),
             runtime: AnglePickerRuntime::default(),
-        };
-        picker
+        }
     }
 
     fn normalize(&mut self, kind: TransitionKind) -> Result<()> {
@@ -1522,17 +1943,9 @@ impl Default for WipeTransition {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PushTransition {
     pub angles: AnglePicker,
-}
-
-impl Default for PushTransition {
-    fn default() -> Self {
-        Self {
-            angles: AnglePicker::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1986,6 +2399,9 @@ pub struct Configuration {
     pub startup_shuffle_seed: Option<u64>,
     /// Matting configuration for displayed photos.
     pub matting: MattingConfig,
+    /// Post-decode photo affects applied before rendering.
+    #[serde(default)]
+    pub photo_affects: PhotoAffectConfig,
     /// Playlist weighting options for how frequently new photos repeat.
     pub playlist: PlaylistOptions,
 }
@@ -2014,6 +2430,9 @@ impl Configuration {
         self.matting
             .prepare_runtime()
             .context("invalid matting configuration")?;
+        self.photo_affects
+            .prepare_runtime()
+            .context("invalid photo-affects configuration")?;
         self.playlist.validate()?;
         Ok(self)
     }
@@ -2030,6 +2449,7 @@ impl Default for Configuration {
             loader_max_concurrent_decodes: 4,
             startup_shuffle_seed: None,
             matting: MattingConfig::default(),
+            photo_affects: PhotoAffectConfig::default(),
             playlist: PlaylistOptions::default(),
         }
     }

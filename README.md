@@ -13,8 +13,9 @@ This project is **alpha and under active development**. Expect rough edges and i
 3. [Features](#features)
 4. [Configuration](#configuration)
 5. [Playlist Weighting](#playlist-weighting)
-6. [Matting Configuration](#matting-configuration)
-7. [License](#license)
+6. [Photo Affect Configuration](#photo-affect-configuration)
+7. [Matting Configuration](#matting-configuration)
+8. [License](#license)
 
 ## Quickstart
 
@@ -47,13 +48,15 @@ flowchart LR
   MAIN[Main] --> FILES[PhotoFiles]
   MAIN --> MAN[PhotoManager]
   MAIN --> LOAD[PhotoLoader]
+  MAIN --> AFFECT[PhotoAffect]
   MAIN --> VIEW[PhotoViewer]
 
   FILES -->|inventory updates| MAN
   MAN -->|invalid photo| FILES
   MAN -->|photo requests| LOAD
-  LOAD -->|decoded image| VIEW
+  LOAD -->|decoded image| AFFECT
   LOAD -->|invalid photo| FILES
+  AFFECT -->|processed image| VIEW
   VIEW -->|displayed event| MAN
 ```
 
@@ -67,6 +70,7 @@ flowchart LR
 - Fixed per-image delay (configurable)
 - Weighted playlist that repeats new photos using an exponential half-life decay
 - Error handling and structured logging
+- Optional photo-affect stage that can simulate print relief before rendering
 
 ### Tier 2+ _(TODO: summarize roadmap items from `Roadmap.md` and planned UX polish)_
 
@@ -254,6 +258,53 @@ Each transition exposes a focused set of fields:
   - `reveal-portion`: Fraction of the timeline (0.05–0.95) spent on the flashing prep before stripes begin revealing the next image.
   - `stripe-count`: How many horizontal bands sweep in to reveal the next photo; higher values mimic finer e-ink refresh passes.
   - `flash-color`: `[r, g, b]` color (0–255) used for the light flash phase before the black inversion.
+
+### Photo affect configuration
+
+The `photo-affects` block introduces an optional processing stage that sits between the loader and the viewer. When the `types`
+list is empty the task is effectively a no-op pass-through. Populate `photo-affects.types` to opt into one or more effects and
+use `photo-affects.type-selection` to decide how the stage rotates through them (mirroring the matting and transition semantics).
+
+The first available effect, `print-3d`, draws on the lighting cues described in *3D Simulation of Prints for Improved Soft
+Proofing* by Rohit A. Patil, Mark D. Fairchild, and Garrett M. Johnson. It computes a per-pixel surface normal from the photo’s
+local luminance gradient, shades the image with a configurable light direction, and adds a subtle specular highlight to mimic the
+depth cues you see when tilting a physical print.
+
+Enable the affect by listing it under `photo-affects.types` and tuning its controls inside `photo-affects.options.print-3d`:
+
+```yaml
+photo-affects:
+  types: [print-3d]
+  type-selection: random
+  options:
+    print-3d:
+      relief-strength: 1.6
+      light-azimuth-degrees: 135.0
+      light-elevation-degrees: 55.0
+      ambient: 0.35
+      diffuse: 0.65
+      specular-strength: 0.25
+      specular-shininess: 24.0
+      shadow-floor: 0.15
+      highlight-gain: 0.35
+```
+
+Key parameters:
+
+- **`relief-strength`** (float, default `1.6`): Scales how strongly luminance gradients tilt the simulated surface normal. Lower
+  values soften the relief; higher values deepen highlights and shadows.
+- **`light-azimuth-degrees`** (float, default `135.0`): Compass direction (0° = positive X, 90° = positive Y) for the virtual
+  key light.
+- **`light-elevation-degrees`** (float, default `55.0`): Elevation angle for the light source above the print plane.
+- **`ambient`** (float 0–1, default `0.35`): Base illumination floor to keep shadows from crushing.
+- **`diffuse`** (float 0–1, default `0.65`): Diffuse contribution applied to the Lambertian term.
+- **`specular-strength`** (float, default `0.25`): Amount of specular highlight energy added to the shading model.
+- **`specular-shininess`** (float, default `24.0`): Controls the width of the specular highlight (larger = tighter highlights).
+- **`shadow-floor`** (float 0–1, default `0.15`): Minimum multiplier applied to preserve detail in the darkest regions.
+- **`highlight-gain`** (float, default `0.35`): Additional boost applied to specular highlights to mimic glossy paper sheen.
+
+Future affects can reuse the same `types`/`type-selection` surface; each new affect simply registers a new key under
+`photo-affects.options` with its own option set.
 
 ### Matting configuration
 
