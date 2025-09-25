@@ -5,6 +5,7 @@ mod tasks {
     pub mod files;
     pub mod loader;
     pub mod manager;
+    pub mod photo_affect;
     pub mod viewer;
 }
 
@@ -84,7 +85,8 @@ async fn main() -> Result<()> {
     let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(128); // Files -> Manager
     let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(64); // Manager/Loader -> Files
     let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(4); // Manager -> Loader (allow a few in-flight requests)
-    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count); // Loader  -> Viewer (prefetch up to cfg.viewer_preload_count)
+    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count); // Loader -> PhotoAffect
+    let (processed_tx, processed_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count); // PhotoAffect -> Viewer
     let (displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(64); // Viewer  -> Manager
 
     let cancel = CancellationToken::new();
@@ -166,11 +168,29 @@ async fn main() -> Result<()> {
         }
     });
 
+    // PhotoAffect pipeline (optional post-processing)
+    let photo_affect_cfg = cfg.photo_affect.clone();
+    tasks.spawn({
+        let from_loader = loaded_rx;
+        let to_viewer = processed_tx.clone();
+        let cancel = cancel.clone();
+        let affect_cfg = photo_affect_cfg;
+        async move {
+            tasks::photo_affect::run(from_loader, to_viewer, cancel, affect_cfg)
+                .await
+                .context("photo-affect task failed")
+        }
+    });
+
     // Run the windowed viewer on the main thread (blocking) after spawning other tasks
     // This call returns when the window closes or cancellation occurs
-    if let Err(e) =
-        tasks::viewer::run_windowed(loaded_rx, displayed_tx.clone(), cancel.clone(), cfg.clone())
-            .context("viewer failed")
+    if let Err(e) = tasks::viewer::run_windowed(
+        processed_rx,
+        displayed_tx.clone(),
+        cancel.clone(),
+        cfg.clone(),
+    )
+    .context("viewer failed")
     {
         tracing::error!("{e:?}");
     }

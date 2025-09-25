@@ -47,6 +47,20 @@ loader-max-concurrent-decodes: 4
 # Optional deterministic seed for the initial shuffle (set to null for random)
 startup-shuffle-seed: null
 
+photo-affect:
+  # List zero or more affect types; set to [] to disable the stage entirely.
+  types: [print-simulation]
+  # Choose how to iterate through affects when multiple are configured.
+  type-selection: random
+  options:
+    print-simulation:
+      light-angle-degrees: 135.0
+      relief-strength: 0.35
+      ink-spread: 0.18
+      sheen-strength: 0.22
+      paper-color: [245, 244, 240]
+      debug: false # Set true to only treat the left half for side-by-side comparison
+
 playlist:
   new-multiplicity: 3
   half-life: 3 days
