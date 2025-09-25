@@ -232,22 +232,35 @@ The command prints the multiplicity assigned to each discovered photo and the fi
 
 ### Photo affect configuration
 
-The photo-affect stage transforms each decoded image before it reaches the viewer. It is designed so new affects can be layered in
-without changing the pipeline. When `types` is empty the task short-circuits and simply forwards images untouched.
+The optional `photo-affect` task sits between the loader and the viewer. When enabled it reconstructs the decoded RGBA pixels, applies any configured affects, and forwards the modified image downstream. Leave `types` empty (or omit the block entirely) to short-circuit the stage and pass photos through untouched.
 
-- **`types`** — List the affect kinds to rotate through. Supported values: `print-simulation`. Set to `[]` to disable the stage.
-- **`type-selection`** — Optional. `random` (default) or `round-robin`. Controls how multiple affects are scheduled.
-- **`options`** — Map of per-affect controls. Every affect listed in `types` must have a matching entry.
-  - **`print-simulation`**
-    - `light-angle-degrees` (float, default `135.0`): Direction of the simulated gallery lighting.
-    - `relief-strength` (float ≥ 0, default `0.35`): Scales surface relief from the image's luminance gradients.
-    - `ink-spread` (float ≥ 0, default `0.18`): Compresses tones to mimic ink absorption.
-    - `sheen-strength` (float ≥ 0, default `0.22`): Amount of paper sheen blended into highlights.
-    - `paper-color` (RGB array, default `[245, 244, 240]`): Base paper tint blended into the sheen component.
-    - `debug` (bool, default `false`): When `true`, only the left half of the image is processed so you can compare the effect.
+#### Scheduling affects
 
-The print simulation follows the spirit of _3D Simulation of Prints for Improved Soft Proofing_ by introducing relief-based shading and
-specular lift that makes digital slides read more like illuminated prints.
+- **`types`** — List the affect kinds to rotate through. Supported values today: `print-simulation`. Set to `[]` to keep the stage disabled while preserving the scaffold for future affects.
+- **`type-selection`** — Optional. `random` (default) or `sequential`. `random` draws an affect independently for each slide, while `sequential` walks the `types` list in order and loops back to the first entry after the last.
+- **`options`** — Map of per-affect controls. Every affect referenced in `types` must appear here so the runtime can look up its parameters.
+
+Example: enable the print simulation affect while keeping its debug split active for quick before/after checks.
+
+```yaml
+photo-affect:
+  types: [print-simulation]
+  type-selection: sequential
+  options:
+    print-simulation:
+      debug: true
+```
+
+#### Print-simulation affect
+
+`print-simulation` adapts ideas from _3D Simulation of Prints for Improved Soft Proofing_ to mimic how a framed print interacts with gallery lighting. It derives a shallow height-field from local luminance gradients, shades that relief with a configurable key light, and layers in ink compression plus paper sheen so highlights glow like coated stock. Tunable controls let operators dial in their paper stock and lighting rig:
+
+- `light-angle-degrees` (float, default `135.0`): Direction of the simulated gallery lighting in degrees clockwise from the positive X axis.
+- `relief-strength` (float ≥ 0, default `0.35`): Scale factor applied to the derived height-field before shading.
+- `ink-spread` (float ≥ 0, default `0.18`): Tone compression coefficient that emulates dye absorption.
+- `sheen-strength` (float ≥ 0, default `0.22`): How strongly the simulated paper sheen is blended into highlights.
+- `paper-color` (RGB array, default `[245, 244, 240]`): Base tint of the reflective sheen layer.
+- `debug` (bool, default `false`): When `true`, only the left half of the image receives the affect so you can compare it against the untouched right half.
 
 ### Transition configuration
 
@@ -397,6 +410,7 @@ Selecting `fixed-image` keeps the backdrop perfectly consistent across slides, w
 ## References
 
 - **Procedural studio mat weave texture.** Our weave shading is adapted from Mike Cauchi’s breakdown of tillable cloth shading, which layers sine-profiled warp/weft threads with randomized grain to keep the pattern from banding. See ["Research – Tillable Images and Cloth Shading"](https://www.mikecauchiart.com/single-post/2017/01/23/research-tillable-images-and-cloth-shading).
+- **Print simulation shading.** The gallery-lighting and relief model follows guidance from Rohit A. Patil, Mark D. Fairchild, and Garrett M. Johnson’s paper ["3D Simulation of Prints for Improved Soft Proofing"](https://doi.org/10.1117/12.813471).
 
 ## License
 

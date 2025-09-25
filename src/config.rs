@@ -1211,9 +1211,9 @@ pub enum PhotoAffectSelection {
     Disabled,
     Fixed(PhotoAffectKind),
     Random(Vec<PhotoAffectKind>),
-    RoundRobin {
+    Sequential {
         kinds: Vec<PhotoAffectKind>,
-        runtime: RoundRobinState,
+        runtime: SequentialState,
     },
 }
 
@@ -1224,8 +1224,8 @@ impl PartialEq for PhotoAffectSelection {
             (PhotoAffectSelection::Fixed(a), PhotoAffectSelection::Fixed(b)) => a == b,
             (PhotoAffectSelection::Random(a), PhotoAffectSelection::Random(b)) => a == b,
             (
-                PhotoAffectSelection::RoundRobin { kinds: a, .. },
-                PhotoAffectSelection::RoundRobin { kinds: b, .. },
+                PhotoAffectSelection::Sequential { kinds: a, .. },
+                PhotoAffectSelection::Sequential { kinds: b, .. },
             ) => a == b,
             _ => false,
         }
@@ -1263,7 +1263,7 @@ impl PhotoAffectConfig {
                 .copied()
                 .choose(rng)
                 .and_then(|kind| self.options.get(&kind).cloned()),
-            PhotoAffectSelection::RoundRobin { kinds, runtime } => {
+            PhotoAffectSelection::Sequential { kinds, runtime } => {
                 if kinds.is_empty() {
                     None
                 } else {
@@ -1285,7 +1285,7 @@ impl PhotoAffectConfig {
                 );
             }
             PhotoAffectSelection::Random(kinds)
-            | PhotoAffectSelection::RoundRobin { kinds, .. } => {
+            | PhotoAffectSelection::Sequential { kinds, .. } => {
                 ensure!(
                     !kinds.is_empty(),
                     "photo-affect.types must include at least one entry"
@@ -1392,9 +1392,9 @@ impl<'de> Visitor<'de> for PhotoAffectConfigVisitor {
         } else {
             match type_selection.unwrap_or(TypeSelection::Random) {
                 TypeSelection::Random => PhotoAffectSelection::Random(types.clone()),
-                TypeSelection::RoundRobin => PhotoAffectSelection::RoundRobin {
+                TypeSelection::Sequential => PhotoAffectSelection::Sequential {
                     kinds: types.clone(),
-                    runtime: RoundRobinState::default(),
+                    runtime: SequentialState::default(),
                 },
             }
         };
@@ -1410,7 +1410,7 @@ impl<'de> Visitor<'de> for PhotoAffectConfigVisitor {
                     }
                 }
                 PhotoAffectSelection::Random(kinds)
-                | PhotoAffectSelection::RoundRobin { kinds, .. } => {
+                | PhotoAffectSelection::Sequential { kinds, .. } => {
                     for kind in kinds {
                         if !options.contains_key(kind) {
                             return Err(de::Error::custom(format!(
@@ -1831,11 +1831,11 @@ pub enum AngleSelection {
 }
 
 #[derive(Debug, Clone)]
-struct AnglePickerRuntime {
+struct AngleSequenceState {
     next_index: Arc<AtomicUsize>,
 }
 
-impl Default for AnglePickerRuntime {
+impl Default for AngleSequenceState {
     fn default() -> Self {
         Self {
             next_index: Arc::new(AtomicUsize::new(0)),
@@ -1848,7 +1848,7 @@ pub struct AnglePicker {
     pub angles_deg: Vec<f32>,
     pub selection: AngleSelection,
     pub jitter_deg: f32,
-    runtime: AnglePickerRuntime,
+    runtime: AngleSequenceState,
 }
 
 impl Default for AnglePicker {
@@ -1857,7 +1857,7 @@ impl Default for AnglePicker {
             angles_deg: vec![0.0],
             selection: AngleSelection::Random,
             jitter_deg: 0.0,
-            runtime: AnglePickerRuntime::default(),
+            runtime: AngleSequenceState::default(),
         }
     }
 }
@@ -1872,7 +1872,7 @@ impl AnglePicker {
             angles_deg: angles_deg.unwrap_or_else(|| vec![0.0]),
             selection: selection.unwrap_or(AngleSelection::Random),
             jitter_deg: jitter_deg.unwrap_or(0.0),
-            runtime: AnglePickerRuntime::default(),
+            runtime: AngleSequenceState::default(),
         };
         picker
     }
