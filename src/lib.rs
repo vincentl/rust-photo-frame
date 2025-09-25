@@ -8,3 +8,4 @@ pub mod tasks {
     pub mod photo_affect;
     pub mod viewer;
 }
+pub mod wifi_setup;
