@@ -244,6 +244,7 @@ without changing the pipeline. When `types` is empty the task short-circuits and
     - `ink-spread` (float ≥ 0, default `0.18`): Compresses tones to mimic ink absorption.
     - `sheen-strength` (float ≥ 0, default `0.22`): Amount of paper sheen blended into highlights.
     - `paper-color` (RGB array, default `[245, 244, 240]`): Base paper tint blended into the sheen component.
+    - `debug` (bool, default `false`): When `true`, only the left half of the image is processed so you can compare the effect.
 
 The print simulation follows the spirit of _3D Simulation of Prints for Improved Soft Proofing_ by introducing relief-based shading and
 specular lift that makes digital slides read more like illuminated prints.
