@@ -34,9 +34,10 @@ pub async fn run(
         None => StdRng::from_entropy(),
     };
     let mut playlist = PlaylistState::with_rng(options, rng, now_override);
+    let mut last_sent: Option<PathBuf> = None;
 
     loop {
-        playlist.ensure_ready();
+        playlist.ensure_ready(last_sent.as_deref());
 
         // Prefer to make progress by sending when we have something.
         // Remain responsive to inventory + displayed events via `select!`.
@@ -60,6 +61,7 @@ pub async fn run(
                 match res {
                     Ok(sent) => {
                         playlist.mark_sent(&sent);
+                        last_sent = Some(sent);
                     }
                     Err(_) => {
                         warn!("loader channel closed");
@@ -114,9 +116,6 @@ struct PlaylistState {
     options: PlaylistOptions,
     dirty: bool,
     now_override: Option<SystemTime>,
-    last_sent: Option<PathBuf>,
-    held_repeat: Option<PathBuf>,
-    held_requires_requeue: bool,
 }
 
 impl PlaylistState {
@@ -129,19 +128,16 @@ impl PlaylistState {
             options,
             dirty: true,
             now_override,
-            last_sent: None,
-            held_repeat: None,
-            held_requires_requeue: false,
         }
     }
 
-    fn ensure_ready(&mut self) {
+    fn ensure_ready(&mut self, last_sent: Option<&Path>) {
         if self.dirty || self.queue.is_empty() {
-            self.rebuild();
+            self.rebuild(last_sent);
         }
     }
 
-    fn rebuild(&mut self) {
+    fn rebuild(&mut self, last_sent: Option<&Path>) {
         if self.known.is_empty() {
             self.queue.clear();
             self.dirty = false;
@@ -192,7 +188,38 @@ impl PlaylistState {
             queue.push_back(path);
         }
 
-        self.queue = queue;
+        let mut candidates = queue;
+        let mut arranged = VecDeque::new();
+        let mut previous = last_sent.map(PathBuf::from);
+
+        while let Some(mut candidate) = candidates.pop_front() {
+            let is_repeat = previous
+                .as_ref()
+                .map(|prev| prev == &candidate)
+                .unwrap_or(false);
+
+            if is_repeat {
+                if let Some(prev_path) = previous.as_ref() {
+                    if let Some(pos) = candidates.iter().position(|path| path != prev_path) {
+                        if let Some(alternative) = candidates.remove(pos) {
+                            candidates.push_front(candidate);
+                            candidate = alternative;
+                        }
+                    } else if self.known.len() > 1 {
+                        self.prioritized.insert(0, candidate);
+                        while let Some(deferred) = candidates.pop_front() {
+                            self.prioritized.push(deferred);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            previous = Some(candidate.clone());
+            arranged.push_back(candidate);
+        }
+
+        self.queue = arranged;
         self.dirty = false;
 
         for (path, multiplicity) in &multiplicities {
@@ -212,50 +239,7 @@ impl PlaylistState {
         );
     }
 
-    fn peek(&mut self) -> Option<&PathBuf> {
-        if self.queue.is_empty() {
-            if let Some(held) = self.held_repeat.take() {
-                self.queue.push_front(held);
-                self.held_requires_requeue = false;
-            } else {
-                return None;
-            }
-        }
-
-        if let Some(last) = self.last_sent.clone() {
-            if self
-                .queue
-                .front()
-                .map(|front| front == &last)
-                .unwrap_or(false)
-            {
-                if self.held_repeat.is_none() {
-                    let held = self.queue.pop_front()?;
-                    self.held_repeat = Some(held);
-                    self.held_requires_requeue = true;
-
-                    if self.queue.is_empty() {
-                        self.ensure_ready();
-                        self.held_requires_requeue = false;
-                    }
-
-                    if let Some(idx) = self.queue.iter().position(|path| path != &last) {
-                        if let Some(candidate) = self.queue.remove(idx) {
-                            self.queue.push_front(candidate);
-                        }
-                    } else if let Some(held) = self.held_repeat.take() {
-                        // Nothing but repeats remain; restore and accept the duplicate.
-                        self.queue.push_front(held);
-                        self.held_requires_requeue = false;
-                    }
-                } else if let Some(held) = self.held_repeat.take() {
-                    // Stack already full, so allow the repeat that was on hold.
-                    self.queue.push_front(held);
-                    self.held_requires_requeue = false;
-                }
-            }
-        }
-
+    fn peek(&self) -> Option<&PathBuf> {
         self.queue.front()
     }
 
@@ -264,31 +248,14 @@ impl PlaylistState {
     }
 
     fn mark_sent(&mut self, sent: &Path) {
-        if self
-            .queue
-            .front()
-            .map(|front| front == sent)
-            .unwrap_or(false)
-        {
-            self.queue.pop_front();
-            self.last_sent = Some(sent.to_path_buf());
-            if let Some(held) = self.held_repeat.take() {
-                if self.held_requires_requeue {
-                    self.queue.push_front(held);
-                }
-                self.held_requires_requeue = false;
+        if let Some(front) = self.queue.front() {
+            if front == sent {
+                self.queue.pop_front();
+                return;
             }
-            return;
         }
         if let Some(pos) = self.queue.iter().position(|p| p == sent) {
             self.queue.remove(pos);
-        }
-        self.last_sent = Some(sent.to_path_buf());
-        if let Some(held) = self.held_repeat.take() {
-            if self.held_requires_requeue {
-                self.queue.push_front(held);
-            }
-            self.held_requires_requeue = false;
         }
     }
 
@@ -331,11 +298,14 @@ where
     }
 
     let mut plan = Vec::new();
+    let mut last_sent: Option<PathBuf> = None;
+
     for _ in 0..iterations {
-        playlist.ensure_ready();
+        playlist.ensure_ready(last_sent.as_deref());
         if let Some(next) = playlist.peek().cloned() {
             plan.push(next.clone());
             playlist.mark_sent(&next);
+            last_sent = Some(next);
         } else {
             break;
         }
