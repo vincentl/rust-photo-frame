@@ -1,6 +1,7 @@
 mod config;
 mod events;
 mod processing;
+mod wifi_setup;
 mod tasks {
     pub mod files;
     pub mod loader;
@@ -77,6 +78,11 @@ async fn main() -> Result<()> {
 
     if let Some(iterations) = playlist_dry_run {
         run_playlist_dry_run(&cfg, iterations, now_override, playlist_seed)?;
+        return Ok(());
+    }
+
+    if !wifi_setup::ensure_wifi_connected().await? {
+        tracing::info!("wifi setup handled; exiting main loop");
         return Ok(());
     }
 
