@@ -101,6 +101,18 @@ matting:
     blur:
       minimum-mat-percentage: 4.0
       sigma: 18.0
+photo-effects:
+  paper-simulation:
+    strength: 0.03
+    texture-period-px: 18.0
+  light-falloff:
+    strength: 0.18
+    radius: 0.9
+    softness: 0.4
+  adaptive-sharpening:
+    base-sigma: 0.35
+    reference-diagonal-px: 1600.0
+    max-sigma: 0.6
 ```
 
 ### Top-level keys
@@ -116,6 +128,7 @@ matting:
 | `startup-shuffle-seed` | integer or `null` | `null` | Optional deterministic seed used for the initial photo shuffle. |
 | `playlist` | mapping | see below | Controls how aggressively new photos repeat before settling into the long-term cadence. |
 | `matting` | mapping | see below | Controls how mats are generated around each photo. |
+| `photo-effects` | mapping | disabled | Optional post-scaling adjustments applied to the photo (paper texture, vignette, softening). |
 
 ### Playlist weighting
 
@@ -262,6 +275,36 @@ The studio mat derives a uniform base color from the photo’s average RGB, rend
 | `fit` | string | `cover` | How the background image is scaled to the canvas. Options: `cover` (default, fills while cropping as needed), `contain` (letterboxes to preserve the whole image), or `stretch` (distorts to exactly fill). |
 
 The fixed background image is loaded once at startup and reused for every slide, ensuring smooth transitions even with large source files.
+
+### Photo effects configuration
+
+The optional `photo-effects` table tweaks the photo itself after it has been scaled to its display size. Every effect is opt-in;
+ omit the mapping (or set `enabled: false`) to disable an effect. Multiple effects can run together.
+
+#### `paper-simulation`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `strength` | float | `0.04` | Multiplies each pixel by a subtle texture (0.0 disables, clamped to ≤0.05). |
+| `texture-period-px` | float | `18.0` | Size of the repeating noise cell in pixels; scaled by the render oversample factor. |
+| `seed` | integer | `0` | Optional deterministic seed to vary the procedural texture between frames. |
+
+#### `light-falloff`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `strength` | float | `0.16` | How strongly the vignette darkens the corners (0.0 disables). |
+| `radius` | float | `0.85` | Radius (as a fraction of the smallest screen dimension) where the falloff begins. |
+| `softness` | float | `0.45` | Width of the feathered region between the inner radius and full vignette. |
+
+#### `adaptive-sharpening`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `base-sigma` | float | `0.35` | Baseline Gaussian blur applied at the reference diagonal. |
+| `reference-diagonal-px` | float | `1600.0` | Diagonal resolution that receives the base blur. Larger photos soften proportionally. |
+| `scale-power` | float | `1.0` | Exponent applied to the resolution ratio when scaling the blur radius. |
+| `max-sigma` | float | `0.8` | Upper bound for the blur radius after scaling. |
 
 ## References
 

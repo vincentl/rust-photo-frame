@@ -26,6 +26,20 @@ loader-max-concurrent-decodes: 4
 # Optional deterministic seed for the initial shuffle (set to null for random)
 startup-shuffle-seed: null
 
+photo-effects:
+  paper-simulation:
+    strength: 0.03
+    texture-period-px: 18.0
+  light-falloff:
+    strength: 0.18
+    radius: 0.9
+    softness: 0.4
+  adaptive-sharpening:
+    base-sigma: 0.35
+    scale-power: 1.0
+    reference-diagonal-px: 1600.0
+    max-sigma: 0.6
+
 playlist:
   new-multiplicity: 3
   half-life: 3 days

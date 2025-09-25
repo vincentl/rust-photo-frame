@@ -4,6 +4,49 @@ use rust_photo_frame::config::{
 use std::path::PathBuf;
 
 #[test]
+fn parse_photo_effects_configuration() {
+    let yaml = r#"
+photo-library-path: "/photos"
+photo-effects:
+  paper-simulation:
+    strength: 0.03
+    texture-period-px: 12.0
+  light-falloff:
+    strength: 0.25
+    radius: 0.9
+    softness: 0.35
+  adaptive-sharpening:
+    base-sigma: 0.4
+    scale-power: 1.2
+    reference-diagonal-px: 1400.0
+    max-sigma: 0.6
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert!(cfg.photo_effects.paper_simulation.is_some());
+    let validated = cfg.validated().unwrap();
+    assert!(validated.photo_effects.has_enabled_effects());
+    let paper = validated
+        .photo_effects
+        .paper_simulation()
+        .expect("paper simulation enabled");
+    assert!((paper.strength() - 0.03).abs() < f32::EPSILON);
+    assert!((paper.texture_period_px() - 12.0).abs() < f32::EPSILON);
+    let vignette = validated
+        .photo_effects
+        .light_falloff()
+        .expect("light falloff enabled");
+    assert!((vignette.radius() - 0.9).abs() < f32::EPSILON);
+    assert!((vignette.softness() - 0.35).abs() < f32::EPSILON);
+    let softening = validated
+        .photo_effects
+        .adaptive_sharpening()
+        .expect("adaptive softening enabled");
+    let sigma = softening.effective_sigma(3840, 2160);
+    assert!(sigma > 0.4);
+    assert!(sigma <= 0.6 + f32::EPSILON);
+}
+
+#[test]
 fn parse_kebab_case_config() {
     let yaml = r#"
 photo-library-path: "/photos"

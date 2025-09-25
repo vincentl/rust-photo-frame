@@ -163,6 +163,227 @@ impl Default for FixedImageFit {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct PhotoEffectsConfig {
+    pub paper_simulation: Option<PaperSimulationConfig>,
+    pub light_falloff: Option<LightFalloffConfig>,
+    pub adaptive_sharpening: Option<AdaptiveSharpeningConfig>,
+}
+
+impl Default for PhotoEffectsConfig {
+    fn default() -> Self {
+        Self {
+            paper_simulation: None,
+            light_falloff: None,
+            adaptive_sharpening: None,
+        }
+    }
+}
+
+impl PhotoEffectsConfig {
+    pub fn validate(&mut self) -> Result<()> {
+        if let Some(cfg) = self.paper_simulation.as_mut() {
+            cfg.clamp();
+        }
+        if let Some(cfg) = self.light_falloff.as_mut() {
+            cfg.clamp();
+        }
+        if let Some(cfg) = self.adaptive_sharpening.as_mut() {
+            cfg.clamp();
+        }
+        Ok(())
+    }
+
+    pub fn has_enabled_effects(&self) -> bool {
+        self.paper_simulation().is_some()
+            || self.light_falloff().is_some()
+            || self.adaptive_sharpening().is_some()
+    }
+
+    pub fn paper_simulation(&self) -> Option<&PaperSimulationConfig> {
+        self.paper_simulation.as_ref().filter(|cfg| cfg.enabled())
+    }
+
+    pub fn light_falloff(&self) -> Option<&LightFalloffConfig> {
+        self.light_falloff.as_ref().filter(|cfg| cfg.enabled())
+    }
+
+    pub fn adaptive_sharpening(&self) -> Option<&AdaptiveSharpeningConfig> {
+        self.adaptive_sharpening
+            .as_ref()
+            .filter(|cfg| cfg.enabled())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct PaperSimulationConfig {
+    #[serde(default = "PaperSimulationConfig::default_enabled")]
+    enabled: bool,
+    #[serde(default = "PaperSimulationConfig::default_strength")]
+    strength: f32,
+    #[serde(default = "PaperSimulationConfig::default_texture_period_px")]
+    texture_period_px: f32,
+    #[serde(default = "PaperSimulationConfig::default_seed")]
+    seed: u64,
+}
+
+impl PaperSimulationConfig {
+    const fn default_enabled() -> bool {
+        true
+    }
+
+    const fn default_strength() -> f32 {
+        0.04
+    }
+
+    const fn default_texture_period_px() -> f32 {
+        18.0
+    }
+
+    const fn default_seed() -> u64 {
+        0
+    }
+
+    fn clamp(&mut self) {
+        self.strength = self.strength.clamp(0.0, 0.05);
+        self.texture_period_px = self.texture_period_px.max(4.0);
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn strength(&self) -> f32 {
+        self.strength
+    }
+
+    pub fn texture_period_px(&self) -> f32 {
+        self.texture_period_px
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct LightFalloffConfig {
+    #[serde(default = "LightFalloffConfig::default_enabled")]
+    enabled: bool,
+    #[serde(default = "LightFalloffConfig::default_strength")]
+    strength: f32,
+    #[serde(default = "LightFalloffConfig::default_radius")]
+    radius: f32,
+    #[serde(default = "LightFalloffConfig::default_softness")]
+    softness: f32,
+}
+
+impl LightFalloffConfig {
+    const fn default_enabled() -> bool {
+        true
+    }
+
+    const fn default_strength() -> f32 {
+        0.16
+    }
+
+    const fn default_radius() -> f32 {
+        0.85
+    }
+
+    const fn default_softness() -> f32 {
+        0.45
+    }
+
+    fn clamp(&mut self) {
+        self.strength = self.strength.clamp(0.0, 0.9);
+        self.radius = self.radius.clamp(0.0, 1.5);
+        self.softness = self.softness.clamp(0.01, 1.5);
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn strength(&self) -> f32 {
+        self.strength
+    }
+
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
+
+    pub fn softness(&self) -> f32 {
+        self.softness
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AdaptiveSharpeningConfig {
+    #[serde(default = "AdaptiveSharpeningConfig::default_enabled")]
+    enabled: bool,
+    #[serde(default = "AdaptiveSharpeningConfig::default_base_sigma")]
+    base_sigma: f32,
+    #[serde(default = "AdaptiveSharpeningConfig::default_scale_power")]
+    scale_power: f32,
+    #[serde(default = "AdaptiveSharpeningConfig::default_reference_diagonal")]
+    reference_diagonal_px: f32,
+    #[serde(default = "AdaptiveSharpeningConfig::default_max_sigma")]
+    max_sigma: f32,
+}
+
+impl AdaptiveSharpeningConfig {
+    const fn default_enabled() -> bool {
+        true
+    }
+
+    const fn default_base_sigma() -> f32 {
+        0.35
+    }
+
+    const fn default_scale_power() -> f32 {
+        1.0
+    }
+
+    const fn default_reference_diagonal() -> f32 {
+        1600.0
+    }
+
+    const fn default_max_sigma() -> f32 {
+        0.8
+    }
+
+    fn clamp(&mut self) {
+        self.base_sigma = self.base_sigma.max(0.0);
+        self.scale_power = self.scale_power.max(0.0);
+        self.reference_diagonal_px = self.reference_diagonal_px.max(1.0);
+        self.max_sigma = self.max_sigma.max(self.base_sigma);
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn effective_sigma(&self, width: u32, height: u32) -> f32 {
+        if !self.enabled {
+            return 0.0;
+        }
+        let diag = f32::hypot(width.max(1) as f32, height.max(1) as f32);
+        let mut sigma = self.base_sigma;
+        if self.scale_power > 0.0 {
+            let scale = (diag / self.reference_diagonal_px).max(0.0);
+            if scale.is_finite() && scale > 0.0 {
+                sigma *= scale.powf(self.scale_power);
+            }
+        }
+        sigma.clamp(0.0, self.max_sigma)
+    }
+}
+
 impl Default for MattingOptions {
     fn default() -> Self {
         Self {
@@ -1508,6 +1729,8 @@ pub struct Configuration {
     pub startup_shuffle_seed: Option<u64>,
     /// Matting configuration for displayed photos.
     pub matting: MattingConfig,
+    /// Optional photo realism adjustments applied to the scaled image.
+    pub photo_effects: PhotoEffectsConfig,
     /// Playlist weighting options for how frequently new photos repeat.
     pub playlist: PlaylistOptions,
 }
@@ -1536,6 +1759,9 @@ impl Configuration {
         self.matting
             .prepare_runtime()
             .context("invalid matting configuration")?;
+        self.photo_effects
+            .validate()
+            .context("invalid photo-effects configuration")?;
         self.playlist.validate()?;
         Ok(self)
     }
@@ -1552,6 +1778,7 @@ impl Default for Configuration {
             loader_max_concurrent_decodes: 4,
             startup_shuffle_seed: None,
             matting: MattingConfig::default(),
+            photo_effects: PhotoEffectsConfig::default(),
             playlist: PlaylistOptions::default(),
         }
     }
