@@ -5,5 +5,6 @@ pub mod tasks {
     pub mod files;
     pub mod loader;
     pub mod manager;
+    pub mod photo_affect;
     pub mod viewer;
 }

@@ -28,11 +28,11 @@ cargo run --release -- <path/to/config.yaml>
 
 The binary accepts several optional CLI flags for playlist testing and determinism:
 
-| Flag | Description |
-| --- | --- |
-| `--playlist-now <RFC3339>` | Overrides `SystemTime::now()` when computing playlist weights. Useful for reproducible simulations. |
-| `--playlist-dry-run <ITERATIONS>` | Emits a textual preview of the weighted playlist order without launching the UI. |
-| `--playlist-seed <SEED>` | Forces deterministic playlist shuffling for both dry-run and live modes. |
+| Flag                              | Description                                                                                         |
+| --------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `--playlist-now <RFC3339>`        | Overrides `SystemTime::now()` when computing playlist weights. Useful for reproducible simulations. |
+| `--playlist-dry-run <ITERATIONS>` | Emits a textual preview of the weighted playlist order without launching the UI.                    |
+| `--playlist-seed <SEED>`          | Forces deterministic playlist shuffling for both dry-run and live modes.                            |
 
 ### Deployment _(TODO: outline systemd service, auto-start configuration, and graceful shutdown strategy)_
 
@@ -40,19 +40,21 @@ The binary accepts several optional CLI flags for playlist testing and determini
 
 ## Architecture Overview
 
-The runtime is composed of four asynchronous tasks orchestrated by `main.rs`. They communicate over bounded channels to keep memory predictable and to respect GPU/CPU parallelism limits.
+The runtime is composed of five asynchronous tasks orchestrated by `main.rs`. They communicate over bounded channels to keep memory predictable and to respect GPU/CPU parallelism limits.
 
 ```mermaid
 flowchart LR
   MAIN[Main] --> FILES[PhotoFiles]
   MAIN --> MAN[PhotoManager]
   MAIN --> LOAD[PhotoLoader]
+  MAIN --> AFFECT[PhotoAffect]
   MAIN --> VIEW[PhotoViewer]
 
   FILES -->|inventory updates| MAN
   MAN -->|invalid photo| FILES
   MAN -->|photo requests| LOAD
-  LOAD -->|decoded image| VIEW
+  LOAD -->|decoded image| AFFECT
+  AFFECT -->|processed image| VIEW
   LOAD -->|invalid photo| FILES
   VIEW -->|displayed event| MAN
 ```
@@ -67,6 +69,7 @@ flowchart LR
 - Fixed per-image delay (configurable)
 - Weighted playlist that repeats new photos using an exponential half-life decay
 - Error handling and structured logging
+- Optional photo-affect stage for print simulation shading inspired by soft-proofing research
 
 ### Tier 2+ _(TODO: summarize roadmap items from `Roadmap.md` and planned UX polish)_
 
@@ -87,6 +90,13 @@ loader-max-concurrent-decodes: 4 # Concurrent decodes in the loader
 oversample: 1.0 # GPU render oversample vs. screen size
 startup-shuffle-seed: null # Optional deterministic seed for initial shuffle
 
+photo-affect:
+  types: [print-simulation] # Set to [] to disable all affects
+  options:
+    print-simulation:
+      relief-strength: 0.35
+      sheen-strength: 0.22
+
 playlist:
   new-multiplicity: 3 # How many copies of a brand-new photo to schedule per cycle
   half-life: 3 days # How quickly that multiplicity decays back toward 1
@@ -105,69 +115,83 @@ matting:
 
 ### Top-level keys
 
-| Key | Required? | Default | What changes when you tweak it? |
-| --- | --- | --- | --- |
-| `photo-library-path` | Yes | _none_ (must point to a real directory) | Determines which folders are scanned recursively for displayable images. |
-| `transition` | Optional | Single 400 ms `fade` | Selects the transition style(s) between photos; see the dedicated section below for fine control. |
-| `dwell-ms` | Optional | `2000` | Sets how long each image remains fully visible before the next transition begins. |
-| `viewer-preload-count` | Optional | `3` | Controls how many decoded frames are staged ahead of the current slide, trading memory for smoothness. |
-| `loader-max-concurrent-decodes` | Optional | `4` | Caps the number of images decoded in parallel, balancing throughput against CPU contention. |
-| `oversample` | Optional | `1.0` | Multiplies the render target resolution; higher values reduce aliasing at the cost of GPU time. |
-| `startup-shuffle-seed` | Optional | `null` | Forces a reproducible initial shuffle when set, aiding demos and regression tests. |
-| `playlist` | Optional | `new-multiplicity: 3`, `half-life: 1 day` | Tunes how aggressively fresh photos repeat before they age into the long-term cadence. |
-| `matting` | Optional | Single `fixed-color` mat in black | Chooses the background treatment (solid, blur, studio bevel, or fixed image) for each photo. |
+| Role                   | Keys                                                                  |
+| ---------------------- | --------------------------------------------------------------------- |
+| **Required**           | `photo-library-path`                                                  |
+| **Core timing**        | `transition`, `dwell-ms`, `playlist`                                  |
+| **Performance tuning** | `viewer-preload-count`, `loader-max-concurrent-decodes`, `oversample` |
+| **Deterministic runs** | `startup-shuffle-seed`                                                |
+| **Presentation**       | `photo-affect`, `matting`                                             |
 
 Use the quick reference above to locate the knobs you care about, then dive into the per-key cards below for the details.
 
 #### `photo-library-path`
+
 - **Purpose:** Sets the root directory that will be scanned recursively for supported photo formats.
 - **Required?** Yes. Leave it unset and the application has no images to display.
 - **Accepted values & defaults:** Any absolute or relative filesystem path. There is no usable default.
 - **Effect on behavior:** Switching the path changes the library the watcher monitors; the viewer reloads the playlist when the directory contents change.
 
 #### `transition`
+
 - **Purpose:** Controls how the viewer blends between photos.
 - **Required?** Optional; when omitted the frame uses a 400 ms fade.
 - **Accepted values & defaults:** Provide a mapping with the keys documented in [Transition configuration](#transition-configuration). Defaults to `types: [fade]` with the standard fade options.
 - **Effect on behavior:** Adjust the duration, direction, randomness, or transition family to match the feel you want—from subtle fades to bold pushes or e‑ink style reveals.
 
 #### `dwell-ms`
+
 - **Purpose:** Defines how long the current photo remains fully visible before a transition kicks in.
 - **Required?** Optional.
 - **Accepted values & defaults:** Positive integer in milliseconds; default `2000`. Validation rejects zero or negative values.
 - **Effect on behavior:** Raising the value slows the slideshow; lowering it speeds up how quickly the frame advances.
 
 #### `viewer-preload-count`
+
 - **Purpose:** Sets the number of decoded images the viewer keeps queued ahead of the slide currently on screen.
 - **Required?** Optional.
 - **Accepted values & defaults:** Positive integer; default `3`. Validation ensures the count stays above zero.
 - **Effect on behavior:** Higher counts buffer more content, smoothing playback on slower storage but increasing GPU memory usage; lower counts conserve memory at the risk of showing load hitches.
 
 #### `loader-max-concurrent-decodes`
+
 - **Purpose:** Limits how many images the CPU decoding task processes simultaneously.
 - **Required?** Optional.
 - **Accepted values & defaults:** Positive integer; default `4`. Validation enforces a minimum of one.
 - **Effect on behavior:** Increasing the cap can keep the pipeline fed on multi-core systems; decreasing it prevents lower-powered CPUs from thrashing under heavy decode loads.
 
 #### `oversample`
+
 - **Purpose:** Adjusts the off-screen render resolution relative to the display.
 - **Required?** Optional.
 - **Accepted values & defaults:** Positive floating-point value; default `1.0`. Validation requires values above zero.
 - **Effect on behavior:** Values slightly above `1.0` sharpen edges and reduce aliasing; values near `1.0` minimize GPU work. Sub-unit values are rejected to avoid undersampling artifacts.
 
 #### `startup-shuffle-seed`
+
 - **Purpose:** Seeds the initial RNG used when shuffling the first playlist.
 - **Required?** Optional.
 - **Accepted values & defaults:** Unsigned 64-bit integer or `null`; default `null`. When omitted the shuffle derives entropy from the system RNG.
 - **Effect on behavior:** Providing a seed freezes the opening playlist order, which is helpful for demos, debugging, or deterministic tests. Leaving it `null` keeps the slideshow fresh on every boot.
 
 #### `playlist`
+
 - **Purpose:** Tunes how the weighting system surfaces new photos.
 - **Required?** Optional.
 - **Accepted values & defaults:** Mapping described in [Playlist weighting](#playlist-weighting); defaults to three copies for new images and a one-day half-life.
 - **Effect on behavior:** Aggressive settings make new imports loop repeatedly until they age; conservative settings let the library settle into an even rotation.
 
+#### `photo-affect`
+
+- **Type:** mapping (see [Photo affect configuration](#photo-affect-configuration))
+- **Default:** disabled (`types: []`)
+- **What it does:** Inserts an optional post-processing stage between the loader and viewer. The built-in `print-simulation`
+  affect relights each frame with directional shading and paper sheen inspired by _3D Simulation of Prints for Improved Soft Proofing_.
+- **When to change it:** Enable when you want the frame to mimic how ink interacts with paper under gallery lighting, or when you
+  add additional affects in future releases.
+
 #### `matting`
+
 - **Purpose:** Chooses the mat/background style rendered behind every photo.
 - **Required?** Optional.
 - **Accepted values & defaults:** Mapping described in [Matting configuration](#matting-configuration); defaults to a black fixed-color mat.
@@ -201,10 +225,28 @@ The command prints the multiplicity assigned to each discovered photo and the fi
 
 #### Playlist knobs
 
-| Field | Required? | Default | Accepted values | Effect on the slideshow |
-| --- | --- | --- | --- | --- |
-| `new-multiplicity` | Optional | `3` | Integer ≥ 1 | Sets how many times a brand-new photo appears in the next loop; higher values surface newcomers more often. |
-| `half-life` | Optional | `1 day` | Positive duration string parsed by [`humantime`](https://docs.rs/humantime) | Controls how quickly the extra repeats decay; shorter half-lives return the playlist to equilibrium faster. |
+| Field              | Required? | Default | Accepted values                                                             | Effect on the slideshow                                                                                     |
+| ------------------ | --------- | ------- | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `new-multiplicity` | Optional  | `3`     | Integer ≥ 1                                                                 | Sets how many times a brand-new photo appears in the next loop; higher values surface newcomers more often. |
+| `half-life`        | Optional  | `1 day` | Positive duration string parsed by [`humantime`](https://docs.rs/humantime) | Controls how quickly the extra repeats decay; shorter half-lives return the playlist to equilibrium faster. |
+
+### Photo affect configuration
+
+The photo-affect stage transforms each decoded image before it reaches the viewer. It is designed so new affects can be layered in
+without changing the pipeline. When `types` is empty the task short-circuits and simply forwards images untouched.
+
+- **`types`** — List the affect kinds to rotate through. Supported values: `print-simulation`. Set to `[]` to disable the stage.
+- **`type-selection`** — Optional. `random` (default) or `round-robin`. Controls how multiple affects are scheduled.
+- **`options`** — Map of per-affect controls. Every affect listed in `types` must have a matching entry.
+  - **`print-simulation`**
+    - `light-angle-degrees` (float, default `135.0`): Direction of the simulated gallery lighting.
+    - `relief-strength` (float ≥ 0, default `0.35`): Scales surface relief from the image's luminance gradients.
+    - `ink-spread` (float ≥ 0, default `0.18`): Compresses tones to mimic ink absorption.
+    - `sheen-strength` (float ≥ 0, default `0.22`): Amount of paper sheen blended into highlights.
+    - `paper-color` (RGB array, default `[245, 244, 240]`): Base paper tint blended into the sheen component.
+
+The print simulation follows the spirit of _3D Simulation of Prints for Improved Soft Proofing_ by introducing relief-based shading and
+specular lift that makes digital slides read more like illuminated prints.
 
 ### Transition configuration
 
@@ -212,11 +254,11 @@ The `transition` block controls how the viewer blends between photos. List one o
 
 #### Structure
 
-| Key | Required? | Default | Accepted values | Effect |
-| --- | --- | --- | --- | --- |
-| `types` | Yes | `['fade']` | Array containing one or more of `fade`, `wipe`, `push`, `e-ink` | Determines which transition families are in play. Duplicates are ignored; at least one entry must be supplied. |
-| `type-selection` | Optional (only valid when `types` has multiple entries) | `random` | `random` or `sequential` | Picks whether the app draws a new type randomly each slide or cycles through the list in order. Ignored when only one type is listed. |
-| `options` | Required when `types` has multiple entries (optional otherwise) | Defaults per transition family | Mapping keyed by transition kind | Provides per-type overrides for duration and mode-specific fields. When only one type is listed you can specify the same fields inline instead of creating the map. |
+| Key              | Required?                                                       | Default                        | Accepted values                                                 | Effect                                                                                                                                                              |
+| ---------------- | --------------------------------------------------------------- | ------------------------------ | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `types`          | Yes                                                             | `['fade']`                     | Array containing one or more of `fade`, `wipe`, `push`, `e-ink` | Determines which transition families are in play. Duplicates are ignored; at least one entry must be supplied.                                                      |
+| `type-selection` | Optional (only valid when `types` has multiple entries)         | `random`                       | `random` or `sequential`                                        | Picks whether the app draws a new type randomly each slide or cycles through the list in order. Ignored when only one type is listed.                               |
+| `options`        | Required when `types` has multiple entries (optional otherwise) | Defaults per transition family | Mapping keyed by transition kind                                | Provides per-type overrides for duration and mode-specific fields. When only one type is listed you can specify the same fields inline instead of creating the map. |
 
 > **Note:** Reserve the word `random` for `type-selection`; adding it to `types` triggers a validation error.
 
@@ -282,11 +324,11 @@ The `matting` table chooses how the background behind each photo is prepared. Ea
 
 #### Structure
 
-| Key | Required? | Default | Accepted values | Effect |
-| --- | --- | --- | --- | --- |
-| `types` | Yes | `['fixed-color']` | Array containing one or more of `fixed-color`, `blur`, `studio`, `fixed-image` | Chooses which mat styles are eligible. Duplicates are ignored; at least one entry must be supplied. |
-| `type-selection` | Optional (only valid when `types` has multiple entries) | `random` | `random` or `sequential` | Switches between drawing mats randomly or cycling through them in order. Ignored when only one type is listed. |
-| `options` | Required when `types` has multiple entries (optional otherwise) | Defaults per mat type | Mapping keyed by mat type | Provides per-style settings. When only one type is listed, you may set the same fields inline instead of using the map. |
+| Key              | Required?                                                       | Default               | Accepted values                                                                | Effect                                                                                                                  |
+| ---------------- | --------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `types`          | Yes                                                             | `['fixed-color']`     | Array containing one or more of `fixed-color`, `blur`, `studio`, `fixed-image` | Chooses which mat styles are eligible. Duplicates are ignored; at least one entry must be supplied.                     |
+| `type-selection` | Optional (only valid when `types` has multiple entries)         | `random`              | `random` or `sequential`                                                       | Switches between drawing mats randomly or cycling through them in order. Ignored when only one type is listed.          |
+| `options`        | Required when `types` has multiple entries (optional otherwise) | Defaults per mat type | Mapping keyed by mat type                                                      | Provides per-style settings. When only one type is listed, you may set the same fields inline instead of using the map. |
 
 > **Note:** Reserve the word `random` for `type-selection`; adding it to `types` triggers a validation error.
 
