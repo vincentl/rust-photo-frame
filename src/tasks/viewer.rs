@@ -67,11 +67,18 @@ pub fn run_windowed(
         offset_y: u32,
     }
 
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    enum StaticBackgroundKey {
+        Color([u8; 3]),
+        Image(std::path::PathBuf),
+    }
+
     struct ImgTex {
         plane: TexturePlane,
         path: std::path::PathBuf,
         background: Option<TexturePlane>,
         foreground: Option<ForegroundTex>,
+        static_key: Option<StaticBackgroundKey>,
     }
 
     #[derive(Clone)]
@@ -105,6 +112,7 @@ pub fn run_windowed(
         canvas: ImagePlane,
         background: Option<ImagePlane>,
         foreground: Option<ForegroundResult>,
+        static_key: Option<StaticBackgroundKey>,
     }
 
     struct TransitionState {
@@ -267,6 +275,7 @@ pub fn run_windowed(
                 canvas,
                 background: None,
                 foreground: None,
+                static_key: None,
             });
         }
 
@@ -376,15 +385,25 @@ pub fn run_windowed(
         };
 
         let mut static_background = None;
-        if matches!(
-            matting.style,
-            MattingMode::FixedColor { .. } | MattingMode::FixedImage { .. }
-        ) {
-            static_background = Some(ImagePlane {
-                width: canvas_w,
-                height: canvas_h,
-                pixels: background.clone().into_raw(),
-            });
+        let mut static_key = None;
+        match &matting.style {
+            MattingMode::FixedColor { color } => {
+                static_background = Some(ImagePlane {
+                    width: canvas_w,
+                    height: canvas_h,
+                    pixels: background.clone().into_raw(),
+                });
+                static_key = Some(StaticBackgroundKey::Color(*color));
+            }
+            MattingMode::FixedImage { path, .. } => {
+                static_background = Some(ImagePlane {
+                    width: canvas_w,
+                    height: canvas_h,
+                    pixels: background.clone().into_raw(),
+                });
+                static_key = Some(StaticBackgroundKey::Image(path.clone()));
+            }
+            _ => {}
         }
 
         let main_img = match main_img {
@@ -421,6 +440,7 @@ pub fn run_windowed(
             canvas,
             background: static_background,
             foreground,
+            static_key,
         })
     }
 
@@ -591,6 +611,7 @@ pub fn run_windowed(
             canvas,
             background,
             foreground,
+            static_key,
         } = result;
         let plane = upload_plane(gpu, canvas)?;
         let background = match background {
@@ -610,6 +631,7 @@ pub fn run_windowed(
             path,
             background,
             foreground,
+            static_key,
         })
     }
 
@@ -635,7 +657,6 @@ pub fn run_windowed(
         deferred_images: VecDeque<PreparedImageCpu>,
         clear_color: wgpu::Color,
         rng: rand::rngs::ThreadRng,
-        static_background: Option<TexturePlane>,
     }
 
     impl ApplicationHandler for App {
@@ -967,33 +988,6 @@ pub fn run_windowed(
                     let mut next_bind = &gpu.blank_plane.bind;
                     let mut have_draw = false;
                     let mut handled_split_push = false;
-                    let mut static_canvas_rect = None;
-
-                    if let Some(bg_plane) = self.static_background.as_ref() {
-                        let rect = compute_cover_rect(
-                            bg_plane.w,
-                            bg_plane.h,
-                            gpu.config.width,
-                            gpu.config.height,
-                        );
-                        let mut bg_uniforms = uniforms;
-                        bg_uniforms.kind = 0;
-                        bg_uniforms.progress = 0.0;
-                        bg_uniforms.current_dest = rect_to_uniform(rect);
-                        bg_uniforms.next_dest = [0.0; 4];
-                        bg_uniforms.params0 = [0.0; 4];
-                        bg_uniforms.params1 = [0.0; 4];
-                        gpu.queue.write_buffer(
-                            &gpu.uniform_buf,
-                            0,
-                            bytemuck::bytes_of(&bg_uniforms),
-                        );
-                        rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                        rpass.set_bind_group(1, &bg_plane.bind, &[]);
-                        rpass.set_bind_group(2, &gpu.blank_plane.bind, &[]);
-                        rpass.draw(0..6, 0..1);
-                        static_canvas_rect = Some(rect);
-                    }
 
                     if let (Some(state), Some(cur), Some(next)) = (
                         self.transition_state.as_ref(),
@@ -1005,49 +999,83 @@ pub fn run_windowed(
                             cur.foreground.as_ref(),
                             next.foreground.as_ref(),
                         ) {
-                            if let Some(canvas_rect) = static_canvas_rect {
-                                handled_split_push = true;
+                            if let (Some(cur_bg), Some(next_bg), Some(cur_key), Some(next_key)) = (
+                                cur.background.as_ref(),
+                                next.background.as_ref(),
+                                cur.static_key.as_ref(),
+                                next.static_key.as_ref(),
+                            ) {
+                                if cur_key == next_key
+                                    && cur_bg.w == next_bg.w
+                                    && cur_bg.h == next_bg.h
+                                {
+                                    handled_split_push = true;
 
-                                let mut progress = state.progress();
-                                progress = progress * progress * (3.0 - 2.0 * progress);
+                                    let canvas_rect = compute_cover_rect(
+                                        cur_bg.w,
+                                        cur_bg.h,
+                                        gpu.config.width,
+                                        gpu.config.height,
+                                    );
 
-                                let cur_photo_rect = compute_foreground_dest(
-                                    canvas_rect,
-                                    cur.plane.w,
-                                    cur.plane.h,
-                                    cur_fg.offset_x,
-                                    cur_fg.offset_y,
-                                    cur_fg.plane.w,
-                                    cur_fg.plane.h,
-                                );
-                                let next_photo_rect = compute_foreground_dest(
-                                    canvas_rect,
-                                    next.plane.w,
-                                    next.plane.h,
-                                    next_fg.offset_x,
-                                    next_fg.offset_y,
-                                    next_fg.plane.w,
-                                    next_fg.plane.h,
-                                );
+                                    let mut bg_uniforms = uniforms;
+                                    bg_uniforms.kind = 0;
+                                    bg_uniforms.progress = 0.0;
+                                    bg_uniforms.current_dest = rect_to_uniform(canvas_rect);
+                                    bg_uniforms.next_dest = [0.0; 4];
+                                    bg_uniforms.params0 = [0.0; 4];
+                                    bg_uniforms.params1 = [0.0; 4];
+                                    gpu.queue.write_buffer(
+                                        &gpu.uniform_buf,
+                                        0,
+                                        bytemuck::bytes_of(&bg_uniforms),
+                                    );
+                                    rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                                    rpass.set_bind_group(1, &cur_bg.bind, &[]);
+                                    rpass.set_bind_group(2, &gpu.blank_plane.bind, &[]);
+                                    rpass.draw(0..6, 0..1);
 
-                                let mut push_uniforms = uniforms;
-                                push_uniforms.kind = state.kind.as_index();
-                                push_uniforms.progress = progress;
-                                push_uniforms.current_dest = rect_to_uniform(cur_photo_rect);
-                                push_uniforms.next_dest = rect_to_uniform(next_photo_rect);
-                                let diag = (screen_w * screen_w + screen_h * screen_h).sqrt();
-                                push_uniforms.params0 =
-                                    [direction[0] * diag, direction[1] * diag, 0.0, 0.0];
-                                push_uniforms.params1 = [0.0; 4];
-                                gpu.queue.write_buffer(
-                                    &gpu.uniform_buf,
-                                    0,
-                                    bytemuck::bytes_of(&push_uniforms),
-                                );
-                                rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                                rpass.set_bind_group(1, &cur_fg.plane.bind, &[]);
-                                rpass.set_bind_group(2, &next_fg.plane.bind, &[]);
-                                rpass.draw(0..6, 0..1);
+                                    let mut progress = state.progress();
+                                    progress = progress * progress * (3.0 - 2.0 * progress);
+
+                                    let cur_photo_rect = compute_foreground_dest(
+                                        canvas_rect,
+                                        cur.plane.w,
+                                        cur.plane.h,
+                                        cur_fg.offset_x,
+                                        cur_fg.offset_y,
+                                        cur_fg.plane.w,
+                                        cur_fg.plane.h,
+                                    );
+                                    let next_photo_rect = compute_foreground_dest(
+                                        canvas_rect,
+                                        next.plane.w,
+                                        next.plane.h,
+                                        next_fg.offset_x,
+                                        next_fg.offset_y,
+                                        next_fg.plane.w,
+                                        next_fg.plane.h,
+                                    );
+
+                                    let mut push_uniforms = uniforms;
+                                    push_uniforms.kind = state.kind.as_index();
+                                    push_uniforms.progress = progress;
+                                    push_uniforms.current_dest = rect_to_uniform(cur_photo_rect);
+                                    push_uniforms.next_dest = rect_to_uniform(next_photo_rect);
+                                    let diag = (screen_w * screen_w + screen_h * screen_h).sqrt();
+                                    push_uniforms.params0 =
+                                        [direction[0] * diag, direction[1] * diag, 0.0, 0.0];
+                                    push_uniforms.params1 = [0.0; 4];
+                                    gpu.queue.write_buffer(
+                                        &gpu.uniform_buf,
+                                        0,
+                                        bytemuck::bytes_of(&push_uniforms),
+                                    );
+                                    rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                                    rpass.set_bind_group(1, &cur_fg.plane.bind, &[]);
+                                    rpass.set_bind_group(2, &next_fg.plane.bind, &[]);
+                                    rpass.draw(0..6, 0..1);
+                                }
                             } else if let Some(background_plane) =
                                 cur.background.as_ref().or(next.background.as_ref())
                             {
@@ -1229,11 +1257,6 @@ pub fn run_windowed(
             if let Some(gpu) = self.gpu.as_ref() {
                 while let Some(result) = self.ready_results.pop_front() {
                     if let Some(new_tex) = upload_mat_result(gpu, result) {
-                        if let Some(bg) = new_tex.background.clone() {
-                            self.static_background = Some(bg);
-                        } else if new_tex.foreground.is_none() {
-                            self.static_background = None;
-                        }
                         self.pending.push_back(new_tex);
                         debug!("queued_image depth={}", self.pending.len());
                     }
@@ -1389,7 +1412,6 @@ pub fn run_windowed(
         deferred_images: VecDeque::new(),
         clear_color,
         rng: thread_rng(),
-        static_background: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
