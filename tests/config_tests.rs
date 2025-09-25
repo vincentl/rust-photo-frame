@@ -1,3 +1,4 @@
+use rand::{rngs::StdRng, SeedableRng};
 use rust_photo_frame::config::{
     Configuration, MattingKind, MattingSelection, TransitionKind, TransitionSelection,
 };
@@ -170,6 +171,48 @@ matting:
 }
 
 #[test]
+fn parse_round_robin_matting_configuration() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  types: [fixed-color, blur]
+  type-selection: round-robin
+  options:
+    fixed-color:
+      color: [10, 20, 30]
+    blur:
+      sigma: 12.0
+      minimum-mat-percentage: 7.5
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    match cfg.matting.selection() {
+        MattingSelection::RoundRobin { kinds, .. } => {
+            assert_eq!(kinds, vec![MattingKind::FixedColor, MattingKind::Blur]);
+        }
+        other => panic!("expected round-robin matting selection, got {other:?}"),
+    }
+
+    let mut rng = StdRng::seed_from_u64(1);
+    let first = cfg.matting.choose_option(&mut rng);
+    let second = cfg.matting.choose_option(&mut rng);
+    let third = cfg.matting.choose_option(&mut rng);
+
+    match first.style {
+        rust_photo_frame::config::MattingMode::FixedColor { .. } => {}
+        _ => panic!("expected first matting option to be fixed-color"),
+    }
+    match second.style {
+        rust_photo_frame::config::MattingMode::Blur { .. } => {}
+        _ => panic!("expected second matting option to be blur"),
+    }
+    match third.style {
+        rust_photo_frame::config::MattingMode::FixedColor { .. } => {}
+        _ => panic!("expected third matting option to repeat fixed-color"),
+    }
+}
+
+#[test]
 fn random_matting_without_options_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
@@ -311,6 +354,50 @@ transition:
 }
 
 #[test]
+fn parse_round_robin_transition_configuration() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  types: [push, wipe]
+  type-selection: round-robin
+  options:
+    push:
+      duration-ms: 640
+      angle-list-degrees: [0.0, 180.0]
+      angle-selection: round-robin
+    wipe:
+      duration-ms: 520
+      angle-list-degrees: [90.0]
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    match cfg.transition.selection() {
+        TransitionSelection::RoundRobin { kinds, .. } => {
+            assert_eq!(kinds, vec![TransitionKind::Push, TransitionKind::Wipe]);
+        }
+        other => panic!("expected round-robin transition selection, got {other:?}"),
+    }
+
+    let mut rng = StdRng::seed_from_u64(42);
+    let first = cfg.transition.choose_option(&mut rng);
+    let second = cfg.transition.choose_option(&mut rng);
+    let third = cfg.transition.choose_option(&mut rng);
+
+    match first.mode() {
+        rust_photo_frame::config::TransitionMode::Push(_) => {}
+        _ => panic!("expected first transition to be push"),
+    }
+    match second.mode() {
+        rust_photo_frame::config::TransitionMode::Wipe(_) => {}
+        _ => panic!("expected second transition to be wipe"),
+    }
+    match third.mode() {
+        rust_photo_frame::config::TransitionMode::Push(_) => {}
+        _ => panic!("expected third transition to return to push"),
+    }
+}
+
+#[test]
 fn random_transition_without_options_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
@@ -335,7 +422,7 @@ transition:
       duration-ms: 520
     push:
       duration-ms: 480
-      angle-deg: 30.0
+      angle-list-degrees: [30.0]
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
