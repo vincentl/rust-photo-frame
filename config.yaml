@@ -59,6 +59,7 @@ photo-affect:
       ink-spread: 0.18
       sheen-strength: 0.22
       paper-color: [245, 244, 240]
+      debug: false # Set true to only treat the left half for side-by-side comparison
 
 playlist:
   new-multiplicity: 3

@@ -15,6 +15,11 @@ pub fn apply_print_simulation(image: &mut RgbaImage, options: &PrintSimulationOp
     let width = image.width() as i32;
     let height = image.height() as i32;
     let mut luminance = vec![0.0f32; (width * height) as usize];
+    let affect_limit = if options.debug {
+        (width + 1) / 2
+    } else {
+        width
+    };
 
     for (idx, pixel) in image.pixels().enumerate() {
         luminance[idx] = luminance_of(pixel);
@@ -33,6 +38,9 @@ pub fn apply_print_simulation(image: &mut RgbaImage, options: &PrintSimulationOp
 
     for y in 0..height {
         for x in 0..width {
+            if options.debug && x >= affect_limit {
+                continue;
+            }
             let idx = (y * width + x) as usize;
             let center_luma = luminance[idx];
 
@@ -107,5 +115,24 @@ mod tests {
         let before: Vec<u8> = image.clone().into_raw();
         apply_print_simulation(&mut image, &options);
         assert_ne!(image.into_raw(), before);
+    }
+
+    #[test]
+    fn debug_mode_only_touches_left_half() {
+        let mut image = RgbaImage::from_fn(4, 1, |x, _| Rgba([(x * 40) as u8, 100, 150, 255]));
+        let mut options = PrintSimulationOptions {
+            relief_strength: 1.0,
+            ink_spread: 0.4,
+            sheen_strength: 0.3,
+            ..PrintSimulationOptions::default()
+        };
+        options.debug = true;
+
+        let before = image.clone();
+        apply_print_simulation(&mut image, &options);
+
+        assert_ne!(image.get_pixel(0, 0).0, before.get_pixel(0, 0).0);
+        assert_eq!(image.get_pixel(2, 0).0, before.get_pixel(2, 0).0);
+        assert_eq!(image.get_pixel(3, 0).0, before.get_pixel(3, 0).0);
     }
 }

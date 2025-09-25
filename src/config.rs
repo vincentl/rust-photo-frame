@@ -1126,6 +1126,8 @@ pub struct PrintSimulationOptions {
         rename = "paper-color"
     )]
     pub paper_color: [u8; 3],
+    #[serde(default)]
+    pub debug: bool,
 }
 
 impl PrintSimulationOptions {
@@ -1178,6 +1180,7 @@ impl Default for PrintSimulationOptions {
             ink_spread: Self::default_ink_spread(),
             sheen_strength: Self::default_sheen_strength(),
             paper_color: Self::default_paper_color(),
+            debug: false,
         }
     }
 }
