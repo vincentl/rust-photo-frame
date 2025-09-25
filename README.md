@@ -215,7 +215,7 @@ The `transition` block controls how the viewer blends between photos. List one o
 | Key | Required? | Default | Accepted values | Effect |
 | --- | --- | --- | --- | --- |
 | `types` | Yes | `['fade']` | Array containing one or more of `fade`, `wipe`, `push`, `e-ink` | Determines which transition families are in play. Duplicates are ignored; at least one entry must be supplied. |
-| `type-selection` | Optional (only valid when `types` has multiple entries) | `random` | `random` or `round-robin` | Picks whether the app draws a new type randomly each slide or cycles through the list in order. Ignored when only one type is listed. |
+| `type-selection` | Optional (only valid when `types` has multiple entries) | `random` | `random` or `sequential` | Picks whether the app draws a new type randomly each slide or cycles through the list in order. Ignored when only one type is listed. |
 | `options` | Required when `types` has multiple entries (optional otherwise) | Defaults per transition family | Mapping keyed by transition kind | Provides per-type overrides for duration and mode-specific fields. When only one type is listed you can specify the same fields inline instead of creating the map. |
 
 > **Note:** Reserve the word `random` for `type-selection`; adding it to `types` triggers a validation error.
@@ -243,14 +243,14 @@ When the list contains only one entry the viewer always uses that direction, so 
 ```yaml
 transition:
   types: [fade, wipe, push]
-  type-selection: round-robin
+  type-selection: sequential
   options:
     fade:
       duration-ms: 500
     wipe:
       duration-ms: 600
       angle-list-degrees: [45.0, 225.0]
-      angle-selection: round-robin
+      angle-selection: sequential
       angle-jitter-degrees: 30.0
     push:
       duration-ms: 650
@@ -263,12 +263,12 @@ Each transition exposes a focused set of fields:
   - **`through-black`** (boolean, default `false`): When `true`, fades to black completely before revealing the next image. Keeps cuts discreet at the cost of a slightly longer blackout.
 - **`wipe`**
   - **`angle-list-degrees`** (array of floats, default `[0.0]`): Collection of wipe directions in degrees (`0°` sweeps left→right, `90°` sweeps top→bottom). At least one finite value is required.
-  - **`angle-selection`** (`random` or `round-robin`, default `random`): Governs how the app chooses from the angle list—either independently each slide or cycling in order.
+  - **`angle-selection`** (`random` or `sequential`, default `random`): Governs how the app chooses from the angle list—either independently each slide or cycling in order.
   - **`angle-jitter-degrees`** (float ≥ 0, default `0.0`): Adds random jitter within ±the supplied degrees, preventing identical wipes.
   - **`softness`** (float, default `0.05`, clamped to `0.0–0.5`): Feathers the wipe edge; higher values create a softer blend.
 - **`push`**
   - **`angle-list-degrees`** (array of floats, default `[0.0]`): Direction the new image pushes in from; the same rules as wipes apply.
-  - **`angle-selection`** (`random` or `round-robin`, default `random`): Selection strategy for the angle list.
+  - **`angle-selection`** (`random` or `sequential`, default `random`): Selection strategy for the angle list.
   - **`angle-jitter-degrees`** (float ≥ 0, default `0.0`): Randomizes the push direction by ±the provided degrees.
 - **`e-ink`**
   - **`flash-count`** (integer, default `3`, capped at `6`): Number of alternating black/flash-color pulses before the reveal.
@@ -285,7 +285,7 @@ The `matting` table chooses how the background behind each photo is prepared. Ea
 | Key | Required? | Default | Accepted values | Effect |
 | --- | --- | --- | --- | --- |
 | `types` | Yes | `['fixed-color']` | Array containing one or more of `fixed-color`, `blur`, `studio`, `fixed-image` | Chooses which mat styles are eligible. Duplicates are ignored; at least one entry must be supplied. |
-| `type-selection` | Optional (only valid when `types` has multiple entries) | `random` | `random` or `round-robin` | Switches between drawing mats randomly or cycling through them in order. Ignored when only one type is listed. |
+| `type-selection` | Optional (only valid when `types` has multiple entries) | `random` | `random` or `sequential` | Switches between drawing mats randomly or cycling through them in order. Ignored when only one type is listed. |
 | `options` | Required when `types` has multiple entries (optional otherwise) | Defaults per mat type | Mapping keyed by mat type | Provides per-style settings. When only one type is listed, you may set the same fields inline instead of using the map. |
 
 > **Note:** Reserve the word `random` for `type-selection`; adding it to `types` triggers a validation error.
@@ -331,7 +331,7 @@ Every entry inside `matting.options` accepts the shared settings below:
 #### `blur`
 
 - **`sigma`** (float, default `20.0`): Gaussian blur radius applied to a scaled copy of the photo that covers the screen. Larger values yield softer backgrounds; zero disables the blur but keeps the scaled image.
-- **`max-sample-dim`** (integer or `null`, default `null`; falls back to `2048` on 64-bit ARM, otherwise the canvas size): Optional cap on the intermediate blur resolution. Lower caps downsample before blurring, cutting CPU/GPU cost while preserving the dreamy backdrop.
+- **`max-sample-dimension`** (integer or `null`, default `null`; falls back to `2048` on 64-bit ARM, otherwise the canvas size): Optional cap on the intermediate blur resolution. Lower caps downsample before blurring, cutting CPU/GPU cost while preserving the dreamy backdrop.
 - **`backend`** (`cpu` or `neon`, default `cpu`): Blur implementation to use. `neon` opts into the vector-accelerated path on 64-bit ARM; if unsupported at runtime the app gracefully falls back to the CPU renderer.
 
 #### `studio`
