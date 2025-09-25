@@ -1,5 +1,6 @@
 use rust_photo_frame::config::{
-    Configuration, MattingKind, MattingSelection, TransitionKind, TransitionSelection,
+    Configuration, FilterKind, FilterSelection, MattingKind, MattingSelection, TransitionKind,
+    TransitionSelection,
 };
 use std::path::PathBuf;
 
@@ -234,11 +235,12 @@ transition:
       duration-ms: 450
     wipe:
       duration-ms: 600
-      angle-deg: 90.0
+      angle-list-degrees: [90.0]
       softness: 0.1
     push:
       duration-ms: 640
-      angle-deg: 0.0
+      angle-list-degrees: [0.0, 180.0]
+      angle-selection: round-robin
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -251,10 +253,28 @@ transition:
     assert_eq!(wipe.duration().as_millis(), 600);
     match wipe.mode() {
         rust_photo_frame::config::TransitionMode::Wipe(cfg) => {
-            assert!((cfg.angle_deg - 90.0).abs() < f32::EPSILON);
+            assert_eq!(cfg.angles.angles_deg, vec![90.0]);
+            assert_eq!(
+                cfg.angles.selection,
+                rust_photo_frame::config::AngleSelection::Random
+            );
             assert!((cfg.softness - 0.1).abs() < f32::EPSILON);
         }
         _ => panic!("expected wipe transition"),
+    }
+
+    let push = options
+        .get(&TransitionKind::Push)
+        .expect("expected push transition option");
+    match push.mode() {
+        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+            assert_eq!(cfg.angles.angles_deg, vec![0.0, 180.0]);
+            assert_eq!(
+                cfg.angles.selection,
+                rust_photo_frame::config::AngleSelection::RoundRobin
+            );
+        }
+        _ => panic!("expected push transition"),
     }
 }
 
@@ -300,13 +320,13 @@ fn wipe_transition_rejects_negative_jitter() {
 photo-library-path: "/photos"
 transition:
   type: wipe
-  angle-jitter-deg: -15.0
+  angle-jitter-degrees: -15.0
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
     assert!(err
         .to_string()
-        .contains("requires wipe.angle-jitter-deg >= 0"));
+        .contains("requires angle-jitter-degrees >= 0"));
 }
 
 #[test]
@@ -315,24 +335,24 @@ fn push_transition_rejects_negative_jitter() {
 photo-library-path: "/photos"
 transition:
   type: push
-  angle-jitter-deg: -30.0
+  angle-jitter-degrees: -30.0
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
     assert!(err
         .to_string()
-        .contains("requires push.angle-jitter-deg >= 0"));
+        .contains("requires angle-jitter-degrees >= 0"));
 }
 
 #[test]
-fn push_transition_vertical_axis_defaults_to_vertical_push() {
+fn push_transition_configures_multiple_angles() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
   type: push
   duration-ms: 725
-  vertical-axis: true
-  reverse: true
+  angle-list-degrees: [90.0, 270.0]
+  angle-selection: round-robin
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -344,9 +364,164 @@ transition:
     assert_eq!(option.duration().as_millis(), 725);
     match option.mode() {
         rust_photo_frame::config::TransitionMode::Push(push) => {
-            assert!((push.angle_deg - 90.0).abs() < f32::EPSILON);
-            assert!(push.reverse);
+            assert_eq!(push.angles.angles_deg, vec![90.0, 270.0]);
+            assert_eq!(
+                push.angles.selection,
+                rust_photo_frame::config::AngleSelection::RoundRobin
+            );
         }
         _ => panic!("expected push transition"),
     }
+}
+
+#[test]
+fn parse_fixed_filter_inline() {
+    let yaml = r#"
+photo-library-path: "/photos"
+filter:
+  type: classic-sepia
+  amount: 0.6
+  vignette-strength: 0.2
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert!(matches!(
+        cfg.filter.selection(),
+        FilterSelection::Fixed(FilterKind::ClassicSepia)
+    ));
+    let options = cfg
+        .filter
+        .options()
+        .get(&FilterKind::ClassicSepia)
+        .expect("expected classic-sepia filter option");
+    match options.mode() {
+        rust_photo_frame::config::FilterMode::ClassicSepia(opts) => {
+            assert!((opts.amount - 0.6).abs() < f32::EPSILON);
+            assert!((opts.vignette_strength - 0.2).abs() < f32::EPSILON);
+        }
+        other => panic!("unexpected filter mode {other:?}"),
+    }
+}
+
+#[test]
+fn parse_random_filter_with_allow_list() {
+    let yaml = r#"
+photo-library-path: "/photos"
+filter:
+  type: random
+  allow: [polaroid-fade, clean-boost]
+  options:
+    polaroid-fade:
+      matte-strength: 0.5
+    clean-boost:
+      contrast-strength: 0.4
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    match cfg.filter.selection() {
+        FilterSelection::Random(allow) => {
+            assert_eq!(
+                allow,
+                &vec![FilterKind::PolaroidFade, FilterKind::CleanBoost]
+            );
+        }
+        other => panic!("unexpected filter selection {other:?}"),
+    }
+    let polaroid = cfg
+        .filter
+        .options()
+        .get(&FilterKind::PolaroidFade)
+        .expect("expected polaroid filter");
+    match polaroid.mode() {
+        rust_photo_frame::config::FilterMode::PolaroidFade(opts) => {
+            assert!((opts.matte_strength - 0.5).abs() < f32::EPSILON);
+        }
+        _ => panic!("expected polaroid fade options"),
+    }
+}
+
+#[test]
+fn random_filter_without_allow_defaults_to_options_keys() {
+    let yaml = r#"
+photo-library-path: "/photos"
+filter:
+  type: random
+  options:
+    lomo-pop:
+      saturation-boost: 0.45
+    cross-process-sim:
+      a-shadow-shift: -12.0
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    match cfg.filter.selection() {
+        FilterSelection::Random(allow) => {
+            assert_eq!(
+                allow,
+                &vec![FilterKind::LomoPop, FilterKind::CrossProcessSim]
+            );
+        }
+        other => panic!("unexpected filter selection {other:?}"),
+    }
+}
+
+#[test]
+fn random_filter_without_allow_or_options_defaults_to_all_filters() {
+    let yaml = r#"
+photo-library-path: "/photos"
+filter:
+  type: random
+"#;
+
+    let mut cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    match cfg.filter.selection() {
+        FilterSelection::Random(allow) => {
+            assert_eq!(
+                allow,
+                &vec![
+                    FilterKind::ClassicSepia,
+                    FilterKind::PolaroidFade,
+                    FilterKind::KodachromePunch,
+                    FilterKind::HighKeyBlackWhite,
+                    FilterKind::MattePortrait,
+                    FilterKind::LomoPop,
+                    FilterKind::CrossProcessSim,
+                    FilterKind::CleanBoost,
+                ]
+            );
+        }
+        other => panic!("unexpected filter selection {other:?}"),
+    }
+
+    cfg.filter.validate().unwrap();
+    for kind in [
+        FilterKind::ClassicSepia,
+        FilterKind::PolaroidFade,
+        FilterKind::KodachromePunch,
+        FilterKind::HighKeyBlackWhite,
+        FilterKind::MattePortrait,
+        FilterKind::LomoPop,
+        FilterKind::CrossProcessSim,
+        FilterKind::CleanBoost,
+    ] {
+        assert!(
+            cfg.filter.options().contains_key(&kind),
+            "expected default options for {kind}"
+        );
+    }
+}
+
+#[test]
+fn filter_allow_only_valid_for_random() {
+    let yaml = r#"
+photo-library-path: "/photos"
+filter:
+  type: clean-boost
+  allow: [classic-sepia]
+"#;
+
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("filter.allow cannot be used with fixed filter selection"));
 }

@@ -97,7 +97,7 @@ async fn manager_rotates_actual_sent_item() {
         .unwrap();
 
     // Allow the manager to enqueue the second photo and start waiting to resend the first.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     inv_tx
         .send(InventoryEvent::PhotoAdded(photo_info(

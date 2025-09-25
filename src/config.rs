@@ -1,13 +1,16 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{ensure, Context, Result};
 use rand::seq::IteratorRandom;
 use rand::Rng;
-use serde::de::{self, DeserializeOwned, DeserializeSeed, Deserializer, MapAccess, Visitor};
+use serde::de::{
+    self, DeserializeOwned, DeserializeSeed, Deserializer, IntoDeserializer, MapAccess, Visitor,
+};
 use serde::Deserialize;
 use serde_yaml::Value as YamlValue;
 
@@ -877,6 +880,712 @@ impl MattingMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FilterKind {
+    ClassicSepia,
+    PolaroidFade,
+    KodachromePunch,
+    HighKeyBlackWhite,
+    MattePortrait,
+    LomoPop,
+    CrossProcessSim,
+    CleanBoost,
+}
+
+impl FilterKind {
+    const ALL: &'static [Self] = &[
+        Self::ClassicSepia,
+        Self::PolaroidFade,
+        Self::KodachromePunch,
+        Self::HighKeyBlackWhite,
+        Self::MattePortrait,
+        Self::LomoPop,
+        Self::CrossProcessSim,
+        Self::CleanBoost,
+    ];
+
+    const NAMES: &'static [&'static str] = &[
+        "classic-sepia",
+        "polaroid-fade",
+        "kodachrome-punch",
+        "high-key-black-white",
+        "matte-portrait",
+        "lomo-pop",
+        "cross-process-sim",
+        "clean-boost",
+    ];
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::ClassicSepia => "classic-sepia",
+            Self::PolaroidFade => "polaroid-fade",
+            Self::KodachromePunch => "kodachrome-punch",
+            Self::HighKeyBlackWhite => "high-key-black-white",
+            Self::MattePortrait => "matte-portrait",
+            Self::LomoPop => "lomo-pop",
+            Self::CrossProcessSim => "cross-process-sim",
+            Self::CleanBoost => "clean-boost",
+        }
+    }
+}
+
+impl fmt::Display for FilterKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for FilterKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        for kind in Self::ALL {
+            if raw == kind.as_str() {
+                return Ok(*kind);
+            }
+        }
+        Err(de::Error::unknown_variant(&raw, Self::NAMES))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FilterConfig {
+    selection: FilterSelection,
+    options: BTreeMap<FilterKind, FilterOptions>,
+}
+
+impl Default for FilterConfig {
+    fn default() -> Self {
+        Self {
+            selection: FilterSelection::None,
+            options: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum FilterSelection {
+    None,
+    Fixed(FilterKind),
+    Random(Vec<FilterKind>),
+}
+
+#[derive(Debug, Clone)]
+pub struct FilterOptions {
+    mode: FilterMode,
+}
+
+impl FilterOptions {
+    pub fn mode(&self) -> &FilterMode {
+        &self.mode
+    }
+
+    pub fn amount(&self) -> f32 {
+        self.mode.amount()
+    }
+
+    fn new(mode: FilterMode) -> Self {
+        let mut this = Self { mode };
+        this.mode.sanitize();
+        this
+    }
+
+    fn default_for(kind: FilterKind) -> Self {
+        match kind {
+            FilterKind::ClassicSepia => Self::new(FilterMode::ClassicSepia(Default::default())),
+            FilterKind::PolaroidFade => Self::new(FilterMode::PolaroidFade(Default::default())),
+            FilterKind::KodachromePunch => {
+                Self::new(FilterMode::KodachromePunch(Default::default()))
+            }
+            FilterKind::HighKeyBlackWhite => {
+                Self::new(FilterMode::HighKeyBlackWhite(Default::default()))
+            }
+            FilterKind::MattePortrait => Self::new(FilterMode::MattePortrait(Default::default())),
+            FilterKind::LomoPop => Self::new(FilterMode::LomoPop(Default::default())),
+            FilterKind::CrossProcessSim => {
+                Self::new(FilterMode::CrossProcessSim(Default::default()))
+            }
+            FilterKind::CleanBoost => Self::new(FilterMode::CleanBoost(Default::default())),
+        }
+    }
+
+    fn sanitize(&mut self) {
+        self.mode.sanitize();
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum FilterMode {
+    ClassicSepia(ClassicSepiaOptions),
+    PolaroidFade(PolaroidFadeOptions),
+    KodachromePunch(KodachromePunchOptions),
+    HighKeyBlackWhite(HighKeyBlackWhiteOptions),
+    MattePortrait(MattePortraitOptions),
+    LomoPop(LomoPopOptions),
+    CrossProcessSim(CrossProcessSimOptions),
+    CleanBoost(CleanBoostOptions),
+}
+
+impl FilterMode {
+    fn amount(&self) -> f32 {
+        match self {
+            FilterMode::ClassicSepia(opt) => opt.amount,
+            FilterMode::PolaroidFade(opt) => opt.amount,
+            FilterMode::KodachromePunch(opt) => opt.amount,
+            FilterMode::HighKeyBlackWhite(opt) => opt.amount,
+            FilterMode::MattePortrait(opt) => opt.amount,
+            FilterMode::LomoPop(opt) => opt.amount,
+            FilterMode::CrossProcessSim(opt) => opt.amount,
+            FilterMode::CleanBoost(opt) => opt.amount,
+        }
+    }
+
+    fn sanitize(&mut self) {
+        match self {
+            FilterMode::ClassicSepia(opt) => opt.sanitize(),
+            FilterMode::PolaroidFade(opt) => opt.sanitize(),
+            FilterMode::KodachromePunch(opt) => opt.sanitize(),
+            FilterMode::HighKeyBlackWhite(opt) => opt.sanitize(),
+            FilterMode::MattePortrait(opt) => opt.sanitize(),
+            FilterMode::LomoPop(opt) => opt.sanitize(),
+            FilterMode::CrossProcessSim(opt) => opt.sanitize(),
+            FilterMode::CleanBoost(opt) => opt.sanitize(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct ClassicSepiaOptions {
+    pub amount: f32,
+    pub tone_strength: f32,
+    pub vignette_strength: f32,
+}
+
+impl Default for ClassicSepiaOptions {
+    fn default() -> Self {
+        Self {
+            amount: 1.0,
+            tone_strength: 0.6,
+            vignette_strength: 0.25,
+        }
+    }
+}
+
+impl ClassicSepiaOptions {
+    fn sanitize(&mut self) {
+        self.amount = self.amount.clamp(0.0, 1.0);
+        self.tone_strength = self.tone_strength.clamp(0.0, 1.0);
+        self.vignette_strength = self.vignette_strength.clamp(0.0, 1.0);
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct PolaroidFadeOptions {
+    pub amount: f32,
+    pub vignette_strength: f32,
+    pub shadow_cool: f32,
+    pub highlight_warm: f32,
+    pub matte_strength: f32,
+}
+
+impl Default for PolaroidFadeOptions {
+    fn default() -> Self {
+        Self {
+            amount: 1.0,
+            vignette_strength: 0.35,
+            shadow_cool: 3.0,
+            highlight_warm: 5.0,
+            matte_strength: 0.75,
+        }
+    }
+}
+
+impl PolaroidFadeOptions {
+    fn sanitize(&mut self) {
+        self.amount = self.amount.clamp(0.0, 1.0);
+        self.vignette_strength = self.vignette_strength.clamp(0.0, 1.0);
+        self.shadow_cool = self.shadow_cool.clamp(0.0, 20.0);
+        self.highlight_warm = self.highlight_warm.clamp(0.0, 20.0);
+        self.matte_strength = self.matte_strength.clamp(0.0, 1.0);
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct KodachromePunchOptions {
+    pub amount: f32,
+    pub contrast: f32,
+    pub saturation_boost: f32,
+    pub sharpen_sigma: f32,
+    pub sharpen_amount: f32,
+}
+
+impl Default for KodachromePunchOptions {
+    fn default() -> Self {
+        Self {
+            amount: 1.0,
+            contrast: 1.2,
+            saturation_boost: 0.12,
+            sharpen_sigma: 1.0,
+            sharpen_amount: 0.5,
+        }
+    }
+}
+
+impl KodachromePunchOptions {
+    fn sanitize(&mut self) {
+        self.amount = self.amount.clamp(0.0, 1.0);
+        self.contrast = self.contrast.clamp(0.5, 2.5);
+        self.saturation_boost = self.saturation_boost.clamp(0.0, 1.0);
+        self.sharpen_sigma = self.sharpen_sigma.clamp(0.2, 4.0);
+        self.sharpen_amount = self.sharpen_amount.clamp(0.0, 1.5);
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct HighKeyBlackWhiteOptions {
+    pub amount: f32,
+    pub contrast: f32,
+    pub grain_strength: f32,
+}
+
+impl Default for HighKeyBlackWhiteOptions {
+    fn default() -> Self {
+        Self {
+            amount: 1.0,
+            contrast: 0.6,
+            grain_strength: 0.06,
+        }
+    }
+}
+
+impl HighKeyBlackWhiteOptions {
+    fn sanitize(&mut self) {
+        self.amount = self.amount.clamp(0.0, 1.0);
+        self.contrast = self.contrast.clamp(0.0, 1.5);
+        self.grain_strength = self.grain_strength.clamp(0.0, 0.5);
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct MattePortraitOptions {
+    pub amount: f32,
+    pub lift: f32,
+    pub gamma: f32,
+    pub gain: f32,
+    pub skin_preserve: f32,
+}
+
+impl Default for MattePortraitOptions {
+    fn default() -> Self {
+        Self {
+            amount: 1.0,
+            lift: 0.08,
+            gamma: 0.95,
+            gain: 0.95,
+            skin_preserve: 0.25,
+        }
+    }
+}
+
+impl MattePortraitOptions {
+    fn sanitize(&mut self) {
+        self.amount = self.amount.clamp(0.0, 1.0);
+        self.lift = self.lift.clamp(0.0, 0.5);
+        self.gamma = self.gamma.clamp(0.2, 2.5);
+        self.gain = self.gain.clamp(0.2, 2.5);
+        self.skin_preserve = self.skin_preserve.clamp(0.0, 1.0);
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct LomoPopOptions {
+    pub amount: f32,
+    pub saturation_boost: f32,
+    pub hue_shift_deg: f32,
+    pub vignette_strength: f32,
+    pub blue_lift: f32,
+}
+
+impl Default for LomoPopOptions {
+    fn default() -> Self {
+        Self {
+            amount: 1.0,
+            saturation_boost: 0.25,
+            hue_shift_deg: 5.0,
+            vignette_strength: 0.75,
+            blue_lift: 0.08,
+        }
+    }
+}
+
+impl LomoPopOptions {
+    fn sanitize(&mut self) {
+        self.amount = self.amount.clamp(0.0, 1.0);
+        self.saturation_boost = self.saturation_boost.clamp(0.0, 1.0);
+        self.hue_shift_deg = self.hue_shift_deg.clamp(-45.0, 45.0);
+        self.vignette_strength = self.vignette_strength.clamp(0.0, 1.5);
+        self.blue_lift = self.blue_lift.clamp(0.0, 0.5);
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct CrossProcessSimOptions {
+    pub amount: f32,
+    pub highlight_boost: f32,
+    pub shadow_crush: f32,
+    pub a_shadow_shift: f32,
+    pub a_highlight_shift: f32,
+    pub b_shift: f32,
+}
+
+impl Default for CrossProcessSimOptions {
+    fn default() -> Self {
+        Self {
+            amount: 1.0,
+            highlight_boost: 0.18,
+            shadow_crush: 0.2,
+            a_shadow_shift: -18.0,
+            a_highlight_shift: 12.0,
+            b_shift: 8.0,
+        }
+    }
+}
+
+impl CrossProcessSimOptions {
+    fn sanitize(&mut self) {
+        self.amount = self.amount.clamp(0.0, 1.0);
+        self.highlight_boost = self.highlight_boost.clamp(0.0, 1.0);
+        self.shadow_crush = self.shadow_crush.clamp(0.0, 1.0);
+        self.a_shadow_shift = self.a_shadow_shift.clamp(-40.0, 0.0);
+        self.a_highlight_shift = self.a_highlight_shift.clamp(0.0, 40.0);
+        self.b_shift = self.b_shift.clamp(-40.0, 40.0);
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct CleanBoostOptions {
+    pub amount: f32,
+    pub white_balance_strength: f32,
+    pub contrast_strength: f32,
+    pub saturation_boost: f32,
+}
+
+impl Default for CleanBoostOptions {
+    fn default() -> Self {
+        Self {
+            amount: 1.0,
+            white_balance_strength: 0.5,
+            contrast_strength: 0.35,
+            saturation_boost: 0.05,
+        }
+    }
+}
+
+impl CleanBoostOptions {
+    fn sanitize(&mut self) {
+        self.amount = self.amount.clamp(0.0, 1.0);
+        self.white_balance_strength = self.white_balance_strength.clamp(0.0, 1.0);
+        self.contrast_strength = self.contrast_strength.clamp(0.0, 1.0);
+        self.saturation_boost = self.saturation_boost.clamp(0.0, 0.5);
+    }
+}
+
+impl FilterConfig {
+    #[allow(dead_code)]
+    pub fn selection(&self) -> &FilterSelection {
+        &self.selection
+    }
+
+    #[allow(dead_code)]
+    pub fn options(&self) -> &BTreeMap<FilterKind, FilterOptions> {
+        &self.options
+    }
+
+    #[allow(dead_code)]
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self.selection, FilterSelection::None)
+    }
+
+    pub fn choose_filter<R: Rng + ?Sized>(&self, rng: &mut R) -> Option<FilterOptions> {
+        match &self.selection {
+            FilterSelection::None => None,
+            FilterSelection::Fixed(kind) => Some(
+                self.options
+                    .get(kind)
+                    .cloned()
+                    .unwrap_or_else(|| FilterOptions::default_for(*kind)),
+            ),
+            FilterSelection::Random(allow) => {
+                if allow.is_empty() {
+                    return None;
+                }
+                let choice = allow
+                    .iter()
+                    .choose(rng)
+                    .copied()
+                    .expect("non-empty list should yield a choice");
+                Some(
+                    self.options
+                        .get(&choice)
+                        .cloned()
+                        .unwrap_or_else(|| FilterOptions::default_for(choice)),
+                )
+            }
+        }
+    }
+
+    pub fn validate(&mut self) -> Result<()> {
+        for option in self.options.values_mut() {
+            option.sanitize();
+        }
+        match &mut self.selection {
+            FilterSelection::None => {}
+            FilterSelection::Fixed(kind) => {
+                let kind = *kind;
+                self.ensure_option(kind);
+            }
+            FilterSelection::Random(allow) => {
+                allow.sort();
+                allow.dedup();
+                ensure!(
+                    !allow.is_empty(),
+                    "filter.allow must include at least one filter"
+                );
+                let ensure_list: Vec<_> = allow.clone();
+                for kind in ensure_list {
+                    self.ensure_option(kind);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_option(&mut self, kind: FilterKind) {
+        self.options
+            .entry(kind)
+            .or_insert_with(|| FilterOptions::default_for(kind));
+    }
+}
+
+impl<'de> Deserialize<'de> for FilterConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(FilterConfigVisitor)
+    }
+}
+
+struct FilterConfigVisitor;
+
+impl<'de> Visitor<'de> for FilterConfigVisitor {
+    type Value = FilterConfig;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a filter configuration map")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut selection: Option<FilterSelection> = None;
+        let mut options: Option<BTreeMap<FilterKind, FilterOptions>> = None;
+        let mut allow: Option<Vec<FilterKind>> = None;
+        let mut inline_fields: Vec<(String, YamlValue)> = Vec::new();
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "type" => {
+                    if selection.is_some() {
+                        return Err(de::Error::duplicate_field("type"));
+                    }
+                    let raw: String = map.next_value()?;
+                    selection = Some(match raw.as_str() {
+                        "none" => FilterSelection::None,
+                        "random" => FilterSelection::Random(Vec::new()),
+                        other => {
+                            let kind = FilterKind::deserialize(other.into_deserializer())?;
+                            FilterSelection::Fixed(kind)
+                        }
+                    });
+                }
+                "allow" => {
+                    if allow.is_some() {
+                        return Err(de::Error::duplicate_field("allow"));
+                    }
+                    allow = Some(map.next_value()?);
+                }
+                "options" => {
+                    if options.is_some() {
+                        return Err(de::Error::duplicate_field("options"));
+                    }
+                    options = Some(map.next_value_seed(FilterOptionsMapSeed)?);
+                }
+                other => {
+                    let value = map.next_value::<YamlValue>()?;
+                    inline_fields.push((other.to_string(), value));
+                }
+            }
+        }
+
+        let mut options = options.unwrap_or_default();
+        let mut selection = selection.unwrap_or(FilterSelection::None);
+
+        match &mut selection {
+            FilterSelection::None => {
+                if !inline_fields.is_empty() {
+                    return Err(de::Error::custom(
+                        "filter.type none does not support inline fields",
+                    ));
+                }
+                if allow.is_some() {
+                    return Err(de::Error::custom(
+                        "filter.allow is only valid when filter.type is random",
+                    ));
+                }
+            }
+            FilterSelection::Fixed(kind) => {
+                if allow.is_some() {
+                    return Err(de::Error::custom(
+                        "filter.allow cannot be used with fixed filter selection",
+                    ));
+                }
+                if options.get(kind).is_none() {
+                    if inline_fields.is_empty() {
+                        options.insert(*kind, FilterOptions::default_for(*kind));
+                    } else {
+                        let option = parse_inline_filter::<A::Error>(*kind, inline_fields)?;
+                        options.insert(*kind, option);
+                    }
+                } else if !inline_fields.is_empty() {
+                    return Err(de::Error::custom(
+                        "filter options supplied both inline and under filter.options",
+                    ));
+                }
+            }
+            FilterSelection::Random(allow_list) => {
+                if !inline_fields.is_empty() {
+                    return Err(de::Error::custom(
+                        "filter.type random does not support inline fields",
+                    ));
+                }
+                let chosen = allow.unwrap_or_else(|| {
+                    if !options.is_empty() {
+                        options.keys().copied().collect::<Vec<_>>()
+                    } else {
+                        FilterKind::ALL.to_vec()
+                    }
+                });
+                *allow_list = chosen;
+            }
+        }
+
+        Ok(FilterConfig { selection, options })
+    }
+}
+
+fn parse_inline_filter<E>(
+    kind: FilterKind,
+    mut fields: Vec<(String, YamlValue)>,
+) -> Result<FilterOptions, E>
+where
+    E: de::Error,
+{
+    let mut map = serde_yaml::Mapping::new();
+    for (key, value) in fields.drain(..) {
+        map.insert(YamlValue::String(key), value);
+    }
+    parse_filter_value(kind, YamlValue::Mapping(map))
+}
+
+fn parse_filter_value<E>(kind: FilterKind, value: YamlValue) -> Result<FilterOptions, E>
+where
+    E: de::Error,
+{
+    match kind {
+        FilterKind::ClassicSepia => inline_value_to::<ClassicSepiaOptions, E>(value)
+            .map(|opts| FilterOptions::new(FilterMode::ClassicSepia(opts))),
+        FilterKind::PolaroidFade => inline_value_to::<PolaroidFadeOptions, E>(value)
+            .map(|opts| FilterOptions::new(FilterMode::PolaroidFade(opts))),
+        FilterKind::KodachromePunch => inline_value_to::<KodachromePunchOptions, E>(value)
+            .map(|opts| FilterOptions::new(FilterMode::KodachromePunch(opts))),
+        FilterKind::HighKeyBlackWhite => inline_value_to::<HighKeyBlackWhiteOptions, E>(value)
+            .map(|opts| FilterOptions::new(FilterMode::HighKeyBlackWhite(opts))),
+        FilterKind::MattePortrait => inline_value_to::<MattePortraitOptions, E>(value)
+            .map(|opts| FilterOptions::new(FilterMode::MattePortrait(opts))),
+        FilterKind::LomoPop => inline_value_to::<LomoPopOptions, E>(value)
+            .map(|opts| FilterOptions::new(FilterMode::LomoPop(opts))),
+        FilterKind::CrossProcessSim => inline_value_to::<CrossProcessSimOptions, E>(value)
+            .map(|opts| FilterOptions::new(FilterMode::CrossProcessSim(opts))),
+        FilterKind::CleanBoost => inline_value_to::<CleanBoostOptions, E>(value)
+            .map(|opts| FilterOptions::new(FilterMode::CleanBoost(opts))),
+    }
+}
+
+struct FilterOptionsMapSeed;
+
+impl<'de> DeserializeSeed<'de> for FilterOptionsMapSeed {
+    type Value = BTreeMap<FilterKind, FilterOptions>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(FilterOptionsMapVisitor)
+    }
+}
+
+struct FilterOptionsMapVisitor;
+
+impl<'de> Visitor<'de> for FilterOptionsMapVisitor {
+    type Value = BTreeMap<FilterKind, FilterOptions>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a map of filter options keyed by filter kind")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut out = BTreeMap::new();
+        while let Some(kind) = map.next_key::<FilterKind>()? {
+            if out.contains_key(&kind) {
+                return Err(de::Error::duplicate_field(kind.as_str()));
+            }
+            let option = map.next_value_seed(FilterOptionSeed { kind })?;
+            out.insert(kind, option);
+        }
+        Ok(out)
+    }
+}
+
+struct FilterOptionSeed {
+    kind: FilterKind,
+}
+
+impl<'de> DeserializeSeed<'de> for FilterOptionSeed {
+    type Value = FilterOptions;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = YamlValue::deserialize(deserializer)?;
+        parse_filter_value(self.kind, value)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransitionSelection {
     Fixed(TransitionKind),
@@ -888,17 +1597,19 @@ pub enum TransitionKind {
     Fade,
     Wipe,
     Push,
+    EInk,
 }
 
 impl TransitionKind {
-    const ALL: &'static [Self] = &[Self::Fade, Self::Wipe, Self::Push];
-    const NAMES: &'static [&'static str] = &["fade", "wipe", "push"];
+    const ALL: &'static [Self] = &[Self::Fade, Self::Wipe, Self::Push, Self::EInk];
+    const NAMES: &'static [&'static str] = &["fade", "wipe", "push", "e-ink"];
 
     fn as_str(&self) -> &'static str {
         match self {
             Self::Fade => "fade",
             Self::Wipe => "wipe",
             Self::Push => "push",
+            Self::EInk => "e-ink",
         }
     }
 
@@ -907,6 +1618,7 @@ impl TransitionKind {
             Self::Fade => 1,
             Self::Wipe => 2,
             Self::Push => 3,
+            Self::EInk => 4,
         }
     }
 }
@@ -1018,14 +1730,16 @@ pub struct TransitionOptions {
 
 impl TransitionOptions {
     fn default_for(kind: TransitionKind) -> Self {
+        let (duration_ms, mode) = match kind {
+            TransitionKind::Fade => (400, TransitionMode::Fade(FadeTransition::default())),
+            TransitionKind::Wipe => (400, TransitionMode::Wipe(WipeTransition::default())),
+            TransitionKind::Push => (400, TransitionMode::Push(PushTransition::default())),
+            TransitionKind::EInk => (1600, TransitionMode::EInk(EInkTransition::default())),
+        };
         Self {
             kind,
-            duration_ms: 400,
-            mode: match kind {
-                TransitionKind::Fade => TransitionMode::Fade(FadeTransition::default()),
-                TransitionKind::Wipe => TransitionMode::Wipe(WipeTransition::default()),
-                TransitionKind::Push => TransitionMode::Push(PushTransition::default()),
-            },
+            duration_ms,
+            mode,
         }
     }
 
@@ -1056,34 +1770,23 @@ impl TransitionOptions {
                     ));
                 }
                 wipe.softness = wipe.softness.clamp(0.0, 0.5);
-                if !wipe.angle_deg.is_finite() || !wipe.angle_jitter_deg.is_finite() {
-                    return Err(anyhow::anyhow!(
-                        "transition option {} has invalid wipe angle configuration",
-                        self.kind
-                    ));
-                }
-                ensure!(
-                    wipe.angle_jitter_deg >= 0.0,
-                    format!(
-                        "transition option {} requires wipe.angle-jitter-deg >= 0",
-                        self.kind
-                    )
-                );
+                wipe.angles.normalize(self.kind)?;
             }
             TransitionMode::Push(push) => {
-                if !push.angle_deg.is_finite() || !push.angle_jitter_deg.is_finite() {
+                push.angles.normalize(self.kind)?;
+            }
+            TransitionMode::EInk(eink) => {
+                if !eink.reveal_portion.is_finite() {
                     return Err(anyhow::anyhow!(
-                        "transition option {} has invalid push angle configuration",
+                        "transition option {} has non-finite e-ink.reveal-portion",
                         self.kind
                     ));
                 }
-                ensure!(
-                    push.angle_jitter_deg >= 0.0,
-                    format!(
-                        "transition option {} requires push.angle-jitter-deg >= 0",
-                        self.kind
-                    )
-                );
+                eink.reveal_portion = eink.reveal_portion.clamp(0.05, 0.95);
+                if eink.stripe_count == 0 {
+                    eink.stripe_count = 1;
+                }
+                eink.flash_count = eink.flash_count.min(6);
             }
         }
         Ok(())
@@ -1098,23 +1801,29 @@ impl TransitionOptions {
                 through_black: builder.fade_through_black.unwrap_or(false),
             }),
             TransitionKind::Wipe => TransitionMode::Wipe(WipeTransition {
-                angle_deg: builder.wipe_angle_deg.unwrap_or(0.0),
-                angle_jitter_deg: builder.wipe_angle_jitter_deg.unwrap_or(0.0),
-                reverse: builder.wipe_reverse.unwrap_or(false),
-                randomize_direction: builder.wipe_randomize_direction.unwrap_or(false),
+                angles: AnglePicker::from_parts(
+                    builder.wipe_angle_list_deg,
+                    builder.wipe_angle_selection,
+                    builder.wipe_angle_jitter_deg,
+                ),
                 softness: builder.wipe_softness.unwrap_or(0.05),
             }),
-            TransitionKind::Push => {
-                let vertical_axis = builder.push_vertical_axis.unwrap_or(false);
-                let angle =
-                    builder
-                        .push_angle_deg
-                        .unwrap_or(if vertical_axis { 90.0 } else { 0.0 });
-                TransitionMode::Push(PushTransition {
-                    angle_deg: angle,
-                    angle_jitter_deg: builder.push_angle_jitter_deg.unwrap_or(0.0),
-                    reverse: builder.push_reverse.unwrap_or(false),
-                    randomize_direction: builder.push_randomize_direction.unwrap_or(false),
+            TransitionKind::Push => TransitionMode::Push(PushTransition {
+                angles: AnglePicker::from_parts(
+                    builder.push_angle_list_deg,
+                    builder.push_angle_selection,
+                    builder.push_angle_jitter_deg,
+                ),
+            }),
+            TransitionKind::EInk => {
+                let defaults = EInkTransition::default();
+                TransitionMode::EInk(EInkTransition {
+                    flash_count: builder.eink_flash_count.unwrap_or(defaults.flash_count),
+                    reveal_portion: builder
+                        .eink_reveal_portion
+                        .unwrap_or(defaults.reveal_portion),
+                    stripe_count: builder.eink_stripe_count.unwrap_or(defaults.stripe_count),
+                    flash_color: builder.eink_flash_color.unwrap_or(defaults.flash_color),
                 })
             }
         };
@@ -1127,22 +1836,23 @@ impl TransitionOptions {
         match &mut option.mode {
             TransitionMode::Fade(_) => {}
             TransitionMode::Wipe(cfg) => {
-                ensure!(
-                    cfg.angle_jitter_deg >= 0.0,
-                    format!(
-                        "transition option {} requires wipe.angle-jitter-deg >= 0",
-                        kind
-                    )
-                );
+                cfg.angles.normalize(kind)?;
             }
             TransitionMode::Push(cfg) => {
-                ensure!(
-                    cfg.angle_jitter_deg >= 0.0,
-                    format!(
-                        "transition option {} requires push.angle-jitter-deg >= 0",
+                cfg.angles.normalize(kind)?;
+            }
+            TransitionMode::EInk(eink) => {
+                if !eink.reveal_portion.is_finite() {
+                    return Err(anyhow::anyhow!(
+                        "transition option {} has non-finite e-ink.reveal-portion",
                         kind
-                    )
-                );
+                    ));
+                }
+                eink.reveal_portion = eink.reveal_portion.clamp(0.05, 0.95);
+                if eink.stripe_count == 0 {
+                    eink.stripe_count = 1;
+                }
+                eink.flash_count = eink.flash_count.min(6);
             }
         }
 
@@ -1155,6 +1865,120 @@ pub enum TransitionMode {
     Fade(FadeTransition),
     Wipe(WipeTransition),
     Push(PushTransition),
+    EInk(EInkTransition),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AngleSelection {
+    Random,
+    RoundRobin,
+}
+
+#[derive(Debug, Clone)]
+struct AnglePickerRuntime {
+    next_index: Arc<AtomicUsize>,
+}
+
+impl Default for AnglePickerRuntime {
+    fn default() -> Self {
+        Self {
+            next_index: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AnglePicker {
+    pub angles_deg: Vec<f32>,
+    pub selection: AngleSelection,
+    pub jitter_deg: f32,
+    runtime: AnglePickerRuntime,
+}
+
+impl Default for AnglePicker {
+    fn default() -> Self {
+        Self {
+            angles_deg: vec![0.0],
+            selection: AngleSelection::Random,
+            jitter_deg: 0.0,
+            runtime: AnglePickerRuntime::default(),
+        }
+    }
+}
+
+impl AnglePicker {
+    fn from_parts(
+        angles_deg: Option<Vec<f32>>,
+        selection: Option<AngleSelection>,
+        jitter_deg: Option<f32>,
+    ) -> Self {
+        let picker = Self {
+            angles_deg: angles_deg.unwrap_or_else(|| vec![0.0]),
+            selection: selection.unwrap_or(AngleSelection::Random),
+            jitter_deg: jitter_deg.unwrap_or(0.0),
+            runtime: AnglePickerRuntime::default(),
+        };
+        picker
+    }
+
+    fn normalize(&mut self, kind: TransitionKind) -> Result<()> {
+        ensure!(
+            !self.angles_deg.is_empty(),
+            format!(
+                "transition option {} requires angle-list-degrees to include at least one entry",
+                kind
+            )
+        );
+        for angle in &self.angles_deg {
+            ensure!(
+                angle.is_finite(),
+                format!(
+                    "transition option {} has non-finite values in angle-list-degrees",
+                    kind
+                )
+            );
+        }
+        ensure!(
+            self.jitter_deg.is_finite(),
+            format!(
+                "transition option {} has non-finite angle-jitter-degrees",
+                kind
+            )
+        );
+        ensure!(
+            self.jitter_deg >= 0.0,
+            format!(
+                "transition option {} requires angle-jitter-degrees >= 0",
+                kind
+            )
+        );
+        Ok(())
+    }
+
+    pub(crate) fn pick_angle(&self, rng: &mut impl Rng) -> f32 {
+        let base_angle = if self.angles_deg.len() == 1 {
+            self.angles_deg[0]
+        } else {
+            match self.selection {
+                AngleSelection::Random => {
+                    let index = rng.gen_range(0..self.angles_deg.len());
+                    self.angles_deg[index]
+                }
+                AngleSelection::RoundRobin => {
+                    let index = self.runtime.next_index.fetch_add(1, Ordering::Relaxed)
+                        % self.angles_deg.len();
+                    self.angles_deg[index]
+                }
+            }
+        };
+        if self.jitter_deg.abs() > f32::EPSILON {
+            let jitter = rng.gen_range(-self.jitter_deg..=self.jitter_deg);
+            base_angle + jitter
+        } else {
+            base_angle
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1162,42 +1986,49 @@ pub struct FadeTransition {
     pub through_black: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct WipeTransition {
-    pub angle_deg: f32,
-    pub angle_jitter_deg: f32,
-    pub reverse: bool,
-    pub randomize_direction: bool,
+    pub angles: AnglePicker,
     pub softness: f32,
 }
 
 impl Default for WipeTransition {
     fn default() -> Self {
         Self {
-            angle_deg: 0.0,
-            angle_jitter_deg: 0.0,
-            reverse: false,
-            randomize_direction: false,
+            angles: AnglePicker::default(),
             softness: 0.05,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PushTransition {
-    pub angle_deg: f32,
-    pub angle_jitter_deg: f32,
-    pub reverse: bool,
-    pub randomize_direction: bool,
+    pub angles: AnglePicker,
 }
 
 impl Default for PushTransition {
     fn default() -> Self {
         Self {
-            angle_deg: 0.0,
-            angle_jitter_deg: 0.0,
-            reverse: false,
-            randomize_direction: false,
+            angles: AnglePicker::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EInkTransition {
+    pub flash_count: u32,
+    pub reveal_portion: f32,
+    pub stripe_count: u32,
+    pub flash_color: [u8; 3],
+}
+
+impl Default for EInkTransition {
+    fn default() -> Self {
+        Self {
+            flash_count: 3,
+            reveal_portion: 0.55,
+            stripe_count: 24,
+            flash_color: [255, 255, 255],
         }
     }
 }
@@ -1407,16 +2238,17 @@ impl<'de> Visitor<'de> for TransitionOptionVisitor {
 struct TransitionOptionBuilder {
     duration_ms: Option<u64>,
     fade_through_black: Option<bool>,
-    wipe_angle_deg: Option<f32>,
+    wipe_angle_list_deg: Option<Vec<f32>>,
+    wipe_angle_selection: Option<AngleSelection>,
     wipe_angle_jitter_deg: Option<f32>,
-    wipe_reverse: Option<bool>,
-    wipe_randomize_direction: Option<bool>,
     wipe_softness: Option<f32>,
-    push_angle_deg: Option<f32>,
+    push_angle_list_deg: Option<Vec<f32>>,
+    push_angle_selection: Option<AngleSelection>,
     push_angle_jitter_deg: Option<f32>,
-    push_reverse: Option<bool>,
-    push_randomize_direction: Option<bool>,
-    push_vertical_axis: Option<bool>,
+    eink_flash_count: Option<u32>,
+    eink_reveal_portion: Option<f32>,
+    eink_stripe_count: Option<u32>,
+    eink_flash_color: Option<[u8; 3]>,
 }
 
 fn apply_transition_inline_field<E: de::Error>(
@@ -1432,15 +2264,23 @@ fn apply_transition_inline_field<E: de::Error>(
         "through-black" if matches!(kind, TransitionKind::Fade) => {
             builder.fade_through_black = Some(inline_value_to::<bool, E>(value)?);
         }
-        "angle-deg" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
-            let angle = inline_value_to::<f32, E>(value)?;
+        "angle-list-degrees" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
+            let angles = inline_value_to::<Vec<f32>, E>(value)?;
             match kind {
-                TransitionKind::Wipe => builder.wipe_angle_deg = Some(angle),
-                TransitionKind::Push => builder.push_angle_deg = Some(angle),
+                TransitionKind::Wipe => builder.wipe_angle_list_deg = Some(angles),
+                TransitionKind::Push => builder.push_angle_list_deg = Some(angles),
                 _ => {}
             }
         }
-        "angle-jitter-deg" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
+        "angle-selection" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
+            let selection = inline_value_to::<AngleSelection, E>(value)?;
+            match kind {
+                TransitionKind::Wipe => builder.wipe_angle_selection = Some(selection),
+                TransitionKind::Push => builder.push_angle_selection = Some(selection),
+                _ => {}
+            }
+        }
+        "angle-jitter-degrees" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
             let jitter = inline_value_to::<f32, E>(value)?;
             match kind {
                 TransitionKind::Wipe => builder.wipe_angle_jitter_deg = Some(jitter),
@@ -1448,27 +2288,20 @@ fn apply_transition_inline_field<E: de::Error>(
                 _ => {}
             }
         }
-        "reverse" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
-            let reverse = inline_value_to::<bool, E>(value)?;
-            match kind {
-                TransitionKind::Wipe => builder.wipe_reverse = Some(reverse),
-                TransitionKind::Push => builder.push_reverse = Some(reverse),
-                _ => {}
-            }
-        }
-        "randomize-direction" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
-            let randomize = inline_value_to::<bool, E>(value)?;
-            match kind {
-                TransitionKind::Wipe => builder.wipe_randomize_direction = Some(randomize),
-                TransitionKind::Push => builder.push_randomize_direction = Some(randomize),
-                _ => {}
-            }
-        }
-        "vertical-axis" if matches!(kind, TransitionKind::Push) => {
-            builder.push_vertical_axis = Some(inline_value_to::<bool, E>(value)?);
-        }
         "softness" if matches!(kind, TransitionKind::Wipe) => {
             builder.wipe_softness = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "flash-count" if matches!(kind, TransitionKind::EInk) => {
+            builder.eink_flash_count = Some(inline_value_to::<u32, E>(value)?);
+        }
+        "reveal-portion" if matches!(kind, TransitionKind::EInk) => {
+            builder.eink_reveal_portion = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "stripe-count" if matches!(kind, TransitionKind::EInk) => {
+            builder.eink_stripe_count = Some(inline_value_to::<u32, E>(value)?);
+        }
+        "flash-color" if matches!(kind, TransitionKind::EInk) => {
+            builder.eink_flash_color = Some(inline_value_to::<[u8; 3], E>(value)?);
         }
         _ => {
             return Err(de::Error::unknown_field(
@@ -1476,12 +2309,14 @@ fn apply_transition_inline_field<E: de::Error>(
                 &[
                     "duration-ms",
                     "through-black",
-                    "angle-deg",
-                    "angle-jitter-deg",
-                    "reverse",
-                    "randomize-direction",
+                    "angle-list-degrees",
+                    "angle-selection",
+                    "angle-jitter-degrees",
                     "softness",
-                    "vertical-axis",
+                    "flash-count",
+                    "reveal-portion",
+                    "stripe-count",
+                    "flash-color",
                 ],
             ));
         }
@@ -1506,6 +2341,8 @@ pub struct Configuration {
     pub loader_max_concurrent_decodes: usize,
     /// Optional deterministic seed for initial photo shuffle.
     pub startup_shuffle_seed: Option<u64>,
+    /// Photo filter configuration applied to the displayed images.
+    pub filter: FilterConfig,
     /// Matting configuration for displayed photos.
     pub matting: MattingConfig,
     /// Playlist weighting options for how frequently new photos repeat.
@@ -1533,6 +2370,9 @@ impl Configuration {
         self.transition
             .validate()
             .context("invalid transition configuration")?;
+        self.filter
+            .validate()
+            .context("invalid filter configuration")?;
         self.matting
             .prepare_runtime()
             .context("invalid matting configuration")?;
@@ -1551,6 +2391,7 @@ impl Default for Configuration {
             viewer_preload_count: 3,
             loader_max_concurrent_decodes: 4,
             startup_shuffle_seed: None,
+            filter: FilterConfig::default(),
             matting: MattingConfig::default(),
             playlist: PlaylistOptions::default(),
         }

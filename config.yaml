@@ -9,12 +9,13 @@ transition:
       duration-ms: 400
     wipe:
       duration-ms: 550
-      angle-deg: 45.0
+      angle-list-degrees: [45.0, 225.0]
+      angle-selection: round-robin
+      angle-jitter-degrees: 5.0
       softness: 0.08
     push:
       duration-ms: 520
-      angle-deg: 0.0
-      randomize-direction: true
+      angle-list-degrees: [0.0, 180.0]
 # Dwell time (ms) the current image remains fully displayed before the next transition
 dwell-ms: 2000
 # Number of images to preload in the viewer (aligns with channel capacity)
@@ -29,6 +30,23 @@ startup-shuffle-seed: null
 playlist:
   new-multiplicity: 3
   half-life: 3 days
+
+# Photo filter settings
+filter:
+  type: random
+  allow: [classic-sepia, clean-boost, polaroid-fade]
+  options:
+    classic-sepia:
+      amount: 0.75
+      tone-strength: 0.65
+      vignette-strength: 0.3
+    polaroid-fade:
+      matte-strength: 0.7
+      vignette-strength: 0.35
+    clean-boost:
+      white-balance-strength: 0.45
+      contrast-strength: 0.35
+      saturation-boost: 0.05
 
 # Matting settings
 matting:

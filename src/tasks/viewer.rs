@@ -1,16 +1,18 @@
 use crate::config::{
-    MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionKind, TransitionMode,
-    TransitionOptions,
+    FilterConfig, FilterOptions, MattingConfig, MattingMode, MattingOptions, TransitionConfig,
+    TransitionKind, TransitionMode, TransitionOptions,
 };
 use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
+use crate::processing::filters::apply_filter;
 use crate::processing::layout::{center_offset, resize_to_cover};
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
 use image::{imageops, Rgba, RgbaImage};
 use rand::{thread_rng, Rng};
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
@@ -72,6 +74,7 @@ pub fn run_windowed(
         oversample: f32,
         max_dim: u32,
         matting: MattingOptions,
+        filter: Option<FilterOptions>,
     }
 
     struct MatTask {
@@ -98,9 +101,23 @@ pub fn run_windowed(
     }
 
     enum ActiveTransition {
-        Fade { through_black: bool },
-        Wipe { normal: [f32; 2], softness: f32 },
-        Push { direction: [f32; 2] },
+        Fade {
+            through_black: bool,
+        },
+        Wipe {
+            normal: [f32; 2],
+            softness: f32,
+        },
+        Push {
+            direction: [f32; 2],
+        },
+        EInk {
+            flash_count: u32,
+            reveal_portion: f32,
+            stripe_count: u32,
+            flash_color: [f32; 3],
+            noise_seed: [f32; 2],
+        },
     }
 
     struct MattingPipeline {
@@ -162,6 +179,7 @@ pub fn run_windowed(
             oversample,
             max_dim,
             matting,
+            filter,
         } = params;
         if screen_w == 0 || screen_h == 0 {
             return None;
@@ -353,12 +371,16 @@ pub fn run_windowed(
             }
         };
 
-        imageops::overlay(
-            &mut background,
-            main_img.as_ref(),
-            offset_x as i64,
-            offset_y as i64,
-        );
+        let mut photo = match main_img {
+            Cow::Borrowed(img) => img.clone(),
+            Cow::Owned(img) => img,
+        };
+        if let Some(ref opts) = filter {
+            let seed = hash_path(&path);
+            apply_filter(&mut photo, opts, seed);
+        }
+
+        imageops::overlay(&mut background, &photo, offset_x as i64, offset_y as i64);
 
         let canvas = ImagePlane {
             width: canvas_w,
@@ -383,17 +405,7 @@ pub fn run_windowed(
                     through_black: cfg.through_black,
                 },
                 TransitionMode::Wipe(cfg) => {
-                    let mut angle = cfg.angle_deg;
-                    if cfg.angle_jitter_deg.abs() > f32::EPSILON {
-                        let jitter = rng.gen_range(-cfg.angle_jitter_deg..=cfg.angle_jitter_deg);
-                        angle += jitter;
-                    }
-                    if cfg.randomize_direction && rng.gen_bool(0.5) {
-                        angle += 180.0;
-                    }
-                    if cfg.reverse {
-                        angle += 180.0;
-                    }
+                    let angle = cfg.angles.pick_angle(rng);
                     let (sin, cos) = angle.to_radians().sin_cos();
                     let mut normal = [cos, sin];
                     let len = (normal[0] * normal[0] + normal[1] * normal[1]).sqrt();
@@ -409,17 +421,7 @@ pub fn run_windowed(
                     }
                 }
                 TransitionMode::Push(cfg) => {
-                    let mut angle = cfg.angle_deg;
-                    if cfg.angle_jitter_deg.abs() > f32::EPSILON {
-                        let jitter = rng.gen_range(-cfg.angle_jitter_deg..=cfg.angle_jitter_deg);
-                        angle += jitter;
-                    }
-                    if cfg.randomize_direction && rng.gen_bool(0.5) {
-                        angle += 180.0;
-                    }
-                    if cfg.reverse {
-                        angle += 180.0;
-                    }
+                    let angle = cfg.angles.pick_angle(rng);
                     let (sin, cos) = angle.to_radians().sin_cos();
                     let mut direction = [cos, sin];
                     let len = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
@@ -431,6 +433,15 @@ pub fn run_windowed(
                     }
                     ActiveTransition::Push { direction }
                 }
+                TransitionMode::EInk(cfg) => ActiveTransition::EInk {
+                    flash_count: cfg.flash_count,
+                    reveal_portion: cfg.reveal_portion.clamp(0.05, 0.95),
+                    stripe_count: cfg.stripe_count.max(1),
+                    flash_color: cfg
+                        .flash_color
+                        .map(|channel| (channel as f32 / 255.0).clamp(0.0, 1.0)),
+                    noise_seed: [rng.gen(), rng.gen()],
+                },
             };
             Self {
                 started_at,
@@ -551,6 +562,7 @@ pub fn run_windowed(
         preload_count: usize,
         oversample: f32,
         matting: MattingConfig,
+        filtering: FilterConfig,
         transition_cfg: TransitionConfig,
         mat_pipeline: MattingPipeline,
         mat_inflight: usize,
@@ -931,6 +943,22 @@ pub fn run_windowed(
                                 uniforms.params0[0] = direction[0] * diag;
                                 uniforms.params0[1] = direction[1] * diag;
                             }
+                            ActiveTransition::EInk {
+                                flash_count,
+                                reveal_portion,
+                                stripe_count,
+                                flash_color,
+                                noise_seed,
+                            } => {
+                                uniforms.params0[0] = (*flash_count).min(6) as f32;
+                                uniforms.params0[1] = *reveal_portion;
+                                uniforms.params0[2] = (*stripe_count).max(1) as f32;
+                                uniforms.params0[3] = noise_seed[0];
+                                uniforms.params1[0] = noise_seed[1];
+                                uniforms.params1[1] = flash_color[0].clamp(0.0, 1.0);
+                                uniforms.params1[2] = flash_color[1].clamp(0.0, 1.0);
+                                uniforms.params1[3] = flash_color[2].clamp(0.0, 1.0);
+                            }
                         }
                     } else if let Some(cur) = &self.current {
                         let rect = compute_cover_rect(
@@ -1011,12 +1039,14 @@ pub fn run_windowed(
                 };
                 let mut rng = thread_rng();
                 let matting = self.matting.choose_option(&mut rng);
+                let filter = self.filtering.choose_filter(&mut rng);
                 let params = MatParams {
                     screen_w: gpu.config.width.max(1),
                     screen_h: gpu.config.height.max(1),
                     oversample: self.oversample,
                     max_dim: gpu.limits.max_texture_dimension_2d,
                     matting,
+                    filter,
                 };
                 let task = MatTask { image: img, params };
                 match self.mat_pipeline.try_submit(task) {
@@ -1136,6 +1166,7 @@ pub fn run_windowed(
         preload_count: cfg.viewer_preload_count,
         oversample: cfg.oversample,
         matting: cfg.matting.clone(),
+        filtering: cfg.filter.clone(),
         transition_cfg: cfg.transition.clone(),
         mat_pipeline,
         mat_inflight: 0,
@@ -1154,6 +1185,12 @@ fn compute_padded_stride(bytes_per_row: u32) -> u32 {
         return 0;
     }
     bytes_per_row.div_ceil(ALIGN) * ALIGN
+}
+
+fn hash_path(path: &std::path::Path) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn compute_canvas_size(screen_w: u32, screen_h: u32, oversample: f32, max_dim: u32) -> (u32, u32) {
