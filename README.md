@@ -79,7 +79,7 @@ photo-library-path: /path/to/photos
 
 # Render/transition settings
 transition:
-  type: fade # fade | wipe | push | random
+  types: [fade] # List one entry for a fixed transition or multiple to randomize
   duration-ms: 400 # Duration for the selected transition
 dwell-ms: 2000 # Time an image remains fully visible (ms)
 viewer-preload-count: 3 # Images the viewer preloads; also sets viewer channel capacity
@@ -92,7 +92,7 @@ playlist:
   half-life: 3 days # How quickly that multiplicity decays back toward 1
 
 matting:
-  type: random # Set to a specific option key to pin a single mat
+  types: [fixed-color, blur] # Single entry = fixed mat, multiple entries = random rotation
   options:
     fixed-color:
       minimum-mat-percentage: 0.0 # % of each screen edge reserved for the mat border
@@ -199,13 +199,13 @@ The command prints the multiplicity assigned to each discovered photo and the fi
 
 ### Transition configuration
 
-The `transition` block controls how the viewer blends between photos. Set `transition.type` to one of the supported transitions or to `random` to choose among multiple configured options. When `type` is `random`, list the available transitions under `transition.options` keyed by their type.
+The `transition` block controls how the viewer blends between photos. List one or more transition kinds under `transition.types`. A single entry locks the viewer to that transition, while multiple entries tell the app to pick randomly on each slide. Every type mentioned in `transition.types` must have matching settings either inline (when only one type is listed) or within `transition.options`. Legacy configs that still use `transition.type` continue to work; `type: random` now randomizes across whichever entries appear in `transition.options`.
 
 #### Example: wipe with a single angle
 
 ```yaml
 transition:
-  type: wipe
+  types: [wipe]
   duration-ms: 600
   angle-list-degrees: [120.0]
   softness: 0.12
@@ -217,7 +217,7 @@ When the list contains only one entry the viewer always uses that direction, so 
 
 ```yaml
 transition:
-  type: random
+  types: [fade, wipe, push]
   options:
     fade:
       duration-ms: 500
@@ -257,13 +257,13 @@ Each transition exposes a focused set of fields:
 
 ### Matting configuration
 
-The `matting` table chooses how the background behind each photo is prepared. Each entry lives under `matting.options` and is keyed by the mat type (`fixed-color`, `blur`, `studio`, or `fixed-image`). Set `matting.type` to one of those keys to lock in a single style, or to `random` to shuffle between every configured option on a per-photo basis. The configuration is invalid if `matting.type` is `random` and no options are provided, or if the selected key is missing from `matting.options`.
+The `matting` table chooses how the background behind each photo is prepared. Each entry lives under `matting.options` and is keyed by the mat type (`fixed-color`, `blur`, `studio`, or `fixed-image`). Supply one or more entries in `matting.types`. A single entry locks the viewer to that mat, while multiple entries cause the app to pick randomly. Every listed type must either be configured inline (when only one type is present) or provided inside `matting.options`. Older `matting.type` configurations are still accepted, and `type: random` rotates through the mats listed under `matting.options`.
 
 A single studio mat:
 
 ```yaml
 matting:
-  type: studio
+  types: [studio]
   options:
     studio:
       minimum-mat-percentage: 3.5
@@ -274,7 +274,7 @@ Random rotation between two mats:
 
 ```yaml
 matting:
-  type: random
+  types: [fixed-color, blur]
   options:
     fixed-color:
       minimum-mat-percentage: 0.0
