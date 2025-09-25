@@ -284,7 +284,7 @@ pub fn run_windowed(
             }
             MattingMode::Blur {
                 sigma,
-                max_sample_dim,
+                max_sample_dimension,
                 backend,
             } => {
                 let (bg_w, bg_h) = resize_to_cover(canvas_w, canvas_h, width, height, max_dim);
@@ -301,12 +301,12 @@ pub fn run_windowed(
                     bg = canvas;
                 }
                 if *sigma > 0.0 {
-                    let limit = max_sample_dim
+                    let limit = max_sample_dimension
                         .filter(|v| *v > 0)
                         .unwrap_or({
                             #[cfg(target_arch = "aarch64")]
                             {
-                                MattingMode::default_blur_max_sample_dim()
+                                MattingMode::default_blur_max_sample_dimension()
                             }
                             #[cfg(not(target_arch = "aarch64"))]
                             {

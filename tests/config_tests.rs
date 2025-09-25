@@ -171,12 +171,12 @@ matting:
 }
 
 #[test]
-fn parse_round_robin_matting_configuration() {
+fn parse_sequential_matting_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
   types: [fixed-color, blur]
-  type-selection: round-robin
+  type-selection: sequential
   options:
     fixed-color:
       color: [10, 20, 30]
@@ -187,10 +187,10 @@ matting:
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     match cfg.matting.selection() {
-        MattingSelection::RoundRobin { kinds, .. } => {
+        MattingSelection::Sequential { kinds, .. } => {
             assert_eq!(kinds, vec![MattingKind::FixedColor, MattingKind::Blur]);
         }
-        other => panic!("expected round-robin matting selection, got {other:?}"),
+        other => panic!("expected sequential matting selection, got {other:?}"),
     }
 
     let mut rng = StdRng::seed_from_u64(1);
@@ -308,7 +308,7 @@ transition:
     push:
       duration-ms: 640
       angle-list-degrees: [0.0, 180.0]
-      angle-selection: round-robin
+      angle-selection: sequential
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -346,7 +346,7 @@ transition:
             assert_eq!(cfg.angles.angles_deg, vec![0.0, 180.0]);
             assert_eq!(
                 cfg.angles.selection,
-                rust_photo_frame::config::AngleSelection::RoundRobin
+                rust_photo_frame::config::AngleSelection::Sequential
             );
         }
         _ => panic!("expected push transition"),
@@ -354,17 +354,17 @@ transition:
 }
 
 #[test]
-fn parse_round_robin_transition_configuration() {
+fn parse_sequential_transition_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
   types: [push, wipe]
-  type-selection: round-robin
+  type-selection: sequential
   options:
     push:
       duration-ms: 640
       angle-list-degrees: [0.0, 180.0]
-      angle-selection: round-robin
+      angle-selection: sequential
     wipe:
       duration-ms: 520
       angle-list-degrees: [90.0]
@@ -372,10 +372,10 @@ transition:
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     match cfg.transition.selection() {
-        TransitionSelection::RoundRobin { kinds, .. } => {
+        TransitionSelection::Sequential { kinds, .. } => {
             assert_eq!(kinds, vec![TransitionKind::Push, TransitionKind::Wipe]);
         }
-        other => panic!("expected round-robin transition selection, got {other:?}"),
+        other => panic!("expected sequential transition selection, got {other:?}"),
     }
 
     let mut rng = StdRng::seed_from_u64(42);
@@ -494,7 +494,7 @@ transition:
   types: [push]
   duration-ms: 725
   angle-list-degrees: [90.0, 270.0]
-  angle-selection: round-robin
+  angle-selection: sequential
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -509,7 +509,7 @@ transition:
             assert_eq!(push.angles.angles_deg, vec![90.0, 270.0]);
             assert_eq!(
                 push.angles.selection,
-                rust_photo_frame::config::AngleSelection::RoundRobin
+                rust_photo_frame::config::AngleSelection::Sequential
             );
         }
         _ => panic!("expected push transition"),
