@@ -115,7 +115,6 @@ struct PlaylistState {
     dirty: bool,
     now_override: Option<SystemTime>,
     last_sent: Option<PathBuf>,
-    unique_candidates: usize,
 }
 
 impl PlaylistState {
@@ -129,7 +128,6 @@ impl PlaylistState {
             dirty: true,
             now_override,
             last_sent: None,
-            unique_candidates: 0,
         }
     }
 
@@ -144,7 +142,6 @@ impl PlaylistState {
             self.queue.clear();
             self.dirty = false;
             self.prioritized.clear();
-            self.unique_candidates = 0;
             return;
         }
 
@@ -191,7 +188,6 @@ impl PlaylistState {
             queue.push_back(path);
         }
 
-        self.unique_candidates = multiplicities.len();
         self.queue = queue;
         self.dirty = false;
 
@@ -214,23 +210,40 @@ impl PlaylistState {
 
     fn peek(&mut self) -> Option<&PathBuf> {
         if let Some(last) = self.last_sent.clone() {
-            while self
-                .queue
-                .front()
-                .map(|front| front == &last)
-                .unwrap_or(false)
-            {
-                if self.unique_candidates <= 1 {
-                    break;
-                }
+            if let Some(front) = self.queue.front() {
+                if front == &last {
+                    let Some(held) = self.queue.pop_front() else {
+                        return None;
+                    };
+                    let mut rebuilt = false;
 
-                self.queue.pop_front();
+                    if self.queue.is_empty() {
+                        self.ensure_ready();
+                        rebuilt = true;
+                    }
 
-                if self.queue.is_empty() {
-                    self.ensure_ready();
+                    if let Some(idx) = self.queue.iter().position(|p| p != &last) {
+                        if idx > 0 {
+                            if let Some(candidate) = self.queue.remove(idx) {
+                                self.queue.push_front(candidate);
+                            }
+                        }
+                    }
+
+                    match self.queue.front() {
+                        Some(next) if next != &last => {
+                            if !rebuilt {
+                                self.queue.insert(1, held);
+                            }
+                        }
+                        _ => {
+                            self.queue.push_front(held);
+                        }
+                    }
                 }
             }
         }
+
         self.queue.front()
     }
 
