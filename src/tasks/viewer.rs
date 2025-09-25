@@ -69,6 +69,7 @@ pub fn run_windowed(
     struct ImgTex {
         plane: TexturePlane,
         path: std::path::PathBuf,
+        background: Option<TexturePlane>,
         foreground: Option<ForegroundTex>,
     }
 
@@ -101,6 +102,7 @@ pub fn run_windowed(
     struct MatResult {
         path: std::path::PathBuf,
         canvas: ImagePlane,
+        background: Option<ImagePlane>,
         foreground: Option<ForegroundResult>,
     }
 
@@ -262,6 +264,7 @@ pub fn run_windowed(
             return Some(MatResult {
                 path,
                 canvas,
+                background: None,
                 foreground: None,
             });
         }
@@ -371,6 +374,18 @@ pub fn run_windowed(
             }
         };
 
+        let mut static_background = None;
+        if matches!(
+            matting.style,
+            MattingMode::FixedColor { .. } | MattingMode::FixedImage { .. }
+        ) {
+            static_background = Some(ImagePlane {
+                width: canvas_w,
+                height: canvas_h,
+                pixels: background.clone().into_raw(),
+            });
+        }
+
         let main_img = match main_img {
             Cow::Borrowed(img) => img.clone(),
             Cow::Owned(img) => img,
@@ -403,6 +418,7 @@ pub fn run_windowed(
         Some(MatResult {
             path,
             canvas,
+            background: static_background,
             foreground,
         })
     }
@@ -572,9 +588,14 @@ pub fn run_windowed(
         let MatResult {
             path,
             canvas,
+            background,
             foreground,
         } = result;
         let plane = upload_plane(gpu, canvas)?;
+        let background = match background {
+            Some(bg) => upload_plane(gpu, bg),
+            None => None,
+        };
         let foreground = match foreground {
             Some(fg) => upload_plane(gpu, fg.plane).map(|plane| ForegroundTex {
                 plane,
@@ -586,6 +607,7 @@ pub fn run_windowed(
         Some(ImgTex {
             plane,
             path,
+            background,
             foreground,
         })
     }
@@ -956,9 +978,14 @@ pub fn run_windowed(
                         ) {
                             handled_split_push = true;
 
+                            let background_plane = cur
+                                .background
+                                .as_ref()
+                                .or(next.background.as_ref())
+                                .unwrap_or(&cur.plane);
                             let cur_canvas_rect = compute_cover_rect(
-                                cur.plane.w,
-                                cur.plane.h,
+                                background_plane.w,
+                                background_plane.h,
                                 gpu.config.width,
                                 gpu.config.height,
                             );
@@ -975,16 +1002,17 @@ pub fn run_windowed(
                                 bytemuck::bytes_of(&bg_uniforms),
                             );
                             rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                            rpass.set_bind_group(1, &cur.plane.bind, &[]);
+                            rpass.set_bind_group(1, &background_plane.bind, &[]);
                             rpass.set_bind_group(2, &gpu.blank_plane.bind, &[]);
                             rpass.draw(0..6, 0..1);
 
                             let mut progress = state.progress();
                             progress = progress * progress * (3.0 - 2.0 * progress);
 
+                            let next_canvas_plane = next.background.as_ref().unwrap_or(&next.plane);
                             let next_canvas_rect = compute_cover_rect(
-                                next.plane.w,
-                                next.plane.h,
+                                next_canvas_plane.w,
+                                next_canvas_plane.h,
                                 gpu.config.width,
                                 gpu.config.height,
                             );
