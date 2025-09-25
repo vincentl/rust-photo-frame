@@ -156,23 +156,54 @@ fn simulate_playlist_respects_seed_and_weights() {
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
     let fresh_path = PathBuf::from("fresh.jpg");
     let old_path = PathBuf::from("old.jpg");
+    let medium_path = PathBuf::from("medium.jpg");
     let photos = vec![
         photo_info(fresh_path.clone(), now - Duration::from_secs(3_600)),
+        photo_info(medium_path.clone(), now - Duration::from_secs(86_400 * 2)),
         photo_info(old_path.clone(), now - Duration::from_secs(86_400 * 30)),
     ];
 
-    let plan = manager::simulate_playlist(photos.clone(), options.clone(), now, 8, Some(42));
+    let plan = manager::simulate_playlist(photos.clone(), options.clone(), now, 12, Some(42));
 
     assert!(plan.len() >= 4, "expected several scheduled items");
     assert_eq!(plan[0], fresh_path, "fresh photo should appear first");
 
     let fresh_count = plan.iter().filter(|p| *p == &fresh_path).count();
+    let medium_count = plan.iter().filter(|p| *p == &medium_path).count();
     let old_count = plan.iter().filter(|p| *p == &old_path).count();
     assert!(
-        fresh_count > old_count,
-        "fresh photo should repeat more often than old ones"
+        fresh_count > medium_count && medium_count >= old_count,
+        "expected weighting fresh>medium>=old but saw fresh={}, medium={}, old={}",
+        fresh_count,
+        medium_count,
+        old_count
     );
 
-    let plan_again = manager::simulate_playlist(photos, options, now, 8, Some(42));
+    let plan_again = manager::simulate_playlist(photos, options, now, 12, Some(42));
     assert_eq!(plan, plan_again, "seeded runs should be deterministic");
+}
+
+#[test]
+fn simulate_playlist_avoids_back_to_back_repeats_when_possible() {
+    let options = PlaylistOptions {
+        new_multiplicity: 3,
+        half_life: Duration::from_secs(60),
+    };
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
+    let photos = vec![
+        photo_info(PathBuf::from("alpha.jpg"), now - Duration::from_secs(10)),
+        photo_info(PathBuf::from("beta.jpg"), now - Duration::from_secs(20)),
+        photo_info(PathBuf::from("gamma.jpg"), now - Duration::from_secs(30)),
+    ];
+
+    let plan = manager::simulate_playlist(photos, options, now, 30, Some(7));
+
+    assert!(
+        plan.len() > 2,
+        "expected enough scheduled items to inspect order"
+    );
+    assert!(
+        plan.windows(2).all(|pair| pair[0] != pair[1]),
+        "playlist should not schedule the same photo twice in a row"
+    );
 }

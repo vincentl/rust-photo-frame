@@ -114,6 +114,8 @@ struct PlaylistState {
     options: PlaylistOptions,
     dirty: bool,
     now_override: Option<SystemTime>,
+    last_sent: Option<PathBuf>,
+    unique_candidates: usize,
 }
 
 impl PlaylistState {
@@ -126,6 +128,8 @@ impl PlaylistState {
             options,
             dirty: true,
             now_override,
+            last_sent: None,
+            unique_candidates: 0,
         }
     }
 
@@ -140,6 +144,7 @@ impl PlaylistState {
             self.queue.clear();
             self.dirty = false;
             self.prioritized.clear();
+            self.unique_candidates = 0;
             return;
         }
 
@@ -186,6 +191,7 @@ impl PlaylistState {
             queue.push_back(path);
         }
 
+        self.unique_candidates = multiplicities.len();
         self.queue = queue;
         self.dirty = false;
 
@@ -206,7 +212,25 @@ impl PlaylistState {
         );
     }
 
-    fn peek(&self) -> Option<&PathBuf> {
+    fn peek(&mut self) -> Option<&PathBuf> {
+        if let Some(last) = self.last_sent.clone() {
+            while self
+                .queue
+                .front()
+                .map(|front| front == &last)
+                .unwrap_or(false)
+            {
+                if self.unique_candidates <= 1 {
+                    break;
+                }
+
+                self.queue.pop_front();
+
+                if self.queue.is_empty() {
+                    self.ensure_ready();
+                }
+            }
+        }
         self.queue.front()
     }
 
@@ -215,15 +239,20 @@ impl PlaylistState {
     }
 
     fn mark_sent(&mut self, sent: &Path) {
-        if let Some(front) = self.queue.front() {
-            if front == sent {
-                self.queue.pop_front();
-                return;
-            }
+        if self
+            .queue
+            .front()
+            .map(|front| front == sent)
+            .unwrap_or(false)
+        {
+            self.queue.pop_front();
+            self.last_sent = Some(sent.to_path_buf());
+            return;
         }
         if let Some(pos) = self.queue.iter().position(|p| p == sent) {
             self.queue.remove(pos);
         }
+        self.last_sent = Some(sent.to_path_buf());
     }
 
     fn record_add(&mut self, info: PhotoInfo) {
