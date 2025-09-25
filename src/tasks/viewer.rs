@@ -60,9 +60,16 @@ pub fn run_windowed(
         h: u32,
     }
 
+    struct ForegroundTex {
+        plane: TexturePlane,
+        offset_x: u32,
+        offset_y: u32,
+    }
+
     struct ImgTex {
         plane: TexturePlane,
         path: std::path::PathBuf,
+        foreground: Option<ForegroundTex>,
     }
 
     #[derive(Clone)]
@@ -85,9 +92,16 @@ pub fn run_windowed(
         pixels: Vec<u8>,
     }
 
+    struct ForegroundResult {
+        plane: ImagePlane,
+        offset_x: u32,
+        offset_y: u32,
+    }
+
     struct MatResult {
         path: std::path::PathBuf,
         canvas: ImagePlane,
+        foreground: Option<ForegroundResult>,
     }
 
     struct TransitionState {
@@ -245,7 +259,11 @@ pub fn run_windowed(
                 pixels: canvas.into_raw(),
             };
 
-            return Some(MatResult { path, canvas });
+            return Some(MatResult {
+                path,
+                canvas,
+                foreground: None,
+            });
         }
 
         let (final_w, final_h) =
@@ -353,12 +371,28 @@ pub fn run_windowed(
             }
         };
 
-        imageops::overlay(
-            &mut background,
-            main_img.as_ref(),
-            offset_x as i64,
-            offset_y as i64,
-        );
+        let main_img = match main_img {
+            Cow::Borrowed(img) => img.clone(),
+            Cow::Owned(img) => img,
+        };
+
+        imageops::overlay(&mut background, &main_img, offset_x as i64, offset_y as i64);
+
+        let foreground = match matting.style {
+            MattingMode::FixedColor { .. } | MattingMode::FixedImage { .. } => {
+                let pixels = main_img.into_raw();
+                Some(ForegroundResult {
+                    plane: ImagePlane {
+                        width: final_w,
+                        height: final_h,
+                        pixels,
+                    },
+                    offset_x,
+                    offset_y,
+                })
+            }
+            _ => None,
+        };
 
         let canvas = ImagePlane {
             width: canvas_w,
@@ -366,7 +400,11 @@ pub fn run_windowed(
             pixels: background.into_raw(),
         };
 
-        Some(MatResult { path, canvas })
+        Some(MatResult {
+            path,
+            canvas,
+            foreground,
+        })
     }
 
     impl TransitionState {
@@ -531,9 +569,25 @@ pub fn run_windowed(
     }
 
     fn upload_mat_result(gpu: &GpuCtx, result: MatResult) -> Option<ImgTex> {
-        let MatResult { path, canvas } = result;
+        let MatResult {
+            path,
+            canvas,
+            foreground,
+        } = result;
         let plane = upload_plane(gpu, canvas)?;
-        Some(ImgTex { plane, path })
+        let foreground = match foreground {
+            Some(fg) => upload_plane(gpu, fg.plane).map(|plane| ForegroundTex {
+                plane,
+                offset_x: fg.offset_x,
+                offset_y: fg.offset_y,
+            }),
+            None => None,
+        };
+        Some(ImgTex {
+            plane,
+            path,
+            foreground,
+        })
     }
 
     struct App {
@@ -888,9 +942,137 @@ pub fn run_windowed(
                     let mut current_bind = &gpu.blank_plane.bind;
                     let mut next_bind = &gpu.blank_plane.bind;
                     let mut have_draw = false;
+                    let mut handled_split_push = false;
 
-                    if let Some(state) = &self.transition_state {
-                        if let Some(cur) = &self.current {
+                    if let (Some(state), Some(cur), Some(next)) = (
+                        self.transition_state.as_ref(),
+                        self.current.as_ref(),
+                        self.next.as_ref(),
+                    ) {
+                        if let (ActiveTransition::Push { direction }, Some(cur_fg), Some(next_fg)) = (
+                            &state.variant,
+                            cur.foreground.as_ref(),
+                            next.foreground.as_ref(),
+                        ) {
+                            handled_split_push = true;
+
+                            let cur_canvas_rect = compute_cover_rect(
+                                cur.plane.w,
+                                cur.plane.h,
+                                gpu.config.width,
+                                gpu.config.height,
+                            );
+                            let mut bg_uniforms = uniforms;
+                            bg_uniforms.kind = 0;
+                            bg_uniforms.progress = 0.0;
+                            bg_uniforms.current_dest = rect_to_uniform(cur_canvas_rect);
+                            bg_uniforms.next_dest = [0.0; 4];
+                            bg_uniforms.params0 = [0.0; 4];
+                            bg_uniforms.params1 = [0.0; 4];
+                            gpu.queue.write_buffer(
+                                &gpu.uniform_buf,
+                                0,
+                                bytemuck::bytes_of(&bg_uniforms),
+                            );
+                            rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                            rpass.set_bind_group(1, &cur.plane.bind, &[]);
+                            rpass.set_bind_group(2, &gpu.blank_plane.bind, &[]);
+                            rpass.draw(0..6, 0..1);
+
+                            let mut progress = state.progress();
+                            progress = progress * progress * (3.0 - 2.0 * progress);
+
+                            let next_canvas_rect = compute_cover_rect(
+                                next.plane.w,
+                                next.plane.h,
+                                gpu.config.width,
+                                gpu.config.height,
+                            );
+                            let cur_photo_rect = compute_foreground_dest(
+                                cur_canvas_rect,
+                                cur.plane.w,
+                                cur.plane.h,
+                                cur_fg.offset_x,
+                                cur_fg.offset_y,
+                                cur_fg.plane.w,
+                                cur_fg.plane.h,
+                            );
+                            let next_photo_rect = compute_foreground_dest(
+                                next_canvas_rect,
+                                next.plane.w,
+                                next.plane.h,
+                                next_fg.offset_x,
+                                next_fg.offset_y,
+                                next_fg.plane.w,
+                                next_fg.plane.h,
+                            );
+
+                            let mut push_uniforms = uniforms;
+                            push_uniforms.kind = state.kind.as_index();
+                            push_uniforms.progress = progress;
+                            push_uniforms.current_dest = rect_to_uniform(cur_photo_rect);
+                            push_uniforms.next_dest = rect_to_uniform(next_photo_rect);
+                            let diag = (screen_w * screen_w + screen_h * screen_h).sqrt();
+                            push_uniforms.params0 =
+                                [direction[0] * diag, direction[1] * diag, 0.0, 0.0];
+                            push_uniforms.params1 = [0.0; 4];
+                            gpu.queue.write_buffer(
+                                &gpu.uniform_buf,
+                                0,
+                                bytemuck::bytes_of(&push_uniforms),
+                            );
+                            rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                            rpass.set_bind_group(1, &cur_fg.plane.bind, &[]);
+                            rpass.set_bind_group(2, &next_fg.plane.bind, &[]);
+                            rpass.draw(0..6, 0..1);
+                        }
+                    }
+
+                    if !handled_split_push {
+                        if let Some(state) = &self.transition_state {
+                            if let Some(cur) = &self.current {
+                                let rect = compute_cover_rect(
+                                    cur.plane.w,
+                                    cur.plane.h,
+                                    gpu.config.width,
+                                    gpu.config.height,
+                                );
+                                uniforms.current_dest = rect_to_uniform(rect);
+                                current_bind = &cur.plane.bind;
+                                have_draw = true;
+                            }
+                            if let Some(next) = &self.next {
+                                let rect = compute_cover_rect(
+                                    next.plane.w,
+                                    next.plane.h,
+                                    gpu.config.width,
+                                    gpu.config.height,
+                                );
+                                uniforms.next_dest = rect_to_uniform(rect);
+                                next_bind = &next.plane.bind;
+                                have_draw = true;
+                            }
+                            let mut progress = state.progress();
+                            progress = progress * progress * (3.0 - 2.0 * progress);
+                            uniforms.progress = progress;
+                            uniforms.kind = state.kind.as_index();
+                            match &state.variant {
+                                ActiveTransition::Fade { through_black } => {
+                                    uniforms.params0[0] = if *through_black { 1.0 } else { 0.0 };
+                                }
+                                ActiveTransition::Wipe { normal, softness } => {
+                                    let (min_proj, inv_span) =
+                                        compute_wipe_span(*normal, screen_w, screen_h);
+                                    uniforms.params0 = [normal[0], normal[1], min_proj, inv_span];
+                                    uniforms.params1[0] = *softness;
+                                }
+                                ActiveTransition::Push { direction } => {
+                                    let diag = (screen_w * screen_w + screen_h * screen_h).sqrt();
+                                    uniforms.params0[0] = direction[0] * diag;
+                                    uniforms.params0[1] = direction[1] * diag;
+                                }
+                            }
+                        } else if let Some(cur) = &self.current {
                             let rect = compute_cover_rect(
                                 cur.plane.w,
                                 cur.plane.h,
@@ -900,63 +1082,22 @@ pub fn run_windowed(
                             uniforms.current_dest = rect_to_uniform(rect);
                             current_bind = &cur.plane.bind;
                             have_draw = true;
-                        }
-                        if let Some(next) = &self.next {
-                            let rect = compute_cover_rect(
-                                next.plane.w,
-                                next.plane.h,
-                                gpu.config.width,
-                                gpu.config.height,
-                            );
-                            uniforms.next_dest = rect_to_uniform(rect);
-                            next_bind = &next.plane.bind;
+                        } else if let Some(loading) = gpu.loading.as_ref() {
+                            let sw = screen_w;
+                            let sh = screen_h;
+                            let iw = loading.w as f32;
+                            let ih = loading.h as f32;
+                            let maxw = sw * 0.4;
+                            let maxh = sh * 0.2;
+                            let scale = (maxw / iw).min(maxh / ih).min(1.0);
+                            let dw = (iw * scale).clamp(0.0, sw);
+                            let dh = (ih * scale).clamp(0.0, sh);
+                            let dx = (sw - dw) * 0.5;
+                            let dy = (sh - dh) * 0.5;
+                            uniforms.current_dest = [dx, dy, dw, dh];
+                            current_bind = &loading.bind;
                             have_draw = true;
                         }
-                        let mut progress = state.progress();
-                        progress = progress * progress * (3.0 - 2.0 * progress);
-                        uniforms.progress = progress;
-                        uniforms.kind = state.kind.as_index();
-                        match &state.variant {
-                            ActiveTransition::Fade { through_black } => {
-                                uniforms.params0[0] = if *through_black { 1.0 } else { 0.0 };
-                            }
-                            ActiveTransition::Wipe { normal, softness } => {
-                                let (min_proj, inv_span) =
-                                    compute_wipe_span(*normal, screen_w, screen_h);
-                                uniforms.params0 = [normal[0], normal[1], min_proj, inv_span];
-                                uniforms.params1[0] = *softness;
-                            }
-                            ActiveTransition::Push { direction } => {
-                                let diag = (screen_w * screen_w + screen_h * screen_h).sqrt();
-                                uniforms.params0[0] = direction[0] * diag;
-                                uniforms.params0[1] = direction[1] * diag;
-                            }
-                        }
-                    } else if let Some(cur) = &self.current {
-                        let rect = compute_cover_rect(
-                            cur.plane.w,
-                            cur.plane.h,
-                            gpu.config.width,
-                            gpu.config.height,
-                        );
-                        uniforms.current_dest = rect_to_uniform(rect);
-                        current_bind = &cur.plane.bind;
-                        have_draw = true;
-                    } else if let Some(loading) = gpu.loading.as_ref() {
-                        let sw = screen_w;
-                        let sh = screen_h;
-                        let iw = loading.w as f32;
-                        let ih = loading.h as f32;
-                        let maxw = sw * 0.4;
-                        let maxh = sh * 0.2;
-                        let scale = (maxw / iw).min(maxh / ih).min(1.0);
-                        let dw = (iw * scale).clamp(0.0, sw);
-                        let dh = (ih * scale).clamp(0.0, sh);
-                        let dx = (sw - dw) * 0.5;
-                        let dy = (sh - dh) * 0.5;
-                        uniforms.current_dest = [dx, dy, dw, dh];
-                        current_bind = &loading.bind;
-                        have_draw = true;
                     }
 
                     if have_draw {
@@ -1445,6 +1586,26 @@ fn compute_cover_rect(
 
 fn rect_to_uniform(rect: (f32, f32, f32, f32)) -> [f32; 4] {
     [rect.0, rect.1, rect.2, rect.3]
+}
+
+fn compute_foreground_dest(
+    canvas_rect: (f32, f32, f32, f32),
+    canvas_w: u32,
+    canvas_h: u32,
+    offset_x: u32,
+    offset_y: u32,
+    fg_w: u32,
+    fg_h: u32,
+) -> (f32, f32, f32, f32) {
+    let canvas_w = canvas_w.max(1) as f32;
+    let canvas_h = canvas_h.max(1) as f32;
+    let scale_x = canvas_rect.2 / canvas_w;
+    let scale_y = canvas_rect.3 / canvas_h;
+    let x = canvas_rect.0 + scale_x * offset_x as f32;
+    let y = canvas_rect.1 + scale_y * offset_y as f32;
+    let w = scale_x * fg_w.max(1) as f32;
+    let h = scale_y * fg_h.max(1) as f32;
+    (x, y, w, h)
 }
 
 fn compute_wipe_span(normal: [f32; 2], screen_w: f32, screen_h: f32) -> (f32, f32) {
