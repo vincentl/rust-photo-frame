@@ -201,18 +201,19 @@ The command prints the multiplicity assigned to each discovered photo and the fi
 
 The `transition` block controls how the viewer blends between photos. Set `transition.type` to one of the supported transitions or to `random` to choose among multiple configured options. When `type` is `random`, list the available transitions under `transition.options` keyed by their type.
 
-Example fixed wipe configuration:
+#### Example: wipe with a single angle
 
 ```yaml
 transition:
   type: wipe
   duration-ms: 600
-  angle-deg: 120.0
+  angle-list-degrees: [120.0]
   softness: 0.12
-  randomize-direction: true
 ```
 
-Randomized mix:
+When the list contains only one entry the viewer always uses that direction, so an explicit `angle-selection` strategy is unnecessary.
+
+#### Example: randomized transition mix
 
 ```yaml
 transition:
@@ -222,14 +223,15 @@ transition:
       duration-ms: 500
     wipe:
       duration-ms: 600
-      angle-deg: 45.0
-      angle-jitter-deg: 30.0
+      angle-list-degrees: [45.0, 225.0]
+      angle-selection: round-robin
+      angle-jitter-degrees: 30.0
     push:
       duration-ms: 650
-      angle-deg: 0.0
-      randomize-direction: true
+      angle-list-degrees: [0.0, 180.0]
 ```
 
+<<<<<<< HEAD
 Each transition exposes a focused set of fields:
 
 - **`fade`**
@@ -237,26 +239,21 @@ Each transition exposes a focused set of fields:
   - `through-black`: Boolean toggle to fade to black before revealing the next image.
 - **`wipe`**
   - `duration-ms`: Transition length in milliseconds.
-  - `angle-deg`: Direction of the wipe.
-  - `angle-jitter-deg`: Random +/- degrees per transition.
+  - `angle-list-degrees`: List of angles to use for direction of wipe.
+  - `angle-selection`: Use `random` for independent draws or `round-robin` to cycle through the angles in order.
+  - `angle-jitter-degrees`: Random +/- degrees per transition.
   - `softness`: Edge feather amount (0–0.5).
-  - `reverse`: Invert the base direction.
-  - `randomize-direction`: Randomly flip the wipe by 180°.
 - **`push`**
   - `duration-ms`: Transition length in milliseconds.
-  - `angle-deg`: Direction of travel.
-  - `angle-jitter-deg`: Random +/- degrees per transition.
-  - `reverse`: Invert the base direction.
-  - `randomize-direction`: Randomly flip the direction by 180°.
-  - `vertical-axis`: When `true`, move vertically instead of horizontally.
+  - `angle-list-degrees`: List of angles to use for direction of wipe.
+  - `angle-selection`: Use `random` for independent draws or `round-robin` to cycle through the angles in order.
+  - `angle-jitter-degrees`: Random +/- degrees per transition.
 - **`e-ink`**
   - `duration-ms`: Transition length in milliseconds.
   - `flash-count`: Number of alternating black/flash-color pulses to run before the reveal (capped at 6).
   - `reveal-portion`: Fraction of the timeline (0.05–0.95) spent on the flashing prep before stripes begin revealing the next image.
   - `stripe-count`: How many horizontal bands sweep in to reveal the next photo; higher values mimic finer e-ink refresh passes.
   - `flash-color`: `[r, g, b]` color (0–255) used for the light flash phase before the black inversion.
-
-Use `vertical-axis: true` with the push transition to move images vertically instead of horizontally. Combine it with `reverse: true` to push upward, or `randomize-direction: true` to shuffle between up and down. Providing an explicit `angle-deg` continues to override the base direction if you need diagonal pushes.
 
 ### Matting configuration
 
