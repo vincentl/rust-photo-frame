@@ -2,7 +2,7 @@ use crate::events::{InvalidPhoto, LoadPhoto, PhotoLoaded, PreparedImageCpu};
 use anyhow::Result;
 use std::fs::File;
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::select;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinSet;
@@ -88,10 +88,15 @@ pub async fn run(
     let mut in_flight: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
     let mut tasks: JoinSet<(std::path::PathBuf, Option<image::RgbaImage>)> = JoinSet::new();
+    let mut pending_ready: Option<ReadyPhoto> = None;
+    let mut last_sent_path: Option<PathBuf> = None;
 
     loop {
         select! {
-            _ = cancel.cancelled() => break,
+            _ = cancel.cancelled() => {
+                flush_pending(&mut last_sent_path, &mut pending_ready, &to_viewer).await;
+                break;
+            },
 
             // Accept new load requests while under limit
             Some(LoadPhoto(path)) = load_rx.recv(), if in_flight.len() < max_in_flight => {
@@ -116,7 +121,11 @@ pub async fn run(
                             debug!("loaded (rgba8): {}", path.display());
                             let (width, height) = rgba8.dimensions();
                             let prepared = PreparedImageCpu { path: path.clone(), width, height, pixels: rgba8.into_raw() };
-                            let _ = to_viewer.send(PhotoLoaded(prepared)).await;
+                            let ready = ReadyPhoto {
+                                path: path.clone(),
+                                event: PhotoLoaded(prepared),
+                            };
+                            send_ready(ready, &mut last_sent_path, &mut pending_ready, &to_viewer).await;
                         }
                         None => {
                             debug!("invalid photo {}", path.display());
@@ -128,17 +137,75 @@ pub async fn run(
 
             else => {
                 // If both channels are closed and nothing in flight, exit
-                if in_flight.is_empty() { break; }
+                if in_flight.is_empty() {
+                    flush_pending(&mut last_sent_path, &mut pending_ready, &to_viewer).await;
+                    break;
+                }
             }
         }
     }
     Ok(())
 }
 
+struct ReadyPhoto {
+    path: PathBuf,
+    event: PhotoLoaded,
+}
+
+async fn send_ready(
+    ready: ReadyPhoto,
+    last_sent: &mut Option<PathBuf>,
+    pending: &mut Option<ReadyPhoto>,
+    to_viewer: &Sender<PhotoLoaded>,
+) {
+    let mut current = Some(ready);
+    while let Some(ReadyPhoto { path, event }) = current {
+        if last_sent.as_ref() == Some(&path) {
+            if pending.is_none() {
+                *pending = Some(ReadyPhoto { path, event });
+            } else {
+                let _ = to_viewer.send(event).await;
+                *last_sent = Some(path);
+            }
+            return;
+        } else {
+            let _ = to_viewer.send(event).await;
+            *last_sent = Some(path);
+            current = pending.take();
+        }
+    }
+}
+
+async fn flush_pending(
+    last_sent: &mut Option<PathBuf>,
+    pending: &mut Option<ReadyPhoto>,
+    to_viewer: &Sender<PhotoLoaded>,
+) {
+    if let Some(ReadyPhoto { path, event }) = pending.take() {
+        let _ = to_viewer.send(event).await;
+        *last_sent = Some(path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use base64::Engine;
+    use tokio::sync::mpsc;
+
+    fn ready_for(path: &str) -> ReadyPhoto {
+        let path_buf = PathBuf::from(path);
+        let prepared = PreparedImageCpu {
+            path: path_buf.clone(),
+            width: 1,
+            height: 1,
+            pixels: vec![0, 0, 0, 0],
+        };
+        ReadyPhoto {
+            path: path_buf,
+            event: PhotoLoaded(prepared),
+        }
+    }
 
     // JPEG 2x1 with EXIF orientation 6 (rotate 90 CW), base64 encoded
     const ORIENT6_JPEG: &str = concat!(
@@ -156,5 +223,45 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         let img = decode_rgba8_apply_exif(&path).unwrap();
         assert_eq!(img.dimensions(), (1, 2));
+    }
+
+    #[tokio::test]
+    async fn reorders_single_repeat_when_possible() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut last_sent = None;
+        let mut pending = None;
+
+        send_ready(ready_for("a"), &mut last_sent, &mut pending, &tx).await;
+        assert_eq!(rx.recv().await.unwrap().0.path, PathBuf::from("a"));
+        assert!(pending.is_none());
+
+        send_ready(ready_for("a"), &mut last_sent, &mut pending, &tx).await;
+        assert!(pending.is_some());
+        assert!(rx.try_recv().is_err());
+
+        send_ready(ready_for("b"), &mut last_sent, &mut pending, &tx).await;
+        assert_eq!(rx.recv().await.unwrap().0.path, PathBuf::from("b"));
+        assert_eq!(rx.recv().await.unwrap().0.path, PathBuf::from("a"));
+        assert!(pending.is_none());
+        assert_eq!(last_sent, Some(PathBuf::from("a")));
+    }
+
+    #[tokio::test]
+    async fn flushes_pending_when_nothing_else_arrives() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut last_sent = None;
+        let mut pending = None;
+
+        send_ready(ready_for("a"), &mut last_sent, &mut pending, &tx).await;
+        assert_eq!(rx.recv().await.unwrap().0.path, PathBuf::from("a"));
+
+        send_ready(ready_for("a"), &mut last_sent, &mut pending, &tx).await;
+        assert!(pending.is_some());
+        assert!(rx.try_recv().is_err());
+
+        flush_pending(&mut last_sent, &mut pending, &tx).await;
+        assert_eq!(rx.recv().await.unwrap().0.path, PathBuf::from("a"));
+        assert!(pending.is_none());
+        assert_eq!(last_sent, Some(PathBuf::from("a")));
     }
 }
