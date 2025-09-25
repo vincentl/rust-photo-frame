@@ -1,29 +1,47 @@
-photo-library-path: /Users/vincent/rust-photo-frame/photo-library-test
+# Example configuration for rust-photo-frame
+# Adjust values to match your hardware, library layout, and visual preferences.
+
+# Root directory for images (scanned recursively)
+photo-library-path: /absolute/path/to/your/photo/library
 
 # Render/transition settings
-# Transition behavior between photos
 transition:
-  types: [fade, wipe, push]
+  # List one or more transition kinds to rotate between.
+  types: [fade, wipe, push, e-ink]
   options:
     fade:
-      duration-ms: 400
+      duration-ms: 450
+      through-black: false
     wipe:
-      duration-ms: 550
+      duration-ms: 600
       angle-list-degrees: [45.0, 225.0]
       angle-selection: round-robin
-      angle-jitter-degrees: 5.0
+      angle-jitter-degrees: 12.0
       softness: 0.08
     push:
       duration-ms: 520
       angle-list-degrees: [0.0, 180.0]
+      angle-selection: random
+      angle-jitter-degrees: 8.0
+    e-ink:
+      duration-ms: 1600
+      flash-count: 3
+      reveal-portion: 0.55
+      stripe-count: 24
+      flash-color: [255, 255, 255]
+
 # Dwell time (ms) the current image remains fully displayed before the next transition
 dwell-ms: 2000
+
+# GPU render oversample factor (1.0 = native to screen)
+oversample: 1.0
+
 # Number of images to preload in the viewer (aligns with channel capacity)
 viewer-preload-count: 3
-# GPU decode/render oversample factor (1.0 = native to screen)
-oversample: 1.0
+
 # Concurrent image decodes in loader
 loader-max-concurrent-decodes: 4
+
 # Optional deterministic seed for the initial shuffle (set to null for random)
 startup-shuffle-seed: null
 
@@ -43,7 +61,7 @@ matting:
       minimum-mat-percentage: 3.5
       sigma: 20.0
       max-sample-dim: 1536
-      backend: neon # options: cpu, neon (defaults to cpu)
+      backend: neon # options: cpu, neon (auto-falls back to cpu if unsupported)
     studio:
       minimum-mat-percentage: 8.0
       bevel-width-px: 4.0
@@ -52,5 +70,6 @@ matting:
       warp-period-px: 5.6 # spacing between vertical warp threads in px
       weft-period-px: 5.2 # spacing between horizontal weft threads in px
     fixed-image:
-      path: /path/to/background.png
+      minimum-mat-percentage: 6.0
+      path: /absolute/path/to/background.png
       fit: cover # options: cover, contain, stretch
