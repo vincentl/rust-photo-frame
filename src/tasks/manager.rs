@@ -31,7 +31,7 @@ pub async fn run(
 ) -> Result<()> {
     let rng = match seed_override {
         Some(seed) => StdRng::seed_from_u64(seed),
-        None => StdRng::from_entropy(),
+        None => StdRng::from_os_rng(),
     };
     let mut playlist = PlaylistState::with_rng(options, rng, now_override);
 
@@ -256,7 +256,7 @@ where
 {
     let rng = match seed {
         Some(seed) => StdRng::seed_from_u64(seed),
-        None => StdRng::from_entropy(),
+        None => StdRng::from_os_rng(),
     };
     let mut playlist = PlaylistState::with_rng(options, rng, Some(now));
 

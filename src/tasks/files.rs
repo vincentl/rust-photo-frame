@@ -167,7 +167,7 @@ pub fn discover_startup_photos(cfg: &Configuration) -> Result<Vec<PhotoInfo>> {
 
     let mut rng = match cfg.startup_shuffle_seed {
         Some(seed) => rand::rngs::StdRng::seed_from_u64(seed),
-        None => rand::rngs::StdRng::from_entropy(),
+        None => rand::rngs::StdRng::from_os_rng(),
     };
     initial.shuffle(&mut rng);
 
