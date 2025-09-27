@@ -14,6 +14,107 @@ use serde_yaml::Value as YamlValue;
 
 use crate::processing::fixed_image::FixedImageBackground;
 
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct GreetingScreenColorsConfig {
+    pub background: Option<String>,
+    pub font: Option<String>,
+    pub accent: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct GreetingScreenConfig {
+    pub message: Option<String>,
+    pub font: Option<String>,
+    #[serde(rename = "stroke-width")]
+    pub stroke_width: Option<f32>,
+    #[serde(rename = "corner-radius")]
+    pub corner_radius: Option<f32>,
+    #[serde(rename = "duration-seconds")]
+    pub duration_seconds: Option<f32>,
+    #[serde(default)]
+    pub colors: GreetingScreenColorsConfig,
+}
+
+impl GreetingScreenConfig {
+    const DEFAULT_STROKE_WIDTH_DIP: f32 = 12.0;
+    const DEFAULT_DURATION_SECONDS: f32 = 4.0;
+
+    pub fn effective_stroke_width_dip(&self) -> f32 {
+        let width = self
+            .stroke_width
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(Self::DEFAULT_STROKE_WIDTH_DIP);
+        width.max(0.1)
+    }
+
+    pub fn effective_corner_radius_dip(&self) -> f32 {
+        let base = self.effective_stroke_width_dip();
+        let radius = self
+            .corner_radius
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(base * 0.75);
+        radius.max(0.0)
+    }
+
+    pub fn effective_duration(&self) -> Duration {
+        let seconds = self
+            .duration_seconds
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(Self::DEFAULT_DURATION_SECONDS)
+            .max(0.0);
+        Duration::from_secs_f32(seconds)
+    }
+
+    pub fn message_or_default(&self) -> std::borrow::Cow<'_, str> {
+        match &self.message {
+            Some(msg) if !msg.trim().is_empty() => std::borrow::Cow::Borrowed(msg.as_str()),
+            _ => std::borrow::Cow::Borrowed("Initializing…"),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if let Some(width) = self.stroke_width {
+            ensure!(
+                width.is_finite() && width > 0.0,
+                "greeting-screen.stroke-width must be positive"
+            );
+        }
+        if let Some(radius) = self.corner_radius {
+            ensure!(
+                radius.is_finite() && radius >= 0.0,
+                "greeting-screen.corner-radius must be non-negative"
+            );
+        }
+        if let Some(duration) = self.duration_seconds {
+            ensure!(
+                duration.is_finite() && duration >= 0.0,
+                "greeting-screen.duration-seconds must be non-negative"
+            );
+        }
+        if let Some(font_name) = &self.font {
+            ensure!(
+                !font_name.trim().is_empty(),
+                "greeting-screen.font must not be blank when provided"
+            );
+        }
+        for (field, value) in [
+            ("background", &self.colors.background),
+            ("font", &self.colors.font),
+            ("accent", &self.colors.accent),
+        ] {
+            if let Some(color) = value {
+                ensure!(
+                    !color.trim().is_empty(),
+                    "greeting-screen.colors.{field} must not be blank when provided"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct MattingOptions {
@@ -2424,6 +2525,8 @@ pub struct Configuration {
     pub matting: MattingConfig,
     /// Playlist weighting options for how frequently new photos repeat.
     pub playlist: PlaylistOptions,
+    /// Greeting screen shown while the first assets are prepared.
+    pub greeting_screen: GreetingScreenConfig,
 }
 
 impl Configuration {
@@ -2454,6 +2557,9 @@ impl Configuration {
             .prepare_runtime()
             .context("invalid matting configuration")?;
         self.playlist.validate()?;
+        self.greeting_screen
+            .validate()
+            .context("invalid greeting screen configuration")?;
         Ok(self)
     }
 }
@@ -2471,6 +2577,7 @@ impl Default for Configuration {
             photo_affect: PhotoAffectConfig::default(),
             matting: MattingConfig::default(),
             playlist: PlaylistOptions::default(),
+            greeting_screen: GreetingScreenConfig::default(),
         }
     }
 }

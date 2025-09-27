@@ -129,6 +129,7 @@ matting:
 | **Performance tuning** | `viewer-preload-count`, `loader-max-concurrent-decodes`, `oversample` |
 | **Deterministic runs** | `startup-shuffle-seed`                                                |
 | **Presentation**       | `photo-affect`, `matting`                                             |
+| **Greeting Screen**    | `greeting-screen`                                                     |
 
 Use the quick reference above to locate the knobs you care about, then dive into the per-key cards below for the details.
 
@@ -196,6 +197,22 @@ Use the quick reference above to locate the knobs you care about, then dive into
   affect relights each frame with directional shading and paper sheen inspired by _3D Simulation of Prints for Improved Soft Proofing_.
 - **When to change it:** Enable when you want the frame to mimic how ink interacts with paper under gallery lighting, or when you
   add additional affects in future releases.
+
+#### `greeting-screen`
+
+- **Purpose:** Styles the GPU-rendered welcome card displayed while the library is still warming up.
+- **Required?** Optional.
+- **Accepted values & defaults:** Mapping with optional keys
+  - `message` (string, default `Initializing…`),
+  - `font` (string font name; falls back to the bundled face when missing),
+  - `stroke-width` (float DIP, default `12.0`),
+  - `corner-radius` (float DIP, default `0.75 × stroke-width`),
+  - `duration-seconds` (float ≥ 0, default `4.0`),
+  - `colors.background`, `colors.font`, `colors.accent` (hex sRGB strings; default palette keeps high contrast).
+- **Effect on behavior:** The renderer fits and centers the configured message inside a rounded double-line frame. `duration-seconds`
+  guarantees the greeting remains on screen for at least that many seconds before the first photo appears, even when decoding finishes instantly.
+- **Notes:** Colors accept `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa` notation. Low-contrast combinations log a warning so you can tweak
+  readability, and the viewer continues with sensible defaults if fonts or colors are omitted.
 
 #### `matting`
 
