@@ -27,18 +27,15 @@ pub struct GreetingScreenColorsConfig {
 pub struct GreetingScreenConfig {
     pub message: Option<String>,
     pub font: Option<String>,
-    #[serde(rename = "stroke-width")]
     pub stroke_width: Option<f32>,
-    #[serde(rename = "corner-radius")]
     pub corner_radius: Option<f32>,
-    #[serde(rename = "duration-seconds")]
     pub duration_seconds: Option<f32>,
     #[serde(default)]
     pub colors: GreetingScreenColorsConfig,
 }
 
 impl GreetingScreenConfig {
-    const DEFAULT_STROKE_WIDTH_DIP: f32 = 12.0;
+    const DEFAULT_STROKE_WIDTH_DIP: f32 = 16.0;
     const DEFAULT_DURATION_SECONDS: f32 = 4.0;
 
     pub fn effective_stroke_width_dip(&self) -> f32 {
@@ -237,7 +234,6 @@ pub enum MattingKind {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum MattingMode {
-    #[serde(rename = "fixed-color")]
     FixedColor {
         #[serde(default = "MattingMode::default_color")]
         color: [u8; 3],

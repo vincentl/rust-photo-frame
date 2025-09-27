@@ -42,7 +42,7 @@ oversample: 1.0
 greeting-screen:
   message: "Warming up your photo memories…"
   font: "Macondo"
-  stroke-width: 10
+  stroke-width: 16
   duration-seconds: 4
   colors:
     background: "#111827"
