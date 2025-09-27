@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TARGET_USER="${SUDO_USER:-$USER}"
+TARGET_USER="${FRAME_USER:-${SUDO_USER:-$USER}}"
 TARGET_HOME="$(eval echo ~"${TARGET_USER}")"
 CARGO_BIN="${TARGET_HOME}/.cargo/bin"
 

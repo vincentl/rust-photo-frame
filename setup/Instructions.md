@@ -63,15 +63,37 @@ This workflow prepares a Raspberry Pi OS (Bookworm, 64-bit) image that boots dir
    ```
 3. Check out the branch or tag that corresponds to the release you plan to deploy.
 
+## Choose the application user for setup modules
+Most setup modules, including the Wi-Fi watcher build, try to run developer tooling (like `cargo`) as the non-root account that
+invokes `sudo`. The scripts automatically prefer, in order:
+
+1. A user supplied via `FRAME_USER=<name>` when invoking the script.
+2. The user recorded in `SUDO_USER` (i.e., the account that ran `sudo`).
+3. The owner of the repository checkout on disk.
+4. A `frame` account, if one exists.
+5. `root` as a last resort.
+
+This means you can simply clone the repository as your preferred account and run the wrapper script without worrying about the
+underlying username; it will elevate with `sudo` as needed and export the right account for every module. If you need to
+override the choice explicitly (for example, when staging a build for another user account), run the module with:
+
+```bash
+FRAME_USER=photoframe sudo ./setup/modules/30-wifi-watcher.sh
+```
+
+The script will warn and fall back to an available account if the requested name cannot be found.
+
 ## Initiate the automated setup
 1. Review the scripts in `setup/setup-modules/` to understand each configuration stage. Scripts are prefixed with two-digit numbers to show execution order.
 2. Ensure the scripts are executable:
    ```bash
    chmod +x setup/system-setup.sh setup/setup-modules/*.sh
    ```
-3. Run the system configuration wrapper. It executes each module in ascending numeric order:
+3. Run the system configuration wrapper. When launched as a regular user it re-executes itself with `sudo`, preserving the
+   invoking account. When run directly as `root`, it prompts for the target username before continuing. The wrapper executes
+   each module in ascending numeric order:
    ```bash
-   sudo ./setup/system-setup.sh
+   ./setup/system-setup.sh
    ```
 4. Watch the console output for prompts or errors. You can rerun an individual module directly (e.g., `sudo ./setup/setup-modules/00-update-os.sh`).
 5. After the base setup completes, continue following the roadmap to implement kiosk mode, background synchronization, button monitoring, Tailscale, Wi-Fi recovery mode, and the configuration web UI.
