@@ -22,12 +22,18 @@ pub struct GreetingScreenConfig {
     #[serde(default = "GreetingScreenConfig::default_stroke_width")]
     pub stroke_width: f32,
     pub corner_radius: Option<f32>,
+    #[serde(default = "GreetingScreenConfig::default_min_display_ms")]
+    pub min_display_ms: u64,
     pub colors: GreetingScreenColors,
 }
 
 impl GreetingScreenConfig {
     const fn default_stroke_width() -> f32 {
         12.0
+    }
+
+    const fn default_min_display_ms() -> u64 {
+        2000
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -41,6 +47,10 @@ impl GreetingScreenConfig {
                 "greeting-screen.corner-radius must be >= 0"
             );
         }
+        ensure!(
+            self.min_display_ms <= 60_000,
+            "greeting-screen.min-display-ms must be 60s or less"
+        );
         Ok(())
     }
 }
@@ -52,6 +62,7 @@ impl Default for GreetingScreenConfig {
             font: None,
             stroke_width: Self::default_stroke_width(),
             corner_radius: None,
+            min_display_ms: Self::default_min_display_ms(),
             colors: GreetingScreenColors::default(),
         }
     }

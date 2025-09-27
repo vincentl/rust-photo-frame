@@ -566,6 +566,7 @@ pub fn run_windowed(
         rng: rand::rngs::ThreadRng,
         scale_factor: f64,
         greeting_cfg: crate::config::GreetingScreenConfig,
+        greeting_visible_until: Option<std::time::Instant>,
     }
 
     impl ApplicationHandler for App {
@@ -578,6 +579,7 @@ pub fn run_windowed(
             self.transition_state = None;
             self.displayed_at = None;
             self.mat_inflight = 0;
+            self.greeting_visible_until = None;
             let monitor = event_loop.primary_monitor();
             let attrs = Window::default_attributes()
                 .with_title("Photo Frame")
@@ -784,6 +786,10 @@ pub fn run_windowed(
             let mut greeting = GreetingScreen::new(&device, &queue, format, &self.greeting_cfg);
             greeting.resize(size, self.scale_factor);
             let greeting_background = greeting.background_color();
+            self.greeting_visible_until = Some(
+                std::time::Instant::now()
+                    + std::time::Duration::from_millis(self.greeting_cfg.min_display_ms),
+            );
 
             self.window = Some(window);
             self.gpu = Some(GpuCtx {
@@ -1044,14 +1050,21 @@ pub fn run_windowed(
                 }
             }
             if self.current.is_none() && self.transition_state.is_none() {
-                if let Some(first) = self.pending.pop_front() {
-                    info!("first_image path={}", first.path.display());
-                    self.current = Some(first);
-                    self.displayed_at = Some(std::time::Instant::now());
-                    if let Some(cur) = &self.current {
-                        let _ = self
-                            .to_manager_displayed
-                            .try_send(Displayed(cur.path.clone()));
+                let allow_photo = self
+                    .greeting_visible_until
+                    .map(|deadline| std::time::Instant::now() >= deadline)
+                    .unwrap_or(true);
+                if allow_photo {
+                    if let Some(first) = self.pending.pop_front() {
+                        info!("first_image path={}", first.path.display());
+                        self.current = Some(first);
+                        self.displayed_at = Some(std::time::Instant::now());
+                        self.greeting_visible_until = None;
+                        if let Some(cur) = &self.current {
+                            let _ = self
+                                .to_manager_displayed
+                                .try_send(Displayed(cur.path.clone()));
+                        }
                     }
                 }
             }
@@ -1159,6 +1172,7 @@ pub fn run_windowed(
         rng: thread_rng(),
         scale_factor: 1.0,
         greeting_cfg: cfg.greeting_screen.clone(),
+        greeting_visible_until: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
