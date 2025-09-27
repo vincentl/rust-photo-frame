@@ -6,12 +6,14 @@ use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::{center_offset, resize_to_cover};
+use crate::tasks::greeting_screen::GreetingScreen;
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
 use image::{imageops, Rgba, RgbaImage};
 use rand::Rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -51,7 +53,7 @@ pub fn run_windowed(
         sampler: wgpu::Sampler,
         pipeline: wgpu::RenderPipeline,
         blank_plane: TexturePlane,
-        loading: Option<TexturePlane>,
+        greeting: GreetingScreen,
     }
 
     struct TexturePlane {
@@ -550,6 +552,8 @@ pub fn run_windowed(
         transition_state: Option<TransitionState>,
         displayed_at: Option<std::time::Instant>,
         dwell_ms: u64,
+        greeting_duration: Duration,
+        greeting_deadline: Option<Instant>,
         pending: VecDeque<ImgTex>,
         preload_count: usize,
         oversample: f32,
@@ -561,6 +565,7 @@ pub fn run_windowed(
         deferred_images: VecDeque<PreparedImageCpu>,
         clear_color: wgpu::Color,
         rng: rand::rngs::ThreadRng,
+        full_config: crate::config::Configuration,
     }
 
     impl ApplicationHandler for App {
@@ -572,6 +577,7 @@ pub fn run_windowed(
             self.next = None;
             self.transition_state = None;
             self.displayed_at = None;
+            self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
             self.mat_inflight = 0;
             let monitor = event_loop.primary_monitor();
             let attrs = Window::default_attributes()
@@ -775,18 +781,8 @@ pub fn run_windowed(
 
             let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
 
-            // Try to create a loading overlay texture from embedded PNG; fallback to 1x1 white
-            let loading_png: &[u8] = include_bytes!("../../assets/ui/loading.png");
-            let loading_rgba = image::load_from_memory(loading_png)
-                .ok()
-                .map(|dynimg| dynimg.to_rgba8());
-            let loading = if let Some(img) = loading_rgba {
-                let lw = img.width().max(1);
-                let lh = img.height().max(1);
-                Some(make_plane("loading-texture", lw, lh, img.as_raw()))
-            } else {
-                Some(make_plane("loading-fallback", 1, 1, &[255, 255, 255, 255]))
-            };
+            let mut greeting = GreetingScreen::new(&device, &queue, format, &self.full_config);
+            greeting.resize(size, window.scale_factor());
 
             self.window = Some(window);
             self.gpu = Some(GpuCtx {
@@ -801,7 +797,7 @@ pub fn run_windowed(
                 sampler,
                 pipeline,
                 blank_plane,
-                loading,
+                greeting,
             });
             self.current = None;
         }
@@ -827,6 +823,7 @@ pub fn run_windowed(
                     gpu.config.width = new_size.width.max(1);
                     gpu.config.height = new_size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
+                    gpu.greeting.resize(new_size, window.scale_factor());
                 }
                 WindowEvent::ScaleFactorChanged {
                     mut inner_size_writer,
@@ -837,6 +834,7 @@ pub fn run_windowed(
                     gpu.config.width = size.width.max(1);
                     gpu.config.height = size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
+                    gpu.greeting.resize(size, window.scale_factor());
                 }
                 WindowEvent::RedrawRequested => {
                     let frame = match gpu.surface.get_current_texture() {
@@ -861,6 +859,13 @@ pub fn run_windowed(
                             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("draw-encoder"),
                             });
+
+                    if self.current.is_none() && self.transition_state.is_none() {
+                        gpu.greeting.render(&mut encoder, &view);
+                        gpu.queue.submit(Some(encoder.finish()));
+                        frame.present();
+                        return;
+                    }
                     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("draw-pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -961,23 +966,7 @@ pub fn run_windowed(
                         uniforms.current_dest = rect_to_uniform(rect);
                         current_bind = &cur.plane.bind;
                         have_draw = true;
-                    } else if let Some(loading) = gpu.loading.as_ref() {
-                        let sw = screen_w;
-                        let sh = screen_h;
-                        let iw = loading.w as f32;
-                        let ih = loading.h as f32;
-                        let maxw = sw * 0.4;
-                        let maxh = sh * 0.2;
-                        let scale = (maxw / iw).min(maxh / ih).min(1.0);
-                        let dw = (iw * scale).clamp(0.0, sw);
-                        let dh = (ih * scale).clamp(0.0, sh);
-                        let dx = (sw - dw) * 0.5;
-                        let dy = (sh - dh) * 0.5;
-                        uniforms.current_dest = [dx, dy, dw, dh];
-                        current_bind = &loading.bind;
-                        have_draw = true;
                     }
-
                     if have_draw {
                         gpu.queue
                             .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
@@ -1049,14 +1038,21 @@ pub fn run_windowed(
                 }
             }
             if self.current.is_none() && self.transition_state.is_none() {
-                if let Some(first) = self.pending.pop_front() {
-                    info!("first_image path={}", first.path.display());
-                    self.current = Some(first);
-                    self.displayed_at = Some(std::time::Instant::now());
-                    if let Some(cur) = &self.current {
-                        let _ = self
-                            .to_manager_displayed
-                            .try_send(Displayed(cur.path.clone()));
+                let greeting_finished = self
+                    .greeting_deadline
+                    .map(|deadline| Instant::now() >= deadline)
+                    .unwrap_or(true);
+                if greeting_finished {
+                    if let Some(first) = self.pending.pop_front() {
+                        info!("first_image path={}", first.path.display());
+                        self.current = Some(first);
+                        self.greeting_deadline = None;
+                        self.displayed_at = Some(std::time::Instant::now());
+                        if let Some(cur) = &self.current {
+                            let _ = self
+                                .to_manager_displayed
+                                .try_send(Displayed(cur.path.clone()));
+                        }
                     }
                 }
             }
@@ -1151,6 +1147,8 @@ pub fn run_windowed(
         transition_state: None,
         displayed_at: None,
         dwell_ms: cfg.dwell_ms,
+        greeting_duration: cfg.greeting_screen.effective_duration(),
+        greeting_deadline: None,
         pending: VecDeque::new(),
         preload_count: cfg.viewer_preload_count,
         oversample: cfg.oversample,
@@ -1162,6 +1160,7 @@ pub fn run_windowed(
         deferred_images: VecDeque::new(),
         clear_color,
         rng: rand::rng(),
+        full_config: cfg.clone(),
     };
     event_loop.run_app(&mut app)?;
     Ok(())
