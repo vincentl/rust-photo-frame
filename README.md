@@ -2,35 +2,48 @@
 
 A digital photo frame driver implemented in Rust with a pipeline tuned for Raspberry Pi hardware. It watches a photo library, weights the playlist so new images appear more frequently, and renders each slide with configurable matting, transitions, and photo effects.
 
+## What is this?
+
+Photoframe turns a Raspberry Pi and an HDMI display into a self-hosted, always-fresh slideshow. The runtime keeps a local or network photo library in sync, prioritizes new additions, and styles every slide with gallery-inspired matting and post-processing. Makers can keep control of their library (no cloud uploads) while still enjoying dynamic sequencing, deterministic testing modes, and a GPU-aware render pipeline that respects the Pi’s constraints.
+
+**Built for:** Raspberry Pi hobbyists, photographers who want a bespoke display, and Rust developers interested in embedded graphics pipelines.
+
+**Highlights:**
+
+- Runs entirely on-device with a configurable playlist weighting system.
+- Supports rich visual treatments (mats, transitions, print simulation) without requiring graphics expertise.
+- Ships with CLI flags and sample configs so you can reproduce playlists during testing or demos.
+
 ## Table of Contents
 
-1. [Hardware](#hardware)
-2. [Frame Setup](#frame-setup)
-3. [Architecture Overview](#architecture-overview)
+1. [What is this?](#what-is-this)
+2. [Hardware](#hardware)
+3. [Frame Setup](#frame-setup)
 4. [Features](#features)
-5. [Configuration](#configuration)
-6. [Playlist Weighting](#playlist-weighting)
-7. [Matting Configuration](#matting-configuration)
-8. [References](#references)
-9. [License](#license)
+5. [Architecture Overview](#architecture-overview)
+6. [Configuration](#configuration)
+7. [Playlist Weighting](#playlist-weighting)
+8. [Matting Configuration](#matting-configuration)
+9. [References](#references)
+10. [License](#license)
 
 ## Hardware
 
 TODO - overview of hardware
 
-- Raspberry Pi 5 with at least 4GiB RAM
+- Raspberry Pi 5 with at least 4 GiB RAM
 - 4K monitor
 - Pi power plan
 - HDMI cable
 - SD card
-- Mouting plan
+- Mounting plan
 - Frame
 
 ## Frame Setup
 
 TODO - overview of setup
 
-### Configure pi
+### Configure Pi
 
 TODO - flash and scripts
 
@@ -40,15 +53,28 @@ TODO - flash and scripts
 cargo run --release -- <path/to/config.yaml>
 ```
 
-The binary accepts several optional CLI flags for playlist testing and determinism:
+Use the core command above for day-to-day playback. Reach for the CLI flags below when you need to troubleshoot sequencing, create demo recordings, or confirm that configuration changes behave as expected.
 
-| Flag                              | Description                                                                                         |
-| --------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `--playlist-now <RFC3339>`        | Overrides `SystemTime::now()` when computing playlist weights. Useful for reproducible simulations. |
-| `--playlist-dry-run <ITERATIONS>` | Emits a textual preview of the weighted playlist order without launching the UI.                    |
-| `--playlist-seed <SEED>`          | Forces deterministic playlist shuffling for both dry-run and live modes.                            |
+| Flag                              | When to reach for it                                                                                                   |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `--playlist-now <RFC3339>`        | Freeze the virtual clock to reproduce playlist weights for debugging or long-form tests.                                |
+| `--playlist-dry-run <ITERATIONS>` | Generate a textual preview of the weighted queue to check ordering before lighting up the display.                      |
+| `--playlist-seed <SEED>`          | Lock the shuffle RNG so repeated runs (dry-run or live) produce the same ordering—handy for demos and regression tests. |
+
+## Features
+
+- Recursively scans a configurable photo library directory
+  - Detects changes from external synchronization processes
+    - Automatically adds new photos to the playlist
+    - Removes deleted photos from the playlist
+  - Prioritizes newer photos with user-configurable display rates
+- Configurable matting, transitions, and photo effects
+- Supports multiple image formats: JPG, PNG, GIF, WebP, BMP, TIFF
+- Robust error handling with structured logging
 
 ## Architecture Overview
+
+Curious how the frame stays responsive? This optional deep dive outlines the async tasks and their communication patterns. Skip ahead to [Configuration](#configuration) if you just want to tune the experience.
 
 The runtime is composed of five asynchronous tasks orchestrated by `main.rs`. They communicate over bounded channels to keep memory predictable and to respect GPU/CPU parallelism limits.
 
@@ -69,20 +95,14 @@ flowchart LR
   VIEW -->|displayed event| MAN
 ```
 
-## Features
-
-- Recursively scans a configurable photo library directory
-  - Detects changes from external synchronization processes
-    - Automatically adds new photos to the playlist
-    - Removes deleted photos from the playlist
-  - Prioritizes newer photos with user-configurable display rates
-- Configurable matting, transitions, and photo effects
-- Supports multiple image formats: JPG, PNG, GIF, WebP, BMP, TIFF
-- Robust error handling with structured logging
 
 ## Configuration
 
-Place a YAML file and pass its path as the CLI argument. Example:
+The repository ships with a [sample `config.yaml`](./config.yaml) you can copy or edit directly. Place a YAML file alongside the binary (or somewhere readable) and pass its path as the CLI argument.
+
+### Starter configuration
+
+The example below targets a Pi driving a 4K portrait display backed by a NAS-mounted photo library. Inline comments explain why each value matters and what to tweak for common scenarios:
 
 ```yaml
 photo-library-path: /path/to/photos
@@ -119,6 +139,8 @@ matting:
       minimum-mat-percentage: 4.0
       sigma: 18.0
 ```
+
+If the frame launches to a black screen, double-check that `photo-library-path` points to a directory the runtime can read and that the user account has permission to access mounted network shares. You can validate a YAML edit quickly with `cargo run -- --playlist-dry-run 1`, which parses the config without opening the render window.
 
 ### Top-level keys
 
