@@ -3,6 +3,7 @@ mod events;
 mod processing;
 mod tasks {
     pub mod files;
+    pub mod greeting_screen;
     pub mod loader;
     pub mod manager;
     pub mod photo_affect;

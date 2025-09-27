@@ -29,3 +29,13 @@ loader-max-concurrent-decodes: 4
 
 # GPU render oversample factor (1.0 = native to screen)
 oversample: 1.0
+
+# Greeting screen displayed while the first images are prepared
+greeting-screen:
+  message: "Warming up your photo memories…"
+  font: "Macondo"
+  stroke-width: 10
+  colors:
+    background: "#111827"
+    font: "#f8fafc"
+    accent: "#38bdf8"
