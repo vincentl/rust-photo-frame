@@ -13,13 +13,17 @@ use tracing::warn;
 use wgpu::util::{DeviceExt, StagingBelt};
 use wgpu_glyph::GlyphCruncher;
 use wgpu_glyph::{
-    GlyphBrush, GlyphBrushBuilder, HorizontalAlign, Layout, Section, Text, VerticalAlign,
+    BuiltInLineBreaker, GlyphBrush, GlyphBrushBuilder, HorizontalAlign, Layout, Section, Text,
+    VerticalAlign,
 };
 use winit::dpi::PhysicalSize;
 
 use crate::config::GreetingScreenColorsConfig;
 
 type AppConfig = crate::config::Configuration;
+
+const MEASURE_BOUNDS_EXTENT: f32 = 100_000.0;
+const DRAW_BOUNDS_PADDING: f32 = 2.0;
 
 const FRAME_SHADER: &str = r#"
 struct VertexOutput {
@@ -74,7 +78,7 @@ struct GreetingSettings {
 struct TextLayout {
     font_size: f32,
     bounds: (f32, f32),
-    origin: (f32, f32),
+    screen_position: (f32, f32),
 }
 
 /// GPU-backed renderer for the configurable greeting screen.
@@ -254,19 +258,35 @@ impl GreetingScreen {
             max_px,
             self.glyph_texture_limit,
         );
-        let origin_x = ((self.size.width as f32) - box_size.0) * 0.5;
-        let origin_y = ((self.size.height as f32) - box_size.1) * 0.5;
+        let measure_layout = measurement_layout();
+        let (measured_width, measured_height) = measure_text_extent(
+            &mut self.glyph_brush,
+            &self.settings.message,
+            font_size,
+            measure_layout,
+        )
+        .unwrap_or((0.0, 0.0));
+        let clamped_width = measured_width.min(box_size.0);
+        let clamped_height = measured_height.min(box_size.1);
+        let padded_bounds = (
+            (clamped_width + DRAW_BOUNDS_PADDING).max(1.0),
+            (clamped_height + DRAW_BOUNDS_PADDING).max(1.0),
+        );
+        let screen_center = (
+            (self.size.width as f32) * 0.5,
+            (self.size.height as f32) * 0.5,
+        );
         self.layout = Some(TextLayout {
             font_size,
-            bounds: box_size,
-            origin: (origin_x, origin_y),
+            bounds: padded_bounds,
+            screen_position: screen_center,
         });
     }
 }
 
 fn build_section(settings: &GreetingSettings, layout: TextLayout) -> Section<'_> {
     Section {
-        screen_position: layout.origin,
+        screen_position: layout.screen_position,
         bounds: (layout.bounds.0, layout.bounds.1),
         layout: Layout::default_wrap()
             .h_align(HorizontalAlign::Center)
@@ -295,25 +315,11 @@ pub fn best_fit_font_px(
     let mut low = min_px.max(1.0);
     let mut high = max_px.min(texture_cap.max(low)).max(low);
     let mut best = low;
-    let layout = Layout::default_wrap()
-        .h_align(HorizontalAlign::Center)
-        .v_align(VerticalAlign::Center);
+    let layout = measurement_layout();
     for _ in 0..18 {
         let mid = (low + high) * 0.5;
-        let section = Section {
-            screen_position: (0.0, 0.0),
-            bounds: (box_px.0, box_px.1),
-            layout,
-            text: vec![Text::new(text).with_scale(mid)],
-            ..Section::default()
-        };
-        let fits = brush
-            .glyph_bounds_custom_layout(section.clone(), &layout)
-            .map(|bounds| {
-                let width = bounds.max.x - bounds.min.x;
-                let height = bounds.max.y - bounds.min.y;
-                width <= box_px.0 + 0.5 && height <= box_px.1 + 0.5
-            })
+        let fits = measure_text_extent(brush, text, mid, layout)
+            .map(|(width, height)| width <= box_px.0 + 0.5 && height <= box_px.1 + 0.5)
             .unwrap_or(false);
         if fits {
             best = mid;
@@ -326,6 +332,35 @@ pub fn best_fit_font_px(
         }
     }
     best
+}
+
+fn measurement_layout() -> Layout<BuiltInLineBreaker> {
+    Layout::default_wrap()
+        .h_align(HorizontalAlign::Left)
+        .v_align(VerticalAlign::Top)
+}
+
+fn measure_text_extent(
+    brush: &mut GlyphBrush<()>,
+    text: &str,
+    font_size: f32,
+    layout: Layout<BuiltInLineBreaker>,
+) -> Option<(f32, f32)> {
+    if text.trim().is_empty() {
+        return Some((0.0, 0.0));
+    }
+    let bounds = (MEASURE_BOUNDS_EXTENT, MEASURE_BOUNDS_EXTENT);
+    let section_layout = layout;
+    let section = Section {
+        screen_position: (0.0, 0.0),
+        bounds,
+        layout: section_layout,
+        text: vec![Text::new(text).with_scale(font_size)],
+        ..Section::default()
+    };
+    brush
+        .glyph_bounds_custom_layout(section, &section_layout)
+        .map(|rect| (rect.max.x - rect.min.x, rect.max.y - rect.min.y))
 }
 
 fn build_glyph_brush(
