@@ -1,3 +1,5 @@
+mod greeting;
+
 use crate::config::{
     MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionKind, TransitionMode,
     TransitionOptions,
@@ -7,6 +9,7 @@ use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::{center_offset, resize_to_cover};
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
+use greeting::GreetingScreen;
 use image::{imageops, Rgba, RgbaImage};
 use rand::{thread_rng, Rng};
 use std::borrow::Cow;
@@ -51,7 +54,7 @@ pub fn run_windowed(
         sampler: wgpu::Sampler,
         pipeline: wgpu::RenderPipeline,
         blank_plane: TexturePlane,
-        loading: Option<TexturePlane>,
+        greeting: GreetingScreen,
     }
 
     struct TexturePlane {
@@ -561,6 +564,8 @@ pub fn run_windowed(
         deferred_images: VecDeque<PreparedImageCpu>,
         clear_color: wgpu::Color,
         rng: rand::rngs::ThreadRng,
+        scale_factor: f64,
+        greeting_cfg: crate::config::GreetingScreenConfig,
     }
 
     impl ApplicationHandler for App {
@@ -583,6 +588,7 @@ pub fn run_windowed(
                 }));
             let window = Arc::new(event_loop.create_window(attrs).unwrap());
             window.set_cursor_visible(false);
+            self.scale_factor = window.scale_factor();
 
             let instance = wgpu::Instance::default();
             let surface = instance.create_surface(window.clone()).unwrap();
@@ -775,18 +781,9 @@ pub fn run_windowed(
 
             let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
 
-            // Try to create a loading overlay texture from embedded PNG; fallback to 1x1 white
-            let loading_png: &[u8] = include_bytes!("../../assets/ui/loading.png");
-            let loading_rgba = image::load_from_memory(loading_png)
-                .ok()
-                .map(|dynimg| dynimg.to_rgba8());
-            let loading = if let Some(img) = loading_rgba {
-                let lw = img.width().max(1);
-                let lh = img.height().max(1);
-                Some(make_plane("loading-texture", lw, lh, img.as_raw()))
-            } else {
-                Some(make_plane("loading-fallback", 1, 1, &[255, 255, 255, 255]))
-            };
+            let mut greeting = GreetingScreen::new(&device, &queue, format, &self.greeting_cfg);
+            greeting.resize(size, self.scale_factor);
+            let greeting_background = greeting.background_color();
 
             self.window = Some(window);
             self.gpu = Some(GpuCtx {
@@ -801,8 +798,9 @@ pub fn run_windowed(
                 sampler,
                 pipeline,
                 blank_plane,
-                loading,
+                greeting,
             });
+            self.clear_color = greeting_background;
             self.current = None;
         }
 
@@ -827,8 +825,10 @@ pub fn run_windowed(
                     gpu.config.width = new_size.width.max(1);
                     gpu.config.height = new_size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
+                    gpu.greeting.resize(new_size, self.scale_factor);
                 }
                 WindowEvent::ScaleFactorChanged {
+                    scale_factor,
                     mut inner_size_writer,
                     ..
                 } => {
@@ -837,6 +837,8 @@ pub fn run_windowed(
                     gpu.config.width = size.width.max(1);
                     gpu.config.height = size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
+                    self.scale_factor = scale_factor;
+                    gpu.greeting.resize(size, scale_factor);
                 }
                 WindowEvent::RedrawRequested => {
                     let frame = match gpu.surface.get_current_texture() {
@@ -891,6 +893,7 @@ pub fn run_windowed(
                     let mut current_bind = &gpu.blank_plane.bind;
                     let mut next_bind = &gpu.blank_plane.bind;
                     let mut have_draw = false;
+                    let mut drew_greeting = false;
 
                     if let Some(state) = &self.transition_state {
                         if let Some(cur) = &self.current {
@@ -961,21 +964,8 @@ pub fn run_windowed(
                         uniforms.current_dest = rect_to_uniform(rect);
                         current_bind = &cur.plane.bind;
                         have_draw = true;
-                    } else if let Some(loading) = gpu.loading.as_ref() {
-                        let sw = screen_w;
-                        let sh = screen_h;
-                        let iw = loading.w as f32;
-                        let ih = loading.h as f32;
-                        let maxw = sw * 0.4;
-                        let maxh = sh * 0.2;
-                        let scale = (maxw / iw).min(maxh / ih).min(1.0);
-                        let dw = (iw * scale).clamp(0.0, sw);
-                        let dh = (ih * scale).clamp(0.0, sh);
-                        let dx = (sw - dw) * 0.5;
-                        let dy = (sh - dh) * 0.5;
-                        uniforms.current_dest = [dx, dy, dw, dh];
-                        current_bind = &loading.bind;
-                        have_draw = true;
+                    } else {
+                        drew_greeting = true;
                     }
 
                     if have_draw {
@@ -988,7 +978,12 @@ pub fn run_windowed(
                     }
                     drop(rpass);
 
+                    if drew_greeting {
+                        gpu.greeting.render(&mut encoder, &view);
+                    }
+
                     gpu.queue.submit(Some(encoder.finish()));
+                    gpu.greeting.on_frame_finished();
                     frame.present();
                 }
                 _ => {}
@@ -1162,6 +1157,8 @@ pub fn run_windowed(
         deferred_images: VecDeque::new(),
         clear_color,
         rng: thread_rng(),
+        scale_factor: 1.0,
+        greeting_cfg: cfg.greeting_screen.clone(),
     };
     event_loop.run_app(&mut app)?;
     Ok(())
