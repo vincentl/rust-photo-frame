@@ -31,12 +31,15 @@ pub struct GreetingScreenConfig {
     pub stroke_width: Option<f32>,
     #[serde(rename = "corner-radius")]
     pub corner_radius: Option<f32>,
+    #[serde(rename = "duration-seconds")]
+    pub duration_seconds: Option<f32>,
     #[serde(default)]
     pub colors: GreetingScreenColorsConfig,
 }
 
 impl GreetingScreenConfig {
     const DEFAULT_STROKE_WIDTH_DIP: f32 = 12.0;
+    const DEFAULT_DURATION_SECONDS: f32 = 4.0;
 
     pub fn effective_stroke_width_dip(&self) -> f32 {
         let width = self
@@ -53,6 +56,15 @@ impl GreetingScreenConfig {
             .filter(|value| value.is_finite() && *value >= 0.0)
             .unwrap_or(base * 0.75);
         radius.max(0.0)
+    }
+
+    pub fn effective_duration(&self) -> Duration {
+        let seconds = self
+            .duration_seconds
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(Self::DEFAULT_DURATION_SECONDS)
+            .max(0.0);
+        Duration::from_secs_f32(seconds)
     }
 
     pub fn message_or_default(&self) -> std::borrow::Cow<'_, str> {
@@ -73,6 +85,12 @@ impl GreetingScreenConfig {
             ensure!(
                 radius.is_finite() && radius >= 0.0,
                 "greeting-screen.corner-radius must be non-negative"
+            );
+        }
+        if let Some(duration) = self.duration_seconds {
+            ensure!(
+                duration.is_finite() && duration >= 0.0,
+                "greeting-screen.duration-seconds must be non-negative"
             );
         }
         if let Some(font_name) = &self.font {
