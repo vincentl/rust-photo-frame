@@ -72,7 +72,7 @@ impl Settings {
             hotspot_ssid,
             hotspot_ip,
             hotspot_env_path: PathBuf::from("/run/photo-frame/hotspot.env"),
-            wordlist_path: PathBuf::from("/opt/photo-frame/share/wordlist_small.txt"),
+            wordlist_path: PathBuf::from("/opt/photo-frame/share/wordlist.txt"),
             poll_interval,
             startup_timeout,
         })
