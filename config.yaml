@@ -70,6 +70,7 @@ greeting-screen:
   message: "Warming up your photo memories…"
   font: "Macondo"
   stroke-width: 10
+  min-display-ms: 2000
   corner-radius: 7.5
   colors:
     background: "#101216"
