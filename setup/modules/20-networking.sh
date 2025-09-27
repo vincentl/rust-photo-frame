@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 FILES_DIR="${REPO_ROOT}/files"
-WORDLIST_SRC="${FILES_DIR}/wordlist_small.txt"
-WORDLIST_DEST="/opt/photo-frame/share/wordlist_small.txt"
+WORDLIST_SRC="${FILES_DIR}/wordlist.txt"
+WORDLIST_DEST="/opt/photo-frame/share/wordlist.txt"
 
 if [[ $EUID -ne 0 ]]; then
     echo "[20-networking] This module must be run as root." >&2
