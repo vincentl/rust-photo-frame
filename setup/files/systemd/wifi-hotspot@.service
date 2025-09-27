@@ -1,0 +1,16 @@
+[Unit]
+Description=Photo Frame Hotspot on %i
+After=NetworkManager.service
+Requires=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=HOTSPOT_SSID=Frame-Setup
+Environment=HOTSPOT_PASSWORD=frame friends share
+EnvironmentFile=-/run/photo-frame/hotspot.env
+ExecStart=/usr/bin/nmcli device wifi hotspot ifname %i ssid "${HOTSPOT_SSID}" password "${HOTSPOT_PASSWORD}"
+ExecStop=/usr/bin/nmcli connection down Hotspot || true
+
+[Install]
+WantedBy=multi-user.target

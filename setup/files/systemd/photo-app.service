@@ -1,0 +1,15 @@
+[Unit]
+Description=Photo Frame Application
+After=graphical.target
+Wants=graphical.target
+
+[Service]
+Type=simple
+User=frame
+Group=frame
+WorkingDirectory=/opt/photo-frame
+ExecStart=/opt/photo-frame/bin/photo-frame --config /etc/photo-frame/config.yaml
+Restart=on-failure
+
+[Install]
+WantedBy=photo-app.target
