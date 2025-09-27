@@ -94,6 +94,8 @@ pub struct GreetingScreen {
     scale_factor: f64,
     settings: GreetingSettings,
     loaded_font_request: Option<String>,
+    glyph_cache_side: u32,
+    glyph_texture_limit: f32,
 }
 
 impl GreetingScreen {
@@ -105,7 +107,13 @@ impl GreetingScreen {
     ) -> Self {
         let settings = GreetingSettings::from_config(config);
         let glyph_font = load_font(&settings.font_name);
-        let glyph_brush = GlyphBrushBuilder::using_font(glyph_font).build(device, format);
+        let device_limits = device.limits();
+        let glyph_texture_limit = device_limits.max_texture_dimension_2d.min(4096);
+        let glyph_cache_side = glyph_texture_limit
+            .min(2048)
+            .max(256)
+            .min(glyph_texture_limit);
+        let glyph_brush = build_glyph_brush(glyph_font, device, format, glyph_cache_side);
         let frame_pipeline = build_frame_pipeline(device, format);
         if contrast_ratio(settings.colors.font, settings.colors.background) < 4.5 {
             warn!("greeting_screen_low_contrast");
@@ -123,6 +131,8 @@ impl GreetingScreen {
             scale_factor: 1.0,
             settings,
             loaded_font_request: font_request,
+            glyph_cache_side,
+            glyph_texture_limit: glyph_texture_limit as f32,
         }
     }
 
@@ -144,7 +154,8 @@ impl GreetingScreen {
         }
         if font_changed {
             let font = load_font(&new_settings.font_name);
-            self.glyph_brush = GlyphBrushBuilder::using_font(font).build(&self.device, self.format);
+            self.glyph_brush =
+                build_glyph_brush(font, &self.device, self.format, self.glyph_cache_side);
             self.loaded_font_request = new_settings.font_name.clone();
         }
         self.settings = new_settings;
@@ -211,7 +222,8 @@ impl GreetingScreen {
             return;
         }
         let font = load_font(&self.settings.font_name);
-        self.glyph_brush = GlyphBrushBuilder::using_font(font).build(&self.device, self.format);
+        self.glyph_brush =
+            build_glyph_brush(font, &self.device, self.format, self.glyph_cache_side);
         self.loaded_font_request = self.settings.font_name.clone();
     }
 
@@ -240,6 +252,7 @@ impl GreetingScreen {
             box_size,
             min_px,
             max_px,
+            self.glyph_texture_limit,
         );
         let origin_x = ((self.size.width as f32) - box_size.0) * 0.5;
         let origin_y = ((self.size.height as f32) - box_size.1) * 0.5;
@@ -271,12 +284,16 @@ pub fn best_fit_font_px(
     box_px: (f32, f32),
     min_px: f32,
     max_px: f32,
+    texture_limit_px: f32,
 ) -> f32 {
     if text.trim().is_empty() {
         return min_px.max(1.0);
     }
+    let glyph_count = text.chars().filter(|c| !c.is_control()).count().max(1) as f32;
+    let texture_limit_px = texture_limit_px.max(1.0);
+    let texture_cap = (texture_limit_px * texture_limit_px / glyph_count).sqrt() * 0.9;
     let mut low = min_px.max(1.0);
-    let mut high = max_px.max(low);
+    let mut high = max_px.min(texture_cap.max(low)).max(low);
     let mut best = low;
     let layout = Layout::default_wrap()
         .h_align(HorizontalAlign::Center)
@@ -309,6 +326,18 @@ pub fn best_fit_font_px(
         }
     }
     best
+}
+
+fn build_glyph_brush(
+    font: FontArc,
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    cache_side: u32,
+) -> GlyphBrush<()> {
+    let side = cache_side.max(1);
+    GlyphBrushBuilder::using_font(font)
+        .initial_cache_size((side, side))
+        .build(device, format)
 }
 
 fn build_frame_pipeline(
