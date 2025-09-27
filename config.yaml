@@ -65,6 +65,17 @@ playlist:
   new-multiplicity: 3
   half-life: 3 days
 
+# Greeting screen shown while the viewer prepares the first photo.
+greeting-screen:
+  message: "Warming up your photo memories…"
+  font: "Macondo"
+  stroke-width: 10
+  corner-radius: 7.5
+  colors:
+    background: "#101216"
+    font: "#f4f3f0"
+    accent: "#5a6c7d"
+
 # Matting settings
 matting:
   types: [fixed-color, blur, studio, fixed-image]

@@ -15,6 +15,67 @@ use serde_yaml::Value as YamlValue;
 use crate::processing::fixed_image::FixedImageBackground;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct GreetingScreenConfig {
+    pub message: Option<String>,
+    pub font: Option<String>,
+    #[serde(default = "GreetingScreenConfig::default_stroke_width")]
+    pub stroke_width: f32,
+    pub corner_radius: Option<f32>,
+    pub colors: GreetingScreenColors,
+}
+
+impl GreetingScreenConfig {
+    const fn default_stroke_width() -> f32 {
+        12.0
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.stroke_width.is_finite() && self.stroke_width > 0.0,
+            "greeting-screen.stroke-width must be positive"
+        );
+        if let Some(radius) = self.corner_radius {
+            ensure!(
+                radius.is_finite() && radius >= 0.0,
+                "greeting-screen.corner-radius must be >= 0"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Default for GreetingScreenConfig {
+    fn default() -> Self {
+        Self {
+            message: None,
+            font: None,
+            stroke_width: Self::default_stroke_width(),
+            corner_radius: None,
+            colors: GreetingScreenColors::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct GreetingScreenColors {
+    pub background: Option<String>,
+    pub font: Option<String>,
+    pub accent: Option<String>,
+}
+
+impl Default for GreetingScreenColors {
+    fn default() -> Self {
+        Self {
+            background: None,
+            font: None,
+            accent: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct MattingOptions {
     #[serde(default = "MattingOptions::default_minimum_percentage")]
@@ -2424,6 +2485,9 @@ pub struct Configuration {
     pub matting: MattingConfig,
     /// Playlist weighting options for how frequently new photos repeat.
     pub playlist: PlaylistOptions,
+    /// Greeting screen appearance shown before the first photo is ready.
+    #[serde(default)]
+    pub greeting_screen: GreetingScreenConfig,
 }
 
 impl Configuration {
@@ -2454,6 +2518,7 @@ impl Configuration {
             .prepare_runtime()
             .context("invalid matting configuration")?;
         self.playlist.validate()?;
+        self.greeting_screen.validate()?;
         Ok(self)
     }
 }
@@ -2471,6 +2536,7 @@ impl Default for Configuration {
             photo_affect: PhotoAffectConfig::default(),
             matting: MattingConfig::default(),
             playlist: PlaylistOptions::default(),
+            greeting_screen: GreetingScreenConfig::default(),
         }
     }
 }
