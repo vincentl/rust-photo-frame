@@ -51,7 +51,7 @@ async fn run_with_affects(
     cancel: CancellationToken,
     config: PhotoAffectConfig,
 ) -> Result<()> {
-    let mut rng = StdRng::from_entropy();
+    let mut rng = StdRng::from_os_rng();
 
     loop {
         select! {

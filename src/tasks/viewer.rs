@@ -8,7 +8,7 @@ use crate::processing::color::average_color;
 use crate::processing::layout::{center_offset, resize_to_cover};
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
 use image::{imageops, Rgba, RgbaImage};
-use rand::{thread_rng, Rng};
+use rand::Rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -432,7 +432,7 @@ pub fn run_windowed(
                     flash_color: cfg
                         .flash_color
                         .map(|channel| (channel as f32 / 255.0).clamp(0.0, 1.0)),
-                    noise_seed: [rng.gen(), rng.gen()],
+                    noise_seed: [rng.random(), rng.random()],
                 },
             };
             Self {
@@ -1028,7 +1028,7 @@ pub fn run_windowed(
                     self.deferred_images.push_front(img);
                     break;
                 };
-                let mut rng = thread_rng();
+                let mut rng = rand::rng();
                 let matting = self.matting.choose_option(&mut rng);
                 let params = MatParams {
                     screen_w: gpu.config.width.max(1),
@@ -1161,7 +1161,7 @@ pub fn run_windowed(
         ready_results: VecDeque::new(),
         deferred_images: VecDeque::new(),
         clear_color,
-        rng: thread_rng(),
+        rng: rand::rng(),
     };
     event_loop.run_app(&mut app)?;
     Ok(())

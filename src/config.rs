@@ -1917,7 +1917,7 @@ impl AnglePicker {
         } else {
             match self.selection {
                 AngleSelection::Random => {
-                    let index = rng.gen_range(0..self.angles_deg.len());
+                    let index = rng.random_range(0..self.angles_deg.len());
                     self.angles_deg[index]
                 }
                 AngleSelection::Sequential => {
@@ -1928,7 +1928,7 @@ impl AnglePicker {
             }
         };
         if self.jitter_deg.abs() > f32::EPSILON {
-            let jitter = rng.gen_range(-self.jitter_deg..=self.jitter_deg);
+            let jitter = rng.random_range(-self.jitter_deg..=self.jitter_deg);
             base_angle + jitter
         } else {
             base_angle
