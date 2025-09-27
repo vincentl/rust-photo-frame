@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
 
+use fontdb::Database;
 use lyon_path::builder::BorderRadii;
 use lyon_path::math::{point, Box2D};
 use lyon_path::Path as LyonPath;
@@ -9,7 +10,7 @@ use lyon_path::Winding;
 use lyon_tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers};
 use tracing::warn;
 use wgpu::util::DeviceExt;
-use wgpu_glyph::ab_glyph::{FontArc, PxScale};
+use wgpu_glyph::ab_glyph::{FontArc, FontVec, PxScale};
 use wgpu_glyph::{
     BuiltInLineBreaker, FontId, GlyphBrush, GlyphBrushBuilder, GlyphCruncher, HorizontalAlign,
     Layout, Section, SectionGeometry, Text, VerticalAlign,
@@ -478,8 +479,8 @@ impl GreetingScreen {
             .h_align(HorizontalAlign::Center)
             .v_align(VerticalAlign::Center);
         self.layout = layout;
-        let min_px = 12.0_f32.min(box_size).max(6.0);
         let max_px = box_size;
+        let min_px = max_px.min(12.0).max(max_px.min(6.0)).max(1.0);
         let font_px = best_fit_font_px(
             &mut self.glyph_brush,
             &self.message,
@@ -614,6 +615,17 @@ pub fn best_fit_font_px(
     if brush.fonts().is_empty() {
         return min_px.max(1.0);
     }
+    if box_px.0 <= 0.0 || box_px.1 <= 0.0 {
+        return min_px.max(1.0);
+    }
+    if !min_px.is_finite() || !max_px.is_finite() {
+        return 12.0;
+    }
+    let mut low = min_px.min(max_px).max(1.0);
+    let mut high = max_px.max(low);
+    if high <= 1.0 {
+        return 1.0;
+    }
     let layout = Layout::default_wrap()
         .h_align(HorizontalAlign::Center)
         .v_align(VerticalAlign::Center);
@@ -621,11 +633,15 @@ pub fn best_fit_font_px(
         screen_position: (0.0, 0.0),
         bounds: box_px,
     };
-    let mut low = min_px.max(1.0);
-    let mut high = max_px.max(low);
+    if fits_bounds(brush, &layout, &geometry, text, high) {
+        return high.clamp(min_px.min(max_px).max(1.0), max_px.max(min_px).max(1.0));
+    }
+    if !fits_bounds(brush, &layout, &geometry, text, low) {
+        return low.clamp(min_px.min(max_px).max(1.0), max_px.max(min_px).max(1.0));
+    }
     let mut best = low;
-    for _ in 0..16 {
-        if high - low < 0.5 {
+    for _ in 0..18 {
+        if high - low <= 0.5 {
             break;
         }
         let mid = (low + high) * 0.5;
@@ -636,7 +652,7 @@ pub fn best_fit_font_px(
             high = mid;
         }
     }
-    best.clamp(min_px.max(1.0), max_px.max(min_px))
+    best.clamp(min_px.min(max_px).max(1.0), max_px.max(min_px).max(1.0))
 }
 
 fn fits_bounds(
@@ -692,13 +708,18 @@ fn sanitize_font_key(raw: Option<&str>) -> Option<String> {
     if text.is_empty() {
         None
     } else {
-        Some(text.to_lowercase())
+        Some(text.to_string())
     }
 }
 
 fn load_font_by_name(name: &str) -> Option<FontArc> {
+    load_font_from_assets(name).or_else(|| load_system_font(name))
+}
+
+fn load_font_from_assets(requested: &str) -> Option<FontArc> {
     let fonts_dir = Path::new("assets/fonts");
     let entries = fs::read_dir(fonts_dir).ok()?;
+    let requested_lower = requested.to_lowercase();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -712,15 +733,23 @@ fn load_font_by_name(name: &str) -> Option<FontArc> {
         if !ext_ok {
             continue;
         }
-        let stem = path
+        let stem_lower = path
             .file_stem()
             .and_then(|s| s.to_str())
             .map(|s| s.to_lowercase());
-        let file_name = path
+        let file_lower = path
             .file_name()
             .and_then(|s| s.to_str())
             .map(|s| s.to_lowercase());
-        if stem.as_deref() == Some(name) || file_name.as_deref() == Some(name) {
+        let matches_request = stem_lower
+            .as_deref()
+            .map(|s| s == requested_lower)
+            .unwrap_or(false)
+            || file_lower
+                .as_deref()
+                .map(|s| s == requested_lower)
+                .unwrap_or(false);
+        if matches_request {
             if let Ok(bytes) = fs::read(&path) {
                 if let Ok(font) = FontArc::try_from_vec(bytes) {
                     return Some(font);
@@ -729,6 +758,27 @@ fn load_font_by_name(name: &str) -> Option<FontArc> {
         }
     }
     None
+}
+
+fn load_system_font(name: &str) -> Option<FontArc> {
+    let mut db = Database::new();
+    db.load_system_fonts();
+    let requested_lower = name.to_lowercase();
+    let face_id = db.faces().find_map(|face| {
+        let mut matches_family = face
+            .families
+            .iter()
+            .any(|(family, _)| family.to_lowercase() == requested_lower);
+        if !matches_family {
+            matches_family = face.post_script_name.to_lowercase() == requested_lower;
+        }
+        matches_family.then_some(face.id)
+    })?;
+    db.with_face_data(face_id, |data, index| {
+        FontVec::try_from_vec_and_index(data.to_vec(), index)
+            .ok()
+            .map(FontArc::new)
+    })?
 }
 
 fn create_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
