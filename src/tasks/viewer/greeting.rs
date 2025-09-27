@@ -508,6 +508,8 @@ impl GreetingScreen {
             let max_delta_x = box_origin.0 + box_size - bounds[2];
             let min_delta_y = box_origin.1 - bounds[1];
             let max_delta_y = box_origin.1 + box_size - bounds[3];
+            let (min_delta_x, max_delta_x) = ordered_range(min_delta_x, max_delta_x);
+            let (min_delta_y, max_delta_y) = ordered_range(min_delta_y, max_delta_y);
             delta_x = delta_x.clamp(min_delta_x, max_delta_x);
             delta_y = delta_y.clamp(min_delta_y, max_delta_y);
             self.text_layout = Some(TextLayoutInfo {
@@ -633,11 +635,13 @@ pub fn best_fit_font_px(
         screen_position: (0.0, 0.0),
         bounds: box_px,
     };
+    let clamped_min = min_px.min(max_px).max(1.0);
+    let clamped_max = max_px.max(min_px).max(clamped_min);
     if fits_bounds(brush, &layout, &geometry, text, high) {
-        return high.clamp(min_px.min(max_px).max(1.0), max_px.max(min_px).max(1.0));
+        return high.clamp(clamped_min, clamped_max);
     }
     if !fits_bounds(brush, &layout, &geometry, text, low) {
-        return low.clamp(min_px.min(max_px).max(1.0), max_px.max(min_px).max(1.0));
+        return low.clamp(clamped_min, clamped_max);
     }
     let mut best = low;
     for _ in 0..18 {
@@ -652,7 +656,15 @@ pub fn best_fit_font_px(
             high = mid;
         }
     }
-    best.clamp(min_px.min(max_px).max(1.0), max_px.max(min_px).max(1.0))
+    best.clamp(clamped_min, clamped_max)
+}
+
+fn ordered_range(a: f32, b: f32) -> (f32, f32) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 fn fits_bounds(
