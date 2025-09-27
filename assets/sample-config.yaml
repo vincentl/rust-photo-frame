@@ -35,6 +35,7 @@ greeting-screen:
   message: "Warming up your photo memories…"
   font: "Macondo"
   stroke-width: 10
+  duration-seconds: 4
   colors:
     background: "#111827"
     font: "#f8fafc"

@@ -13,6 +13,7 @@ use rand::Rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -551,6 +552,8 @@ pub fn run_windowed(
         transition_state: Option<TransitionState>,
         displayed_at: Option<std::time::Instant>,
         dwell_ms: u64,
+        greeting_duration: Duration,
+        greeting_deadline: Option<Instant>,
         pending: VecDeque<ImgTex>,
         preload_count: usize,
         oversample: f32,
@@ -574,6 +577,7 @@ pub fn run_windowed(
             self.next = None;
             self.transition_state = None;
             self.displayed_at = None;
+            self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
             self.mat_inflight = 0;
             let monitor = event_loop.primary_monitor();
             let attrs = Window::default_attributes()
@@ -1034,14 +1038,21 @@ pub fn run_windowed(
                 }
             }
             if self.current.is_none() && self.transition_state.is_none() {
-                if let Some(first) = self.pending.pop_front() {
-                    info!("first_image path={}", first.path.display());
-                    self.current = Some(first);
-                    self.displayed_at = Some(std::time::Instant::now());
-                    if let Some(cur) = &self.current {
-                        let _ = self
-                            .to_manager_displayed
-                            .try_send(Displayed(cur.path.clone()));
+                let greeting_finished = self
+                    .greeting_deadline
+                    .map(|deadline| Instant::now() >= deadline)
+                    .unwrap_or(true);
+                if greeting_finished {
+                    if let Some(first) = self.pending.pop_front() {
+                        info!("first_image path={}", first.path.display());
+                        self.current = Some(first);
+                        self.greeting_deadline = None;
+                        self.displayed_at = Some(std::time::Instant::now());
+                        if let Some(cur) = &self.current {
+                            let _ = self
+                                .to_manager_displayed
+                                .try_send(Displayed(cur.path.clone()));
+                        }
                     }
                 }
             }
@@ -1136,6 +1147,8 @@ pub fn run_windowed(
         transition_state: None,
         displayed_at: None,
         dwell_ms: cfg.dwell_ms,
+        greeting_duration: cfg.greeting_screen.effective_duration(),
+        greeting_deadline: None,
         pending: VecDeque::new(),
         preload_count: cfg.viewer_preload_count,
         oversample: cfg.oversample,
