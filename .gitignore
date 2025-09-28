@@ -3,3 +3,4 @@
 **/target/
 Cargo.lock
 photo-library-test/
+setup/app/build/

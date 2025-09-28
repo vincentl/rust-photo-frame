@@ -85,35 +85,14 @@ This workflow prepares a Raspberry Pi OS (Bookworm, 64-bit) image that boots dir
 
 1. **Optional:** Check out a specific branch or tag.
 
-### Choose the application user for setup modules
+## Run the automated setup
 
-Most setup modules, including the Wi-Fi watcher build, try to run developer tooling (like `cargo`) as the non-root account that invokes `sudo`. The scripts automatically prefer, in order:
+Both setup stages should be launched as the deployment user. They call `sudo` internally for the few operations that need elevated privileges (apt packages, `/boot` updates, and copying into `/opt/photo-frame`). The stages are safe to re-run; unchanged modules will detect that no work is required.
 
-1. A user supplied via `FRAME_USER=<name>` when invoking the script.
-1. The user recorded in `SUDO_USER` (i.e., the account that ran `sudo`).
-1. The owner of the repository checkout on disk.
-1. A `frame` account, if one exists.
-1. `root` as a last resort.
-
-This means you can clone the repository as your preferred account and let the automation pick the owner of the build artifacts.
-
-- `setup/system/run.sh` automatically re-invokes itself with `sudo` when started from an unprivileged shell so you do not need to prepend `sudo`. It also exports the resolved `FRAME_USER` so that the Rust toolchain is installed for the correct account.
-- `setup/app/run.sh` and individual modules under `setup/app/modules/` must be invoked with `sudo` (or from a root shell) because they install services and system packages. They honour the same `FRAME_USER` selection logic but do not escalate on their own.
-
-If you need to override the choice explicitly (for example, when staging a build for another user account), run the module with:
-
-```bash
-FRAME_USER=photoframe sudo ./setup/app/modules/30-wifi-watcher.sh
-```
-
-The script will warn and fall back to an available account if the requested name cannot be found.
-
-## Initiate the automated setup
-
-1. The script `./setup/system/run.sh` calls scripts in `./setup/system/modules/` to configure the boot configuration to support a 4k monitor and install Rust.
+1. The script `./setup/system/system-setup.sh` provisions operating-system dependencies, enables the 4K HDMI boot profile, and installs a user-scoped Rust toolchain.
 
    ```bash
-   ./setup/system/run.sh
+   ./setup/system/system-setup.sh
    ```
 
 1. Reboot the pi to enable the boot changes.
@@ -124,4 +103,17 @@ The script will warn and fall back to an available account if the requested name
 
    You will need to ssh back to the frame once it reboots to continue installation.
 
-1. The script `sudo ./setup/app/run.sh` calls scripts in `./setup/app/modules/` to build the photo frame application, configure cloud syncing, and install a Wi-Fi watcher to simplify moving the frame to a new Wi-Fi network.
+1. The script `./setup/app/app-setup.sh` builds the photo frame application, stages the release artifacts, installs them into `/opt/photo-frame`, and enables the `photo-frame.service` systemd unit.
+
+   ```bash
+   ./setup/app/app-setup.sh
+   ```
+
+Use the following environment variables to customise an installation:
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `INSTALL_ROOT` | `/opt/photo-frame` | Target installation prefix. |
+| `SERVICE_USER` | `photo-frame` | The systemd account that owns `/opt/photo-frame/var`. Created automatically when missing. |
+| `CARGO_PROFILE` | `release` | Cargo profile passed to `cargo build`. |
+| `DRY_RUN` | unset | Set to `1` to see the actions that would be taken without modifying the system. |
