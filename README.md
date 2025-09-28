@@ -1,10 +1,6 @@
-# Photoframe
+# Photo Frame
 
-A digital photo frame driver implemented in Rust with a pipeline tuned for Raspberry Pi hardware. It watches a photo library, weights the playlist so new images appear more frequently, and renders each slide with configurable matting, transitions, and photo effects.
-
-## What is this?
-
-Photoframe turns a Raspberry Pi and an HDMI display into a self-hosted, always-fresh slideshow. The runtime keeps a local or network photo library in sync, prioritizes new additions, and styles every slide with gallery-inspired matting and post-processing. Makers can keep control of their library (no cloud uploads) while still enjoying dynamic sequencing, deterministic testing modes, and a GPU-aware render pipeline that respects the Pi’s constraints.
+A digital photo frame driver implemented in Rust with a pipeline tuned for Raspberry Pi hardware. Watches a photo library, weights the playlist so new images appear more frequently, and renders each slide with configurable matting, transitions, and photo effects.
 
 **Built for:** Raspberry Pi hobbyists, photographers who want a bespoke display, and Rust developers interested in embedded graphics pipelines.
 
@@ -12,20 +8,18 @@ Photoframe turns a Raspberry Pi and an HDMI display into a self-hosted, always
 
 - Runs entirely on-device with a configurable playlist weighting system.
 - Supports rich visual treatments (mats, transitions, print simulation) without requiring graphics expertise.
-- Ships with CLI flags and sample configs so you can reproduce playlists during testing or demos.
 
 ## Table of Contents
 
-1. [What is this?](#what-is-this)
-2. [Hardware](#hardware)
-3. [Frame Setup](#frame-setup)
-4. [Features](#features)
-5. [Architecture Overview](#architecture-overview)
-6. [Configuration](#configuration)
-7. [Playlist Weighting](#playlist-weighting)
-8. [Matting Configuration](#matting-configuration)
-9. [References](#references)
-10. [License](#license)
+1. [Hardware](#hardware)
+2. [Frame Setup](#frame-setup)
+3. [Features](#features)
+4. [Architecture Overview](#architecture-overview)
+5. [Configuration](#configuration)
+6. [Playlist Weighting](#playlist-weighting)
+7. [Matting Configuration](#matting-configuration)
+8. [References](#references)
+9. [License](#license)
 
 ## Hardware
 
@@ -55,7 +49,7 @@ cargo run --release -- <path/to/config.yaml>
 
 Use the core command above for day-to-day playback. Reach for the CLI flags below when you need to troubleshoot sequencing, create demo recordings, or confirm that configuration changes behave as expected.
 
-| Flag                              | When to reach for it                                                                                                   |
+| Flag                              | When to reach for it                                                                                                    |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `--playlist-now <RFC3339>`        | Freeze the virtual clock to reproduce playlist weights for debugging or long-form tests.                                |
 | `--playlist-dry-run <ITERATIONS>` | Generate a textual preview of the weighted queue to check ordering before lighting up the display.                      |
@@ -94,7 +88,6 @@ flowchart LR
   LOAD -->|invalid photo| FILES
   VIEW -->|displayed event| MAN
 ```
-
 
 ## Configuration
 
@@ -154,6 +147,36 @@ If the frame launches to a black screen, double-check that `photo-library-path` 
 | **Greeting Screen**    | `greeting-screen`                                                     |
 
 Use the quick reference above to locate the knobs you care about, then dive into the per-key cards below for the details.
+
+## rust-photo-frame-services
+
+The provisioning toolchain under `setup/` installs three long-running services that keep the frame online and the library fresh. Run the existing system bootstrap (`setup/system-setup.sh`) and then execute `sudo ./setup/setup.sh` to apply these additional modules in order.
+
+### Wi-Fi watcher and provisioning flow
+
+- `wifi-watcher` is a Rust daemon that monitors `nmcli` connectivity every 30 s. When the network is online it writes `/run/photo-frame/wifi_up`, starts `photo-app.target`, and ensures the provisioning stack is idle. When connectivity drops it stops the slideshow, spins up a hotspot via `wifi-hotspot@wlan0.service`, launches the captive portal (`wifi-setter.service`), and displays a full-screen QR-code UI so someone nearby can reconfigure credentials.【F:setup/files/systemd/wifi-watcher.service†L1-L16】【F:setup/files/systemd/wifi-hotspot@.service†L1-L15】
+- The watcher generates three-word hotspot passwords from `/opt/photo-frame/share/wordlist.txt` and writes them to `/run/photo-frame/hotspot.env` for the templated hotspot unit. Passwords appear verbatim in the on-device UI and in no logs.【F:setup/files/wordlist.txt†L1-L1024】【F:crates/wifi-watcher/src/hotspot.rs†L14-L120】
+- `wifi-setter` is a minimal Axum web app bound to `0.0.0.0:80`. It scans for nearby SSIDs, differentiates between known and new connections, and updates NetworkManager in-place without duplicating profiles. Its `/api/status` endpoint lets the captive page auto-refresh once the Pi is back online.【F:crates/wifi-setter/src/web.rs†L1-L159】
+- Both binaries honor configuration from `/etc/photo-frame/config.yaml` when present and fall back to the environment variables exposed in their systemd units: `WIFI_IFNAME` (default `wlan0`), `FRAME_USER` (default `frame`), `HOTSPOT_IP` (default `192.168.4.1`). Override them with `systemctl edit` drop-ins if your hardware differs.【F:setup/files/systemd/wifi-watcher.service†L8-L15】【F:setup/files/systemd/wifi-setter.service†L7-L14】
+- Use `/opt/photo-frame/bin/print-status.sh` to inspect the current connectivity, hotspot state, slideshow target, and sync schedule in one place.【F:setup/files/bin/print-status.sh†L1-L43】
+
+### Photo app orchestration
+
+- `photo-app.target` gates startup of the slideshow, allowing the watcher to start and stop the renderer as Wi-Fi comes and goes. The unit keeps the process under the `frame` user, runs from `/opt/photo-frame`, and uses the existing `config.yaml` path. Do **not** enable `photo-app.service` directly; the watcher will start the target when connectivity is healthy.【F:setup/files/systemd/photo-app.service†L1-L16】【F:setup/modules/40-photo-app.sh†L16-L26】
+- Optional kiosk tweaks—such as autologin to the `frame` user or hiding the cursor—can be layered on later using Raspberry Pi OS’ standard GUI settings. They are documented but intentionally not enforced by these modules.
+
+### Cloud photo sync
+
+- `sync-photos.service` is a oneshot wrapper around `rclone sync`, mirroring the configured remote directly into the live `photo-library-path`. It relies on rclone’s temp-file writes and atomic renames, so the viewer never sees partially copied images.【F:setup/files/systemd/sync-photos.service†L1-L28】
+- The paired timer defaults to `OnCalendar=hourly`; override the cadence by editing `/etc/systemd/system/sync-photos.timer.d/override.conf` where the setup module writes the initial schedule. Set `RCLONE_REMOTE` (for cloud endpoints) or switch to `SYNC_TOOL=rsync` with `RSYNC_SOURCE` when pulling from another host.【F:setup/modules/50-sync.sh†L37-L66】
+- Required paths come from `config.yaml` when present; if the YAML omits `photo-library-path`, the setup script writes `PHOTO_LIBRARY_PATH` into a drop-in so the service still knows where to sync.【F:setup/modules/50-sync.sh†L20-L66】
+
+### Quickstart
+
+1. Run the normal bootstrap (`setup/system-setup.sh`) to provision base dependencies, then execute `sudo ./setup/setup.sh` to install the watcher, hotspot, photo-app target, and sync timer.
+2. Configure a cloud remote with `rclone config`, then set `RCLONE_REMOTE` (and optional `RCLONE_FLAGS`) via `systemctl edit sync-photos.service`.
+3. Reboot or start `wifi-watcher.service`. If Wi-Fi is unavailable, connect to the “Frame-Setup” hotspot, scan the QR code, and submit new credentials through the captive portal.
+4. Once online, the photo app launches automatically and `sync-photos.timer` keeps the library mirrored on the cadence defined by `SYNC_SCHEDULE` (default hourly).
 
 #### `photo-library-path`
 
