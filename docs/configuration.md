@@ -19,8 +19,8 @@ loader-max-concurrent-decodes: 4 # Concurrent decodes in the loader
 oversample: 1.0 # GPU render oversample vs. screen size
 startup-shuffle-seed: null # Optional deterministic seed for initial shuffle
 
-photo-affect:
-  types: [print-simulation] # Set to [] to disable all affects
+photo-effect:
+  types: [print-simulation] # Set to [] to disable all effects
   options:
     print-simulation:
       relief-strength: 0.35
@@ -54,7 +54,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 | **Core timing**        | `transition`, `dwell-ms`, `playlist`                                  |
 | **Performance tuning** | `viewer-preload-count`, `loader-max-concurrent-decodes`, `oversample` |
 | **Deterministic runs** | `startup-shuffle-seed`                                                |
-| **Presentation**       | `photo-affect`, `matting`                                             |
+| **Presentation**       | `photo-effect`, `matting`                                             |
 | **Greeting Screen**    | `greeting-screen`                                                     |
 
 ## Key reference
@@ -116,12 +116,12 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Accepted values & defaults:** Mapping described in [Playlist weighting](#playlist-weighting); defaults to three copies for new images and a one-day half-life.
 - **Effect on behavior:** Aggressive settings make new imports loop repeatedly until they age; conservative settings let the library settle into an even rotation.
 
-### `photo-affect`
+### `photo-effect`
 
-- **Type:** mapping (see [Photo affect configuration](#photo-affect-configuration))
+- **Type:** mapping (see [Photo effect configuration](#photo-effect-configuration))
 - **Default:** disabled (`types: []`)
-- **What it does:** Inserts an optional post-processing stage between the loader and viewer. The built-in `print-simulation` affect relights each frame with directional shading and paper sheen inspired by _3D Simulation of Prints for Improved Soft Proofing_.
-- **When to change it:** Enable when you want the frame to mimic how ink interacts with paper under gallery lighting, or when you add additional affects in future releases.
+- **What it does:** Inserts an optional post-processing stage between the loader and viewer. The built-in `print-simulation` effect relights each frame with directional shading and paper sheen inspired by _3D Simulation of Prints for Improved Soft Proofing_.
+- **When to change it:** Enable when you want the frame to mimic how ink interacts with paper under gallery lighting, or when you add additional effects in future releases.
 
 ### `greeting-screen`
 
@@ -177,20 +177,20 @@ The command prints the multiplicity assigned to each discovered photo and the fi
 | `new-multiplicity` | Optional  | `3`     | Integer ≥ 1                                                                 | Sets how many times a brand-new photo appears in the next loop; higher values surface newcomers more often. |
 | `half-life`        | Optional  | `1 day` | Positive duration string parsed by [`humantime`](https://docs.rs/humantime) | Controls how quickly the extra repeats decay; shorter half-lives return the playlist to equilibrium faster. |
 
-## Photo affect configuration
+## Photo effect configuration
 
-The optional `photo-affect` task sits between the loader and the viewer. When enabled it reconstructs the decoded RGBA pixels, applies any configured affects, and forwards the modified image downstream. Leave `types` empty (or omit the block entirely) to short-circuit the stage and pass photos through untouched.
+The optional `photo-effect` task sits between the loader and the viewer. When enabled it reconstructs the decoded RGBA pixels, applies any configured effects, and forwards the modified image downstream. Leave `types` empty (or omit the block entirely) to short-circuit the stage and pass photos through untouched.
 
-### Scheduling affects
+### Scheduling effects
 
-- **`types`** — List the affect kinds to rotate through. Supported values today: `print-simulation`. Set to `[]` to keep the stage disabled while preserving the scaffold for future affects.
-- **`type-selection`** — Optional. `random` (default) or `sequential`. `random` draws an affect independently for each slide, while `sequential` walks the `types` list in order and loops back to the first entry after the last.
-- **`options`** — Map of per-affect controls. Every affect referenced in `types` must appear here so the runtime can look up its parameters.
+- **`types`** — List the effect kinds to rotate through. Supported values today: `print-simulation`. Set to `[]` to keep the stage disabled while preserving the scaffold for future effects.
+- **`type-selection`** — Optional. `random` (default) or `sequential`. `random` draws an effect independently for each slide, while `sequential` walks the `types` list in order and loops back to the first entry after the last.
+- **`options`** — Map of per-effect controls. Every effect referenced in `types` must appear here so the runtime can look up its parameters.
 
-Example: enable the print simulation affect while keeping its debug split active for quick before/after checks.
+Example: enable the print simulation effect while keeping its debug split active for quick before/after checks.
 
 ```yaml
-photo-affect:
+photo-effect:
   types: [print-simulation]
   type-selection: sequential
   options:
@@ -198,7 +198,7 @@ photo-affect:
       debug: true
 ```
 
-### Print-simulation affect
+### Print-simulation effect
 
 `print-simulation` adapts ideas from _3D Simulation of Prints for Improved Soft Proofing_ to mimic how a framed print interacts with gallery lighting. It derives a shallow height-field from local luminance gradients, shades that relief with a configurable key light, and layers in ink compression plus paper sheen so highlights glow like coated stock. Tunable controls let operators dial in their paper stock and lighting rig:
 
@@ -207,7 +207,7 @@ photo-affect:
 - `ink-spread` (float ≥ 0, default `0.18`): Tone compression coefficient that emulates dye absorption.
 - `sheen-strength` (float ≥ 0, default `0.22`): How strongly the simulated paper sheen is blended into highlights.
 - `paper-color` (RGB array, default `[245, 244, 240]`): Base tint of the reflective sheen layer.
-- `debug` (bool, default `false`): When `true`, only the left half of the image receives the affect so you can compare it against the untouched right half.
+- `debug` (bool, default `false`): When `true`, only the left half of the image receives the effect so you can compare it against the untouched right half.
 
 ## Transition configuration
 
