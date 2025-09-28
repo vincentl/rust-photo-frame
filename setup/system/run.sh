@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
-MODULE_DIR="${SCRIPT_DIR}/setup-modules"
+MODULE_DIR="${SCRIPT_DIR}/modules"
 
 if [[ $EUID -ne 0 ]]; then
     export FRAME_USER="${FRAME_USER:-${USER}}"
