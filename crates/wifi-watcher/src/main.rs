@@ -19,6 +19,11 @@ use crate::nm::Connectivity;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if matches!(std::env::args().nth(1).as_deref(), Some("--ui")) {
+        init_tracing();
+        return ui::run_from_env();
+    }
+
     init_tracing();
     if std::env::args().any(|arg| arg == "--show-ui") {
         return run_ui_mode();
@@ -140,7 +145,9 @@ impl Controller {
     }
 
     async fn on_wifi_down(&mut self) -> Result<()> {
-        self.clear_wifi_flag()?;
+        if let Err(err) = self.clear_wifi_flag() {
+            warn!(?err, "failed to clear wifi flag");
+        }
         self.stop_photo_app()?;
         let hotspot = self.ensure_hotspot()?;
         self.ensure_setter()?;
@@ -178,7 +185,7 @@ impl Controller {
             }
             self.ui = None;
         }
-        match ui::spawn(&info, &self.settings) {
+        match ui::spawn(&self.settings, info) {
             Ok(handle) => {
                 self.ui = Some(handle);
                 Ok(())
