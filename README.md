@@ -2,7 +2,7 @@
 
 A digital photo frame driver implemented in Rust with a pipeline tuned for Raspberry Pi hardware. Watches a photo library, weights the playlist so new images appear more frequently, and renders each slide with configurable matting, transitions, and photo effects.
 
-**Built for:** Raspberry Pi hobbyists, photographers who want a bespoke display, and Rust developers interested in embedded graphics pipelines.
+**Built for:** Raspberry Pi hobbyists, makers or photographers who want a bespoke display, and Rust developers interested in embedded graphics pipelines.
 
 **Highlights:**
 
