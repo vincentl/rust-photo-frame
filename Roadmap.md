@@ -1,22 +1,5 @@
 # Photo Frame Project Roadmap
 
-## Major Missing Items
-
-[ ] cloud sync
-[ ] setup framework
-[ ] details on physical frame
-[ ] details on Pi parts
-
-# My To Do
-
-[X] Pick a bevel options and merge it
-[X] Start a task to enable random matting - will need to allow different minimum matting values per type, how to specify each? Code allow all and select one or random
-[ ] Continue work on button setup script
-[ ] Start new task for button interpretation - 1 vs 2 clicks
-[ ] Test pi on with new button location
-[ ] Start a task on how to do cloud sync
-[ ] Test fixed image background
-
 ## Software Subproject
 
 - [ ] **Remote administration & observability**
@@ -34,21 +17,12 @@
   - [ ] Design sync cadence: periodic pull, manual trigger, conflict handling policy.
   - [ ] Implement sync worker (hashing, temp staging, graceful failover when offline).
   - [ ] Surface manual sync trigger (button event + future web UI hook).
-- [ ] **Viewer & pipeline quality**
-  - [ ] Integration test to confirm viewer emits `Displayed` after draw completes.
-  - [ ] Detect and log stalled transitions (timeouts, stuck GPU frame submission).
-  - [ ] Provide CPU-only fallback path if wgpu initialization fails on target hardware.
-  - [ ] Add structured logging spans for load → prepare → display pipeline.
 - [ ] **Configuration & UX**
   - [ ] Expand config schema to cover matting, schedules, sync, admin settings.
-  - [ ] Ship CLI tooling for editing config and tailing logs over SSH/Tailscale.
-  - [ ] Draft API surface for future local web UI (read/write config, trigger sync, view status).
   - [ ] Define UX flows for first-run wifi setup and device naming.
 - [ ] **Deployment automation**
   - [ ] Systemd unit files for manager, viewer, and background sync services.
   - [ ] End-to-end setup validation script (lint config, check dependencies, smoke test viewer).
-  - [ ] Build + package artifacts per target (Pi image, macOS binary, config templates).
-  - [ ] Continuous integration: `cargo fmt`, `clippy`, tests, and cross build for aarch64.
 
 ## Tier 1 – Must-do (MVP)
 
