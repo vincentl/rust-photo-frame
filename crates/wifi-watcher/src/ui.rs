@@ -1,13 +1,17 @@
-use std::fs;
-use std::io::ErrorKind;
+use std::env;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use eframe::{egui, App};
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use qrcode::QrCode;
 use tracing::{info, warn};
+use users::get_user_by_name;
+use users::os::unix::UserExt;
 
 use crate::check::Settings;
 use crate::hotspot::HotspotInfo;
@@ -17,36 +21,13 @@ pub struct UiHandle {
 }
 
 impl UiHandle {
-    pub fn is_alive(&mut self) -> Result<bool> {
-        if let Some(mut child) = self.child.take() {
-            let result = match child.try_wait() {
-                Ok(Some(_status)) => Ok(false),
-                Ok(None) => {
-                    self.child = Some(child);
-                    Ok(true)
-                }
-                Err(err) => {
-                    warn!(?err, "failed to poll wifi UI child status");
-                    self.child = Some(child);
-                    Err(err.into())
-                }
-            };
-            result
-        } else {
-            Ok(false)
-        }
-    }
-
     pub fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            match child.kill() {
-                Ok(()) => {
-                    let _ = child.wait();
-                }
-                Err(err) if err.kind() == ErrorKind::InvalidInput => {}
-                Err(err) => {
-                    warn!(?err, "failed to terminate wifi UI process");
-                }
+            if let Ok(Some(_)) = child.try_wait() {
+                return;
+            }
+            if let Err(err) = terminate_child(&mut child) {
+                warn!(?err, "failed to stop Wi-Fi UI cleanly");
             }
         }
     }
@@ -58,40 +39,105 @@ impl Drop for UiHandle {
     }
 }
 
-pub fn spawn(info: &HotspotInfo, settings: &Settings) -> Result<UiHandle> {
-    let session = SessionEnv::from_settings(settings)?;
-    let exe = std::env::current_exe().context("locating wifi-watcher executable")?;
-    let payload = serde_json::to_string(info).context("serializing hotspot info for UI")?;
+pub fn spawn(settings: &Settings, info: HotspotInfo) -> Result<UiHandle> {
+    let mut command = Command::new(env::current_exe().context("resolving wifi-watcher executable")?);
+    command.arg("--ui");
+    command.env("HOTSPOT_SSID", &info.ssid);
+    command.env("HOTSPOT_PASSWORD", &info.password);
+    command.env("HOTSPOT_IP", &info.ip);
 
-    let child = if session.use_sudo {
-        let mut command = Command::new("sudo");
-        command.arg("-u").arg(&session.user);
-        command.arg("env");
-        for pair in session.env_pairs() {
-            command.arg(pair);
-        }
-        command.arg(format!("WIFI_UI_PAYLOAD={payload}"));
-        command.arg(&exe);
-        command.arg("--show-ui");
-        command
-            .spawn()
-            .context("launching wifi UI process with sudo")?
-    } else {
-        let mut command = Command::new(&exe);
-        session.apply_direct_env(&mut command);
-        command.arg("--show-ui");
-        command
-            .env("WIFI_UI_PAYLOAD", payload)
-            .spawn()
-            .context("launching wifi UI process")?
-    };
+    configure_for_frame_user(&mut command, &settings.frame_user)?;
 
+    let child = command
+        .spawn()
+        .context("spawning Wi-Fi provisioning UI as frame user")?;
     Ok(UiHandle {
         child: Some(child),
     })
 }
 
-pub fn run_blocking(info: HotspotInfo) -> Result<()> {
+pub fn run_from_env() -> Result<()> {
+    let info = HotspotInfo {
+        ssid: env::var("HOTSPOT_SSID").context("HOTSPOT_SSID not set")?,
+        password: env::var("HOTSPOT_PASSWORD").context("HOTSPOT_PASSWORD not set")?,
+        ip: env::var("HOTSPOT_IP").context("HOTSPOT_IP not set")?,
+    };
+    run_ui(info)
+}
+
+fn configure_for_frame_user(command: &mut Command, frame_user: &str) -> Result<()> {
+    let user = get_user_by_name(frame_user)
+        .ok_or_else(|| anyhow!("frame user '{frame_user}' not found"))?;
+
+    let uid = user.uid();
+    let gid = user.primary_group_id();
+    let username = user.name().to_string_lossy().to_string();
+    let home = user.home_dir().to_path_buf();
+
+    command.uid(uid);
+    command.gid(gid);
+    command.current_dir(&home);
+    command.env("HOME", &home);
+    command.env("USER", &username);
+    command.env("LOGNAME", &username);
+
+    if let Ok(rust_log) = env::var("RUST_LOG") {
+        command.env("RUST_LOG", rust_log);
+    }
+
+    let runtime_dir = PathBuf::from(format!("/run/user/{uid}"));
+    if runtime_dir.exists() {
+        command.env("XDG_RUNTIME_DIR", runtime_dir);
+    }
+
+    if let Ok(display) = env::var("FRAME_DISPLAY") {
+        command.env("DISPLAY", display);
+    } else if let Ok(display) = env::var("DISPLAY") {
+        command.env("DISPLAY", display);
+    } else {
+        command.env("DISPLAY", ":0");
+    }
+
+    if let Ok(wayland_display) = env::var("FRAME_WAYLAND_DISPLAY") {
+        command.env("WAYLAND_DISPLAY", wayland_display);
+    }
+
+    let xauthority = home.join(".Xauthority");
+    if xauthority.exists() {
+        command.env("XAUTHORITY", xauthority);
+    }
+
+    Ok(())
+}
+
+fn terminate_child(child: &mut Child) -> Result<()> {
+    let pid = child.id();
+    if pid == 0 {
+        return Ok(());
+    }
+
+    unsafe {
+        if libc::kill(pid as i32, libc::SIGTERM) != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::InvalidInput && err.raw_os_error() != Some(libc::ESRCH) {
+                return Err(err).context("sending SIGTERM to Wi-Fi UI");
+            }
+        }
+    }
+
+    for _ in 0..10 {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    child.kill().context("forcing Wi-Fi UI shutdown")?;
+    let _ = child.wait();
+    Ok(())
+}
+
+fn run_ui(info: HotspotInfo) -> Result<()> {
     let title = "Wi-Fi Down".to_string();
     let viewport = egui::ViewportBuilder::default()
         .with_title(title.clone())
@@ -103,125 +149,15 @@ pub fn run_blocking(info: HotspotInfo) -> Result<()> {
         follow_system_theme: true,
         ..Default::default()
     };
-    info!("launching Wi-Fi down UI");
+
+    info!(ssid = %info.ssid, "launching Wi-Fi down UI");
     eframe::run_native(
         &title,
         native_options,
-        Box::new(move |cc| {
-            Ok(Box::new(WifiDownApp::new(
-                cc.egui_ctx.clone(),
-                info.clone(),
-            )))
-        }),
+        Box::new(move |cc| Ok(Box::new(WifiDownApp::new(cc.egui_ctx.clone(), info.clone())))),
     )
-    .map_err(|err| anyhow!(err))?;
+    .context("running Wi-Fi down UI")?;
     Ok(())
-}
-
-struct SessionEnv {
-    user: String,
-    use_sudo: bool,
-    env: Vec<(String, String)>,
-}
-
-impl SessionEnv {
-    fn from_settings(settings: &Settings) -> Result<Self> {
-        let user = settings.frame_user.clone();
-        let use_sudo = user != "root";
-        let record = lookup_user(&user)?;
-
-        let mut env = Vec::new();
-
-        if let Ok(value) = std::env::var("WAYLAND_DISPLAY") {
-            env.push(("WAYLAND_DISPLAY".into(), value));
-        }
-
-        let display = std::env::var("DISPLAY")
-            .or_else(|_| std::env::var("FRAME_DISPLAY"))
-            .unwrap_or_else(|_| ":0".to_string());
-        env.push(("DISPLAY".into(), display));
-
-        if let Ok(value) = std::env::var("XAUTHORITY") {
-            env.push(("XAUTHORITY".into(), value));
-        } else if let Some(home) = record.home.as_ref() {
-            let path = home.join(".Xauthority");
-            env.push(("XAUTHORITY".into(), path.to_string_lossy().into_owned()));
-        }
-
-        if let Ok(value) = std::env::var("XDG_RUNTIME_DIR") {
-            env.push(("XDG_RUNTIME_DIR".into(), value.clone()));
-            if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_err() {
-                env.push((
-                    "DBUS_SESSION_BUS_ADDRESS".into(),
-                    format!("unix:path={}/bus", value),
-                ));
-            }
-        } else if let Some(uid) = record.uid {
-            let runtime = format!("/run/user/{uid}");
-            env.push(("XDG_RUNTIME_DIR".into(), runtime.clone()));
-            env.push((
-                "DBUS_SESSION_BUS_ADDRESS".into(),
-                format!("unix:path={runtime}/bus"),
-            ));
-        } else if use_sudo {
-            return Err(anyhow!(
-                "unable to determine runtime directory for user '{}'",
-                user
-            ));
-        }
-
-        Ok(Self {
-            user,
-            use_sudo,
-            env,
-        })
-    }
-
-    fn env_pairs(&self) -> impl Iterator<Item = String> + '_ {
-        self.env
-            .iter()
-            .map(|(key, value)| format!("{key}={value}"))
-    }
-
-    fn apply_direct_env(&self, command: &mut Command) {
-        for (key, value) in &self.env {
-            command.env(key, value);
-        }
-    }
-}
-
-struct UserRecord {
-    uid: Option<u32>,
-    home: Option<PathBuf>,
-}
-
-fn lookup_user(username: &str) -> Result<UserRecord> {
-    let contents = fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?;
-    for line in contents.lines() {
-        if line.starts_with('#') || line.trim().is_empty() {
-            continue;
-        }
-        let mut parts = line.split(':');
-        let name = parts.next().unwrap_or("");
-        if name != username {
-            continue;
-        }
-        let _password = parts.next();
-        let uid = parts
-            .next()
-            .and_then(|value| value.parse::<u32>().ok());
-        let _gid = parts.next();
-        let _gecos = parts.next();
-        let home = parts.next().map(PathBuf::from);
-        return Ok(UserRecord { uid, home });
-    }
-    if username == "root" {
-        return Ok(UserRecord {
-            uid: Some(0),
-            home: Some(PathBuf::from("/root")),
-        });
-    }
-    Err(anyhow!("user '{username}' not found in /etc/passwd"))
 }
 
 struct WifiDownApp {
@@ -275,7 +211,7 @@ impl App for WifiDownApp {
             });
         });
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        ctx.request_repaint_after(Duration::from_millis(200));
     }
 }
 
