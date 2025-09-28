@@ -89,10 +89,10 @@ This workflow prepares a Raspberry Pi OS (Bookworm, 64-bit) image that boots dir
 
 Both setup stages should be launched as the deployment user. They call `sudo` internally for the few operations that need elevated privileges (apt packages, `/boot` updates, and copying into `/opt/photo-frame`). The stages are safe to re-run; unchanged modules will detect that no work is required.
 
-1. The script `./setup/system/system-setup.sh` provisions operating-system dependencies, enables the 4K HDMI boot profile, and installs a user-scoped Rust toolchain.
+1. The script `./setup/system/run.sh` provisions operating-system dependencies, enables the 4K HDMI boot profile, and installs a user-scoped Rust toolchain.
 
    ```bash
-   ./setup/system/system-setup.sh
+   ./setup/system/run.sh
    ```
 
 1. Reboot the pi to enable the boot changes.
@@ -103,10 +103,10 @@ Both setup stages should be launched as the deployment user. They call `sudo` in
 
    You will need to ssh back to the frame once it reboots to continue installation.
 
-1. The script `./setup/app/app-setup.sh` builds the photo frame application, stages the release artifacts, installs them into `/opt/photo-frame`, and enables the `photo-frame.service` systemd unit.
+1. The script `./setup/app/run.sh` builds the photo frame application, stages the release artifacts, installs them into `/opt/photo-frame`, and enables the `photo-frame.service` systemd unit.
 
    ```bash
-   ./setup/app/app-setup.sh
+   ./setup/app/run.sh
    ```
 
 Use the following environment variables to customise an installation:

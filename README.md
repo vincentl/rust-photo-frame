@@ -35,7 +35,7 @@ The provisioning workflow now runs in two explicit stages so you can separate on
 1. **System prerequisites**
 
    ```bash
-   ./setup/system/system-setup.sh
+   ./setup/system/run.sh
    ```
 
    Installs apt dependencies, enables the 4K HDMI boot profile, and bootstraps a user-scoped Rust toolchain (`rustup`, `cargo`, `rustc`). The script only elevates for package-manager and firmware edits and exports `~/.cargo/bin` into `PATH` for subsequent stages.
@@ -43,7 +43,7 @@ The provisioning workflow now runs in two explicit stages so you can separate on
 2. **Application build & install**
 
    ```bash
-   ./setup/app/app-setup.sh
+   ./setup/app/run.sh
    ```
 
    Builds the Rust binaries as the invoking user, stages the release artifacts, and installs them into `/opt/photo-frame`. Systemd unit files are copied into `/opt/photo-frame/systemd` and linked into `/etc/systemd/system`, then `photo-frame.service` is enabled and started.
