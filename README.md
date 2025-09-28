@@ -118,6 +118,13 @@ Plan the physical build of the frame with dedicated fabrication guidance that co
 - **Procedural studio mat weave texture.** Our weave shading is adapted from Mike Cauchi’s breakdown of tillable cloth shading, which layers sine-profiled warp/weft threads with randomized grain to keep the pattern from banding. See ["Research – Tillable Images and Cloth Shading"](https://www.mikecauchiart.com/single-post/2017/01/23/research-tillable-images-and-cloth-shading).
 - **Print simulation shading.** The gallery-lighting and relief model follows guidance from Rohit A. Patil, Mark D. Fairchild, and Garrett M. Johnson’s paper ["3D Simulation of Prints for Improved Soft Proofing"](https://doi.org/10.1117/12.813471).
 
+## AI Statement
+
+This project was developed with significant assistance from OpenAI’s AI tools:
+
+- **ChatGPT** was used for design discussions, debugging strategies, and drafting technical documentation.
+- **Codex** (OpenAI’s software engineering agent framework) was used extensively for code generation and documentation.
+
 ## License
 
 This project is licensed under the **MIT License**.
