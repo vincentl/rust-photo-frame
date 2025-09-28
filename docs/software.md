@@ -95,20 +95,25 @@ Most setup modules, including the Wi-Fi watcher build, try to run developer tool
 1. A `frame` account, if one exists.
 1. `root` as a last resort.
 
-This means you can simply clone the repository as your preferred account and run the wrapper script without worrying about the underlying username; it will elevate with `sudo` as needed and export the right account for every module. If you need to override the choice explicitly (for example, when staging a build for another user account), run the module with:
+This means you can clone the repository as your preferred account and let the automation pick the owner of the build artifacts.
+
+- `setup/system/run.sh` automatically re-invokes itself with `sudo` when started from an unprivileged shell so you do not need to prepend `sudo`. It also exports the resolved `FRAME_USER` so that the Rust toolchain is installed for the correct account.
+- `setup/app/run.sh` and individual modules under `setup/app/modules/` must be invoked with `sudo` (or from a root shell) because they install services and system packages. They honour the same `FRAME_USER` selection logic but do not escalate on their own.
+
+If you need to override the choice explicitly (for example, when staging a build for another user account), run the module with:
 
 ```bash
-FRAME_USER=photoframe sudo ./setup/modules/30-wifi-watcher.sh
+FRAME_USER=photoframe sudo ./setup/app/modules/30-wifi-watcher.sh
 ```
 
 The script will warn and fall back to an available account if the requested name cannot be found.
 
 ## Initiate the automated setup
 
-1. The script `./setup/system-setup.sh` calls scripts in `./setup/setup-modules` to configure the boot configuration to support a 4k monitor and install rust.
+1. The script `./setup/system/run.sh` calls scripts in `./setup/system/modules/` to configure the boot configuration to support a 4k monitor and install Rust.
 
    ```bash
-   ./setup/system-setup.sh
+   ./setup/system/run.sh
    ```
 
 1. Reboot the pi to enable the boot changes.
@@ -119,4 +124,4 @@ The script will warn and fall back to an available account if the requested name
 
    You will need to ssh back to the frame once it reboots to continue installation.
 
-1. The script `./setup/setup.sh` calls scripts in `./setup/modules` to build the photo frame application, configure cloud syncing, and install a wifi watcher to simplify moving the frame to a new wifi network.
+1. The script `sudo ./setup/app/run.sh` calls scripts in `./setup/app/modules/` to build the photo frame application, configure cloud syncing, and install a Wi-Fi watcher to simplify moving the frame to a new Wi-Fi network.
