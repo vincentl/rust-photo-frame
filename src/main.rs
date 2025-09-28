@@ -6,7 +6,7 @@ mod tasks {
     pub mod greeting_screen;
     pub mod loader;
     pub mod manager;
-    pub mod photo_affect;
+    pub mod photo_effect;
     pub mod viewer;
 }
 
@@ -86,8 +86,8 @@ async fn main() -> Result<()> {
     let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(128); // Files -> Manager
     let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(64); // Manager/Loader -> Files
     let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(4); // Manager -> Loader (allow a few in-flight requests)
-    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count); // Loader -> PhotoAffect
-    let (processed_tx, processed_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count); // PhotoAffect -> Viewer
+    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count); // Loader -> PhotoEffect
+    let (processed_tx, processed_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count); // PhotoEffect -> Viewer
     let (displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(64); // Viewer  -> Manager
 
     let cancel = CancellationToken::new();
@@ -169,17 +169,17 @@ async fn main() -> Result<()> {
         }
     });
 
-    // PhotoAffect pipeline (optional post-processing)
-    let photo_affect_cfg = cfg.photo_affect.clone();
+    // PhotoEffect pipeline (optional post-processing)
+    let photo_effect_cfg = cfg.photo_effect.clone();
     tasks.spawn({
         let from_loader = loaded_rx;
         let to_viewer = processed_tx.clone();
         let cancel = cancel.clone();
-        let affect_cfg = photo_affect_cfg;
+        let effect_cfg = photo_effect_cfg;
         async move {
-            tasks::photo_affect::run(from_loader, to_viewer, cancel, affect_cfg)
+            tasks::photo_effect::run(from_loader, to_viewer, cancel, effect_cfg)
                 .await
-                .context("photo-affect task failed")
+                .context("photo-effect task failed")
         }
     });
 

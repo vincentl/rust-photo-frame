@@ -1322,11 +1322,11 @@ impl MattingMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum PhotoAffectKind {
+pub enum PhotoEffectKind {
     PrintSimulation,
 }
 
-impl PhotoAffectKind {
+impl PhotoEffectKind {
     const ALL: &'static [Self] = &[Self::PrintSimulation];
     const NAMES: &'static [&'static str] = &["print-simulation"];
 
@@ -1337,13 +1337,13 @@ impl PhotoAffectKind {
     }
 }
 
-impl fmt::Display for PhotoAffectKind {
+impl fmt::Display for PhotoEffectKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl<'de> Deserialize<'de> for PhotoAffectKind {
+impl<'de> Deserialize<'de> for PhotoEffectKind {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -1414,19 +1414,19 @@ impl PrintSimulationOptions {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.relief_strength.is_finite() && self.relief_strength >= 0.0,
-            "photo-affect.print-simulation.relief-strength must be non-negative"
+            "photo-effect.print-simulation.relief-strength must be non-negative"
         );
         ensure!(
             self.ink_spread.is_finite() && self.ink_spread >= 0.0,
-            "photo-affect.print-simulation.ink-spread must be non-negative"
+            "photo-effect.print-simulation.ink-spread must be non-negative"
         );
         ensure!(
             self.sheen_strength.is_finite() && self.sheen_strength >= 0.0,
-            "photo-affect.print-simulation.sheen-strength must be non-negative"
+            "photo-effect.print-simulation.sheen-strength must be non-negative"
         );
         ensure!(
             self.light_angle_degrees.is_finite(),
-            "photo-affect.print-simulation.light-angle-degrees must be a finite value"
+            "photo-effect.print-simulation.light-angle-degrees must be a finite value"
         );
         Ok(())
     }
@@ -1446,20 +1446,20 @@ impl Default for PrintSimulationOptions {
 }
 
 #[derive(Debug, Clone)]
-pub enum PhotoAffectOptions {
+pub enum PhotoEffectOptions {
     PrintSimulation(PrintSimulationOptions),
 }
 
-impl PhotoAffectOptions {
-    pub fn kind(&self) -> PhotoAffectKind {
+impl PhotoEffectOptions {
+    pub fn kind(&self) -> PhotoEffectKind {
         match self {
-            Self::PrintSimulation(_) => PhotoAffectKind::PrintSimulation,
+            Self::PrintSimulation(_) => PhotoEffectKind::PrintSimulation,
         }
     }
 
     pub fn validate(&self) -> Result<()> {
         match self {
-            PhotoAffectOptions::PrintSimulation(options) => options
+            PhotoEffectOptions::PrintSimulation(options) => options
                 .validate()
                 .context("invalid print-simulation options"),
         }
@@ -1467,63 +1467,63 @@ impl PhotoAffectOptions {
 }
 
 #[derive(Debug, Clone)]
-pub enum PhotoAffectSelection {
+pub enum PhotoEffectSelection {
     Disabled,
-    Fixed(PhotoAffectKind),
-    Random(Vec<PhotoAffectKind>),
+    Fixed(PhotoEffectKind),
+    Random(Vec<PhotoEffectKind>),
     Sequential {
-        kinds: Vec<PhotoAffectKind>,
+        kinds: Vec<PhotoEffectKind>,
         runtime: SequentialState,
     },
 }
 
-impl PartialEq for PhotoAffectSelection {
+impl PartialEq for PhotoEffectSelection {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (PhotoAffectSelection::Disabled, PhotoAffectSelection::Disabled) => true,
-            (PhotoAffectSelection::Fixed(a), PhotoAffectSelection::Fixed(b)) => a == b,
-            (PhotoAffectSelection::Random(a), PhotoAffectSelection::Random(b)) => a == b,
+            (PhotoEffectSelection::Disabled, PhotoEffectSelection::Disabled) => true,
+            (PhotoEffectSelection::Fixed(a), PhotoEffectSelection::Fixed(b)) => a == b,
+            (PhotoEffectSelection::Random(a), PhotoEffectSelection::Random(b)) => a == b,
             (
-                PhotoAffectSelection::Sequential { kinds: a, .. },
-                PhotoAffectSelection::Sequential { kinds: b, .. },
+                PhotoEffectSelection::Sequential { kinds: a, .. },
+                PhotoEffectSelection::Sequential { kinds: b, .. },
             ) => a == b,
             _ => false,
         }
     }
 }
 
-impl Eq for PhotoAffectSelection {}
+impl Eq for PhotoEffectSelection {}
 
 #[derive(Debug, Clone)]
-pub struct PhotoAffectConfig {
-    selection: PhotoAffectSelection,
-    options: BTreeMap<PhotoAffectKind, PhotoAffectOptions>,
+pub struct PhotoEffectConfig {
+    selection: PhotoEffectSelection,
+    options: BTreeMap<PhotoEffectKind, PhotoEffectOptions>,
 }
 
-impl Default for PhotoAffectConfig {
+impl Default for PhotoEffectConfig {
     fn default() -> Self {
         Self {
-            selection: PhotoAffectSelection::Disabled,
+            selection: PhotoEffectSelection::Disabled,
             options: BTreeMap::new(),
         }
     }
 }
 
-impl PhotoAffectConfig {
+impl PhotoEffectConfig {
     pub fn is_enabled(&self) -> bool {
-        !matches!(self.selection, PhotoAffectSelection::Disabled)
+        !matches!(self.selection, PhotoEffectSelection::Disabled)
     }
 
-    pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> Option<PhotoAffectOptions> {
+    pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> Option<PhotoEffectOptions> {
         match &self.selection {
-            PhotoAffectSelection::Disabled => None,
-            PhotoAffectSelection::Fixed(kind) => self.options.get(kind).cloned(),
-            PhotoAffectSelection::Random(kinds) => kinds
+            PhotoEffectSelection::Disabled => None,
+            PhotoEffectSelection::Fixed(kind) => self.options.get(kind).cloned(),
+            PhotoEffectSelection::Random(kinds) => kinds
                 .iter()
                 .copied()
                 .choose(rng)
                 .and_then(|kind| self.options.get(&kind).cloned()),
-            PhotoAffectSelection::Sequential { kinds, runtime } => {
+            PhotoEffectSelection::Sequential { kinds, runtime } => {
                 if kinds.is_empty() {
                     None
                 } else {
@@ -1537,23 +1537,23 @@ impl PhotoAffectConfig {
 
     pub fn prepare_runtime(&mut self) -> Result<()> {
         match &self.selection {
-            PhotoAffectSelection::Disabled => {}
-            PhotoAffectSelection::Fixed(kind) => {
+            PhotoEffectSelection::Disabled => {}
+            PhotoEffectSelection::Fixed(kind) => {
                 ensure!(
                     self.options.contains_key(kind),
-                    "photo-affect.types entry {kind} must match a key in photo-affect.options"
+                    "photo-effect.types entry {kind} must match a key in photo-effect.options"
                 );
             }
-            PhotoAffectSelection::Random(kinds)
-            | PhotoAffectSelection::Sequential { kinds, .. } => {
+            PhotoEffectSelection::Random(kinds)
+            | PhotoEffectSelection::Sequential { kinds, .. } => {
                 ensure!(
                     !kinds.is_empty(),
-                    "photo-affect.types must include at least one entry"
+                    "photo-effect.types must include at least one entry"
                 );
                 for kind in kinds {
                     ensure!(
                         self.options.contains_key(kind),
-                        "photo-affect.types entry {kind} must match a key in photo-affect.options"
+                        "photo-effect.types entry {kind} must match a key in photo-effect.options"
                     );
                 }
             }
@@ -1567,31 +1567,31 @@ impl PhotoAffectConfig {
     }
 }
 
-impl<'de> Deserialize<'de> for PhotoAffectConfig {
+impl<'de> Deserialize<'de> for PhotoEffectConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_map(PhotoAffectConfigVisitor)
+        deserializer.deserialize_map(PhotoEffectConfigVisitor)
     }
 }
 
-struct PhotoAffectConfigVisitor;
+struct PhotoEffectConfigVisitor;
 
-impl<'de> Visitor<'de> for PhotoAffectConfigVisitor {
-    type Value = PhotoAffectConfig;
+impl<'de> Visitor<'de> for PhotoEffectConfigVisitor {
+    type Value = PhotoEffectConfig;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a photo affect configuration map")
+        formatter.write_str("a photo effect configuration map")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
     where
         A: MapAccess<'de>,
     {
-        let mut types: Option<Vec<PhotoAffectKind>> = None;
+        let mut types: Option<Vec<PhotoEffectKind>> = None;
         let mut type_selection: Option<TypeSelection> = None;
-        let mut options: Option<BTreeMap<PhotoAffectKind, PhotoAffectOptions>> = None;
+        let mut options: Option<BTreeMap<PhotoEffectKind, PhotoEffectOptions>> = None;
 
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
@@ -1599,12 +1599,12 @@ impl<'de> Visitor<'de> for PhotoAffectConfigVisitor {
                     if types.is_some() {
                         return Err(de::Error::duplicate_field("types"));
                     }
-                    let raw: Vec<PhotoAffectKind> = map.next_value()?;
+                    let raw: Vec<PhotoEffectKind> = map.next_value()?;
                     let mut unique = Vec::new();
                     for kind in raw {
                         if unique.contains(&kind) {
                             return Err(de::Error::custom(format!(
-                                "photo-affect.types cannot repeat the entry {}",
+                                "photo-effect.types cannot repeat the entry {}",
                                 kind
                             )));
                         }
@@ -1622,7 +1622,7 @@ impl<'de> Visitor<'de> for PhotoAffectConfigVisitor {
                     if options.is_some() {
                         return Err(de::Error::duplicate_field("options"));
                     }
-                    options = Some(map.next_value_seed(PhotoAffectOptionsMapSeed)?);
+                    options = Some(map.next_value_seed(PhotoEffectOptionsMapSeed)?);
                 }
                 other => {
                     return Err(de::Error::unknown_field(
@@ -1636,7 +1636,7 @@ impl<'de> Visitor<'de> for PhotoAffectConfigVisitor {
         if let Some(selection) = type_selection.as_ref() {
             if types.as_ref().map_or(true, |t| t.is_empty()) {
                 return Err(de::Error::custom(format!(
-                    "photo-affect.type-selection {:?} requires photo-affect.types to select from",
+                    "photo-effect.type-selection {:?} requires photo-effect.types to select from",
                     selection
                 )));
             }
@@ -1646,68 +1646,68 @@ impl<'de> Visitor<'de> for PhotoAffectConfigVisitor {
         let types = types.unwrap_or_default();
 
         let selection = if types.is_empty() {
-            PhotoAffectSelection::Disabled
+            PhotoEffectSelection::Disabled
         } else if types.len() == 1 {
-            PhotoAffectSelection::Fixed(types[0])
+            PhotoEffectSelection::Fixed(types[0])
         } else {
             match type_selection.unwrap_or(TypeSelection::Random) {
-                TypeSelection::Random => PhotoAffectSelection::Random(types.clone()),
-                TypeSelection::Sequential => PhotoAffectSelection::Sequential {
+                TypeSelection::Random => PhotoEffectSelection::Random(types.clone()),
+                TypeSelection::Sequential => PhotoEffectSelection::Sequential {
                     kinds: types.clone(),
                     runtime: SequentialState::default(),
                 },
             }
         };
 
-        if !matches!(selection, PhotoAffectSelection::Disabled) {
+        if !matches!(selection, PhotoEffectSelection::Disabled) {
             match &selection {
-                PhotoAffectSelection::Fixed(kind) => {
+                PhotoEffectSelection::Fixed(kind) => {
                     if !options.contains_key(kind) {
                         options.insert(
                             *kind,
-                            PhotoAffectOptions::PrintSimulation(PrintSimulationOptions::default()),
+                            PhotoEffectOptions::PrintSimulation(PrintSimulationOptions::default()),
                         );
                     }
                 }
-                PhotoAffectSelection::Random(kinds)
-                | PhotoAffectSelection::Sequential { kinds, .. } => {
+                PhotoEffectSelection::Random(kinds)
+                | PhotoEffectSelection::Sequential { kinds, .. } => {
                     for kind in kinds {
                         if !options.contains_key(kind) {
                             return Err(de::Error::custom(format!(
-                                "photo-affect.types entry {} must match a key in photo-affect.options",
+                                "photo-effect.types entry {} must match a key in photo-effect.options",
                                 kind
                             )));
                         }
                     }
                 }
-                PhotoAffectSelection::Disabled => {}
+                PhotoEffectSelection::Disabled => {}
             }
         }
 
-        Ok(PhotoAffectConfig { selection, options })
+        Ok(PhotoEffectConfig { selection, options })
     }
 }
 
-struct PhotoAffectOptionsMapSeed;
+struct PhotoEffectOptionsMapSeed;
 
-impl<'de> DeserializeSeed<'de> for PhotoAffectOptionsMapSeed {
-    type Value = BTreeMap<PhotoAffectKind, PhotoAffectOptions>;
+impl<'de> DeserializeSeed<'de> for PhotoEffectOptionsMapSeed {
+    type Value = BTreeMap<PhotoEffectKind, PhotoEffectOptions>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_map(PhotoAffectOptionsMapVisitor)
+        deserializer.deserialize_map(PhotoEffectOptionsMapVisitor)
     }
 }
 
-struct PhotoAffectOptionsMapVisitor;
+struct PhotoEffectOptionsMapVisitor;
 
-impl<'de> Visitor<'de> for PhotoAffectOptionsMapVisitor {
-    type Value = BTreeMap<PhotoAffectKind, PhotoAffectOptions>;
+impl<'de> Visitor<'de> for PhotoEffectOptionsMapVisitor {
+    type Value = BTreeMap<PhotoEffectKind, PhotoEffectOptions>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a map of photo affect options keyed by affect type")
+        formatter.write_str("a map of photo effect options keyed by effect type")
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -1715,17 +1715,17 @@ impl<'de> Visitor<'de> for PhotoAffectOptionsMapVisitor {
         A: MapAccess<'de>,
     {
         let mut options = BTreeMap::new();
-        while let Some(kind) = map.next_key::<PhotoAffectKind>()? {
+        while let Some(kind) = map.next_key::<PhotoEffectKind>()? {
             if options.contains_key(&kind) {
                 return Err(de::Error::custom(format!(
-                    "duplicate photo-affect option for type {}",
+                    "duplicate photo-effect option for type {}",
                     kind
                 )));
             }
-            let option = map.next_value_seed(PhotoAffectOptionSeed { kind })?;
+            let option = map.next_value_seed(PhotoEffectOptionSeed { kind })?;
             if option.kind() != kind {
                 return Err(de::Error::custom(format!(
-                    "photo-affect option for key {} does not match its configuration",
+                    "photo-effect option for key {} does not match its configuration",
                     kind
                 )));
             }
@@ -1735,21 +1735,21 @@ impl<'de> Visitor<'de> for PhotoAffectOptionsMapVisitor {
     }
 }
 
-struct PhotoAffectOptionSeed {
-    kind: PhotoAffectKind,
+struct PhotoEffectOptionSeed {
+    kind: PhotoEffectKind,
 }
 
-impl<'de> DeserializeSeed<'de> for PhotoAffectOptionSeed {
-    type Value = PhotoAffectOptions;
+impl<'de> DeserializeSeed<'de> for PhotoEffectOptionSeed {
+    type Value = PhotoEffectOptions;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: Deserializer<'de>,
     {
         match self.kind {
-            PhotoAffectKind::PrintSimulation => {
+            PhotoEffectKind::PrintSimulation => {
                 let options = PrintSimulationOptions::deserialize(deserializer)?;
-                Ok(PhotoAffectOptions::PrintSimulation(options))
+                Ok(PhotoEffectOptions::PrintSimulation(options))
             }
         }
     }
@@ -2678,8 +2678,8 @@ pub struct Configuration {
     pub loader_max_concurrent_decodes: usize,
     /// Optional deterministic seed for initial photo shuffle.
     pub startup_shuffle_seed: Option<u64>,
-    /// Optional post-processing affects applied after loading and before display.
-    pub photo_affect: PhotoAffectConfig,
+    /// Optional post-processing effects applied after loading and before display.
+    pub photo_effect: PhotoEffectConfig,
     /// Matting configuration for displayed photos.
     pub matting: MattingConfig,
     /// Playlist weighting options for how frequently new photos repeat.
@@ -2709,9 +2709,9 @@ impl Configuration {
         self.transition
             .validate()
             .context("invalid transition configuration")?;
-        self.photo_affect
+        self.photo_effect
             .prepare_runtime()
-            .context("invalid photo affect configuration")?;
+            .context("invalid photo effect configuration")?;
         self.matting
             .prepare_runtime()
             .context("invalid matting configuration")?;
@@ -2733,7 +2733,7 @@ impl Default for Configuration {
             viewer_preload_count: 3,
             loader_max_concurrent_decodes: 4,
             startup_shuffle_seed: None,
-            photo_affect: PhotoAffectConfig::default(),
+            photo_effect: PhotoEffectConfig::default(),
             matting: MattingConfig::default(),
             playlist: PlaylistOptions::default(),
             greeting_screen: GreetingScreenConfig::default(),
