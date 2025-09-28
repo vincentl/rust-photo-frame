@@ -26,7 +26,7 @@ Plan your build around a Raspberry Pi 5, a portrait-capable 4K monitor, and moun
 
 ## Software Setup
 
-From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync services, the setup guide walks through every command you need to bring the slideshow online. It also documents CLI flags for local debugging and a quickstart checklist for provisioning. [Full details →](docs/software-setup.md)
+From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync services, the setup guide walks through every command you need to bring the slideshow online. It also documents CLI flags for local debugging and a quickstart checklist for provisioning. [Full details →](docs/software.md)
 
 ## Features
 
