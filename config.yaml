@@ -49,6 +49,21 @@ greeting-screen:
     font: "#f8fafc"
     accent: "#38bdf8"
 
+# Sleep schedule that pauses rendering and dims the display outside active hours
+sleep-mode:
+  timezone: America/Los_Angeles
+  on-hours:
+    start: "07:00"
+    end: "22:00"
+  weekend-override:
+    start: "08:30 America/Los_Angeles"
+    end: "23:00 America/Los_Angeles"
+  days:
+    friday:
+      start: "09:00"
+      end: "23:30"
+  dim-brightness: 0.04
+
 # Number of images to preload in the viewer (aligns with channel capacity)
 viewer-preload-count: 3
 
