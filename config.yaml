@@ -45,8 +45,8 @@ greeting-screen:
   stroke-width: 16
   duration-seconds: 4
   colors:
-    background: "#111827"
-    font: "#f8fafc"
+    background: "#f8fafc"
+    font: "#111827"
     accent: "#38bdf8"
 
 # Sleep schedule that pauses rendering and dims the display outside active hours
