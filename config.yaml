@@ -27,10 +27,10 @@ transition:
       angle-jitter-degrees: 8.0
     e-ink:
       duration-ms: 1600
-      flash-count: 3
+      flash-count: 0
       reveal-portion: 0.55
       stripe-count: 24
-      flash-color: [255, 255, 255]
+      flash-color: [0, 0, 0]
 
 # Dwell time (ms) the current image remains fully displayed before the next transition
 dwell-ms: 2000
@@ -115,9 +115,10 @@ matting:
       weft-period-px: 5.2 # spacing between horizontal weft threads in px
     fixed-image:
       minimum-mat-percentage: 6.0
-      path: [
-        /opt/photo-frame/share/backgrounds/default-0.jpg,
-        /opt/photo-frame/share/backgrounds/default-1.jpg,
-      ]
+      path:
+        [
+          /opt/photo-frame/share/backgrounds/default-0.jpg,
+          /opt/photo-frame/share/backgrounds/default-1.jpg,
+        ]
       path-selection: sequential # or random
       fit: cover # options: cover, contain, stretch
