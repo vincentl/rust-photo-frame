@@ -21,7 +21,10 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-use events::{Displayed, InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded};
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
+
+use events::{Displayed, InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded, ViewerCommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -89,6 +92,7 @@ async fn main() -> Result<()> {
     let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count); // Loader -> PhotoAffect
     let (processed_tx, processed_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count); // PhotoAffect -> Viewer
     let (displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(64); // Viewer  -> Manager
+    let (viewer_control_tx, viewer_control_rx) = mpsc::channel::<ViewerCommand>(16); // External -> Viewer
 
     let cancel = CancellationToken::new();
 
@@ -114,6 +118,32 @@ async fn main() -> Result<()> {
             }
             tracing::info!("ctrl-c received; initiating shutdown");
             cancel.cancel();
+        });
+    }
+
+    #[cfg(unix)]
+    {
+        let cancel = cancel.clone();
+        let control = viewer_control_tx.clone();
+        tokio::spawn(async move {
+            match signal(SignalKind::user_defined1()) {
+                Ok(mut sigusr1) => loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        received = sigusr1.recv() => {
+                            if received.is_none() {
+                                break;
+                            }
+                            tracing::info!("SIGUSR1 received; toggling sleep mode");
+                            if let Err(err) = control.send(ViewerCommand::ToggleSleep).await {
+                                tracing::warn!("failed to forward sleep toggle request: {err}");
+                                break;
+                            }
+                        }
+                    }
+                },
+                Err(err) => tracing::warn!("failed to register SIGUSR1 handler: {err}"),
+            }
         });
     }
 
@@ -190,6 +220,7 @@ async fn main() -> Result<()> {
         displayed_tx.clone(),
         cancel.clone(),
         cfg.clone(),
+        viewer_control_rx,
     )
     .context("viewer failed")
     {
