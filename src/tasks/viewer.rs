@@ -352,7 +352,8 @@ pub fn run_windowed(
             }
             MattingMode::Studio { .. } => unreachable!(),
             MattingMode::FixedImage { fit, .. } => {
-                if let Some(bg) = matting.runtime.fixed_image.as_ref() {
+                let mut rng = rand::rng();
+                if let Some(bg) = matting.runtime.select_fixed_image(&mut rng) {
                     match bg.canvas_for(*fit, canvas_w, canvas_h, max_dim) {
                         Ok(prepared) => prepared.as_ref().clone(),
                         Err(err) => {

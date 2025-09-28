@@ -349,7 +349,8 @@ The studio mat derives a uniform base color from the photo’s average RGB, rend
 
 ### `fixed-image`
 
-- **`path`** (string, required): Filesystem path to the background image that should appear behind every photo. The file is loaded once at startup and cached for reuse.
+- **`path`** (string or string array, required): One or more filesystem paths to the backdrop image(s). All referenced files are loaded and cached at startup. Supplying an empty array disables the `fixed-image` mat without raising an error.
+- **`path-selection`** (`sequential` or `random`; default `sequential`): Chooses how to rotate through the configured backgrounds when more than one path is supplied.
 - **`fit`** (`cover`, `contain`, or `stretch`; default `cover`): Chooses how the background scales to the canvas—fill while cropping (`cover`), letterbox without cropping (`contain`), or distort to fit exactly (`stretch`).
 
-Selecting `fixed-image` keeps the backdrop perfectly consistent across slides, which is ideal for branded frames or themed installations.
+Selecting `fixed-image` keeps the backdrop perfectly consistent across slides when only one path is listed, or rotates through a curated set of branded backgrounds when multiple paths are available.
