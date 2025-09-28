@@ -56,6 +56,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 | **Deterministic runs** | `startup-shuffle-seed`                                                |
 | **Presentation**       | `photo-affect`, `matting`                                             |
 | **Greeting Screen**    | `greeting-screen`                                                     |
+| **Power schedule**     | `sleep-mode`                                                          |
 
 ## Key reference
 
@@ -136,6 +137,19 @@ Use the quick reference below to locate the knobs you care about, then dive into
   - `colors.background`, `colors.font`, `colors.accent` (hex sRGB strings; default palette keeps high contrast).
 - **Effect on behavior:** The renderer fits and centers the configured message inside a rounded double-line frame. `duration-seconds` guarantees the greeting remains on screen for at least that many seconds before the first photo appears, even when decoding finishes instantly.
 - **Notes:** Colors accept `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa` notation. Low-contrast combinations log a warning so you can tweak readability, and the viewer continues with sensible defaults if fonts or colors are omitted.
+
+### `sleep-mode`
+
+- **Purpose:** Defines when the frame should pause the slideshow, blank the screen to a dim level, and resume automatically.
+- **Required?** Optional; when omitted the frame runs 24/7.
+- **Accepted values & defaults:** Mapping with the keys below. Times accept `HH:MM` or `HH:MM:SS` strings and may optionally include a trailing IANA timezone name (for example `"07:30 America/Los_Angeles"`). When no timezone is specified on a field, the top-level `timezone` value applies.
+  - `timezone` — Required IANA timezone identifier. Sets the base clock used to pick weekday/weekend overrides and interpret times that do not specify their own zone.
+  - `on-hours.start` / `on-hours.end` — Required local times describing when the frame should be awake each day. Start must be earlier than end within the same day.
+  - `weekday-override` / `weekend-override` — Optional blocks with their own `start`/`end` that replace the default window on weekdays (`Mon–Fri`) or weekends (`Sat/Sun`).
+  - `days` — Optional map keyed by weekday name (`monday`, `tues`, …) that replaces both default and weekday/weekend overrides for specific days.
+  - `dim-brightness` — Optional float between `0.0` (black) and `1.0` (white). Controls the solid color used while sleeping. Defaults to `0.05`.
+- **Effect on behavior:** Outside the configured "on" window the viewer stops advancing slides, cancels any in-flight transitions, and clears the surface to the dim color. When the schedule says to wake up, the currently loaded image is shown again and normal dwell/transition pacing resumes.
+- **Notes:** Sending `SIGUSR1` to the process toggles a manual override—handy for a single-button GPIO input. One press flips between the scheduled state and its opposite (wake vs. sleep), and the next press returns control to the schedule. When the override is released the frame snaps back to whatever the schedule dictates at that moment.
 
 ### `matting`
 

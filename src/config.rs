@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
+use chrono::{DateTime, Datelike, NaiveTime, Utc, Weekday};
+use chrono_tz::Tz;
 use rand::seq::IteratorRandom;
 use rand::Rng;
 use serde::de::{self, DeserializeOwned, DeserializeSeed, Deserializer, MapAccess, Visitor};
@@ -2499,6 +2501,314 @@ fn apply_transition_inline_field<E: de::Error>(
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct DailyHoursSpec {
+    pub start: String,
+    pub end: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeekdayName(Weekday);
+
+impl WeekdayName {
+    fn as_str(self) -> &'static str {
+        weekday_label(self.0)
+    }
+}
+
+impl PartialOrd for WeekdayName {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for WeekdayName {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .num_days_from_monday()
+            .cmp(&other.0.num_days_from_monday())
+    }
+}
+
+impl<'de> Deserialize<'de> for WeekdayName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let normalized = raw.trim().to_ascii_lowercase();
+        let day = match normalized.as_str() {
+            "mon" | "monday" => Weekday::Mon,
+            "tue" | "tues" | "tuesday" => Weekday::Tue,
+            "wed" | "weds" | "wednesday" => Weekday::Wed,
+            "thu" | "thur" | "thurs" | "thursday" => Weekday::Thu,
+            "fri" | "friday" => Weekday::Fri,
+            "sat" | "saturday" => Weekday::Sat,
+            "sun" | "sunday" => Weekday::Sun,
+            _ => {
+                return Err(de::Error::custom(format!("unknown weekday '{raw}'")));
+            }
+        };
+        Ok(Self(day))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct SleepModeConfig {
+    pub timezone: String,
+    #[serde(rename = "on-hours")]
+    pub on_hours: DailyHoursSpec,
+    #[serde(default, rename = "weekday-override")]
+    pub weekday_override: Option<DailyHoursSpec>,
+    #[serde(default, rename = "weekend-override")]
+    pub weekend_override: Option<DailyHoursSpec>,
+    #[serde(default)]
+    pub days: BTreeMap<WeekdayName, DailyHoursSpec>,
+    #[serde(
+        default = "SleepModeConfig::default_dim_brightness",
+        rename = "dim-brightness"
+    )]
+    pub dim_brightness: f32,
+    #[serde(skip)]
+    pub runtime: Option<SleepModeRuntime>,
+}
+
+impl SleepModeConfig {
+    const fn default_dim_brightness() -> f32 {
+        0.05
+    }
+
+    pub fn runtime(&self) -> Option<&SleepModeRuntime> {
+        self.runtime.as_ref()
+    }
+
+    pub fn prepare_runtime(&mut self) -> Result<()> {
+        let base_tz: Tz = self
+            .timezone
+            .parse()
+            .map_err(|_| anyhow!("invalid timezone '{}'", self.timezone))?;
+
+        ensure!(
+            (0.0..=1.0).contains(&self.dim_brightness),
+            "sleep-mode.dim-brightness must be between 0.0 and 1.0"
+        );
+
+        let default = parse_window(&self.on_hours, base_tz, "sleep-mode.on-hours")?;
+        let weekday = match &self.weekday_override {
+            Some(spec) => Some(parse_window(spec, base_tz, "sleep-mode.weekday-override")?),
+            None => None,
+        };
+        let weekend = match &self.weekend_override {
+            Some(spec) => Some(parse_window(spec, base_tz, "sleep-mode.weekend-override")?),
+            None => None,
+        };
+        let mut days = BTreeMap::new();
+        for (name, spec) in &self.days {
+            let label = format!("sleep-mode.days.{}", name.as_str());
+            let window = parse_window(spec, base_tz, &label)?;
+            days.insert(*name, window);
+        }
+
+        self.runtime = Some(SleepModeRuntime {
+            default,
+            weekday,
+            weekend,
+            days,
+            dim_brightness: self.dim_brightness,
+        });
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SleepModeRuntime {
+    default: SleepWindow,
+    weekday: Option<SleepWindow>,
+    weekend: Option<SleepWindow>,
+    days: BTreeMap<WeekdayName, SleepWindow>,
+    dim_brightness: f32,
+}
+
+impl SleepModeRuntime {
+    pub fn is_awake(&self, now: DateTime<Utc>) -> bool {
+        let day = now.with_timezone(&self.default.timezone).weekday();
+        let schedule = self.schedule_for(day);
+        schedule.contains(now)
+    }
+
+    fn schedule_for(&self, day: Weekday) -> &SleepWindow {
+        if let Some(specific) = self.days.get(&WeekdayName(day)) {
+            return specific;
+        }
+        match day {
+            Weekday::Sat | Weekday::Sun => self.weekend.as_ref().unwrap_or(&self.default),
+            _ => self.weekday.as_ref().unwrap_or(&self.default),
+        }
+    }
+
+    pub fn dim_brightness(&self) -> f32 {
+        self.dim_brightness
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SleepWindow {
+    timezone: Tz,
+    start: NaiveTime,
+    end: NaiveTime,
+}
+
+impl SleepWindow {
+    fn contains(&self, instant: DateTime<Utc>) -> bool {
+        let local = instant.with_timezone(&self.timezone);
+        let time = local.time();
+        self.start <= time && time < self.end
+    }
+}
+
+fn parse_window(spec: &DailyHoursSpec, base_tz: Tz, label: &str) -> Result<SleepWindow> {
+    let (start, start_tz) =
+        parse_time_with_optional_zone(&spec.start, base_tz, &format!("{label}.start"))?;
+    let (end, end_tz) = parse_time_with_optional_zone(&spec.end, base_tz, &format!("{label}.end"))?;
+    ensure!(
+        start_tz == end_tz,
+        "{label}: start and end must share the same timezone",
+        label = label
+    );
+    ensure!(
+        start < end,
+        "{label}: start time must be before end time",
+        label = label
+    );
+    Ok(SleepWindow {
+        timezone: start_tz,
+        start,
+        end,
+    })
+}
+
+fn parse_time_with_optional_zone(
+    raw: &str,
+    default_tz: Tz,
+    label: &str,
+) -> Result<(NaiveTime, Tz)> {
+    let trimmed = raw.trim();
+    ensure!(
+        !trimmed.is_empty(),
+        "{label} must not be blank",
+        label = label
+    );
+    let mut parts = trimmed.split_whitespace();
+    let time_part = parts
+        .next()
+        .ok_or_else(|| anyhow!("{label} must include a time component"))?;
+    let tz_part = parts.next();
+    ensure!(
+        parts.next().is_none(),
+        "{label} has unexpected extra tokens",
+        label = label
+    );
+
+    let time = parse_clock_time(time_part)
+        .with_context(|| format!("{label} has invalid time '{time_part}'"))?;
+    let timezone = match tz_part {
+        Some(name) => name
+            .parse()
+            .map_err(|_| anyhow!("{label} timezone '{name}' is not recognized"))?,
+        None => default_tz,
+    };
+    Ok((time, timezone))
+}
+
+fn parse_clock_time(raw: &str) -> Result<NaiveTime> {
+    for fmt in ["%H:%M:%S", "%H:%M", "%R"] {
+        if let Ok(time) = NaiveTime::parse_from_str(raw, fmt) {
+            return Ok(time);
+        }
+    }
+    Err(anyhow!("invalid time '{raw}'"))
+}
+
+fn weekday_label(day: Weekday) -> &'static str {
+    match day {
+        Weekday::Mon => "monday",
+        Weekday::Tue => "tuesday",
+        Weekday::Wed => "wednesday",
+        Weekday::Thu => "thursday",
+        Weekday::Fri => "friday",
+        Weekday::Sat => "saturday",
+        Weekday::Sun => "sunday",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use chrono_tz::Tz;
+
+    #[test]
+    fn sleep_mode_schedule_respects_overrides() {
+        let yaml = r#"
+photo-library-path: /tmp/photos
+sleep-mode:
+  timezone: America/Los_Angeles
+  on-hours:
+    start: "07:00"
+    end: "21:00"
+  weekend-override:
+    start: "09:00"
+    end: "23:00"
+  days:
+    monday:
+      start: "10:00"
+      end: "20:00"
+  dim-brightness: 0.1
+"#;
+        let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+        let cfg = cfg.validated().unwrap();
+        let runtime = cfg
+            .sleep_mode
+            .as_ref()
+            .and_then(SleepModeConfig::runtime)
+            .cloned()
+            .expect("sleep runtime should exist");
+
+        let tz: Tz = "America/Los_Angeles".parse().unwrap();
+        let monday_awake = tz
+            .with_ymd_and_hms(2024, 7, 1, 11, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(runtime.is_awake(monday_awake));
+
+        let monday_sleep = tz
+            .with_ymd_and_hms(2024, 7, 1, 9, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(!runtime.is_awake(monday_sleep));
+
+        let saturday_awake = tz
+            .with_ymd_and_hms(2024, 7, 6, 9, 30, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(runtime.is_awake(saturday_awake));
+
+        let saturday_sleep = tz
+            .with_ymd_and_hms(2024, 7, 6, 8, 30, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(!runtime.is_awake(saturday_sleep));
+
+        assert!((runtime.dim_brightness() - 0.1).abs() < f32::EPSILON);
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct Configuration {
     /// Root directory to scan recursively for images.
@@ -2523,6 +2833,9 @@ pub struct Configuration {
     pub playlist: PlaylistOptions,
     /// Greeting screen shown while the first assets are prepared.
     pub greeting_screen: GreetingScreenConfig,
+    /// Optional sleep mode schedule controlling when the viewer idles.
+    #[serde(default)]
+    pub sleep_mode: Option<SleepModeConfig>,
 }
 
 impl Configuration {
@@ -2556,6 +2869,11 @@ impl Configuration {
         self.greeting_screen
             .validate()
             .context("invalid greeting screen configuration")?;
+        if let Some(sleep) = &mut self.sleep_mode {
+            sleep
+                .prepare_runtime()
+                .context("invalid sleep-mode configuration")?;
+        }
         Ok(self)
     }
 }
@@ -2574,6 +2892,7 @@ impl Default for Configuration {
             matting: MattingConfig::default(),
             playlist: PlaylistOptions::default(),
             greeting_screen: GreetingScreenConfig::default(),
+            sleep_mode: None,
         }
     }
 }
