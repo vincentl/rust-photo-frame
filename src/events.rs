@@ -33,3 +33,8 @@ pub struct InvalidPhoto(pub PathBuf);
 /// Emitted by the viewer after a photo is shown (for now, immediately).
 #[derive(Debug)]
 pub struct Displayed(pub PathBuf);
+
+#[derive(Debug, Clone)]
+pub enum ViewerCommand {
+    ToggleSleep,
+}

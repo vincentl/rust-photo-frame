@@ -1,12 +1,13 @@
 use crate::config::{
-    MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionKind, TransitionMode,
-    TransitionOptions,
+    MattingConfig, MattingMode, MattingOptions, SleepModeRuntime, TransitionConfig, TransitionKind,
+    TransitionMode, TransitionOptions,
 };
-use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu};
+use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand};
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::{center_offset, resize_to_cover};
 use crate::tasks::greeting_screen::GreetingScreen;
+use chrono::Utc;
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
 use image::{imageops, Rgba, RgbaImage};
 use rand::Rng;
@@ -23,6 +24,7 @@ pub fn run_windowed(
     to_manager_displayed: Sender<Displayed>,
     cancel: CancellationToken,
     cfg: crate::config::Configuration,
+    control: Receiver<ViewerCommand>,
 ) -> anyhow::Result<()> {
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
@@ -542,10 +544,105 @@ pub fn run_windowed(
         Some(ImgTex { plane, path })
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum SleepTrigger {
+        Schedule,
+        Manual,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum SleepTransition {
+        None,
+        EnteredSleep { trigger: SleepTrigger },
+        ExitedSleep { trigger: SleepTrigger },
+    }
+
+    struct SleepToggleResult {
+        transition: SleepTransition,
+        override_active: bool,
+    }
+
+    struct SleepController {
+        runtime: SleepModeRuntime,
+        manual_override: Option<bool>,
+        awake: bool,
+    }
+
+    impl SleepController {
+        fn new(runtime: SleepModeRuntime) -> Self {
+            let awake = runtime.is_awake(Utc::now());
+            Self {
+                runtime,
+                manual_override: None,
+                awake,
+            }
+        }
+
+        fn is_awake(&self) -> bool {
+            self.awake
+        }
+
+        fn dim_color(&self) -> wgpu::Color {
+            let level = self.runtime.dim_brightness().clamp(0.0, 1.0) as f64;
+            wgpu::Color {
+                r: level,
+                g: level,
+                b: level,
+                a: 1.0,
+            }
+        }
+
+        fn toggle(&mut self) -> SleepToggleResult {
+            if self.manual_override.is_some() {
+                self.manual_override = None;
+                let transition = self.apply_target(self.scheduled_awake(), SleepTrigger::Manual);
+                SleepToggleResult {
+                    transition,
+                    override_active: false,
+                }
+            } else {
+                let scheduled = self.scheduled_awake();
+                let target = !scheduled;
+                self.manual_override = Some(target);
+                let transition = self.apply_target(target, SleepTrigger::Manual);
+                SleepToggleResult {
+                    transition,
+                    override_active: true,
+                }
+            }
+        }
+
+        fn advance_schedule(&mut self) -> SleepTransition {
+            if self.manual_override.is_some() {
+                SleepTransition::None
+            } else {
+                self.apply_target(self.scheduled_awake(), SleepTrigger::Schedule)
+            }
+        }
+
+        fn scheduled_awake(&self) -> bool {
+            self.runtime.is_awake(Utc::now())
+        }
+
+        fn apply_target(&mut self, target_awake: bool, trigger: SleepTrigger) -> SleepTransition {
+            if target_awake == self.awake {
+                SleepTransition::None
+            } else {
+                self.awake = target_awake;
+                if target_awake {
+                    SleepTransition::ExitedSleep { trigger }
+                } else {
+                    SleepTransition::EnteredSleep { trigger }
+                }
+            }
+        }
+    }
+
     struct App {
         from_loader: Receiver<PhotoLoaded>,
         to_manager_displayed: Sender<Displayed>,
         cancel: CancellationToken,
+        control: Receiver<ViewerCommand>,
         window: Option<Arc<Window>>,
         gpu: Option<GpuCtx>,
         current: Option<ImgTex>,
@@ -567,6 +664,27 @@ pub fn run_windowed(
         clear_color: wgpu::Color,
         rng: rand::rngs::ThreadRng,
         full_config: crate::config::Configuration,
+        sleep: Option<SleepController>,
+    }
+
+    impl App {
+        fn handle_sleep_transition(&mut self, transition: SleepTransition) {
+            match transition {
+                SleepTransition::None => {}
+                SleepTransition::EnteredSleep { trigger } => {
+                    info!(?trigger, "sleep mode entered");
+                    self.transition_state = None;
+                    self.next = None;
+                    self.displayed_at = None;
+                }
+                SleepTransition::ExitedSleep { trigger } => {
+                    info!(?trigger, "sleep mode exited");
+                    if self.current.is_some() {
+                        self.displayed_at = Some(std::time::Instant::now());
+                    }
+                }
+            }
+        }
     }
 
     impl ApplicationHandler for App {
@@ -861,6 +979,36 @@ pub fn run_windowed(
                                 label: Some("draw-encoder"),
                             });
 
+                    let sleeping = self.sleep.as_ref().is_some_and(|ctrl| !ctrl.is_awake());
+                    if sleeping {
+                        let dim_color = self
+                            .sleep
+                            .as_ref()
+                            .map(|ctrl| ctrl.dim_color())
+                            .unwrap_or(self.clear_color);
+                        {
+                            let _sleep_pass =
+                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: Some("sleep-pass"),
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                        view: &view,
+                                        depth_slice: None,
+                                        resolve_target: None,
+                                        ops: wgpu::Operations {
+                                            load: wgpu::LoadOp::Clear(dim_color),
+                                            store: wgpu::StoreOp::Store,
+                                        },
+                                    })],
+                                    depth_stencil_attachment: None,
+                                    occlusion_query_set: None,
+                                    timestamp_writes: None,
+                                });
+                        }
+                        gpu.queue.submit(Some(encoder.finish()));
+                        frame.present();
+                        return;
+                    }
+
                     if self.current.is_none() && self.transition_state.is_none() {
                         gpu.greeting.render(&mut encoder, &view);
                         gpu.queue.submit(Some(encoder.finish()));
@@ -990,6 +1138,34 @@ pub fn run_windowed(
                 event_loop.exit();
                 return;
             }
+            while let Ok(cmd) = self.control.try_recv() {
+                match cmd {
+                    ViewerCommand::ToggleSleep => {
+                        if let Some(ctrl) = self.sleep.as_mut() {
+                            let result = ctrl.toggle();
+                            if result.override_active {
+                                info!(
+                                    sleep_mode_manual_override = true,
+                                    "sleep mode manual override engaged"
+                                );
+                            } else {
+                                info!(
+                                    sleep_mode_manual_override = false,
+                                    "sleep mode manual override cleared"
+                                );
+                            }
+                            self.handle_sleep_transition(result.transition);
+                        } else {
+                            warn!("sleep mode toggle requested but configuration is absent");
+                        }
+                    }
+                }
+            }
+            if let Some(ctrl) = self.sleep.as_mut() {
+                let transition = ctrl.advance_schedule();
+                self.handle_sleep_transition(transition);
+            }
+            let sleeping = self.sleep.as_ref().is_some_and(|ctrl| !ctrl.is_awake());
             while let Some(result) = self.mat_pipeline.try_recv() {
                 self.mat_inflight = self.mat_inflight.saturating_sub(1);
                 self.ready_results.push_back(result);
@@ -1038,7 +1214,7 @@ pub fn run_windowed(
                     }
                 }
             }
-            if self.current.is_none() && self.transition_state.is_none() {
+            if !sleeping && self.current.is_none() && self.transition_state.is_none() {
                 let greeting_finished = self
                     .greeting_deadline
                     .map(|deadline| Instant::now() >= deadline)
@@ -1079,7 +1255,7 @@ pub fn run_windowed(
                     let _ = self.to_manager_displayed.try_send(Displayed(path));
                 }
             }
-            if self.transition_state.is_none() {
+            if !sleeping && self.transition_state.is_none() {
                 if let Some(shown_at) = self.displayed_at {
                     if shown_at.elapsed() >= std::time::Duration::from_millis(self.dwell_ms) {
                         if self.next.is_none() {
@@ -1137,10 +1313,24 @@ pub fn run_windowed(
             a: 1.0,
         })
         .unwrap_or(wgpu::Color::BLACK);
+    let mut sleep_controller = cfg
+        .sleep_mode
+        .as_ref()
+        .and_then(|cfg| cfg.runtime().cloned())
+        .map(SleepController::new);
+    if let Some(ctrl) = sleep_controller.as_ref() {
+        if !ctrl.is_awake() {
+            info!(
+                sleep_mode_startup_state = "sleeping",
+                "sleep mode active at startup"
+            );
+        }
+    }
     let mut app = App {
         from_loader,
         to_manager_displayed,
         cancel,
+        control,
         window: None,
         gpu: None,
         current: None,
@@ -1162,6 +1352,7 @@ pub fn run_windowed(
         clear_color,
         rng: rand::rng(),
         full_config: cfg.clone(),
+        sleep: sleep_controller.take(),
     };
     event_loop.run_app(&mut app)?;
     Ok(())
