@@ -149,24 +149,6 @@ impl GreetingScreen {
         }
     }
 
-    #[allow(dead_code)] // Retained for future config hot-reload integration.
-    pub fn update_config(&mut self, config: &AppConfig) {
-        let new_settings = GreetingSettings::from_config(config);
-        let font_changed = new_settings.font_name != self.loaded_font_request;
-        if contrast_ratio(new_settings.colors.font, new_settings.colors.background) < 4.5 {
-            warn!("greeting_screen_low_contrast");
-        }
-        if font_changed {
-            let font = load_font(&new_settings.font_name);
-            self.glyph_brush =
-                build_glyph_brush(font, &self.device, self.format, self.glyph_cache_side);
-            self.loaded_font_request = new_settings.font_name.clone();
-        }
-        self.settings = new_settings;
-        self.rebuild_geometry();
-        self.update_text_layout();
-    }
-
     pub fn render(&mut self, encoder: &mut wgpu::CommandEncoder, target_view: &wgpu::TextureView) {
         if self.size.width == 0 || self.size.height == 0 {
             return;
@@ -565,14 +547,16 @@ fn snap_to_half(value: f32) -> f32 {
 }
 
 fn load_font(request: &Option<String>) -> FontArc {
-    let fallback_bytes: &[u8] = include_bytes!("../../assets/fonts/Inconsolata-Regular.ttf");
     if let Some(name) = request.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         if let Some(font) = load_named_font(name) {
             return font;
         }
         warn!(font = %name, "greeting_screen_font_missing");
     }
-    FontArc::try_from_slice(fallback_bytes).expect("valid bundled font")
+    
+    // reasonable default: DejaVu Sans
+    load_named_font("DejaVu Sans")
+        .unwrap_or_else(|| panic!("Default system font (DejaVu Sans) not found"))
 }
 
 fn load_named_font(name: &str) -> Option<FontArc> {
