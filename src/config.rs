@@ -183,9 +183,66 @@ impl PartialEq for MattingSelection {
 
 impl Eq for MattingSelection {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FixedImagePathSelection {
+    Sequential,
+    Random,
+}
+
+impl Default for FixedImagePathSelection {
+    fn default() -> Self {
+        Self::Sequential
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FixedImageRuntime {
+    backgrounds: Arc<[Arc<FixedImageBackground>]>,
+    selection: FixedImagePathSelection,
+    sequential: SequentialState,
+}
+
+impl FixedImageRuntime {
+    fn new(
+        backgrounds: Vec<Arc<FixedImageBackground>>,
+        selection: FixedImagePathSelection,
+    ) -> Self {
+        Self {
+            backgrounds: Arc::from(backgrounds),
+            selection,
+            sequential: SequentialState::default(),
+        }
+    }
+
+    fn select<R: Rng + ?Sized>(&self, rng: &mut R) -> Option<Arc<FixedImageBackground>> {
+        if self.backgrounds.is_empty() {
+            return None;
+        }
+        match self.selection {
+            FixedImagePathSelection::Sequential => {
+                let index = self.sequential.next(self.backgrounds.len());
+                Some(Arc::clone(&self.backgrounds[index]))
+            }
+            FixedImagePathSelection::Random => self.backgrounds.iter().choose(rng).cloned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MattingRuntime {
-    pub fixed_image: Option<Arc<FixedImageBackground>>,
+    fixed_image: Option<FixedImageRuntime>,
+}
+
+impl MattingRuntime {
+    pub fn select_fixed_image<R: Rng + ?Sized>(
+        &self,
+        rng: &mut R,
+    ) -> Option<Arc<FixedImageBackground>> {
+        self.fixed_image
+            .as_ref()
+            .and_then(|runtime| runtime.select(rng))
+    }
 }
 
 impl MattingKind {
@@ -274,7 +331,14 @@ pub enum MattingMode {
         weft_period_px: f32,
     },
     FixedImage {
-        path: PathBuf,
+        #[serde(
+            default,
+            rename = "path",
+            deserialize_with = "deserialize_fixed_image_paths"
+        )]
+        paths: Vec<PathBuf>,
+        #[serde(default, rename = "path-selection")]
+        path_selection: FixedImagePathSelection,
         #[serde(default)]
         fit: FixedImageFit,
     },
@@ -307,6 +371,48 @@ impl Default for FixedImageFit {
     }
 }
 
+fn deserialize_fixed_image_paths<'de, D>(deserializer: D) -> Result<Vec<PathBuf>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct PathsVisitor;
+
+    impl<'de> Visitor<'de> for PathsVisitor {
+        type Value = Vec<PathBuf>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a path string or a list of paths")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(vec![PathBuf::from(value)])
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            self.visit_str(&value)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut paths = Vec::new();
+            while let Some(path) = seq.next_element::<PathBuf>()? {
+                paths.push(path);
+            }
+            Ok(paths)
+        }
+    }
+
+    deserializer.deserialize_any(PathsVisitor)
+}
+
 impl Default for MattingOptions {
     fn default() -> Self {
         Self {
@@ -332,14 +438,27 @@ impl MattingOptions {
             .max_upscale_factor
             .max(Self::default_max_upscale_factor());
         self.runtime = MattingRuntime::default();
-        if let MattingMode::FixedImage { path, .. } = &self.style {
-            let background = FixedImageBackground::new(path.clone()).with_context(|| {
-                format!(
-                    "failed to prepare fixed background image at {}",
-                    path.display()
-                )
-            })?;
-            self.runtime.fixed_image = Some(Arc::new(background));
+        if let MattingMode::FixedImage {
+            paths,
+            path_selection,
+            ..
+        } = &self.style
+        {
+            if paths.is_empty() {
+                return Ok(());
+            }
+
+            let mut backgrounds = Vec::with_capacity(paths.len());
+            for path in paths {
+                let background = FixedImageBackground::new(path.clone()).with_context(|| {
+                    format!(
+                        "failed to prepare fixed background image at {}",
+                        path.display()
+                    )
+                })?;
+                backgrounds.push(Arc::new(background));
+            }
+            self.runtime.fixed_image = Some(FixedImageRuntime::new(backgrounds, *path_selection));
         }
         Ok(())
     }
@@ -392,7 +511,10 @@ impl MattingOptions {
                     .unwrap_or_else(MattingMode::default_studio_weft_period_px),
             },
             MattingKind::FixedImage => MattingMode::FixedImage {
-                path: base.path.expect("fixed-image matting must supply a path"),
+                paths: base
+                    .fixed_image_paths
+                    .expect("fixed-image matting must supply a path"),
+                path_selection: base.fixed_image_path_selection.unwrap_or_default(),
                 fit: base.fixed_image_fit.unwrap_or_default(),
             },
         };
@@ -426,7 +548,8 @@ struct MattingOptionBuilder {
     texture_strength: Option<f32>,
     warp_period_px: Option<f32>,
     weft_period_px: Option<f32>,
-    path: Option<PathBuf>,
+    fixed_image_paths: Option<Vec<PathBuf>>,
+    fixed_image_path_selection: Option<FixedImagePathSelection>,
     fixed_image_fit: Option<FixedImageFit>,
 }
 
@@ -436,6 +559,26 @@ where
     E: de::Error,
 {
     serde_yaml::from_value(value).map_err(|err| de::Error::custom(err.to_string()))
+}
+
+fn inline_value_to_fixed_image_paths<E>(value: YamlValue) -> Result<Vec<PathBuf>, E>
+where
+    E: de::Error,
+{
+    match value {
+        YamlValue::String(path) => Ok(vec![PathBuf::from(path)]),
+        YamlValue::Sequence(entries) => {
+            let mut paths = Vec::with_capacity(entries.len());
+            for entry in entries {
+                paths.push(inline_value_to::<PathBuf, E>(entry)?);
+            }
+            Ok(paths)
+        }
+        other => Err(de::Error::custom(format!(
+            "fixed-image.path must be a string or list of paths, got {:?}",
+            other
+        ))),
+    }
 }
 
 fn apply_inline_field<E>(
@@ -555,10 +698,18 @@ where
             },
             MattingKind::FixedImage => match other {
                 "path" => {
-                    if builder.path.is_some() {
+                    if builder.fixed_image_paths.is_some() {
                         return Err(de::Error::duplicate_field("path"));
                     }
-                    builder.path = Some(inline_value_to::<PathBuf, E>(value)?);
+                    builder.fixed_image_paths =
+                        Some(inline_value_to_fixed_image_paths::<E>(value)?);
+                }
+                "path-selection" => {
+                    if builder.fixed_image_path_selection.is_some() {
+                        return Err(de::Error::duplicate_field("path-selection"));
+                    }
+                    builder.fixed_image_path_selection =
+                        Some(inline_value_to::<FixedImagePathSelection, E>(value)?);
                 }
                 "fit" => {
                     if builder.fixed_image_fit.is_some() {
@@ -571,6 +722,7 @@ where
                         other,
                         &[
                             "path",
+                            "path-selection",
                             "fit",
                             "minimum-mat-percentage",
                             "max-upscale-factor",
@@ -739,7 +891,9 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
                     for (field, value) in std::mem::take(&mut inline_fields) {
                         apply_inline_field::<A::Error>(&mut builder, kind, &field, value)?;
                     }
-                    if matches!(kind, MattingKind::FixedImage) && builder.path.is_none() {
+                    if matches!(kind, MattingKind::FixedImage)
+                        && builder.fixed_image_paths.is_none()
+                    {
                         return Err(de::Error::missing_field("path"));
                     }
                     let option = MattingOptions::with_kind(kind, builder);
@@ -1014,10 +1168,18 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
                     },
                     MattingKind::FixedImage => match other {
                         "path" => {
-                            if builder.path.is_some() {
+                            if builder.fixed_image_paths.is_some() {
                                 return Err(de::Error::duplicate_field("path"));
                             }
-                            builder.path = Some(map.next_value()?);
+                            let value: YamlValue = map.next_value()?;
+                            builder.fixed_image_paths =
+                                Some(inline_value_to_fixed_image_paths::<A::Error>(value)?);
+                        }
+                        "path-selection" => {
+                            if builder.fixed_image_path_selection.is_some() {
+                                return Err(de::Error::duplicate_field("path-selection"));
+                            }
+                            builder.fixed_image_path_selection = Some(map.next_value()?);
                         }
                         "fit" => {
                             if builder.fixed_image_fit.is_some() {
@@ -1030,6 +1192,7 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
                                 other,
                                 &[
                                     "path",
+                                    "path-selection",
                                     "fit",
                                     "minimum-mat-percentage",
                                     "max-upscale-factor",
@@ -1041,7 +1204,7 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
             }
         }
 
-        if matches!(self.kind, MattingKind::FixedImage) && builder.path.is_none() {
+        if matches!(self.kind, MattingKind::FixedImage) && builder.fixed_image_paths.is_none() {
             return Err(de::Error::missing_field("path"));
         }
 

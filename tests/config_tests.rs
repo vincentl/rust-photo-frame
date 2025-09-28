@@ -1,6 +1,7 @@
 use rand::{rngs::StdRng, SeedableRng};
 use rust_photo_frame::config::{
-    Configuration, MattingKind, MattingSelection, TransitionKind, TransitionSelection,
+    Configuration, FixedImagePathSelection, MattingKind, MattingMode, MattingSelection,
+    TransitionKind, TransitionSelection,
 };
 use std::path::PathBuf;
 
@@ -210,6 +211,150 @@ matting:
         rust_photo_frame::config::MattingMode::FixedColor { .. } => {}
         _ => panic!("expected third matting option to repeat fixed-color"),
     }
+}
+
+#[test]
+fn parse_fixed_image_with_multiple_paths() {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use std::fs;
+
+    let png = STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z/C/HwAFgwJ/lc7BnwAAAABJRU5ErkJggg==")
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("bg-0.png");
+    let second = dir.path().join("bg-1.png");
+    fs::write(&first, &png).unwrap();
+    fs::write(&second, &png).unwrap();
+
+    let yaml = format!(
+        r#"
+photo-library-path: "/photos"
+matting:
+  types: [fixed-image]
+  options:
+    fixed-image:
+      path: ["{first}", "{second}"]
+      path-selection: sequential
+      fit: contain
+"#,
+        first = first.display(),
+        second = second.display()
+    );
+
+    let cfg: Configuration = serde_yaml::from_str(&yaml).unwrap();
+    let option = cfg
+        .matting
+        .primary_option()
+        .expect("expected fixed-image matting");
+
+    match &option.style {
+        MattingMode::FixedImage {
+            paths,
+            path_selection,
+            fit,
+        } => {
+            assert_eq!(paths, &vec![first.clone(), second.clone()]);
+            assert_eq!(*path_selection, FixedImagePathSelection::Sequential);
+            assert!(matches!(
+                fit,
+                rust_photo_frame::config::FixedImageFit::Contain
+            ));
+        }
+        other => panic!("expected fixed-image matting, got {other:?}"),
+    }
+
+    let mut mat = option.clone();
+    mat.prepare_runtime().unwrap();
+    let mut rng = StdRng::seed_from_u64(1);
+    let bg0 = mat
+        .runtime
+        .select_fixed_image(&mut rng)
+        .expect("expected first fixed background");
+    let bg1 = mat
+        .runtime
+        .select_fixed_image(&mut rng)
+        .expect("expected second fixed background");
+    let bg2 = mat
+        .runtime
+        .select_fixed_image(&mut rng)
+        .expect("expected rotation to repeat");
+
+    assert_eq!(bg0.path(), first.as_path());
+    assert_eq!(bg1.path(), second.as_path());
+    assert_eq!(bg2.path(), first.as_path());
+}
+
+#[test]
+fn parse_fixed_image_with_single_string_path() {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use std::fs;
+
+    let png = STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z/C/HwAFgwJ/lc7BnwAAAABJRU5ErkJggg==")
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let only = dir.path().join("bg.png");
+    fs::write(&only, &png).unwrap();
+
+    let yaml = format!(
+        r#"
+photo-library-path: "/photos"
+matting:
+  types: [fixed-image]
+  options:
+    fixed-image:
+      path: "{only}"
+"#,
+        only = only.display()
+    );
+
+    let cfg: Configuration = serde_yaml::from_str(&yaml).unwrap();
+    let option = cfg
+        .matting
+        .primary_option()
+        .expect("expected fixed-image matting");
+
+    match &option.style {
+        MattingMode::FixedImage { paths, .. } => {
+            assert_eq!(paths, &vec![only.clone()]);
+        }
+        other => panic!("expected fixed-image matting, got {other:?}"),
+    }
+
+    let mut mat = option.clone();
+    mat.prepare_runtime().unwrap();
+    let mut rng = StdRng::seed_from_u64(3);
+    let bg = mat
+        .runtime
+        .select_fixed_image(&mut rng)
+        .expect("expected fixed background");
+    assert_eq!(bg.path(), only.as_path());
+}
+
+#[test]
+fn fixed_image_with_empty_paths_is_disabled() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  types: [fixed-image]
+  options:
+    fixed-image:
+      path: []
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let mut mat = cfg
+        .matting
+        .primary_option()
+        .expect("expected fixed-image matting")
+        .clone();
+
+    mat.prepare_runtime().unwrap();
+    let mut rng = StdRng::seed_from_u64(5);
+    assert!(mat.runtime.select_fixed_image(&mut rng).is_none());
 }
 
 #[test]
