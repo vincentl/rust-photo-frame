@@ -2,74 +2,65 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 MODULE_DIR="${SCRIPT_DIR}/modules"
+SCRIPT_NAME="$(basename "$0")"
 
-if [[ $EUID -ne 0 ]]; then
-    export FRAME_USER="${FRAME_USER:-${USER}}"
-    exec sudo FRAME_USER="${FRAME_USER}" "${SCRIPT_DIR}/${SCRIPT_NAME}" "$@"
-fi
+INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
+SERVICE_USER="${SERVICE_USER:-photo-frame}"
+CARGO_PROFILE="${CARGO_PROFILE:-release}"
+DRY_RUN="${DRY_RUN:-0}"
 
-prompt_for_frame_user() {
-    local input
-    while true; do
-        read -r -p "Enter the username that should own the rust-photo-frame installation: " input
-        input="${input// /}"
-        if [[ -z "${input}" ]]; then
-            echo "[ERROR] Username cannot be empty." >&2
-            continue
-        fi
-        if ! id -u "${input}" >/dev/null 2>&1; then
-            echo "[ERROR] User '${input}' does not exist on this system." >&2
-            continue
-        fi
-        FRAME_USER="${input}"
-        export FRAME_USER
-        break
-    done
+log() {
+    local level="$1"; shift
+    printf '[%s] %s\n' "${SCRIPT_NAME}" "$level: $*"
 }
 
-if [[ -z "${FRAME_USER:-}" ]]; then
-    if [[ -n "${SUDO_USER:-}" ]]; then
-        FRAME_USER="${SUDO_USER}"
-        export FRAME_USER
-    else
-        prompt_for_frame_user
-    fi
-fi
-
-if ! id -u "${FRAME_USER}" >/dev/null 2>&1; then
-    echo "[ERROR] Target user '${FRAME_USER}' does not exist. Use FRAME_USER to specify a valid account." >&2
-    exit 1
-fi
-
-echo "[INFO] Configuring rust-photo-frame for user '${FRAME_USER}'."
+trap 'log ERROR "${SCRIPT_NAME} failed on line ${LINENO}"' ERR
 
 if [[ ! -d "${MODULE_DIR}" ]]; then
-    echo "[ERROR] Module directory not found: ${MODULE_DIR}" >&2
+    log ERROR "Module directory not found: ${MODULE_DIR}"
     exit 1
 fi
 
+if [[ $(id -u) -eq 0 ]]; then
+    log ERROR "Run ${SCRIPT_NAME} as an unprivileged user; modules will request sudo when necessary."
+    exit 1
+fi
+
+CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
+if [[ -d "${CARGO_HOME}/bin" ]]; then
+    case ":${PATH}:" in
+        *:"${CARGO_HOME}/bin":*) ;;
+        *)
+            export PATH="${CARGO_HOME}/bin:${PATH}"
+            ;;
+    esac
+fi
+
+export INSTALL_ROOT SERVICE_USER CARGO_PROFILE DRY_RUN REPO_ROOT
+export CARGO_HOME
+export PATH
+
 shopt -s nullglob
-MODULES=("${MODULE_DIR}"/[0-9][0-9]-*.sh)
+modules=("${MODULE_DIR}"/[0-9][0-9]-*.sh)
 shopt -u nullglob
 
-if [[ ${#MODULES[@]} -eq 0 ]]; then
-    echo "[WARN] No setup modules found in ${MODULE_DIR}. Nothing to do."
+if [[ ${#modules[@]} -eq 0 ]]; then
+    log INFO "No system setup modules found in ${MODULE_DIR}."
     exit 0
 fi
 
-echo "[INFO] Executing setup modules from ${MODULE_DIR}" 
-for module in "${MODULES[@]}"; do
-    echo "[INFO] Running $(basename "${module}")"
+log INFO "Executing system setup modules as user $(id -un)"
+for module in "${modules[@]}"; do
+    module_name="$(basename "${module}")"
+    log INFO "Starting ${module_name}"
     if [[ ! -x "${module}" ]]; then
-        echo "[INFO] Making module executable"
         chmod +x "${module}"
     fi
     "${module}"
-    echo "[INFO] Completed $(basename "${module}")"
+    log INFO "Completed ${module_name}"
     echo
-
 done
 
-echo "[INFO] All setup modules completed successfully."
+log INFO "System setup stage complete."
