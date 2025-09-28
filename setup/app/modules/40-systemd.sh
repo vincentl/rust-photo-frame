@@ -64,24 +64,42 @@ else
     run_sudo systemctl daemon-reload
 fi
 
-enable_and_start() {
+enable_unit() {
     local unit_name="$1"
-    local action="$2"
     if [[ ! -f "${SYSTEMD_SOURCE}/${unit_name}" ]]; then
         return
     fi
     if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would systemctl ${action} ${unit_name}"
+        log INFO "DRY_RUN: would systemctl enable ${unit_name}"
     else
-        run_sudo systemctl ${action} "${unit_name}"
+        run_sudo systemctl enable "${unit_name}"
     fi
 }
 
-enable_and_start photo-frame.service "enable --now"
+activate_unit() {
+    local unit_name="$1"
+    if [[ ! -f "${SYSTEMD_SOURCE}/${unit_name}" ]]; then
+        return
+    fi
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        log INFO "DRY_RUN: would ensure ${unit_name} is running (reload-or-restart if already active)"
+        return
+    fi
+    if run_sudo systemctl is-active --quiet "${unit_name}"; then
+        run_sudo systemctl reload-or-restart "${unit_name}"
+    else
+        run_sudo systemctl start "${unit_name}"
+    fi
+}
+
+enable_unit photo-frame.service
+activate_unit photo-frame.service
+
 if [[ -f "${SYSTEMD_SOURCE}/photo-sync.timer" ]]; then
-    enable_and_start photo-sync.timer "enable --now"
+    enable_unit photo-sync.timer
+    activate_unit photo-sync.timer
     if [[ -f "${SYSTEMD_SOURCE}/photo-sync.service" ]]; then
-        enable_and_start photo-sync.service "enable"
+        enable_unit photo-sync.service
     fi
 fi
 
