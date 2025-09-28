@@ -2,7 +2,7 @@
 # Adjust values to match your hardware, library layout, and visual preferences.
 
 # Root directory for images (scanned recursively)
-photo-library-path: /absolute/path/to/your/photo/library
+photo-library-path: /opt/photo-frame/var/photos
 
 # Render/transition settings
 transition:
@@ -100,5 +100,5 @@ matting:
       weft-period-px: 5.2 # spacing between horizontal weft threads in px
     fixed-image:
       minimum-mat-percentage: 6.0
-      path: /absolute/path/to/background.png
+      path: /opt/photo-frame/share/backgrounds/default-fixed.jpg
       fit: cover # options: cover, contain, stretch

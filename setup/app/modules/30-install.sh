@@ -40,11 +40,13 @@ create_service_user() {
 
 install_tree() {
     run_sudo install -d -m 755 "${INSTALL_ROOT}"
-    for dir in bin lib etc docs systemd var; do
+    for dir in bin lib etc docs systemd share var; do
         run_sudo install -d -m 755 "${INSTALL_ROOT}/${dir}"
     done
 
-    for dir in bin lib etc docs systemd; do
+    run_sudo install -d -m 755 "${INSTALL_ROOT}/share/backgrounds"
+
+    for dir in bin lib etc docs systemd share; do
         if [[ -d "${STAGE_DIR}/${dir}" ]]; then
             run_sudo rsync -a --delete "${STAGE_DIR}/${dir}/" "${INSTALL_ROOT}/${dir}/"
         fi
@@ -54,6 +56,7 @@ install_tree() {
 bootstrap_var() {
     run_sudo install -d -m 755 "${INSTALL_ROOT}/var/log"
     run_sudo install -d -m 755 "${INSTALL_ROOT}/var/cache"
+    run_sudo install -d -m 775 "${INSTALL_ROOT}/var/photos"
     if [[ -f "${INSTALL_ROOT}/etc/config.yaml" && ! -f "${INSTALL_ROOT}/var/config.yaml" ]]; then
         if [[ "${DRY_RUN}" == "1" ]]; then
             log INFO "DRY_RUN: would initialize writable config at ${INSTALL_ROOT}/var/config.yaml"
@@ -79,7 +82,12 @@ else
 fi
 
 if [[ "${DRY_RUN}" != "1" ]]; then
-    run_sudo chmod -R u+rwX,go+rX "${INSTALL_ROOT}/bin" "${INSTALL_ROOT}/lib" "${INSTALL_ROOT}/docs" "${INSTALL_ROOT}/systemd"
+    run_sudo chmod -R u+rwX,go+rX \
+        "${INSTALL_ROOT}/bin" \
+        "${INSTALL_ROOT}/lib" \
+        "${INSTALL_ROOT}/docs" \
+        "${INSTALL_ROOT}/systemd" \
+        "${INSTALL_ROOT}/share"
     if [[ -d "${INSTALL_ROOT}/etc" ]]; then
         run_sudo find "${INSTALL_ROOT}/etc" -type f -exec chmod 644 {} +
     fi
