@@ -37,7 +37,15 @@ cleanup_stage() {
 
 create_stage_layout() {
     cleanup_stage
-    for dir in "${STAGE_DIR}" "${STAGE_DIR}/bin" "${STAGE_DIR}/lib" "${STAGE_DIR}/etc" "${STAGE_DIR}/docs" "${STAGE_DIR}/systemd"; do
+    for dir in \
+        "${STAGE_DIR}" \
+        "${STAGE_DIR}/bin" \
+        "${STAGE_DIR}/lib" \
+        "${STAGE_DIR}/etc" \
+        "${STAGE_DIR}/docs" \
+        "${STAGE_DIR}/systemd" \
+        "${STAGE_DIR}/share" \
+        "${STAGE_DIR}/share/backgrounds"; do
         ensure_dir "${dir}"
     done
 }
@@ -80,6 +88,21 @@ if [[ -f "${CONFIG_SRC}" ]]; then
     fi
 else
     log WARN "Default config.yaml not found at repo root"
+fi
+
+B64_BACKGROUND_SRC="${REPO_ROOT}/assets/backgrounds/default-fixed.jpg.b64"
+BACKGROUND_DEST="${STAGE_DIR}/share/backgrounds/default-fixed.jpg"
+if [[ -f "${B64_BACKGROUND_SRC}" ]]; then
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        log INFO "DRY_RUN: would decode fixed background asset to ${BACKGROUND_DEST}"
+    else
+        if ! base64 --decode "${B64_BACKGROUND_SRC}" | install -Dm644 /dev/stdin "${BACKGROUND_DEST}"; then
+            log ERROR "Failed to decode fixed background asset from ${B64_BACKGROUND_SRC}"
+            exit 1
+        fi
+    fi
+else
+    log WARN "Fixed background asset not found at ${B64_BACKGROUND_SRC}"
 fi
 
 DOCS_SRC="${REPO_ROOT}/docs"
