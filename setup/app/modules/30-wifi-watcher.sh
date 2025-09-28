@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 FRAME_USER_REQUESTED="${FRAME_USER:-}"
 
@@ -55,26 +55,42 @@ if [[ -z "${FRAME_HOME}" ]]; then
     exit 1
 fi
 
-# shellcheck disable=SC1090
+ENV_SETUP=""
 if [[ -f "${FRAME_HOME}/.cargo/env" ]]; then
-    source "${FRAME_HOME}/.cargo/env"
-elif [[ -d "${FRAME_HOME}/.cargo/bin" ]]; then
-    export PATH="${FRAME_HOME}/.cargo/bin:${PATH}"
-fi
-
-if ! command -v cargo >/dev/null 2>&1; then
-    echo "[30-wifi-watcher] cargo is required but was not found in PATH." >&2
-    exit 1
+    ENV_SETUP="source '${FRAME_HOME}/.cargo/env' && "
+else
+    ENV_EXPORTS=(
+        "export CARGO_HOME='${FRAME_HOME}/.cargo'"
+        "export RUSTUP_HOME='${FRAME_HOME}/.rustup'"
+    )
+    if [[ -d "${FRAME_HOME}/.cargo/bin" ]]; then
+        ENV_EXPORTS+=("export PATH='${FRAME_HOME}/.cargo/bin':\"\$PATH\"")
+    fi
+    if [[ ${#ENV_EXPORTS[@]} -gt 0 ]]; then
+        ENV_SETUP=""
+        for export_cmd in "${ENV_EXPORTS[@]}"; do
+            ENV_SETUP+="${export_cmd} && "
+        done
+    fi
 fi
 
 run_as_frame() {
     local cmd="$1"
+    if [[ -n "${ENV_SETUP}" ]]; then
+        cmd="${ENV_SETUP}${cmd}"
+    fi
     if [[ "${FRAME_USER}" == "root" ]]; then
         bash -lc "${cmd}"
     else
         sudo -u "${FRAME_USER}" -H bash -lc "${cmd}"
     fi
 }
+
+if ! run_as_frame "command -v cargo >/dev/null 2>&1"; then
+    echo "[30-wifi-watcher] cargo is required but was not found in PATH for user '${FRAME_USER}'." >&2
+    echo "[30-wifi-watcher] Run ./setup/system/run.sh first or install Rust with FRAME_USER=${FRAME_USER}." >&2
+    exit 1
+fi
 
 echo "[30-wifi-watcher] Building Wi-Fi watcher binaries with cargo (user: ${FRAME_USER})..."
 run_as_frame "cd '${REPO_ROOT}' && cargo build --release"

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FILES_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)/files"
+FILES_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)/files"
 SYSTEMD_DIR="${FILES_DIR}/systemd"
 
 if [[ $EUID -ne 0 ]]; then
