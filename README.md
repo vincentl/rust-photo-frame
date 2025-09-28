@@ -28,6 +28,49 @@ Plan your build around a Raspberry Pi 5, a portrait-capable 4K monitor, and moun
 
 From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync services, the setup guide walks through every command you need to bring the slideshow online. It also documents CLI flags for local debugging and a quickstart checklist for provisioning. [Full details →](docs/software.md)
 
+### Deployment Pipeline
+
+The provisioning workflow now runs in two explicit stages so you can separate one-time operating-system preparation from rapid application iteration. Each stage is idempotent—safe to re-run whenever you need to update dependencies or redeploy a fresh build.
+
+1. **System prerequisites**
+
+   ```bash
+   ./setup/system/run.sh
+   ```
+
+   Installs apt dependencies, enables the 4K HDMI boot profile, and bootstraps a user-scoped Rust toolchain (`rustup`, `cargo`, `rustc`). The script only elevates for package-manager and firmware edits and exports `~/.cargo/bin` into `PATH` for subsequent stages.
+
+2. **Application build & install**
+
+   ```bash
+   ./setup/app/run.sh
+   ```
+
+   Builds the Rust binaries as the invoking user, stages the release artifacts, and installs them into `/opt/photo-frame`. Systemd unit files are copied into `/opt/photo-frame/systemd` and linked into `/etc/systemd/system`, then `photo-frame.service` is enabled and started.
+
+Both stages respect the following knobs:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `INSTALL_ROOT` | `/opt/photo-frame` | Installation prefix for binaries, configs, docs, and unit files. |
+| `SERVICE_USER` | `photo-frame` | Systemd user that owns `/opt/photo-frame/var` and runs the services. |
+| `CARGO_PROFILE` | `release` | Cargo profile used for builds (passed through to `cargo build`). |
+| `DRY_RUN` | unset | When set to `1`, modules print the actions they would take instead of executing them. |
+
+After a successful install the filesystem layout is:
+
+```
+/opt/photo-frame/
+  bin/       # Executables (e.g., rust-photo-frame)
+  lib/       # Reserved for shared assets and helper scripts
+  etc/       # Read-only configuration templates
+  var/       # Writable runtime state owned by ${SERVICE_USER}
+  docs/      # Offline documentation and licensing
+  systemd/   # Deployed unit files sourced by the installer
+```
+
+The `photo-frame.service` unit runs the application with its working directory set to `/opt/photo-frame/var` and automatically restarts on failure. Override configuration can be dropped in `/etc/default/photo-frame` when needed.
+
 ## Features
 
 - Recursively scans a configurable photo library directory
