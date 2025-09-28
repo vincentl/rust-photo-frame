@@ -100,5 +100,9 @@ matting:
       weft-period-px: 5.2 # spacing between horizontal weft threads in px
     fixed-image:
       minimum-mat-percentage: 6.0
-      path: /opt/photo-frame/share/backgrounds/default-fixed.jpg
+      path: [
+        /opt/photo-frame/share/backgrounds/default-0.jpg,
+        /opt/photo-frame/share/backgrounds/default-1.jpg,
+      ]
+      path-selection: sequential # or random
       fit: cover # options: cover, contain, stretch
