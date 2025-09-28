@@ -13,12 +13,13 @@ A digital photo frame driver implemented in Rust with a pipeline tuned for Raspb
 
 1. [Hardware](#hardware)
 2. [Software Setup](#software-setup)
-3. [Features](#features)
-4. [Architecture Overview](#architecture-overview)
-5. [Configuration](#configuration)
-6. [Fabrication](#fabrication)
-7. [References](#references)
-8. [License](#license)
+3. [Wi-Fi Recovery & Provisioning](#wi-fi-recovery--provisioning)
+4. [Features](#features)
+5. [Architecture Overview](#architecture-overview)
+6. [Configuration](#configuration)
+7. [Fabrication](#fabrication)
+8. [References](#references)
+9. [License](#license)
 
 ## Hardware
 
@@ -27,6 +28,17 @@ Plan your build around a Raspberry Pi 5, a portrait-capable 4K monitor, and moun
 ## Software Setup
 
 From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync services, the setup guide walks through every command you need to bring the slideshow online. It also documents CLI flags for local debugging and a quickstart checklist for provisioning. [Full details →](docs/software.md)
+
+## Wi-Fi Recovery & Provisioning
+
+The frame includes a self-contained Wi-Fi manager that watches connectivity, launches a recovery hotspot, and writes fresh credentials into NetworkManager without manual SSH access.
+
+- **Automatic hotspot.** If the frame has been offline for more than 30 seconds, `wifi-manager` brings up an access point named **PhotoFrame-Setup** secured with a random three-word passphrase. The active passphrase is saved to `/opt/photo-frame/var/hotspot-password.txt` and mirrored in the QR code at `/opt/photo-frame/var/wifi-qr.png`.
+- **Guided web UI.** Join the hotspot (the frame shows the QR code) and browse to [http://192.168.4.1:8080/](http://192.168.4.1:8080/) to reach a single-page setup form. Submit the target SSID and password; the page polls status until the frame rejoins your network.
+- **Seamless NetworkManager updates.** Credentials are written via `nmcli` and the hotspot is torn down only after the frame obtains an IP address on the new network. Last-attempt diagnostics live in `/opt/photo-frame/var/wifi-last.json` for remote support.
+- **Service management.** The systemd unit (`wifi-manager.service`) runs as the `photo-frame` user on boot. Tail logs with `journalctl -u wifi-manager -f` to watch state transitions such as `ONLINE → OFFLINE` or provisioning progress.
+- **Configuration.** Tune behaviour in `/opt/photo-frame/etc/wifi-manager.yaml` (grace period, hotspot SSID, UI port). Update the template, then restart with `sudo systemctl restart wifi-manager`.
+- **Manual overrides.** When direct shell access is available, you can run `sudo -u photo-frame /opt/photo-frame/bin/wifi-manager nm add --ssid "MyNetwork" --psk "password123"` to seed a connection, or `nmcli connection up pf-hotspot` to force the recovery hotspot.
 
 ## Features
 
