@@ -20,6 +20,9 @@ use crate::nm::Connectivity;
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
+    if std::env::args().any(|arg| arg == "--show-ui") {
+        return run_ui_mode();
+    }
     let settings = Settings::load()?;
     info!(
         wifi_ifname = %settings.wifi_ifname,
@@ -33,6 +36,14 @@ async fn main() -> Result<()> {
 
     let mut controller = Controller::new(settings);
     controller.run().await
+}
+
+fn run_ui_mode() -> Result<()> {
+    let payload = std::env::var("WIFI_UI_PAYLOAD")
+        .context("WIFI_UI_PAYLOAD missing for --show-ui mode")?;
+    let info: HotspotInfo =
+        serde_json::from_str(&payload).context("parsing WIFI_UI_PAYLOAD")?;
+    ui::run_blocking(info)
 }
 
 fn init_tracing() {
@@ -161,10 +172,13 @@ impl Controller {
     }
 
     fn ensure_ui(&mut self, info: HotspotInfo) -> Result<()> {
-        if self.ui.is_some() {
-            return Ok(());
+        if let Some(handle) = self.ui.as_mut() {
+            if handle.is_alive()? {
+                return Ok(());
+            }
+            self.ui = None;
         }
-        match ui::spawn(info) {
+        match ui::spawn(&info, &self.settings) {
             Ok(handle) => {
                 self.ui = Some(handle);
                 Ok(())
