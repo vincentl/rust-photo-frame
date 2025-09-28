@@ -1,4 +1,4 @@
-use crate::config::{PhotoAffectConfig, PhotoAffectOptions};
+use crate::config::{PhotoEffectConfig, PhotoEffectOptions};
 use crate::events::PhotoLoaded;
 use anyhow::Result;
 use image::RgbaImage;
@@ -8,17 +8,17 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-/// Applies optional photo affects to decoded images before they reach the viewer.
+/// Applies optional photo effects to decoded images before they reach the viewer.
 pub async fn run(
     from_loader: Receiver<PhotoLoaded>,
     to_viewer: Sender<PhotoLoaded>,
     cancel: CancellationToken,
-    config: PhotoAffectConfig,
+    config: PhotoEffectConfig,
 ) -> Result<()> {
     if !config.is_enabled() {
         forward_only(from_loader, to_viewer, cancel).await
     } else {
-        run_with_affects(from_loader, to_viewer, cancel, config).await
+        run_with_effects(from_loader, to_viewer, cancel, config).await
     }
 }
 
@@ -45,11 +45,11 @@ async fn forward_only(
     Ok(())
 }
 
-async fn run_with_affects(
+async fn run_with_effects(
     mut from_loader: Receiver<PhotoLoaded>,
     to_viewer: Sender<PhotoLoaded>,
     cancel: CancellationToken,
-    config: PhotoAffectConfig,
+    config: PhotoEffectConfig,
 ) -> Result<()> {
     let mut rng = StdRng::from_os_rng();
 
@@ -63,14 +63,14 @@ async fn run_with_affects(
 
                 if let Some(option) = config.choose_option(&mut rng) {
                     if let Some(mut image) = reconstruct_image(&prepared) {
-                        apply_affect(&mut image, &option);
+                        apply_effect(&mut image, &option);
                         prepared.pixels = image.into_raw();
                     } else {
                         warn!(
                             path = %prepared.path.display(),
                             width = prepared.width,
                             height = prepared.height,
-                            "failed to reconstruct RGBA image for photo affect"
+                            "failed to reconstruct RGBA image for photo effect"
                         );
                     }
                 }
@@ -96,13 +96,13 @@ fn reconstruct_image(prepared: &crate::events::PreparedImageCpu) -> Option<RgbaI
     RgbaImage::from_raw(width, height, pixels)
 }
 
-fn apply_affect(image: &mut RgbaImage, option: &PhotoAffectOptions) {
+fn apply_effect(image: &mut RgbaImage, option: &PhotoEffectOptions) {
     match option {
-        PhotoAffectOptions::PrintSimulation(settings) => {
+        PhotoEffectOptions::PrintSimulation(settings) => {
             crate::processing::print_simulation::apply_print_simulation(image, settings);
         }
     }
-    debug!("applied photo affect {:?}", option.kind());
+    debug!("applied photo effect {:?}", option.kind());
 }
 
 #[cfg(test)]
@@ -113,7 +113,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
-    async fn forwards_without_affect_when_disabled() {
+    async fn forwards_without_effect_when_disabled() {
         let (tx_in, rx_in) = mpsc::channel(1);
         let (tx_out, mut rx_out) = mpsc::channel(1);
         let cancel = CancellationToken::new();
@@ -129,7 +129,7 @@ mod tests {
             .unwrap();
         drop(tx_in);
 
-        run(rx_in, tx_out, cancel.clone(), PhotoAffectConfig::default())
+        run(rx_in, tx_out, cancel.clone(), PhotoEffectConfig::default())
             .await
             .unwrap();
 
@@ -147,7 +147,7 @@ options:
     relief-strength: 1.0
     sheen-strength: 0.5
 "#;
-        let config: PhotoAffectConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: PhotoEffectConfig = serde_yaml::from_str(yaml).unwrap();
 
         let (tx_in, rx_in) = mpsc::channel(1);
         let (tx_out, mut rx_out) = mpsc::channel(1);
