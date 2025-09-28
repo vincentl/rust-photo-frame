@@ -36,7 +36,7 @@ else
 fi
 
 if [[ "${DRY_RUN}" != "1" && -d "${REPO_ROOT}/target" ]]; then
-    if find "${REPO_ROOT}/target" -maxdepth 2 -user root -print -quit >/dev/null 2>&1; then
+    if find "${REPO_ROOT}/target" -maxdepth 2 -user root -print -quit | grep -q .; then
         log ERROR "Detected root-owned files under ${REPO_ROOT}/target; clean them before continuing."
         exit 1
     fi
