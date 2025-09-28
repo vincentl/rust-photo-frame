@@ -1,10 +1,6 @@
-# Photoframe
+# Photo Frame
 
-A digital photo frame driver implemented in Rust with a pipeline tuned for Raspberry Pi hardware. It watches a photo library, weights the playlist so new images appear more frequently, and renders each slide with configurable matting, transitions, and photo effects.
-
-## What is this?
-
-Photoframe turns a Raspberry Pi and an HDMI display into a self-hosted, always-fresh slideshow. The runtime keeps a local or network photo library in sync, prioritizes new additions, and styles every slide with gallery-inspired matting and post-processing. Makers can keep control of their library (no cloud uploads) while still enjoying dynamic sequencing, deterministic testing modes, and a GPU-aware render pipeline that respects the Pi’s constraints.
+A digital photo frame driver implemented in Rust with a pipeline tuned for Raspberry Pi hardware. Watches a photo library, weights the playlist so new images appear more frequently, and renders each slide with configurable matting, transitions, and photo effects.
 
 **Built for:** Raspberry Pi hobbyists, photographers who want a bespoke display, and Rust developers interested in embedded graphics pipelines.
 
@@ -12,20 +8,18 @@ Photoframe turns a Raspberry Pi and an HDMI display into a self-hosted, always
 
 - Runs entirely on-device with a configurable playlist weighting system.
 - Supports rich visual treatments (mats, transitions, print simulation) without requiring graphics expertise.
-- Ships with CLI flags and sample configs so you can reproduce playlists during testing or demos.
 
 ## Table of Contents
 
-1. [What is this?](#what-is-this)
-2. [Hardware](#hardware)
-3. [Frame Setup](#frame-setup)
-4. [Features](#features)
-5. [Architecture Overview](#architecture-overview)
-6. [Configuration](#configuration)
-7. [Playlist Weighting](#playlist-weighting)
-8. [Matting Configuration](#matting-configuration)
-9. [References](#references)
-10. [License](#license)
+1. [Hardware](#hardware)
+2. [Frame Setup](#frame-setup)
+3. [Features](#features)
+4. [Architecture Overview](#architecture-overview)
+5. [Configuration](#configuration)
+6. [Playlist Weighting](#playlist-weighting)
+7. [Matting Configuration](#matting-configuration)
+8. [References](#references)
+9. [License](#license)
 
 ## Hardware
 
@@ -55,7 +49,7 @@ cargo run --release -- <path/to/config.yaml>
 
 Use the core command above for day-to-day playback. Reach for the CLI flags below when you need to troubleshoot sequencing, create demo recordings, or confirm that configuration changes behave as expected.
 
-| Flag                              | When to reach for it                                                                                                   |
+| Flag                              | When to reach for it                                                                                                    |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `--playlist-now <RFC3339>`        | Freeze the virtual clock to reproduce playlist weights for debugging or long-form tests.                                |
 | `--playlist-dry-run <ITERATIONS>` | Generate a textual preview of the weighted queue to check ordering before lighting up the display.                      |
@@ -94,7 +88,6 @@ flowchart LR
   LOAD -->|invalid photo| FILES
   VIEW -->|displayed event| MAN
 ```
-
 
 ## Configuration
 
