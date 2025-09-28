@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-FILES_DIR="${REPO_ROOT}/files"
+SETUP_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+FILES_DIR="${SETUP_DIR}/files"
 WORDLIST_SRC="${FILES_DIR}/wordlist.txt"
 WORDLIST_DEST="/opt/photo-frame/share/wordlist.txt"
 
