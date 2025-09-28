@@ -58,10 +58,10 @@ loader-max-concurrent-decodes: 4
 # Optional deterministic seed for the initial shuffle (set to null for random)
 startup-shuffle-seed: null
 
-photo-affect:
-  # List zero or more affect types; set to [] to disable the stage entirely.
+photo-effect:
+  # List zero or more effect types; set to [] to disable the stage entirely.
   types: [print-simulation]
-  # Choose how to iterate through affects when multiple are configured.
+  # Choose how to iterate through effects when multiple are configured.
   type-selection: random
   options:
     print-simulation:
