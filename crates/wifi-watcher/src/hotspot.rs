@@ -6,11 +6,12 @@ use std::process::Command;
 use anyhow::{anyhow, Context, Result};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::check::Settings;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HotspotInfo {
     pub ssid: String,
     pub password: String,
