@@ -6,7 +6,7 @@ The repository ships with a sample [`config.yaml`](../config.yaml) that you can 
 The example below targets a Pi driving a 4K portrait display backed by a NAS-mounted photo library. Inline comments explain why each value matters and what to tweak for common scenarios.
 
 ```yaml
-photo-library-path: /path/to/photos
+photo-library-path: /opt/photo-frame/var/photos
 
 # Render/transition settings
 transition:
@@ -59,8 +59,9 @@ Use the quick reference below to locate the knobs you care about, then dive into
 ### `photo-library-path`
 - **Purpose:** Sets the root directory that will be scanned recursively for supported photo formats.
 - **Required?** Yes. Leave it unset and the application has no images to display.
-- **Accepted values & defaults:** Any absolute or relative filesystem path. There is no usable default.
+- **Accepted values & defaults:** Any absolute or relative filesystem path. The setup pipeline provisions `/opt/photo-frame/var/photos` and points the default configuration there so both the runtime and any cloud sync job start from a known location.
 - **Effect on behavior:** Switching the path changes the library the watcher monitors; the viewer reloads the playlist when the directory contents change.
+- **Notes:** After the installer seeds `/opt/photo-frame/var/config.yaml`, edit that writable copy to move the library elsewhere (for example, to an attached drive or network share) if you do not want to keep photos under `/opt/photo-frame/var/photos`.
 
 ### `transition`
 - **Purpose:** Controls how the viewer blends between photos.
@@ -128,6 +129,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Required?** Optional.
 - **Accepted values & defaults:** Mapping described in [Matting configuration](#matting-configuration); defaults to a black fixed-color mat.
 - **Effect on behavior:** Selecting different mat types changes the visual framing—from gallery-style solids to soft blurs or custom imagery.
+- **Notes:** The default configuration references `/opt/photo-frame/share/backgrounds/default-fixed.jpg`, a neutral gallery mat installed alongside the application. Swap in your own asset by updating the path in `/opt/photo-frame/var/config.yaml`.
 
 ## Playlist weighting
 The playlist treats every photo as a node in a cycle. Brand-new photos are temporarily duplicated so that they appear multiple times per cycle, then decay back toward a single appearance as they age.
