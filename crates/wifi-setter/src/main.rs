@@ -3,6 +3,7 @@ mod web;
 
 use std::env;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -31,22 +32,17 @@ struct FrameConfig {
 
 impl Settings {
     fn load() -> Result<Self> {
-        let config_path = std::path::PathBuf::from(
-            env::var("PHOTO_FRAME_CONFIG")
-                .unwrap_or_else(|_| "/etc/photo-frame/config.yaml".to_string()),
-        );
+        let config_path = Self::config_path();
         let mut wifi_ifname = env::var("WIFI_IFNAME").unwrap_or_else(|_| "wlan0".to_string());
         let mut hotspot_ip = env::var("HOTSPOT_IP").unwrap_or_else(|_| "192.168.4.1".to_string());
 
         if config_path.exists() {
-            if let Ok(contents) = std::fs::read_to_string(&config_path) {
-                if let Ok(cfg) = serde_yaml::from_str::<FrameConfig>(&contents) {
-                    if let Some(value) = cfg.wifi_ifname {
-                        wifi_ifname = value;
-                    }
-                    if let Some(value) = cfg.hotspot_ip {
-                        hotspot_ip = value;
-                    }
+            if let Some(cfg) = read_config(&config_path).ok().flatten() {
+                if let Some(value) = cfg.wifi_ifname {
+                    wifi_ifname = value;
+                }
+                if let Some(value) = cfg.hotspot_ip {
+                    hotspot_ip = value;
                 }
             }
         }
@@ -62,18 +58,21 @@ impl Settings {
             bind_addr,
         })
     }
+
+    fn config_path() -> PathBuf {
+        env::var("PHOTO_FRAME_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/etc/photo-frame/config.yaml"))
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
     let settings = Settings::load()?;
-    info!(?settings.bind_addr, "starting wifi setter");
+    info!(bind_addr = %settings.bind_addr, wifi_ifname = %settings.wifi_ifname, "starting wifi setter");
 
-    let state = AppState {
-        ifname: settings.wifi_ifname.clone(),
-        hotspot_ip: settings.hotspot_ip.clone(),
-    };
+    let state = AppState::from(&settings);
 
     let listener = TcpListener::bind(settings.bind_addr)
         .await
@@ -98,5 +97,18 @@ async fn shutdown() {
         info!("wifi setter received shutdown signal");
     } else {
         warn!("wifi setter shutdown signal stream errored");
+    }
+}
+
+fn read_config(path: &Path) -> Result<Option<FrameConfig>> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("reading config at {}", path.display()))?;
+    let cfg: FrameConfig = serde_yaml::from_str(&contents).context("parsing config.yaml")?;
+    Ok(Some(cfg))
+}
+
+impl From<&Settings> for AppState {
+    fn from(settings: &Settings) -> Self {
+        AppState::new(settings.wifi_ifname.clone(), settings.hotspot_ip.clone())
     }
 }
