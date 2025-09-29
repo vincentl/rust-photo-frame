@@ -4,7 +4,8 @@ set -euo pipefail
 MODULE="app:50-postcheck"
 DRY_RUN="${DRY_RUN:-0}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
-SERVICE_USER="${SERVICE_USER:-photo-frame}"
+SERVICE_USER="${SERVICE_USER:-$(id -un)}"
+SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn)}"
 
 log() {
     local level="$1"; shift
@@ -36,8 +37,9 @@ if [[ ! -d "${VAR_DIR}" ]]; then
 fi
 
 var_owner="$(stat -c %U "${VAR_DIR}")"
-if [[ "${var_owner}" != "${SERVICE_USER}" ]]; then
-    log ERROR "${VAR_DIR} is owned by ${var_owner}, expected ${SERVICE_USER}"
+var_group="$(stat -c %G "${VAR_DIR}")"
+if [[ "${var_owner}" != "${SERVICE_USER}" || "${var_group}" != "${SERVICE_GROUP}" ]]; then
+    log ERROR "${VAR_DIR} is owned by ${var_owner}:${var_group}, expected ${SERVICE_USER}:${SERVICE_GROUP}"
     exit 1
 fi
 
@@ -60,6 +62,7 @@ cat <<SUMMARY
 ----------------------------------------
 Install root : ${INSTALL_ROOT}
 Service user : ${SERVICE_USER}
+Service group: ${SERVICE_GROUP}
 Binary       : ${BIN_PATH}
 Config (RO)  : ${CONFIG_TEMPLATE}
 Config (RW)  : ${INSTALL_ROOT}/var/config.yaml

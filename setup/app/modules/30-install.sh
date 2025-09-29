@@ -4,7 +4,8 @@ set -euo pipefail
 MODULE="app:30-install"
 DRY_RUN="${DRY_RUN:-0}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
-SERVICE_USER="${SERVICE_USER:-photo-frame}"
+SERVICE_USER="${SERVICE_USER:-$(id -un)}"
+SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE_ROOT="${STAGE_ROOT:-${SCRIPT_DIR}/../build}"
 STAGE_DIR="${STAGE_ROOT}/stage"
@@ -29,13 +30,20 @@ require_stage_dir() {
     fi
 }
 
-create_service_user() {
-    if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
-        log INFO "Service user ${SERVICE_USER} already exists"
-        return
+validate_service_principal() {
+    if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+        log ERROR "Service user ${SERVICE_USER} does not exist. Set SERVICE_USER to an existing account."
+        exit 1
     fi
-    run_sudo useradd --system --no-create-home --shell /usr/sbin/nologin "${SERVICE_USER}"
-    log INFO "Created service user ${SERVICE_USER}"
+    if ! getent group "${SERVICE_GROUP}" >/dev/null 2>&1; then
+        log ERROR "Service group ${SERVICE_GROUP} does not exist. Set SERVICE_GROUP to a group associated with ${SERVICE_USER}."
+        exit 1
+    fi
+    if ! id -Gn "${SERVICE_USER}" | tr ' ' '\n' | grep -Fxq "${SERVICE_GROUP}"; then
+        log ERROR "Service user ${SERVICE_USER} is not a member of ${SERVICE_GROUP}. Adjust SERVICE_GROUP or update the account."
+        exit 1
+    fi
+    log INFO "Using service account ${SERVICE_USER}:${SERVICE_GROUP}"
 }
 
 install_tree() {
@@ -64,11 +72,11 @@ bootstrap_var() {
             run_sudo install -m 664 "${INSTALL_ROOT}/etc/config.yaml" "${INSTALL_ROOT}/var/config.yaml"
         fi
     fi
-    run_sudo chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}/var"
+    run_sudo chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_ROOT}/var"
 }
 
 require_stage_dir
-create_service_user
+validate_service_principal
 if [[ "${DRY_RUN}" == "1" ]]; then
     log INFO "DRY_RUN: would install staged artifacts into ${INSTALL_ROOT}"
 else

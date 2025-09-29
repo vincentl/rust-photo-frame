@@ -53,7 +53,8 @@ Both stages respect the following knobs:
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `INSTALL_ROOT` | `/opt/photo-frame` | Installation prefix for binaries, configs, docs, and unit files. |
-| `SERVICE_USER` | `photo-frame` | Systemd user that owns `/opt/photo-frame/var` and runs the services. |
+| `SERVICE_USER` | invoking user | Systemd user that owns `/opt/photo-frame/var` and runs the services. |
+| `SERVICE_GROUP` | invoking user's primary group | Group associated with `SERVICE_USER` that owns `/opt/photo-frame/var`. |
 | `CARGO_PROFILE` | `release` | Cargo profile used for builds (passed through to `cargo build`). |
 | `DRY_RUN` | unset | When set to `1`, modules print the actions they would take instead of executing them. |
 
@@ -64,7 +65,7 @@ After a successful install the filesystem layout is:
   bin/       # Executables (e.g., rust-photo-frame)
   lib/       # Reserved for shared assets and helper scripts
   etc/       # Read-only configuration templates
-  var/       # Writable runtime state owned by ${SERVICE_USER}
+  var/       # Writable runtime state owned by ${SERVICE_USER}:${SERVICE_GROUP}
   docs/      # Offline documentation and licensing
   systemd/   # Deployed unit files sourced by the installer
 ```
