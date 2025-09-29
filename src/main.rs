@@ -1,5 +1,6 @@
 mod config;
 mod events;
+mod platform;
 mod processing;
 mod tasks {
     pub mod files;
