@@ -3,6 +3,7 @@ use crate::config::{
     TransitionMode, TransitionOptions,
 };
 use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand};
+use crate::platform::display_power::DisplayPowerController;
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::{center_offset, resize_to_cover};
@@ -665,6 +666,7 @@ pub fn run_windowed(
         rng: rand::rngs::ThreadRng,
         full_config: crate::config::Configuration,
         sleep: Option<SleepController>,
+        display_power: Option<DisplayPowerController>,
     }
 
     impl App {
@@ -676,9 +678,19 @@ pub fn run_windowed(
                     self.transition_state = None;
                     self.next = None;
                     self.displayed_at = None;
+                    if let Some(controller) = self.display_power.as_ref() {
+                        if let Err(error) = controller.sleep() {
+                            warn!(?error, "failed to power down display");
+                        }
+                    }
                 }
                 SleepTransition::ExitedSleep { trigger } => {
                     info!(?trigger, "sleep mode exited");
+                    if let Some(controller) = self.display_power.as_ref() {
+                        if let Err(error) = controller.wake() {
+                            warn!(?error, "failed to power up display");
+                        }
+                    }
                     if self.current.is_some() {
                         self.displayed_at = Some(std::time::Instant::now());
                     }
@@ -1313,11 +1325,14 @@ pub fn run_windowed(
             a: 1.0,
         })
         .unwrap_or(wgpu::Color::BLACK);
-    let mut sleep_controller = cfg
+    let sleep_runtime = cfg
         .sleep_mode
         .as_ref()
-        .and_then(|cfg| cfg.runtime().cloned())
-        .map(SleepController::new);
+        .and_then(|cfg| cfg.runtime().cloned());
+    let display_power = sleep_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.display_power().cloned());
+    let mut sleep_controller = sleep_runtime.map(SleepController::new);
     if let Some(ctrl) = sleep_controller.as_ref() {
         if !ctrl.is_awake() {
             info!(
@@ -1353,6 +1368,7 @@ pub fn run_windowed(
         rng: rand::rng(),
         full_config: cfg.clone(),
         sleep: sleep_controller.take(),
+        display_power,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
