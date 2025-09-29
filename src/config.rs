@@ -14,6 +14,7 @@ use serde::de::{self, DeserializeOwned, DeserializeSeed, Deserializer, MapAccess
 use serde::Deserialize;
 use serde_yaml::Value as YamlValue;
 
+use crate::platform::display_power::{BacklightSysfs, DisplayPowerController, DisplayPowerPlan};
 use crate::processing::fixed_image::FixedImageBackground;
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -2716,6 +2717,60 @@ impl<'de> Deserialize<'de> for WeekdayName {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct DisplayPowerConfig {
+    #[serde(rename = "backlight-path")]
+    pub backlight_path: Option<PathBuf>,
+    #[serde(rename = "sleep-value")]
+    pub sleep_value: Option<String>,
+    #[serde(rename = "wake-value")]
+    pub wake_value: Option<String>,
+    #[serde(rename = "sleep-command")]
+    pub sleep_command: Option<String>,
+    #[serde(rename = "wake-command")]
+    pub wake_command: Option<String>,
+}
+
+impl DisplayPowerConfig {
+    fn prepare_controller(&self) -> Result<DisplayPowerController> {
+        let mut plan = DisplayPowerPlan::default();
+
+        if let Some(path) = &self.backlight_path {
+            let sleep_value = self.sleep_value.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "sleep-mode.display-power.sleep-value is required when backlight-path is set"
+                )
+            })?;
+            ensure!(
+                !sleep_value.trim().is_empty(),
+                "sleep-mode.display-power.sleep-value must not be blank"
+            );
+
+            let wake_value = self.wake_value.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "sleep-mode.display-power.wake-value is required when backlight-path is set"
+                )
+            })?;
+            ensure!(
+                !wake_value.trim().is_empty(),
+                "sleep-mode.display-power.wake-value must not be blank"
+            );
+
+            plan.sysfs = Some(BacklightSysfs {
+                path: path.clone(),
+                sleep_value: sleep_value.clone(),
+                wake_value: wake_value.clone(),
+            });
+        }
+
+        plan.sleep_command = self.sleep_command.clone();
+        plan.wake_command = self.wake_command.clone();
+
+        DisplayPowerController::new(plan)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SleepModeConfig {
@@ -2733,6 +2788,8 @@ pub struct SleepModeConfig {
         rename = "dim-brightness"
     )]
     pub dim_brightness: f32,
+    #[serde(default, rename = "display-power")]
+    pub display_power: Option<DisplayPowerConfig>,
     #[serde(skip)]
     pub runtime: Option<SleepModeRuntime>,
 }
@@ -2773,12 +2830,18 @@ impl SleepModeConfig {
             days.insert(*name, window);
         }
 
+        let display_power = match &self.display_power {
+            Some(config) => Some(config.prepare_controller()?),
+            None => None,
+        };
+
         self.runtime = Some(SleepModeRuntime {
             default,
             weekday,
             weekend,
             days,
             dim_brightness: self.dim_brightness,
+            display_power,
         });
         Ok(())
     }
@@ -2791,6 +2854,7 @@ pub struct SleepModeRuntime {
     weekend: Option<SleepWindow>,
     days: BTreeMap<WeekdayName, SleepWindow>,
     dim_brightness: f32,
+    display_power: Option<DisplayPowerController>,
 }
 
 impl SleepModeRuntime {
@@ -2812,6 +2876,10 @@ impl SleepModeRuntime {
 
     pub fn dim_brightness(&self) -> f32 {
         self.dim_brightness
+    }
+
+    pub fn display_power(&self) -> Option<&DisplayPowerController> {
+        self.display_power.as_ref()
     }
 }
 
