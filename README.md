@@ -70,7 +70,7 @@ After a successful install the filesystem layout is:
   systemd/   # Deployed unit files sourced by the installer
 ```
 
-The `photo-frame.service` unit runs the application with its working directory set to `/opt/photo-frame/var` and automatically restarts on failure. Override configuration can be dropped in `/etc/default/photo-frame` when needed.
+The `photo-frame.service` unit runs the application with its working directory set to `/opt/photo-frame/var` and automatically restarts on failure. It exports the `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` variables so the compositor grants fullscreen access when the service starts outside an interactive login. Override configuration can be dropped in `/etc/default/photo-frame` when needed.
 
 ## Features
 
