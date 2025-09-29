@@ -6,7 +6,7 @@ After=network-online.target
 [Service]
 Type=simple
 User=@SERVICE_USER@
-Group=@SERVICE_USER@
+Group=@SERVICE_GROUP@
 EnvironmentFile=-/etc/default/photo-frame
 WorkingDirectory=@INSTALL_ROOT@/var
 ExecStart=@INSTALL_ROOT@/bin/rust-photo-frame --config @INSTALL_ROOT@/var/config.yaml
