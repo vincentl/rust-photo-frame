@@ -1,7 +1,7 @@
 use rand::{rngs::StdRng, SeedableRng};
 use rust_photo_frame::config::{
-    Configuration, FixedImagePathSelection, MattingKind, MattingMode, MattingSelection,
-    TransitionKind, TransitionSelection,
+    ColorSelection, Configuration, FixedImagePathSelection, MattingKind, MattingMode,
+    MattingSelection, StudioMatColor, TransitionKind, TransitionSelection,
 };
 use std::path::PathBuf;
 
@@ -58,8 +58,9 @@ matting:
     let mat = options
         .get(&MattingKind::Studio)
         .expect("expected studio matting option");
-    match mat.style {
+    match &mat.style {
         rust_photo_frame::config::MattingMode::Studio {
+            colors,
             bevel_width_px,
             bevel_color,
             texture_strength,
@@ -67,11 +68,12 @@ matting:
             weft_period_px,
             ..
         } => {
-            assert!((bevel_width_px - 5.0).abs() < f32::EPSILON);
-            assert_eq!(bevel_color, [200, 210, 220]);
-            assert!((texture_strength - 1.0).abs() < f32::EPSILON);
-            assert!((warp_period_px - 5.6).abs() < f32::EPSILON);
-            assert!((weft_period_px - 5.2).abs() < f32::EPSILON);
+            assert_eq!(colors.as_slice(), &[StudioMatColor::PhotoAverage]);
+            assert!((*bevel_width_px - 5.0).abs() < f32::EPSILON);
+            assert_eq!(*bevel_color, [200, 210, 220]);
+            assert!((*texture_strength - 1.0).abs() < f32::EPSILON);
+            assert!((*warp_period_px - 5.6).abs() < f32::EPSILON);
+            assert!((*weft_period_px - 5.2).abs() < f32::EPSILON);
         }
         _ => panic!("expected studio matting"),
     }
@@ -139,7 +141,10 @@ matting:
   types: [fixed-color, blur]
   options:
     fixed-color:
-      color: [10, 20, 30]
+      colors:
+        - [10, 20, 30]
+        - [5, 15, 25]
+      color-selection: random
     blur:
       minimum-mat-percentage: 7.5
       sigma: 12.0
@@ -155,8 +160,13 @@ matting:
     let fixed = options
         .get(&MattingKind::FixedColor)
         .expect("expected fixed-color mat option");
-    if let rust_photo_frame::config::MattingMode::FixedColor { color } = fixed.style {
-        assert_eq!(color, [10, 20, 30]);
+    if let rust_photo_frame::config::MattingMode::FixedColor {
+        colors,
+        color_selection,
+    } = &fixed.style
+    {
+        assert_eq!(colors.as_slice(), &[[10, 20, 30], [5, 15, 25]]);
+        assert_eq!(*color_selection, ColorSelection::Random);
     } else {
         panic!("expected fixed-color matting");
     }
@@ -180,7 +190,9 @@ matting:
   type-selection: sequential
   options:
     fixed-color:
-      color: [10, 20, 30]
+      colors:
+        - [10, 20, 30]
+        - [40, 50, 60]
     blur:
       sigma: 12.0
       minimum-mat-percentage: 7.5
@@ -199,8 +211,12 @@ matting:
     let second = cfg.matting.choose_option(&mut rng);
     let third = cfg.matting.choose_option(&mut rng);
 
-    match first.style {
-        rust_photo_frame::config::MattingMode::FixedColor { .. } => {}
+    match &first.style {
+        rust_photo_frame::config::MattingMode::FixedColor {
+            color_selection, ..
+        } => {
+            assert_eq!(*color_selection, ColorSelection::Sequential);
+        }
         _ => panic!("expected first matting option to be fixed-color"),
     }
     match second.style {
@@ -396,7 +412,7 @@ matting:
   type: random
   options:
     fixed-color:
-      color: [5, 15, 25]
+      colors: [[5, 15, 25]]
     blur:
       sigma: 9.0
       minimum-mat-percentage: 4.0
