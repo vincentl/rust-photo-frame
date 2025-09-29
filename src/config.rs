@@ -10,7 +10,10 @@ use chrono::{DateTime, Datelike, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use rand::seq::IteratorRandom;
 use rand::Rng;
-use serde::de::{self, DeserializeOwned, DeserializeSeed, Deserializer, MapAccess, Visitor};
+use serde::de::{
+    self, DeserializeOwned, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Unexpected,
+    Visitor,
+};
 use serde::Deserialize;
 use serde_yaml::Value as YamlValue;
 
@@ -232,12 +235,183 @@ impl FixedImageRuntime {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ColorSelection {
+    Sequential,
+    Random,
+}
+
+impl Default for ColorSelection {
+    fn default() -> Self {
+        Self::Sequential
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StudioMatColor {
+    Rgb([u8; 3]),
+    PhotoAverage,
+}
+
+impl StudioMatColor {
+    fn resolve(self, fallback: [f32; 3]) -> [f32; 3] {
+        match self {
+            StudioMatColor::Rgb(rgb) => [
+                (rgb[0] as f32) / 255.0,
+                (rgb[1] as f32) / 255.0,
+                (rgb[2] as f32) / 255.0,
+            ],
+            StudioMatColor::PhotoAverage => fallback,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StudioMatColor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct MatColorVisitor;
+
+        impl<'de> Visitor<'de> for MatColorVisitor {
+            type Value = StudioMatColor;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("an RGB triple or the string 'photo-average'")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    "photo-average" => Ok(StudioMatColor::PhotoAverage),
+                    other => Err(de::Error::invalid_value(Unexpected::Str(other), &self)),
+                }
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut rgb = [0u8; 3];
+                for (index, channel) in rgb.iter_mut().enumerate() {
+                    *channel = seq
+                        .next_element()?
+                        .ok_or_else(|| de::Error::invalid_length(index, &self))?;
+                }
+                if seq.next_element::<de::IgnoredAny>()?.is_some() {
+                    return Err(de::Error::invalid_length(4, &self));
+                }
+                Ok(StudioMatColor::Rgb(rgb))
+            }
+        }
+
+        deserializer.deserialize_any(MatColorVisitor)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FixedColorRuntime {
+    palette: Arc<[[u8; 3]]>,
+    selection: ColorSelection,
+    sequential: SequentialState,
+}
+
+impl FixedColorRuntime {
+    fn new(colors: Vec<[u8; 3]>, selection: ColorSelection) -> Self {
+        Self {
+            palette: colors.into(),
+            selection,
+            sequential: SequentialState::default(),
+        }
+    }
+
+    fn select<R: Rng + ?Sized>(&self, rng: &mut R) -> [u8; 3] {
+        if self.palette.is_empty() {
+            return [0, 0, 0];
+        }
+        match self.selection {
+            ColorSelection::Sequential => {
+                let index = self.sequential.next(self.palette.len());
+                self.palette[index]
+            }
+            ColorSelection::Random => self
+                .palette
+                .iter()
+                .copied()
+                .choose(rng)
+                .expect("non-empty fixed color palette"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StudioRuntime {
+    palette: Arc<[StudioMatColor]>,
+    selection: ColorSelection,
+    sequential: SequentialState,
+}
+
+impl StudioRuntime {
+    fn new(colors: Vec<StudioMatColor>, selection: ColorSelection) -> Self {
+        Self {
+            palette: colors.into(),
+            selection,
+            sequential: SequentialState::default(),
+        }
+    }
+
+    fn select<R: Rng + ?Sized>(&self, rng: &mut R, fallback: [f32; 3]) -> [f32; 3] {
+        if self.palette.is_empty() {
+            return fallback;
+        }
+        let choice = match self.selection {
+            ColorSelection::Sequential => {
+                let index = self.sequential.next(self.palette.len());
+                self.palette[index]
+            }
+            ColorSelection::Random => self
+                .palette
+                .iter()
+                .copied()
+                .choose(rng)
+                .expect("non-empty studio color palette"),
+        };
+        choice.resolve(fallback)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MattingRuntime {
+    fixed_color: Option<FixedColorRuntime>,
+    studio: Option<StudioRuntime>,
     fixed_image: Option<FixedImageRuntime>,
 }
 
 impl MattingRuntime {
+    pub fn select_fixed_color<R: Rng + ?Sized>(&self, rng: &mut R) -> Option<[u8; 3]> {
+        self.fixed_color.as_ref().map(|runtime| runtime.select(rng))
+    }
+
+    pub fn select_studio_color<R: Rng + ?Sized>(
+        &self,
+        rng: &mut R,
+        fallback: [f32; 3],
+    ) -> Option<[f32; 3]> {
+        self.studio
+            .as_ref()
+            .map(|runtime| runtime.select(rng, fallback))
+    }
+
     pub fn select_fixed_image<R: Rng + ?Sized>(
         &self,
         rng: &mut R,
@@ -295,8 +469,10 @@ pub enum MattingKind {
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum MattingMode {
     FixedColor {
-        #[serde(default = "MattingMode::default_color")]
-        color: [u8; 3],
+        #[serde(default = "MattingMode::default_fixed_color_palette")]
+        colors: Vec<[u8; 3]>,
+        #[serde(default, rename = "color-selection")]
+        color_selection: ColorSelection,
     },
     Blur {
         #[serde(default = "MattingMode::default_blur_sigma")]
@@ -310,6 +486,10 @@ pub enum MattingMode {
         backend: BlurBackend,
     },
     Studio {
+        #[serde(default = "MattingMode::default_studio_colors")]
+        colors: Vec<StudioMatColor>,
+        #[serde(default, rename = "color-selection")]
+        color_selection: ColorSelection,
         #[serde(
             default = "MattingMode::default_studio_bevel_width_px",
             rename = "bevel-width-px"
@@ -444,6 +624,30 @@ impl MattingOptions {
             .max_upscale_factor
             .max(Self::default_max_upscale_factor());
         self.runtime = MattingRuntime::default();
+        if let MattingMode::FixedColor {
+            colors,
+            color_selection,
+        } = &self.style
+        {
+            ensure!(
+                !colors.is_empty(),
+                "matting.fixed-color.colors must include at least one entry",
+            );
+            self.runtime.fixed_color =
+                Some(FixedColorRuntime::new(colors.clone(), *color_selection));
+        }
+        if let MattingMode::Studio {
+            colors,
+            color_selection,
+            ..
+        } = &self.style
+        {
+            ensure!(
+                !colors.is_empty(),
+                "matting.studio.colors must include at least one entry",
+            );
+            self.runtime.studio = Some(StudioRuntime::new(colors.clone(), *color_selection));
+        }
         if let MattingMode::FixedImage {
             paths,
             path_selection,
@@ -470,8 +674,8 @@ impl MattingOptions {
     }
 
     pub fn fixed_color(&self) -> Option<[u8; 3]> {
-        match self.style {
-            MattingMode::FixedColor { color } => Some(color),
+        match &self.style {
+            MattingMode::FixedColor { colors, .. } => colors.first().copied(),
             _ => None,
         }
     }
@@ -492,7 +696,10 @@ impl MattingOptions {
     fn with_kind(kind: MattingKind, base: MattingOptionBuilder) -> Self {
         let style = match kind {
             MattingKind::FixedColor => MattingMode::FixedColor {
-                color: base.color.unwrap_or_else(MattingMode::default_color),
+                colors: base
+                    .fixed_colors
+                    .unwrap_or_else(MattingMode::default_fixed_color_palette),
+                color_selection: base.color_selection.unwrap_or_default(),
             },
             MattingKind::Blur => MattingMode::Blur {
                 sigma: base.sigma.unwrap_or_else(MattingMode::default_blur_sigma),
@@ -502,6 +709,10 @@ impl MattingOptions {
                 backend: base.blur_backend.unwrap_or_default(),
             },
             MattingKind::Studio => MattingMode::Studio {
+                colors: base
+                    .studio_colors
+                    .unwrap_or_else(MattingMode::default_studio_colors),
+                color_selection: base.color_selection.unwrap_or_default(),
                 bevel_width_px: base
                     .bevel_width_px
                     .unwrap_or_else(MattingMode::default_studio_bevel_width_px),
@@ -547,7 +758,8 @@ impl MattingOptions {
 struct MattingOptionBuilder {
     minimum_mat_percentage: Option<f32>,
     max_upscale_factor: Option<f32>,
-    color: Option<[u8; 3]>,
+    fixed_colors: Option<Vec<[u8; 3]>>,
+    color_selection: Option<ColorSelection>,
     sigma: Option<f32>,
     sample_scale: Option<f32>,
     blur_backend: Option<BlurBackend>,
@@ -556,6 +768,7 @@ struct MattingOptionBuilder {
     texture_strength: Option<f32>,
     warp_period_px: Option<f32>,
     weft_period_px: Option<f32>,
+    studio_colors: Option<Vec<StudioMatColor>>,
     fixed_image_paths: Option<Vec<PathBuf>>,
     fixed_image_path_selection: Option<FixedImagePathSelection>,
     fixed_image_fit: Option<FixedImageFit>,
@@ -613,16 +826,27 @@ where
         }
         other => match kind {
             MattingKind::FixedColor => match other {
-                "color" => {
-                    if builder.color.is_some() {
-                        return Err(de::Error::duplicate_field("color"));
+                "colors" => {
+                    if builder.fixed_colors.is_some() {
+                        return Err(de::Error::duplicate_field("colors"));
                     }
-                    builder.color = Some(inline_value_to::<[u8; 3], E>(value)?);
+                    builder.fixed_colors = Some(inline_value_to::<Vec<[u8; 3]>, E>(value)?);
+                }
+                "color-selection" => {
+                    if builder.color_selection.is_some() {
+                        return Err(de::Error::duplicate_field("color-selection"));
+                    }
+                    builder.color_selection = Some(inline_value_to::<ColorSelection, E>(value)?);
                 }
                 _ => {
                     return Err(de::Error::unknown_field(
                         other,
-                        &["color", "minimum-mat-percentage", "max-upscale-factor"],
+                        &[
+                            "colors",
+                            "color-selection",
+                            "minimum-mat-percentage",
+                            "max-upscale-factor",
+                        ],
                     ));
                 }
             },
@@ -659,6 +883,18 @@ where
                 }
             },
             MattingKind::Studio => match other {
+                "colors" => {
+                    if builder.studio_colors.is_some() {
+                        return Err(de::Error::duplicate_field("colors"));
+                    }
+                    builder.studio_colors = Some(inline_value_to::<Vec<StudioMatColor>, E>(value)?);
+                }
+                "color-selection" => {
+                    if builder.color_selection.is_some() {
+                        return Err(de::Error::duplicate_field("color-selection"));
+                    }
+                    builder.color_selection = Some(inline_value_to::<ColorSelection, E>(value)?);
+                }
                 "bevel-width-px" => {
                     if builder.bevel_width_px.is_some() {
                         return Err(de::Error::duplicate_field("bevel-width-px"));
@@ -693,6 +929,8 @@ where
                     return Err(de::Error::unknown_field(
                         other,
                         &[
+                            "colors",
+                            "color-selection",
                             "bevel-width-px",
                             "bevel-color",
                             "texture-strength",
@@ -1083,16 +1321,27 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
                 }
                 other => match self.kind {
                     MattingKind::FixedColor => match other {
-                        "color" => {
-                            if builder.color.is_some() {
-                                return Err(de::Error::duplicate_field("color"));
+                        "colors" => {
+                            if builder.fixed_colors.is_some() {
+                                return Err(de::Error::duplicate_field("colors"));
                             }
-                            builder.color = Some(map.next_value()?);
+                            builder.fixed_colors = Some(map.next_value()?);
+                        }
+                        "color-selection" => {
+                            if builder.color_selection.is_some() {
+                                return Err(de::Error::duplicate_field("color-selection"));
+                            }
+                            builder.color_selection = Some(map.next_value()?);
                         }
                         _ => {
                             return Err(de::Error::unknown_field(
                                 other,
-                                &["color", "minimum-mat-percentage", "max-upscale-factor"],
+                                &[
+                                    "colors",
+                                    "color-selection",
+                                    "minimum-mat-percentage",
+                                    "max-upscale-factor",
+                                ],
                             ))
                         }
                     },
@@ -1129,6 +1378,18 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
                         }
                     },
                     MattingKind::Studio => match other {
+                        "colors" => {
+                            if builder.studio_colors.is_some() {
+                                return Err(de::Error::duplicate_field("colors"));
+                            }
+                            builder.studio_colors = Some(map.next_value()?);
+                        }
+                        "color-selection" => {
+                            if builder.color_selection.is_some() {
+                                return Err(de::Error::duplicate_field("color-selection"));
+                            }
+                            builder.color_selection = Some(map.next_value()?);
+                        }
                         "bevel-width-px" => {
                             if builder.bevel_width_px.is_some() {
                                 return Err(de::Error::duplicate_field("bevel-width-px"));
@@ -1163,6 +1424,8 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
                             return Err(de::Error::unknown_field(
                                 other,
                                 &[
+                                    "colors",
+                                    "color-selection",
                                     "bevel-width-px",
                                     "bevel-color",
                                     "texture-strength",
@@ -1289,7 +1552,8 @@ impl MattingConfig {
 impl Default for MattingMode {
     fn default() -> Self {
         Self::FixedColor {
-            color: Self::default_color(),
+            colors: Self::default_fixed_color_palette(),
+            color_selection: ColorSelection::default(),
         }
     }
 }
@@ -1297,6 +1561,14 @@ impl Default for MattingMode {
 impl MattingMode {
     const fn default_color() -> [u8; 3] {
         [0, 0, 0]
+    }
+
+    fn default_fixed_color_palette() -> Vec<[u8; 3]> {
+        vec![Self::default_color()]
+    }
+
+    fn default_studio_colors() -> Vec<StudioMatColor> {
+        vec![StudioMatColor::PhotoAverage]
     }
 
     const fn default_blur_sigma() -> f32 {

@@ -36,7 +36,8 @@ matting:
     fixed-color:
       minimum-mat-percentage: 0.0 # % of each screen edge reserved for the mat border
       max-upscale-factor: 1.0 # Limit for enlarging images when applying mats
-      color: [0, 0, 0]
+      colors: [[0, 0, 0], [32, 32, 32]]
+      color-selection: sequential
     blur:
       minimum-mat-percentage: 4.0
       sigma: 18.0
@@ -367,7 +368,8 @@ matting:
   options:
     fixed-color:
       minimum-mat-percentage: 0.0
-      color: [0, 0, 0]
+      colors: [[0, 0, 0], [32, 32, 32]]
+      color-selection: sequential
     blur:
       minimum-mat-percentage: 6.0
       sigma: 18.0
@@ -379,7 +381,8 @@ Every entry inside `matting.options` accepts the shared settings below:
 
 ### `fixed-color`
 
-- **`color`** (`[r, g, b]` array, default `[0, 0, 0]`): RGB values (0–255) used to fill the mat background. Channels outside the range are clamped. Choose lighter colors to mimic gallery mats or darker tones for a cinematic look.
+- **`colors`** (array of `[r, g, b]` triples, default `[[0, 0, 0]]`): One or more RGB swatches (0–255 per channel) to rotate through. Channels outside the valid range are clamped before rendering. Supply multiple entries to keep the frame palette fresh or stick with a single swatch for a consistent backdrop.
+- **`color-selection`** (`sequential` or `random`; default `sequential`): Chooses how the viewer advances through the configured swatches. Sequential mode cycles in order, while random selects a new color for each slide.
 
 ### `blur`
 
@@ -389,13 +392,15 @@ Every entry inside `matting.options` accepts the shared settings below:
 
 ### `studio`
 
+- **`colors`** (array containing `[r, g, b]` triples and/or the string `photo-average`; default `[photo-average]`): Palette entries used for the mat base. Plain RGB swatches render exactly as specified, while `photo-average` reuses the current slide’s average color. Provide multiple entries to mix custom hues with adaptive tones.
+- **`color-selection`** (`sequential` or `random`; default `sequential`): Governs how the mat palette advances between slides. Sequential mode steps through the configured colors, and random picks one each time.
 - **`bevel-width-px`** (float, default `3.0`): Visible width of the bevel band in pixels. The renderer clamps the bevel if the mat border is thinner than the requested width.
 - **`bevel-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB values (0–255) used for the bevel band.
 - **`texture-strength`** (float, default `1.0`): Strength of the simulated paper weave. `0.0` yields a flat matte; values above `1.0` exaggerate the texture.
 - **`warp-period-px`** (float, default `5.6`): Horizontal spacing between vertical warp threads, in pixels.
 - **`weft-period-px`** (float, default `5.2`): Vertical spacing between horizontal weft threads, in pixels.
 
-The studio mat derives a uniform base color from the photo’s average RGB, renders a mitred bevel band with the configured width and color, blends a hint of the mat pigment along the outer lip, and shades the bevel from a fixed light direction so it reads as a cut paper core. The photo then sits flush against that inner frame.
+The studio mat shades a mitred bevel band and textured paper surface using the selected palette entry, blends a hint of pigment along the outer lip, and lights the bevel from a fixed direction so it reads as a cut paper core. The photo then sits flush against that inner frame.
 
 ### `fixed-image`
 
