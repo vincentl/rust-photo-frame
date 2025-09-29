@@ -104,7 +104,7 @@ matting:
     blur:
       minimum-mat-percentage: 3.5
       sigma: 20.0
-      max-sample-dimension: 1536
+      sample-scale: 1.0 # reduce toward 0.0 to trade fidelity for blur speed
       backend: neon # options: cpu, neon (auto-falls back to cpu if unsupported)
     studio:
       minimum-mat-percentage: 8.0
