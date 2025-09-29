@@ -51,13 +51,13 @@ greeting-screen:
 
 # Sleep schedule that pauses rendering and dims the display outside active hours
 sleep-mode:
-  timezone: America/Los_Angeles
+  timezone: America/New_York
   on-hours:
     start: "07:00"
     end: "22:00"
   weekend-override:
-    start: "08:30 America/Los_Angeles"
-    end: "23:00 America/Los_Angeles"
+    start: "08:30"
+    end: "23:00"
   days:
     friday:
       start: "09:00"
