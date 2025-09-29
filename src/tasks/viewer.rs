@@ -1720,8 +1720,21 @@ fn scale_image_to_cover_canvas(
 
     let crop = imageops::crop_imm(src, crop_x, crop_y, crop_w, crop_h).to_image();
 
-    let target_w = safe_canvas_w.min(safe_max_dim);
-    let target_h = safe_canvas_h.min(safe_max_dim);
+    let scale_cap_w = safe_max_dim as f64 / safe_canvas_w as f64;
+    let scale_cap_h = safe_max_dim as f64 / safe_canvas_h as f64;
+    let needs_downscale = safe_canvas_w > safe_max_dim || safe_canvas_h > safe_max_dim;
+    let uniform_scale = if needs_downscale {
+        scale_cap_w.min(scale_cap_h)
+    } else {
+        1.0
+    };
+
+    let target_w = ((safe_canvas_w as f64) * uniform_scale)
+        .round()
+        .clamp(1.0, safe_max_dim as f64) as u32;
+    let target_h = ((safe_canvas_h as f64) * uniform_scale)
+        .round()
+        .clamp(1.0, safe_max_dim as f64) as u32;
     let scaled = imageops::resize(&crop, target_w, target_h, imageops::FilterType::Triangle);
 
     center_crop_or_pad(scaled, canvas_w, canvas_h)
