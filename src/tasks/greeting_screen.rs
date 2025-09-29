@@ -553,7 +553,7 @@ fn load_font(request: &Option<String>) -> FontArc {
         }
         warn!(font = %name, "greeting_screen_font_missing");
     }
-    
+
     // reasonable default: DejaVu Sans
     load_named_font("DejaVu Sans")
         .unwrap_or_else(|| panic!("Default system font (DejaVu Sans) not found"))

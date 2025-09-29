@@ -81,6 +81,15 @@ else
     install -Dm755 "${BINARY_SRC}" "${BINARY_DEST}"
 fi
 
+POWERCTL_SRC="${REPO_ROOT}/setup/app/powerctl"
+if [[ -f "${POWERCTL_SRC}" ]]; then
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        log INFO "DRY_RUN: would install powerctl helper to ${STAGE_DIR}/bin/powerctl"
+    else
+        install -Dm755 "${POWERCTL_SRC}" "${STAGE_DIR}/bin/powerctl"
+    fi
+fi
+
 CONFIG_SRC="${REPO_ROOT}/config.yaml"
 if [[ -f "${CONFIG_SRC}" ]]; then
     if [[ "${DRY_RUN}" == "1" ]]; then
