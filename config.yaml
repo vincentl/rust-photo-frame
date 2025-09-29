@@ -63,6 +63,9 @@ sleep-mode:
       start: "09:00"
       end: "23:30"
   dim-brightness: 0.04
+  display-power:
+    sleep-command: "/opt/photo-frame/bin/powerctl sleep"
+    wake-command: "/opt/photo-frame/bin/powerctl wake"
 
 # Number of images to preload in the viewer (aligns with channel capacity)
 viewer-preload-count: 3

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+MODE="${1:-}"
+OUT="${2:-@AUTO@}"
+if [[ -z "$MODE" ]]; then
+  echo "usage: powerctl {sleep|wake} [OUTPUT]" >&2
+  exit 2
+fi
+detect_out() {
+  wlr-randr | awk '/connected/ {print $1; exit}'
+}
+if [[ "$OUT" == "@AUTO@" ]]; then
+  OUT="$(detect_out || echo HDMI-A-1)"
+fi
+if [[ "$MODE" == "sleep" ]]; then
+  wlr-randr --output "$OUT" --off || vcgencmd display_power 0
+else
+  wlr-randr --output "$OUT" --on  || vcgencmd display_power 1
+fi
