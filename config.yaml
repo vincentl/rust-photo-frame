@@ -4,6 +4,11 @@
 # Root directory for images (scanned recursively)
 photo-library-path: /opt/photo-frame/var/photos
 
+# Wi-Fi provisioning defaults (optional; override to match your hardware)
+wifi-ifname: wlan0
+hotspot-ssid: Frame-Setup
+hotspot-ip: 192.168.4.1
+
 # Render/transition settings
 transition:
   # List one or more transition kinds to rotate between.

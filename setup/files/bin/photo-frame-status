@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WIFI_IFNAME="${WIFI_IFNAME:-wlan0}"
+PHOTO_SERVICE="${PHOTO_SERVICE:-photo-frame.service}"
+PHOTO_TIMER="${PHOTO_TIMER:-photo-sync.timer}"
+PHOTO_SYNC_SERVICE="${PHOTO_SYNC_SERVICE:-photo-sync.service}"
+WIFI_WATCHER_UNIT="${WIFI_WATCHER_UNIT:-wifi-watcher.service}"
+WIFI_SETTER_UNIT="${WIFI_SETTER_UNIT:-wifi-setter.service}"
+HOTSPOT_UNIT_PREFIX="${HOTSPOT_UNIT_PREFIX:-wifi-hotspot@}"
+
+printf '\n=== Wi-Fi Connectivity ===\n'
+if nmcli -t -f CONNECTIVITY general status >/tmp/connectivity 2>&1; then
+    CONNECTIVITY="$(cat /tmp/connectivity | tr -d '\n')"
+    printf 'Connectivity: %s\n' "${CONNECTIVITY:-unknown}"
+else
+    printf 'Connectivity: error (%s)\n' "$(cat /tmp/connectivity)"
+fi
+rm -f /tmp/connectivity
+
+ACTIVE_WIFI="$(nmcli -t -f NAME,DEVICE,TYPE connection show --active 2>/dev/null | awk -F: '$3=="wifi" {print $1 " on " $2}')"
+if [[ -n "${ACTIVE_WIFI}" ]]; then
+    printf 'Active connection: %s\n' "${ACTIVE_WIFI}"
+else
+    printf 'Active connection: none\n'
+fi
+
+printf '\n=== Hotspot & Provisioning ===\n'
+HOTSPOT_STATE="$(systemctl is-active "${HOTSPOT_UNIT_PREFIX}${WIFI_IFNAME}.service" 2>/dev/null || true)"
+printf 'Hotspot (%s): %s\n' "${WIFI_IFNAME}" "${HOTSPOT_STATE:-unknown}"
+SETTER_STATE="$(systemctl is-active "${WIFI_SETTER_UNIT}" 2>/dev/null || true)"
+printf '%s: %s\n' "${WIFI_SETTER_UNIT}" "${SETTER_STATE:-unknown}"
+WATCHER_STATE="$(systemctl is-active "${WIFI_WATCHER_UNIT}" 2>/dev/null || true)"
+printf '%s: %s\n' "${WIFI_WATCHER_UNIT}" "${WATCHER_STATE:-unknown}"
+
+printf '\n=== Photo App ===\n'
+PHOTO_STATE="$(systemctl is-active "${PHOTO_SERVICE}" 2>/dev/null || true)"
+printf '%s: %s\n' "${PHOTO_SERVICE}" "${PHOTO_STATE:-unknown}"
+
+printf '\n=== Sync ===\n'
+SYNC_STATE="$(systemctl is-active "${PHOTO_SYNC_SERVICE}" 2>/dev/null || true)"
+printf '%s: %s\n' "${PHOTO_SYNC_SERVICE}" "${SYNC_STATE:-unknown}"
+NEXT_TIMER="$(systemctl list-timers --all 2>/dev/null | awk -v timer="${PHOTO_TIMER}" '$0 ~ timer {print $5, "(left: "$6")"; exit}')"
+if [[ -n "${NEXT_TIMER}" ]]; then
+    printf 'Next sync: %s\n' "${NEXT_TIMER}"
+else
+    printf 'Next sync: timer inactive\n'
+fi
+LAST_TRIGGER="$(systemctl show -p LastTriggerUSec "${PHOTO_TIMER}" 2>/dev/null | cut -d= -f2)"
+if [[ -n "${LAST_TRIGGER}" && "${LAST_TRIGGER}" != "n/a" ]]; then
+    printf 'Last sync trigger: %s\n' "${LAST_TRIGGER}"
+else
+    printf 'Last sync trigger: never\n'
+fi
+
+printf '\nStatus summary complete.\n'

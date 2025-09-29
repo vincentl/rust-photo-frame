@@ -21,6 +21,20 @@ pub struct UiHandle {
 }
 
 impl UiHandle {
+    pub fn is_alive(&mut self) -> Result<bool> {
+        if let Some(child) = self.child.as_mut() {
+            if let Some(status) = child.try_wait().context("checking Wi-Fi UI status")? {
+                info!(?status, "Wi-Fi UI exited");
+                self.child = None;
+                Ok(false)
+            } else {
+                Ok(true)
+            }
+        } else {
+            Ok(false)
+        }
+    }
+
     pub fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
             if let Ok(Some(_)) = child.try_wait() {
@@ -40,7 +54,8 @@ impl Drop for UiHandle {
 }
 
 pub fn spawn(settings: &Settings, info: HotspotInfo) -> Result<UiHandle> {
-    let mut command = Command::new(env::current_exe().context("resolving wifi-watcher executable")?);
+    let mut command =
+        Command::new(env::current_exe().context("resolving wifi-watcher executable")?);
     command.arg("--ui");
     command.env("HOTSPOT_SSID", &info.ssid);
     command.env("HOTSPOT_PASSWORD", &info.password);
@@ -51,9 +66,7 @@ pub fn spawn(settings: &Settings, info: HotspotInfo) -> Result<UiHandle> {
     let child = command
         .spawn()
         .context("spawning Wi-Fi provisioning UI as frame user")?;
-    Ok(UiHandle {
-        child: Some(child),
-    })
+    Ok(UiHandle { child: Some(child) })
 }
 
 pub fn run_from_env() -> Result<()> {
@@ -62,6 +75,10 @@ pub fn run_from_env() -> Result<()> {
         password: env::var("HOTSPOT_PASSWORD").context("HOTSPOT_PASSWORD not set")?,
         ip: env::var("HOTSPOT_IP").context("HOTSPOT_IP not set")?,
     };
+    run_ui(info)
+}
+
+pub fn run_blocking(info: HotspotInfo) -> Result<()> {
     run_ui(info)
 }
 
@@ -119,7 +136,9 @@ fn terminate_child(child: &mut Child) -> Result<()> {
     unsafe {
         if libc::kill(pid as i32, libc::SIGTERM) != 0 {
             let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::InvalidInput && err.raw_os_error() != Some(libc::ESRCH) {
+            if err.kind() != std::io::ErrorKind::InvalidInput
+                && err.raw_os_error() != Some(libc::ESRCH)
+            {
                 return Err(err).context("sending SIGTERM to Wi-Fi UI");
             }
         }
@@ -154,7 +173,12 @@ fn run_ui(info: HotspotInfo) -> Result<()> {
     eframe::run_native(
         &title,
         native_options,
-        Box::new(move |cc| Ok(Box::new(WifiDownApp::new(cc.egui_ctx.clone(), info.clone())))),
+        Box::new(move |cc| {
+            Ok(Box::new(WifiDownApp::new(
+                cc.egui_ctx.clone(),
+                info.clone(),
+            )))
+        }),
     )
     .context("running Wi-Fi down UI")?;
     Ok(())

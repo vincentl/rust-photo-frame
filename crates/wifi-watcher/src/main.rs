@@ -44,10 +44,9 @@ async fn main() -> Result<()> {
 }
 
 fn run_ui_mode() -> Result<()> {
-    let payload = std::env::var("WIFI_UI_PAYLOAD")
-        .context("WIFI_UI_PAYLOAD missing for --show-ui mode")?;
-    let info: HotspotInfo =
-        serde_json::from_str(&payload).context("parsing WIFI_UI_PAYLOAD")?;
+    let payload =
+        std::env::var("WIFI_UI_PAYLOAD").context("WIFI_UI_PAYLOAD missing for --show-ui mode")?;
+    let info: HotspotInfo = serde_json::from_str(&payload).context("parsing WIFI_UI_PAYLOAD")?;
     ui::run_blocking(info)
 }
 
@@ -221,13 +220,15 @@ impl Controller {
     }
 
     fn ensure_photo_app_started(&self) -> Result<()> {
+        let unit = &self.settings.photo_service_unit;
         let output = std::process::Command::new("systemctl")
-            .args(["start", "photo-app.target"])
+            .args(["start", unit])
             .output()
-            .context("starting photo-app.target")?;
+            .with_context(|| format!("starting {unit}"))?;
         if !output.status.success() {
             warn!(
-                "photo-app.target start returned non-zero: {}",
+                "{} start returned non-zero: {}",
+                unit,
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -235,13 +236,15 @@ impl Controller {
     }
 
     fn stop_photo_app(&self) -> Result<()> {
+        let unit = &self.settings.photo_service_unit;
         let output = std::process::Command::new("systemctl")
-            .args(["stop", "photo-app.service"])
+            .args(["stop", unit])
             .output()
-            .context("stopping photo-app.service")?;
+            .with_context(|| format!("stopping {unit}"))?;
         if !output.status.success() {
             warn!(
-                "photo-app.service stop returned non-zero: {}",
+                "{} stop returned non-zero: {}",
+                unit,
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -254,13 +257,15 @@ impl Controller {
     }
 
     fn ensure_setter(&self) -> Result<()> {
+        let unit = &self.settings.wifi_setter_unit;
         let output = std::process::Command::new("systemctl")
-            .args(["start", "wifi-setter.service"])
+            .args(["start", unit])
             .output()
-            .context("starting wifi-setter.service")?;
+            .with_context(|| format!("starting {unit}"))?;
         if !output.status.success() {
             warn!(
-                "wifi-setter start returned non-zero: {}",
+                "{} start returned non-zero: {}",
+                unit,
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -268,13 +273,15 @@ impl Controller {
     }
 
     fn stop_setter(&self) -> Result<()> {
+        let unit = &self.settings.wifi_setter_unit;
         let output = std::process::Command::new("systemctl")
-            .args(["stop", "wifi-setter.service"])
+            .args(["stop", unit])
             .output()
-            .context("stopping wifi-setter.service")?;
+            .with_context(|| format!("stopping {unit}"))?;
         if !output.status.success() {
             warn!(
-                "wifi-setter stop returned non-zero: {}",
+                "{} stop returned non-zero: {}",
+                unit,
                 String::from_utf8_lossy(&output.stderr)
             );
         }

@@ -103,4 +103,7 @@ if [[ -f "${SYSTEMD_SOURCE}/photo-sync.timer" ]]; then
     fi
 fi
 
+enable_unit wifi-watcher.service
+activate_unit wifi-watcher.service
+
 log INFO "Systemd units installed and activated"

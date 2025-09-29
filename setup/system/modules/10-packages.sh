@@ -35,6 +35,9 @@ PACKAGES=(
     curl
     git
     rsync
+    network-manager
+    dnsmasq-base
+    iptables
 )
 
 log INFO "Installing required packages: ${PACKAGES[*]}"

@@ -14,12 +14,13 @@ A digital photo frame driver implemented in Rust with a pipeline tuned for Raspb
 
 1. [Hardware](#hardware)
 2. [Software Setup](#software-setup)
-3. [Features](#features)
-4. [Architecture Overview](#architecture-overview)
-5. [Configuration](#configuration)
-6. [Fabrication](#fabrication)
-7. [References](#references)
-8. [License](#license)
+3. [Wi-Fi Provisioning](#wi-fi-provisioning)
+4. [Features](#features)
+5. [Architecture Overview](#architecture-overview)
+6. [Configuration](#configuration)
+7. [Fabrication](#fabrication)
+8. [References](#references)
+9. [License](#license)
 
 ## Hardware
 
@@ -72,6 +73,15 @@ After a successful install the filesystem layout is:
 ```
 
 The `photo-frame.service` unit runs the application with its working directory set to `/opt/photo-frame/var` and automatically restarts on failure. It exports the `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` variables so the compositor grants fullscreen access when the service starts outside an interactive login. Override configuration can be dropped in `/etc/default/photo-frame` when needed.
+
+## Wi-Fi Provisioning
+
+When the frame cannot reach your home network, a dedicated watcher spins up a captive-portal-style
+workflow: `wifi-watcher.service` toggles a temporary hotspot, `wifi-setter.service` hosts an HTTP
+form to collect credentials, and the on-device UI shows a QR code plus the rotating passphrase. Once
+Wi-Fi returns the watcher tears everything down and relaunches `photo-frame.service`. The status
+helper (`/opt/photo-frame/bin/photo-frame-status`) prints connectivity and service health summaries
+over SSH. [Provisioning deep dive →](docs/wifi-provisioning.md)
 
 ## Features
 

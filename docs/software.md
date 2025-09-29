@@ -118,3 +118,7 @@ Use the following environment variables to customise an installation:
 | `SERVICE_GROUP` | invoking user's primary group | Group that owns `/opt/photo-frame/var` alongside `SERVICE_USER`. |
 | `CARGO_PROFILE` | `release` | Cargo profile passed to `cargo build`. |
 | `DRY_RUN` | unset | Set to `1` to see the actions that would be taken without modifying the system. |
+
+After both stages finish, the installer enables `wifi-watcher.service`, stages `wifi-setter.service`,
+and copies the hotspot template. The provisioning workflow—including how to use the temporary
+hotspot and web UI—is documented in detail in [Wi-Fi Provisioning and Hotspot Workflow](wifi-provisioning.md).

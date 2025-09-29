@@ -60,6 +60,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 | **Presentation**       | `photo-effect`, `matting`                                             |
 | **Greeting Screen**    | `greeting-screen`                                                     |
 | **Power schedule**     | `sleep-mode`                                                          |
+| **Wi-Fi provisioning** | `wifi-ifname`, `hotspot-ssid`, `hotspot-ip`                           |
 
 ## Key reference
 
@@ -70,6 +71,30 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Accepted values & defaults:** Any absolute or relative filesystem path. The setup pipeline provisions `/opt/photo-frame/var/photos` and points the default configuration there so both the runtime and any cloud sync job start from a known location.
 - **Effect on behavior:** Switching the path changes the library the watcher monitors; the viewer reloads the playlist when the directory contents change.
 - **Notes:** After the installer seeds `/opt/photo-frame/var/config.yaml`, edit that writable copy to move the library elsewhere (for example, to an attached drive or network share) if you do not want to keep photos under `/opt/photo-frame/var/photos`.
+
+### `wifi-ifname`
+
+- **Purpose:** Identifies the wireless interface that NetworkManager should manage for both the frame’s primary network and the fallback hotspot.
+- **Required?** Optional. Defaults to `wlan0`, which matches Raspberry Pi hardware out of the box.
+- **Accepted values & defaults:** Any interface name visible via `nmcli device status`. Override it if you use a USB Wi‑Fi adapter with a different identifier.
+- **Effect on behavior:** The Wi-Fi watcher disconnects or reconnects this device during provisioning. If the wrong interface is selected the hotspot cannot start and the provisioning UI will fail to appear.
+- **Notes:** You can also override this path temporarily by exporting `WIFI_IFNAME` before launching the services, but persisting it in the config keeps the automation idempotent.
+
+### `hotspot-ssid`
+
+- **Purpose:** Sets the SSID broadcast when the frame falls back to its self-hosted setup hotspot.
+- **Required?** Optional. Defaults to `Frame-Setup` for clarity during onboarding.
+- **Accepted values & defaults:** Any ASCII string supported by `nmcli`. Avoid spaces at the ends of the string; they are trimmed by client devices.
+- **Effect on behavior:** The Wi-Fi watcher writes the SSID into `/run/photo-frame/hotspot.env` and displays it in the on-device provisioning UI. Updating the value changes both places immediately on the next restart of the watcher service.
+- **Notes:** If you use multiple frames on the same bench, give each a unique SSID so you can tell hotspots apart while provisioning.
+
+### `hotspot-ip`
+
+- **Purpose:** Configures the management IP address that the hotspot advertises and that the setter API binds to.
+- **Required?** Optional. Defaults to `192.168.4.1`.
+- **Accepted values & defaults:** Any private IPv4 address not already in use on your network. Stick with the `192.168.x.x` or `10.x.x.x` ranges.
+- **Effect on behavior:** Determines which address the provisioning UI shares in its QR code and the socket where the `wifi-setter` web service listens. Changing it without updating clients leads to connection timeouts.
+- **Notes:** Make sure the chosen subnet does not overlap with the one your main Wi-Fi router assigns, otherwise devices may refuse to route traffic to the frame while the hotspot is active.
 
 ### `transition`
 

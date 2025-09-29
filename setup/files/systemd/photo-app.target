@@ -1,3 +1,0 @@
-[Unit]
-Description=Ready-to-run target for Photo App (started only when WiFi is up)
-Wants=photo-app.service
