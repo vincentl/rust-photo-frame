@@ -7,7 +7,11 @@
 # Example:
 #   ./make-fake-btime.sh orig.txt copy.txt "2020-01-01 12:00:00"
 #
-# Use the script to create a test photo library with "old" images, add a new image to check it is displayed more often
+# Use the script to create a test photo library with "old" images, add a new image to check it is displayed more often.
+#
+# Example
+#   find ~/photo-library-test -regex ".*\(jpeg\|png\)" \
+#   -exec bash -c 'tools/fake-btime.sh "$1" "/opt/photo-frame/var/photos/$(basename "$1")" "2020-01-01 12:00:00"' _ {} \;
 
 set -euo pipefail
 
