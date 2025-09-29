@@ -1684,26 +1684,59 @@ fn scale_image_to_cover_canvas(
     max_dim: u32,
 ) -> RgbaImage {
     let (src_w, src_h) = src.dimensions();
-    let iw = src_w.max(1) as f64;
-    let ih = src_h.max(1) as f64;
-    let cw = canvas_w.max(1) as f64;
-    let ch = canvas_h.max(1) as f64;
+    let safe_canvas_w = canvas_w.max(1);
+    let safe_canvas_h = canvas_h.max(1);
+    let safe_max_dim = max_dim.max(1);
 
-    let mut scale = (cw / iw).max(ch / ih);
-    if !scale.is_finite() || scale <= 0.0 {
-        scale = 1.0;
+    if src_w == 0 || src_h == 0 {
+        return RgbaImage::from_pixel(safe_canvas_w, safe_canvas_h, Rgba([0, 0, 0, 255]));
     }
 
-    let max_dim = max_dim.max(1) as f64;
-    let max_scale = (max_dim / iw).min(max_dim / ih);
-    if max_scale.is_finite() && max_scale > 0.0 {
-        scale = scale.min(max_scale);
-    }
+    let src_w_f = src_w as f64;
+    let src_h_f = src_h as f64;
+    let canvas_w_f = safe_canvas_w as f64;
+    let canvas_h_f = safe_canvas_h as f64;
 
-    let target_w = (iw * scale).ceil().clamp(1.0, max_dim) as u32;
-    let target_h = (ih * scale).ceil().clamp(1.0, max_dim) as u32;
+    let aspect_src = src_w_f / src_h_f;
+    let aspect_canvas = canvas_w_f / canvas_h_f;
 
-    let scaled = imageops::resize(src, target_w, target_h, imageops::FilterType::Triangle);
+    let (crop_x, crop_y, crop_w, crop_h) = if (aspect_src - aspect_canvas).abs() < f64::EPSILON {
+        (0, 0, src_w, src_h)
+    } else if aspect_src < aspect_canvas {
+        // Source is taller relative to the canvas; trim vertical excess.
+        let desired_h = (src_w_f / aspect_canvas)
+            .round()
+            .clamp(1.0, src_h_f) as u32;
+        let crop_y = ((src_h - desired_h) / 2).min(src_h.saturating_sub(desired_h));
+        (0, crop_y, src_w, desired_h.max(1))
+    } else {
+        // Source is wider relative to the canvas; trim horizontal excess.
+        let desired_w = (src_h_f * aspect_canvas)
+            .round()
+            .clamp(1.0, src_w_f) as u32;
+        let crop_x = ((src_w - desired_w) / 2).min(src_w.saturating_sub(desired_w));
+        (crop_x, 0, desired_w.max(1), src_h)
+    };
+
+    let crop = imageops::crop_imm(src, crop_x, crop_y, crop_w, crop_h).to_image();
+
+    let scale_cap_w = safe_max_dim as f64 / safe_canvas_w as f64;
+    let scale_cap_h = safe_max_dim as f64 / safe_canvas_h as f64;
+    let needs_downscale = safe_canvas_w > safe_max_dim || safe_canvas_h > safe_max_dim;
+    let uniform_scale = if needs_downscale {
+        scale_cap_w.min(scale_cap_h)
+    } else {
+        1.0
+    };
+
+    let target_w = ((safe_canvas_w as f64) * uniform_scale)
+        .round()
+        .clamp(1.0, safe_max_dim as f64) as u32;
+    let target_h = ((safe_canvas_h as f64) * uniform_scale)
+        .round()
+        .clamp(1.0, safe_max_dim as f64) as u32;
+    let scaled = imageops::resize(&crop, target_w, target_h, imageops::FilterType::Triangle);
+
     center_crop_or_pad(scaled, canvas_w, canvas_h)
 }
 
@@ -1759,6 +1792,21 @@ mod tests {
         let top_left = canvas.get_pixel(0, 0);
         let bottom_right = canvas.get_pixel(1919, 1079);
         assert!(top_left[3] == 255 && bottom_right[3] == 255);
+    }
+
+    #[test]
+    fn scale_cover_portrait_fills_width() {
+        let src = make_gradient(600, 4000);
+        let canvas = scale_image_to_cover_canvas(&src, 1920, 1080, 4096);
+        assert_eq!(canvas.dimensions(), (1920, 1080));
+
+        let left_bar = (0..1080).all(|y| *canvas.get_pixel(0, y) == Rgba([0, 0, 0, 255]));
+        let right_bar = (0..1080).all(|y| *canvas.get_pixel(1919, y) == Rgba([0, 0, 0, 255]));
+
+        assert!(
+            !(left_bar || right_bar),
+            "expected portrait background to cover full width without black bars"
+        );
     }
 }
 
