@@ -301,8 +301,11 @@ pub enum MattingMode {
     Blur {
         #[serde(default = "MattingMode::default_blur_sigma")]
         sigma: f32,
-        #[serde(default, rename = "max-sample-dimension")]
-        max_sample_dimension: Option<u32>,
+        #[serde(
+            default = "MattingMode::default_blur_sample_scale",
+            rename = "sample-scale"
+        )]
+        sample_scale: f32,
         #[serde(default)]
         backend: BlurBackend,
     },
@@ -493,7 +496,9 @@ impl MattingOptions {
             },
             MattingKind::Blur => MattingMode::Blur {
                 sigma: base.sigma.unwrap_or_else(MattingMode::default_blur_sigma),
-                max_sample_dimension: base.max_sample_dimension,
+                sample_scale: base
+                    .sample_scale
+                    .unwrap_or_else(MattingMode::default_blur_sample_scale),
                 backend: base.blur_backend.unwrap_or_default(),
             },
             MattingKind::Studio => MattingMode::Studio {
@@ -544,7 +549,7 @@ struct MattingOptionBuilder {
     max_upscale_factor: Option<f32>,
     color: Option<[u8; 3]>,
     sigma: Option<f32>,
-    max_sample_dimension: Option<u32>,
+    sample_scale: Option<f32>,
     blur_backend: Option<BlurBackend>,
     bevel_width_px: Option<f32>,
     bevel_color: Option<[u8; 3]>,
@@ -628,11 +633,11 @@ where
                     }
                     builder.sigma = Some(inline_value_to::<f32, E>(value)?);
                 }
-                "max-sample-dimension" => {
-                    if builder.max_sample_dimension.is_some() {
-                        return Err(de::Error::duplicate_field("max-sample-dimension"));
+                "sample-scale" => {
+                    if builder.sample_scale.is_some() {
+                        return Err(de::Error::duplicate_field("sample-scale"));
                     }
-                    builder.max_sample_dimension = Some(inline_value_to::<u32, E>(value)?);
+                    builder.sample_scale = Some(inline_value_to::<f32, E>(value)?);
                 }
                 "backend" => {
                     if builder.blur_backend.is_some() {
@@ -645,7 +650,7 @@ where
                         other,
                         &[
                             "sigma",
-                            "max-sample-dimension",
+                            "sample-scale",
                             "backend",
                             "minimum-mat-percentage",
                             "max-upscale-factor",
@@ -1098,11 +1103,11 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
                             }
                             builder.sigma = Some(map.next_value()?);
                         }
-                        "max-sample-dimension" => {
-                            if builder.max_sample_dimension.is_some() {
-                                return Err(de::Error::duplicate_field("max-sample-dimension"));
+                        "sample-scale" => {
+                            if builder.sample_scale.is_some() {
+                                return Err(de::Error::duplicate_field("sample-scale"));
                             }
-                            builder.max_sample_dimension = Some(map.next_value()?);
+                            builder.sample_scale = Some(map.next_value()?);
                         }
                         "backend" => {
                             if builder.blur_backend.is_some() {
@@ -1115,7 +1120,7 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
                                 other,
                                 &[
                                     "sigma",
-                                    "max-sample-dimension",
+                                    "sample-scale",
                                     "backend",
                                     "minimum-mat-percentage",
                                     "max-upscale-factor",
@@ -1298,9 +1303,8 @@ impl MattingMode {
         20.0
     }
 
-    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
-    pub const fn default_blur_max_sample_dimension() -> u32 {
-        2048
+    pub const fn default_blur_sample_scale() -> f32 {
+        1.0
     }
 
     const fn default_studio_bevel_width_px() -> f32 {

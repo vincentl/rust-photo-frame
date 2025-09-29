@@ -352,7 +352,7 @@ Every entry inside `matting.options` accepts the shared settings below:
 ### `blur`
 
 - **`sigma`** (float, default `20.0`): Gaussian blur radius applied to a scaled copy of the photo that covers the screen. Larger values yield softer backgrounds; zero disables the blur but keeps the scaled image.
-- **`max-sample-dimension`** (integer or `null`, default `null`; falls back to `2048` on 64-bit ARM, otherwise the canvas size): Optional cap on the intermediate blur resolution. Lower caps downsample before blurring, cutting CPU/GPU cost while preserving the dreamy backdrop.
+- **`sample-scale`** (float, default `1.0`): Ratio between the canvas resolution and the intermediate blur buffer. The renderer first scales the photo to the canvas at 1:1, then optionally downsamples by this factor before blurring. Values below `1.0` trade fidelity for speed; keep it at `1.0` for distortion-free mats.
 - **`backend`** (`cpu` or `neon`, default `cpu`): Blur implementation to use. `neon` opts into the vector-accelerated path on 64-bit ARM; if unsupported at runtime the app gracefully falls back to the CPU renderer.
 
 ### `studio`

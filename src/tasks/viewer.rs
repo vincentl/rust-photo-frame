@@ -289,7 +289,7 @@ pub fn run_windowed(
             }
             MattingMode::Blur {
                 sigma,
-                max_sample_dimension,
+                sample_scale,
                 backend,
             } => {
                 let (bg_w, bg_h) = resize_to_cover(canvas_w, canvas_h, width, height, max_dim);
@@ -306,35 +306,27 @@ pub fn run_windowed(
                     bg = canvas;
                 }
                 if *sigma > 0.0 {
-                    let limit = max_sample_dimension
-                        .filter(|v| *v > 0)
-                        .unwrap_or({
-                            #[cfg(target_arch = "aarch64")]
-                            {
-                                MattingMode::default_blur_max_sample_dimension()
-                            }
-                            #[cfg(not(target_arch = "aarch64"))]
-                            {
-                                max_dim
-                            }
-                        })
-                        .min(max_dim)
-                        .max(1);
-
                     let mut sample = bg;
                     let mut sigma_px = *sigma;
-                    let canvas_max = canvas_w.max(canvas_h).max(1);
-                    if canvas_max > limit {
-                        let scale = (limit as f32) / (canvas_max as f32);
-                        let sample_w =
-                            ((canvas_w as f32) * scale).round().clamp(1.0, limit as f32) as u32;
-                        let sample_h =
-                            ((canvas_h as f32) * scale).round().clamp(1.0, limit as f32) as u32;
+                    let scale = sample_scale
+                        .is_finite()
+                        .then_some(*sample_scale)
+                        .unwrap_or_else(MattingMode::default_blur_sample_scale)
+                        .clamp(0.01, 1.0);
+                    if scale < 1.0 {
+                        let sample_w = ((canvas_w as f32) * scale)
+                            .round()
+                            .clamp(1.0, canvas_w as f32)
+                            as u32;
+                        let sample_h = ((canvas_h as f32) * scale)
+                            .round()
+                            .clamp(1.0, canvas_h as f32)
+                            as u32;
                         sample = imageops::resize(
                             &sample,
                             sample_w,
                             sample_h,
-                            imageops::FilterType::Triangle,
+                            imageops::FilterType::CatmullRom,
                         );
                         sigma_px *= scale.max(0.01);
                     }
