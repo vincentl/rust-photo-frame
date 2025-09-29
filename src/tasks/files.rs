@@ -74,7 +74,7 @@ pub async fn run(
                     match &event.kind {
                         EventKind::Create(CreateKind::File) => {
                             for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
-                                info!(path = %p.display(), "fs: add (create)");
+                                debug!(path = %p.display(), "fs: add (create)");
                                 let created_at = photo_created_at(&p);
                                 let info = PhotoInfo { path: p.clone(), created_at };
                                 let _ = to_manager.send(InventoryEvent::PhotoAdded(info)).await;
@@ -82,7 +82,7 @@ pub async fn run(
                         }
                         EventKind::Remove(RemoveKind::File) => {
                             for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
-                                info!(path = %p.display(), "fs: remove (remove)");
+                                debug!(path = %p.display(), "fs: remove (remove)");
                                 let _ = to_manager.send(InventoryEvent::PhotoRemoved(p)).await;
                             }
                         }
@@ -90,12 +90,12 @@ pub async fn run(
                             // macOS often reports moves as Name(Any). Decide per-path by existence.
                             for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
                                 if p.exists() {
-                                    info!(path = %p.display(), "fs: add (rename/name)");
+                                    debug!(path = %p.display(), "fs: add (rename/name)");
                                     let created_at = photo_created_at(&p);
                                     let info = PhotoInfo { path: p.clone(), created_at };
                                     let _ = to_manager.send(InventoryEvent::PhotoAdded(info)).await;
                                 } else {
-                                    info!(path = %p.display(), "fs: remove (rename/name)");
+                                    debug!(path = %p.display(), "fs: remove (rename/name)");
                                     let _ = to_manager.send(InventoryEvent::PhotoRemoved(p)).await;
                                 }
                             }
