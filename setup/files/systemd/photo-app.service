@@ -8,7 +8,7 @@ Type=simple
 User=frame
 Group=frame
 WorkingDirectory=/opt/photo-frame
-ExecStart=/opt/photo-frame/bin/photo-frame --config /etc/photo-frame/config.yaml
+ExecStart=/opt/photo-frame/bin/photo-frame /etc/photo-frame/config.yaml
 Restart=on-failure
 
 [Install]
