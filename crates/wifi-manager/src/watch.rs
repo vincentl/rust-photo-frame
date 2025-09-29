@@ -99,7 +99,14 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
                         WatchState::Online
                     }
                     (WatchState::Hotspot, false) => {
-                        WatchState::Hotspot
+                        info!("state transition: HOTSPOT -> OFFLINE (connectivity still missing)");
+                        if let Some(mut active) = hotspot_state.take() {
+                            if let Err(err) = active.stop(&config).await {
+                                warn!(error = ?err, "failed to fully stop hotspot while re-entering offline state");
+                            }
+                        }
+                        offline_since = Some(Instant::now());
+                        WatchState::Offline
                     }
                 };
 
