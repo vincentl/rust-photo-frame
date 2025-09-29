@@ -114,6 +114,7 @@ Use the following environment variables to customise an installation:
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `INSTALL_ROOT` | `/opt/photo-frame` | Target installation prefix. |
-| `SERVICE_USER` | `photo-frame` | The systemd account that owns `/opt/photo-frame/var`. Created automatically when missing. |
+| `SERVICE_USER` | invoking user | The systemd account that owns `/opt/photo-frame/var`. Must already exist. |
+| `SERVICE_GROUP` | invoking user's primary group | Group that owns `/opt/photo-frame/var` alongside `SERVICE_USER`. |
 | `CARGO_PROFILE` | `release` | Cargo profile passed to `cargo build`. |
 | `DRY_RUN` | unset | Set to `1` to see the actions that would be taken without modifying the system. |
