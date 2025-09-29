@@ -8,6 +8,7 @@ A digital photo frame driver implemented in Rust with a pipeline tuned for Raspb
 
 - Runs entirely on-device with a configurable playlist weighting system.
 - Supports rich visual treatments (mats, transitions, print simulation) without requiring graphics expertise.
+- Sleep scheduling with manual overrides and Wayland-friendly DPMS commands for HDMI displays.
 
 ## Table of Contents
 
@@ -109,6 +110,8 @@ flowchart LR
 ## Configuration
 
 All configuration options—from playlist weighting and greeting screens to transition tuning—are documented in depth, including starter YAML examples and per-key reference tables. [Full details →](docs/configuration.md)
+
+Need help wiring the sleep schedule to Raspberry Pi + Dell HDMI hardware? The dedicated power guide covers DPMS commands, troubleshooting, and verification steps. [Power & sleep details →](docs/power-and-sleep.md)
 
 ## Fabrication
 
