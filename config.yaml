@@ -101,7 +101,10 @@ matting:
   type-selection: random
   options:
     fixed-color:
-      color: [0, 0, 0]
+      colors:
+        - [0, 0, 0]
+        - [32, 32, 32]
+      color-selection: sequential # or random
       minimum-mat-percentage: 0.0
       max-upscale-factor: 1.0
     blur:
@@ -110,6 +113,11 @@ matting:
       sample-scale: 1.0 # reduce toward 0.0 to trade fidelity for blur speed
       backend: neon # options: cpu, neon (auto-falls back to cpu if unsupported)
     studio:
+      colors:
+        - [24, 24, 24]
+        - photo-average
+        - [210, 210, 210]
+      color-selection: random # or sequential
       minimum-mat-percentage: 8.0
       bevel-width-px: 4.0
       bevel-color: [255, 255, 255]

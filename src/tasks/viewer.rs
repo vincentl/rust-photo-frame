@@ -201,8 +201,14 @@ pub fn run_windowed(
             texture_strength,
             warp_period_px,
             weft_period_px,
+            ..
         } = &matting.style
         {
+            let mut rng = rand::rng();
+            let mat_color = matting
+                .runtime
+                .select_studio_color(&mut rng, avg_color)
+                .unwrap_or(avg_color);
             let mut bevel_px = bevel_width_px.max(0.0);
             let margin_x = (canvas_w as f32 * margin).round();
             let margin_y = (canvas_h as f32 * margin).round();
@@ -254,7 +260,7 @@ pub fn run_windowed(
                 photo_w,
                 photo_h,
                 main_img.as_ref(),
-                avg_color,
+                mat_color,
                 bevel_px,
                 *bevel_color,
                 *texture_strength,
@@ -287,7 +293,13 @@ pub fn run_windowed(
         };
 
         let mut background = match &matting.style {
-            MattingMode::FixedColor { color } => {
+            MattingMode::FixedColor { colors, .. } => {
+                let mut rng = rand::rng();
+                let color = matting
+                    .runtime
+                    .select_fixed_color(&mut rng)
+                    .or_else(|| colors.first().copied())
+                    .unwrap_or([0, 0, 0]);
                 let px = Rgba([color[0], color[1], color[2], 255]);
                 RgbaImage::from_pixel(canvas_w, canvas_h, px)
             }
@@ -1704,16 +1716,12 @@ fn scale_image_to_cover_canvas(
         (0, 0, src_w, src_h)
     } else if aspect_src < aspect_canvas {
         // Source is taller relative to the canvas; trim vertical excess.
-        let desired_h = (src_w_f / aspect_canvas)
-            .round()
-            .clamp(1.0, src_h_f) as u32;
+        let desired_h = (src_w_f / aspect_canvas).round().clamp(1.0, src_h_f) as u32;
         let crop_y = ((src_h - desired_h) / 2).min(src_h.saturating_sub(desired_h));
         (0, crop_y, src_w, desired_h.max(1))
     } else {
         // Source is wider relative to the canvas; trim horizontal excess.
-        let desired_w = (src_h_f * aspect_canvas)
-            .round()
-            .clamp(1.0, src_w_f) as u32;
+        let desired_w = (src_h_f * aspect_canvas).round().clamp(1.0, src_w_f) as u32;
         let crop_x = ((src_w - desired_w) / 2).min(src_w.saturating_sub(desired_w));
         (crop_x, 0, desired_w.max(1), src_h)
     };
