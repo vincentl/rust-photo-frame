@@ -5,9 +5,11 @@ MODULE="app:20-stage"
 DRY_RUN="${DRY_RUN:-0}"
 CARGO_PROFILE="${CARGO_PROFILE:-release}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
-SERVICE_USER="${SERVICE_USER:-photo-frame}"
+SERVICE_USER="${SERVICE_USER:-$(id -un)}"
+SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn)}"
 INSTALL_ROOT_ESC="$(printf '%s' "${INSTALL_ROOT}" | sed 's/[&/]/\\&/g')"
 SERVICE_USER_ESC="$(printf '%s' "${SERVICE_USER}" | sed 's/[&/]/\\&/g')"
+SERVICE_GROUP_ESC="$(printf '%s' "${SERVICE_GROUP}" | sed 's/[&/]/\\&/g')"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 STAGE_ROOT="${STAGE_ROOT:-${SCRIPT_DIR}/../build}"
@@ -134,6 +136,7 @@ if [[ -d "${SYSTEMD_SRC}" ]]; then
             sed -i \
                 -e "s|@INSTALL_ROOT@|${INSTALL_ROOT_ESC}|g" \
                 -e "s|@SERVICE_USER@|${SERVICE_USER_ESC}|g" \
+                -e "s|@SERVICE_GROUP@|${SERVICE_GROUP_ESC}|g" \
                 "${unit}"
         done
         shopt -u nullglob
