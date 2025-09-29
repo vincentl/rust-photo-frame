@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, ensure, Context, Result};
-use chrono::{DateTime, Datelike, NaiveTime, Utc, Weekday};
+use chrono::{DateTime, Datelike, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use rand::seq::IteratorRandom;
 use rand::Rng;
@@ -2682,6 +2682,10 @@ impl WeekdayName {
     fn as_str(self) -> &'static str {
         weekday_label(self.0)
     }
+
+    fn weekday(self) -> Weekday {
+        self.0
+    }
 }
 
 impl PartialOrd for WeekdayName {
@@ -2738,6 +2742,11 @@ pub struct DisplayPowerConfig {
 
 impl DisplayPowerConfig {
     fn prepare_controller(&self) -> Result<DisplayPowerController> {
+        const DEFAULT_SLEEP_COMMAND: &str =
+            "wlr-randr --output @OUTPUT@ --off || vcgencmd display_power 0";
+        const DEFAULT_WAKE_COMMAND: &str =
+            "wlr-randr --output @OUTPUT@ --on  || vcgencmd display_power 1";
+
         let mut plan = DisplayPowerPlan::default();
 
         if let Some(path) = &self.backlight_path {
@@ -2768,8 +2777,20 @@ impl DisplayPowerConfig {
             });
         }
 
-        plan.sleep_command = self.sleep_command.clone();
-        plan.wake_command = self.wake_command.clone();
+        plan.sleep_command = self.sleep_command.clone().or_else(|| {
+            if plan.sysfs.is_none() {
+                Some(DEFAULT_SLEEP_COMMAND.to_string())
+            } else {
+                None
+            }
+        });
+        plan.wake_command = self.wake_command.clone().or_else(|| {
+            if plan.sysfs.is_none() {
+                Some(DEFAULT_WAKE_COMMAND.to_string())
+            } else {
+                None
+            }
+        });
 
         DisplayPowerController::new(plan)
     }
@@ -2818,20 +2839,38 @@ impl SleepModeConfig {
             "sleep-mode.dim-brightness must be between 0.0 and 1.0"
         );
 
-        let default = parse_window(&self.on_hours, base_tz, "sleep-mode.on-hours")?;
+        let default = SleepScheduleEntry::new(
+            parse_window(&self.on_hours, base_tz, "sleep-mode.on-hours")?,
+            "sleep-mode.on-hours",
+            ScheduleSource::Default,
+        );
+
         let weekday = match &self.weekday_override {
-            Some(spec) => Some(parse_window(spec, base_tz, "sleep-mode.weekday-override")?),
+            Some(spec) => Some(SleepScheduleEntry::new(
+                parse_window(spec, base_tz, "sleep-mode.weekday-override")?,
+                "sleep-mode.weekday-override",
+                ScheduleSource::WeekdayOverride,
+            )),
             None => None,
         };
+
         let weekend = match &self.weekend_override {
-            Some(spec) => Some(parse_window(spec, base_tz, "sleep-mode.weekend-override")?),
+            Some(spec) => Some(SleepScheduleEntry::new(
+                parse_window(spec, base_tz, "sleep-mode.weekend-override")?,
+                "sleep-mode.weekend-override",
+                ScheduleSource::WeekendOverride,
+            )),
             None => None,
         };
+
         let mut days = BTreeMap::new();
         for (name, spec) in &self.days {
             let label = format!("sleep-mode.days.{}", name.as_str());
             let window = parse_window(spec, base_tz, &label)?;
-            days.insert(*name, window);
+            days.insert(
+                *name,
+                SleepScheduleEntry::new(window, label, ScheduleSource::DayOverride(name.weekday())),
+            );
         }
 
         let display_power = match &self.display_power {
@@ -2840,6 +2879,7 @@ impl SleepModeConfig {
         };
 
         self.runtime = Some(SleepModeRuntime {
+            base_timezone: base_tz,
             default,
             weekday,
             weekend,
@@ -2853,29 +2893,24 @@ impl SleepModeConfig {
 
 #[derive(Debug, Clone)]
 pub struct SleepModeRuntime {
-    default: SleepWindow,
-    weekday: Option<SleepWindow>,
-    weekend: Option<SleepWindow>,
-    days: BTreeMap<WeekdayName, SleepWindow>,
+    base_timezone: Tz,
+    default: SleepScheduleEntry,
+    weekday: Option<SleepScheduleEntry>,
+    weekend: Option<SleepScheduleEntry>,
+    days: BTreeMap<WeekdayName, SleepScheduleEntry>,
     dim_brightness: f32,
     display_power: Option<DisplayPowerController>,
 }
 
 impl SleepModeRuntime {
-    pub fn is_awake(&self, now: DateTime<Utc>) -> bool {
-        let day = now.with_timezone(&self.default.timezone).weekday();
-        let schedule = self.schedule_for(day);
-        schedule.contains(now)
+    pub fn base_timezone(&self) -> Tz {
+        self.base_timezone
     }
 
-    fn schedule_for(&self, day: Weekday) -> &SleepWindow {
-        if let Some(specific) = self.days.get(&WeekdayName(day)) {
-            return specific;
-        }
-        match day {
-            Weekday::Sat | Weekday::Sun => self.weekend.as_ref().unwrap_or(&self.default),
-            _ => self.weekday.as_ref().unwrap_or(&self.default),
-        }
+    pub fn is_awake(&self, now: DateTime<Utc>) -> bool {
+        let day = now.with_timezone(&self.base_timezone).weekday();
+        let entry = self.schedule_entry_for(day);
+        entry.window.contains(now)
     }
 
     pub fn dim_brightness(&self) -> f32 {
@@ -2885,6 +2920,134 @@ impl SleepModeRuntime {
     pub fn display_power(&self) -> Option<&DisplayPowerController> {
         self.display_power.as_ref()
     }
+
+    pub fn schedule_snapshot(&self, now: DateTime<Utc>) -> SleepScheduleSnapshot {
+        let local = now.with_timezone(&self.base_timezone);
+        let entry = self.schedule_entry_for(local.weekday());
+        SleepScheduleSnapshot {
+            now_utc: now,
+            now_local: local,
+            timezone: self.base_timezone,
+            awake: entry.window.contains(now),
+            active_label: entry.label.clone(),
+            active_source: entry.source,
+            next_transition: self.next_transition_after(now),
+        }
+    }
+
+    pub fn next_transition_after(&self, now: DateTime<Utc>) -> Option<ScheduleBoundary> {
+        let local = now.with_timezone(&self.base_timezone);
+        let date = local.date_naive();
+        let mut candidates = Vec::new();
+        for offset in -1..=2 {
+            if let Some(day) = date.checked_add_signed(chrono::Duration::days(offset.into())) {
+                candidates.extend(self.boundaries_for_date(day));
+            }
+        }
+        candidates.sort_by_key(|boundary| boundary.at_utc);
+        candidates
+            .into_iter()
+            .find(|boundary| boundary.at_utc > now)
+    }
+
+    pub fn upcoming_transitions(
+        &self,
+        start: DateTime<Utc>,
+        horizon: chrono::Duration,
+    ) -> Vec<ScheduleBoundary> {
+        let mut boundaries = Vec::new();
+        let end = start + horizon;
+        let start_local = start.with_timezone(&self.base_timezone);
+        let base_date = start_local.date_naive();
+        for offset in -1..=14 {
+            if let Some(day) = base_date.checked_add_signed(chrono::Duration::days(offset.into())) {
+                for boundary in self.boundaries_for_date(day) {
+                    if boundary.at_utc >= start && boundary.at_utc <= end {
+                        boundaries.push(boundary);
+                    }
+                }
+            }
+        }
+        boundaries.sort_by_key(|boundary| boundary.at_utc);
+        boundaries
+    }
+
+    fn schedule_entry_for(&self, day: Weekday) -> &SleepScheduleEntry {
+        if let Some(entry) = self.days.get(&WeekdayName(day)) {
+            return entry;
+        }
+        match day {
+            Weekday::Sat | Weekday::Sun => self.weekend.as_ref().unwrap_or(&self.default),
+            _ => self.weekday.as_ref().unwrap_or(&self.default),
+        }
+    }
+
+    fn boundaries_for_date(&self, date: chrono::NaiveDate) -> Vec<ScheduleBoundary> {
+        let weekday = date.weekday();
+        let entry = self.schedule_entry_for(weekday);
+        entry
+            .window
+            .boundaries_for_date(date)
+            .into_iter()
+            .map(|(local, awake)| {
+                let utc = local.with_timezone(&Utc);
+                ScheduleBoundary {
+                    at_utc: utc,
+                    at_local: utc.with_timezone(&self.base_timezone),
+                    awake,
+                    label: entry.label.clone(),
+                    source: entry.source,
+                    weekday,
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SleepScheduleEntry {
+    window: SleepWindow,
+    label: String,
+    source: ScheduleSource,
+}
+
+impl SleepScheduleEntry {
+    fn new(window: SleepWindow, label: impl Into<String>, source: ScheduleSource) -> Self {
+        Self {
+            window,
+            label: label.into(),
+            source,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleSource {
+    Default,
+    WeekdayOverride,
+    WeekendOverride,
+    DayOverride(Weekday),
+}
+
+#[derive(Debug, Clone)]
+pub struct SleepScheduleSnapshot {
+    pub now_utc: DateTime<Utc>,
+    pub now_local: DateTime<Tz>,
+    pub timezone: Tz,
+    pub awake: bool,
+    pub active_label: String,
+    pub active_source: ScheduleSource,
+    pub next_transition: Option<ScheduleBoundary>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScheduleBoundary {
+    pub at_utc: DateTime<Utc>,
+    pub at_local: DateTime<Tz>,
+    pub awake: bool,
+    pub label: String,
+    pub source: ScheduleSource,
+    pub weekday: Weekday,
 }
 
 #[derive(Debug, Clone)]
@@ -2892,13 +3055,57 @@ struct SleepWindow {
     timezone: Tz,
     start: NaiveTime,
     end: NaiveTime,
+    wraps: bool,
 }
 
 impl SleepWindow {
     fn contains(&self, instant: DateTime<Utc>) -> bool {
         let local = instant.with_timezone(&self.timezone);
         let time = local.time();
-        self.start <= time && time < self.end
+        if self.wraps {
+            time >= self.start || time < self.end
+        } else {
+            self.start <= time && time < self.end
+        }
+    }
+
+    fn boundaries_for_date(&self, date: chrono::NaiveDate) -> Vec<(DateTime<Tz>, bool)> {
+        let mut points = Vec::new();
+        let start = date.and_time(self.start);
+        if let Some(dt) = resolve_local_datetime(self.timezone, start) {
+            points.push((dt, true));
+        }
+
+        let end_date = if self.wraps {
+            date.checked_add_signed(chrono::Duration::days(1))
+                .unwrap_or(date)
+        } else {
+            date
+        };
+        let end = end_date.and_time(self.end);
+        if let Some(dt) = resolve_local_datetime(self.timezone, end) {
+            points.push((dt, false));
+        }
+        points
+    }
+}
+
+fn resolve_local_datetime(tz: Tz, naive: chrono::NaiveDateTime) -> Option<DateTime<Tz>> {
+    match tz.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(dt) => Some(dt),
+        chrono::LocalResult::Ambiguous(a, b) => Some(a.min(b)),
+        chrono::LocalResult::None => {
+            let mut adjusted = naive;
+            for _ in 0..180 {
+                adjusted += chrono::Duration::minutes(1);
+                match tz.from_local_datetime(&adjusted) {
+                    chrono::LocalResult::Single(dt) => return Some(dt),
+                    chrono::LocalResult::Ambiguous(a, b) => return Some(a.min(b)),
+                    chrono::LocalResult::None => continue,
+                }
+            }
+            None
+        }
     }
 }
 
@@ -2912,14 +3119,15 @@ fn parse_window(spec: &DailyHoursSpec, base_tz: Tz, label: &str) -> Result<Sleep
         label = label
     );
     ensure!(
-        start < end,
-        "{label}: start time must be before end time",
+        start != end,
+        "{label}: start and end must not be identical",
         label = label
     );
     Ok(SleepWindow {
         timezone: start_tz,
         start,
         end,
+        wraps: end <= start,
     })
 }
 
@@ -3041,6 +3249,135 @@ sleep-mode:
 
         assert!((runtime.dim_brightness() - 0.1).abs() < f32::EPSILON);
     }
+
+    #[test]
+    fn sleep_mode_supports_wrap_past_midnight() {
+        let yaml = r#"
+photo-library-path: /tmp/photos
+sleep-mode:
+  timezone: America/New_York
+  on-hours:
+    start: "22:00"
+    end: "08:00"
+"#;
+        let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+        let cfg = cfg.validated().unwrap();
+        let runtime = cfg
+            .sleep_mode
+            .as_ref()
+            .and_then(SleepModeConfig::runtime)
+            .cloned()
+            .expect("sleep runtime should exist");
+        let tz: Tz = "America/New_York".parse().unwrap();
+
+        let late_evening = tz
+            .with_ymd_and_hms(2024, 6, 1, 23, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(runtime.is_awake(late_evening));
+
+        let early_morning = tz
+            .with_ymd_and_hms(2024, 6, 2, 6, 30, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(runtime.is_awake(early_morning));
+
+        let midday = tz
+            .with_ymd_and_hms(2024, 6, 2, 12, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(!runtime.is_awake(midday));
+
+        let next_boundary = runtime.next_transition_after(midday).unwrap();
+        assert_eq!(
+            next_boundary.at_local.time(),
+            chrono::NaiveTime::from_hms_opt(22, 0, 0).unwrap()
+        );
+        assert!(next_boundary.awake);
+    }
+
+    #[test]
+    fn sleep_mode_dst_transitions_remain_on_wall_clock() {
+        let yaml = r#"
+photo-library-path: /tmp/photos
+sleep-mode:
+  timezone: America/New_York
+  on-hours:
+    start: "08:00"
+    end: "22:00"
+"#;
+        let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+        let cfg = cfg.validated().unwrap();
+        let runtime = cfg
+            .sleep_mode
+            .as_ref()
+            .and_then(SleepModeConfig::runtime)
+            .cloned()
+            .expect("sleep runtime should exist");
+        let tz: Tz = "America/New_York".parse().unwrap();
+
+        let before_dst = tz
+            .with_ymd_and_hms(2024, 3, 10, 7, 30, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        let next = runtime.next_transition_after(before_dst).unwrap();
+        assert_eq!(
+            next.at_local.time(),
+            chrono::NaiveTime::from_hms_opt(8, 0, 0).unwrap()
+        );
+
+        let before_fall_back = tz
+            .with_ymd_and_hms(2024, 11, 3, 21, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        let boundary = runtime.next_transition_after(before_fall_back).unwrap();
+        assert_eq!(
+            boundary.at_local.time(),
+            chrono::NaiveTime::from_hms_opt(22, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn sleep_mode_upcoming_transitions_reports_schedule() {
+        let yaml = r#"
+photo-library-path: /tmp/photos
+sleep-mode:
+  timezone: America/Los_Angeles
+  on-hours:
+    start: "08:00"
+    end: "22:00"
+  weekday-override:
+    start: "07:00"
+    end: "23:00"
+"#;
+        let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+        let cfg = cfg.validated().unwrap();
+        let runtime = cfg
+            .sleep_mode
+            .as_ref()
+            .and_then(SleepModeConfig::runtime)
+            .cloned()
+            .expect("sleep runtime should exist");
+        let tz: Tz = "America/Los_Angeles".parse().unwrap();
+        let start = tz
+            .with_ymd_and_hms(2024, 7, 3, 6, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        let transitions = runtime.upcoming_transitions(start, chrono::Duration::hours(24));
+        assert!(!transitions.is_empty());
+        assert!(transitions.iter().any(|b| {
+            b.at_local.time() == chrono::NaiveTime::from_hms_opt(7, 0, 0).unwrap() && b.awake
+        }));
+        assert!(transitions.iter().any(|b| {
+            b.at_local.time() == chrono::NaiveTime::from_hms_opt(23, 0, 0).unwrap() && !b.awake
+        }));
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3069,7 +3406,7 @@ pub struct Configuration {
     /// Greeting screen shown while the first assets are prepared.
     pub greeting_screen: GreetingScreenConfig,
     /// Optional sleep mode schedule controlling when the viewer idles.
-    #[serde(default)]
+    #[serde(default, alias = "sleep")]
     pub sleep_mode: Option<SleepModeConfig>,
 }
 

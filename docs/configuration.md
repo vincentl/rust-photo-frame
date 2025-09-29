@@ -144,16 +144,48 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Required?** Optional; when omitted the frame runs 24/7.
 - **Accepted values & defaults:** Mapping with the keys below. Times accept `HH:MM` or `HH:MM:SS` strings and may optionally include a trailing IANA timezone name (for example `"07:30 America/Los_Angeles"`). When no timezone is specified on a field, the top-level `timezone` value applies.
   - `timezone` — Required IANA timezone identifier. Sets the base clock used to pick weekday/weekend overrides and interpret times that do not specify their own zone.
-  - `on-hours.start` / `on-hours.end` — Required local times describing when the frame should be awake each day. Start must be earlier than end within the same day.
+  - `on-hours.start` / `on-hours.end` — Required local times describing when the frame should be awake each day. Start and end may wrap past midnight (for example `22:00 → 08:00` keeps the panel awake overnight). Start and end must not be identical.
   - `weekday-override` / `weekend-override` — Optional blocks with their own `start`/`end` that replace the default window on weekdays (`Mon–Fri`) or weekends (`Sat/Sun`).
-  - `days` — Optional map keyed by weekday name (`monday`, `tues`, …) that replaces both default and weekday/weekend overrides for specific days.
+  - `days` — Optional map keyed by weekday name (`monday`, `tues`, …) that replaces both default and weekday/weekend overrides for specific days. Precedence is `days[...]` → `weekday/weekend-override` → `on-hours`.
 - `dim-brightness` — Optional float between `0.0` (black) and `1.0` (white). Controls the solid color used while sleeping. Defaults to `0.05`.
 - `display-power` — Optional block that issues hardware sleep/wake actions in addition to dimming. Configure any combination of:
-  - `backlight-path` plus the required `sleep-value`/`wake-value` strings to write to a backlight sysfs node (for example `/sys/class/backlight/rpi_backlight/bl_power`).
-  - `sleep-command` and/or `wake-command` shell snippets that run when the frame transitions into or out of sleep.
-- **Effect on behavior:** Outside the configured "on" window the viewer stops advancing slides, cancels any in-flight transitions, and clears the surface to the dim color. When the schedule says to wake up, the currently loaded image is shown again and normal dwell/transition pacing resumes.
-- **Power management:** When `display-power` is configured the frame also executes the specified sysfs writes or commands so the panel actually powers down during sleep instead of merely showing a dark framebuffer.
-- **Notes:** Sending `SIGUSR1` to the process toggles a manual override—handy for a single-button GPIO input. One press flips between the scheduled state and its opposite (wake vs. sleep), and the next press returns control to the schedule. When the override is released the frame snaps back to whatever the schedule dictates at that moment.
+  - `backlight-path` plus the required `sleep-value`/`wake-value` strings to write to a backlight sysfs node (intended for DSI panels or laptop-class devices). HDMI monitors typically do **not** expose `/sys/class/backlight` entries.
+  - `sleep-command` and/or `wake-command` shell snippets that run when the frame transitions into or out of sleep. The defaults issue Wayland DPMS requests via `wlr-randr --output @OUTPUT@ --off|--on` with a fallback to `vcgencmd display_power 0|1`. The `@OUTPUT@` placeholder is replaced at runtime with the first connected output reported by `wlr-randr`, or `HDMI-A-1` if auto-detection fails.
+- **Effect on behavior:** Outside the configured "on" window the viewer stops advancing slides, cancels any in-flight transitions, and clears the surface to the dim color. When the schedule says to wake up, the currently loaded image is shown again and normal dwell/transition pacing resumes. The schedule is evaluated using the configured timezone on a wall-clock basis; DST transitions do not cause drift.
+- **Manual override:** Sending `SIGUSR1` to the process toggles a manual override—handy for a single-button GPIO input. The first press forces the opposite of the scheduled state (awake → sleep, or sleep → awake); the next press returns control to the schedule. Environment helpers `PHOTO_FRAME_SLEEP_OVERRIDE=sleep|wake` or `PHOTO_FRAME_SLEEP_OVERRIDE_FILE=/path/to/state` can seed an override at startup. Overrides are logged with timestamps and the schedule timeline continues to update in the background.
+- **CLI helpers:**
+  - `--verbose-sleep` logs the parsed schedule and the next 24 hours of transitions during startup.
+  - `--sleep-test <SECONDS>` forces the configured display-power commands to sleep, waits `SECONDS`, wakes the panel (retrying once after two seconds), and exits.
+
+#### Canonical example
+
+```yaml
+sleep:
+  timezone: America/New_York
+  on-hours:
+    # 8am–10pm; app sleeps outside this window
+    start: "08:00"
+    end:   "22:00"
+
+  # Optional overrides (take precedence over on-hours)
+  weekday-override:
+    start: "07:30"
+    end:   "23:00"
+  days:
+    sunday:
+      start: "09:30"
+      end:   "21:00"
+
+  # Dim color brightness (0=black, 1=white). Default 0.05
+  dim-brightness: 0.05
+
+  # True power control (HDMI monitor over Wayland)
+  display-power:
+    sleep-command: "wlr-randr --output HDMI-A-1 --off || vcgencmd display_power 0"
+    wake-command:  "wlr-randr --output HDMI-A-1 --on  || vcgencmd display_power 1"
+```
+
+The default configuration installs `/opt/photo-frame/bin/powerctl`, a thin wrapper around the same commands. Replace the example strings with `/opt/photo-frame/bin/powerctl sleep` / `wake` to use the helper and share a consistent detection script across deployments.
 
 ### `matting`
 
