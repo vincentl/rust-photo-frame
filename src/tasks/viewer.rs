@@ -6,7 +6,7 @@ use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand};
 use crate::platform::display_power::{DisplayPowerController, PowerCommandReport};
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
-use crate::processing::layout::{center_offset, resize_to_cover};
+use crate::processing::layout::center_offset;
 use crate::tasks::greeting_screen::GreetingScreen;
 use chrono::Utc;
 use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
@@ -296,19 +296,7 @@ pub fn run_windowed(
                 sample_scale,
                 backend,
             } => {
-                let (bg_w, bg_h) = resize_to_cover(canvas_w, canvas_h, width, height, max_dim);
-                let mut bg = imageops::resize(&src, bg_w, bg_h, imageops::FilterType::Triangle);
-                if bg_w > canvas_w || bg_h > canvas_h {
-                    let crop_x = (bg_w.saturating_sub(canvas_w)) / 2;
-                    let crop_y = (bg_h.saturating_sub(canvas_h)) / 2;
-                    bg = imageops::crop_imm(&bg, crop_x, crop_y, canvas_w, canvas_h).to_image();
-                } else if bg_w < canvas_w || bg_h < canvas_h {
-                    let mut canvas =
-                        RgbaImage::from_pixel(canvas_w, canvas_h, Rgba([0u8, 0, 0, 255]));
-                    let (bg_x, bg_y) = center_offset(bg_w, bg_h, canvas_w, canvas_h);
-                    imageops::overlay(&mut canvas, &bg, bg_x as i64, bg_y as i64);
-                    bg = canvas;
-                }
+                let bg = scale_image_to_cover_canvas(&src, canvas_w, canvas_h, max_dim);
                 if *sigma > 0.0 {
                     let mut sample = bg;
                     let mut sigma_px = *sigma;
@@ -1687,6 +1675,91 @@ fn compute_canvas_size(screen_w: u32, screen_h: u32, oversample: f32, max_dim: u
         .round()
         .clamp(1.0, max_dim as f32);
     (sw as u32, sh as u32)
+}
+
+fn scale_image_to_cover_canvas(
+    src: &RgbaImage,
+    canvas_w: u32,
+    canvas_h: u32,
+    max_dim: u32,
+) -> RgbaImage {
+    let (src_w, src_h) = src.dimensions();
+    let iw = src_w.max(1) as f64;
+    let ih = src_h.max(1) as f64;
+    let cw = canvas_w.max(1) as f64;
+    let ch = canvas_h.max(1) as f64;
+
+    let mut scale = (cw / iw).max(ch / ih);
+    if !scale.is_finite() || scale <= 0.0 {
+        scale = 1.0;
+    }
+
+    let max_dim = max_dim.max(1) as f64;
+    let max_scale = (max_dim / iw).min(max_dim / ih);
+    if max_scale.is_finite() && max_scale > 0.0 {
+        scale = scale.min(max_scale);
+    }
+
+    let target_w = (iw * scale).ceil().clamp(1.0, max_dim) as u32;
+    let target_h = (ih * scale).ceil().clamp(1.0, max_dim) as u32;
+
+    let scaled = imageops::resize(src, target_w, target_h, imageops::FilterType::Triangle);
+    center_crop_or_pad(scaled, canvas_w, canvas_h)
+}
+
+fn center_crop_or_pad(mut img: RgbaImage, target_w: u32, target_h: u32) -> RgbaImage {
+    if img.width() > target_w {
+        let crop_x = (img.width() - target_w) / 2;
+        img = imageops::crop_imm(&img, crop_x, 0, target_w, img.height()).to_image();
+    }
+
+    if img.height() > target_h {
+        let crop_y = (img.height() - target_h) / 2;
+        let crop_w = img.width();
+        img = imageops::crop_imm(&img, 0, crop_y, crop_w, target_h).to_image();
+    }
+
+    if img.width() < target_w || img.height() < target_h {
+        let mut canvas = RgbaImage::from_pixel(target_w, target_h, Rgba([0u8, 0, 0, 255]));
+        let (x, y) = center_offset(img.width(), img.height(), target_w, target_h);
+        imageops::overlay(&mut canvas, &img, x as i64, y as i64);
+        canvas
+    } else {
+        img
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgba;
+
+    fn make_gradient(width: u32, height: u32) -> RgbaImage {
+        image::ImageBuffer::from_fn(width, height, |x, y| {
+            let r = ((x * 255) / width.max(1)).min(255) as u8;
+            let g = ((y * 255) / height.max(1)).min(255) as u8;
+            Rgba([r, g, 0, 255])
+        })
+    }
+
+    #[test]
+    fn scale_cover_matches_canvas_dimensions() {
+        let src = make_gradient(400, 300);
+        let canvas = scale_image_to_cover_canvas(&src, 1920, 1080, 4096);
+        assert_eq!(canvas.dimensions(), (1920, 1080));
+        let center = canvas.get_pixel(960, 540);
+        assert_eq!(center[3], 255);
+    }
+
+    #[test]
+    fn scale_cover_respects_max_texture_limit() {
+        let src = make_gradient(1000, 400);
+        let canvas = scale_image_to_cover_canvas(&src, 1920, 1080, 2000);
+        assert_eq!(canvas.dimensions(), (1920, 1080));
+        let top_left = canvas.get_pixel(0, 0);
+        let bottom_right = canvas.get_pixel(1919, 1079);
+        assert!(top_left[3] == 255 && bottom_right[3] == 255);
+    }
 }
 
 fn resize_to_fit_with_margin(
