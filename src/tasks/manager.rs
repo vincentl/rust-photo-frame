@@ -130,12 +130,16 @@ impl PlaylistState {
     }
 
     fn ensure_ready(&mut self) {
-        if self.dirty || self.queue.is_empty() {
-            self.rebuild();
+        if self.dirty {
+            self.rebuild(RebuildReason::InventoryChange);
+        } else if self.queue.is_empty() {
+            // When the queue drains naturally we rebuild to reshuffle the next lap.
+            // This used to log at info! every cycle, which was noisy despite being expected.
+            self.rebuild(RebuildReason::CycleExhausted);
         }
     }
 
-    fn rebuild(&mut self) {
+    fn rebuild(&mut self, reason: RebuildReason) {
         if self.known.is_empty() {
             self.queue.clear();
             self.dirty = false;
@@ -197,13 +201,24 @@ impl PlaylistState {
                 "playlist multiplicity"
             );
         }
-        info!(
-            photos = multiplicities.len(),
-            scheduled = self.queue.len(),
-            prioritized = prioritized_set.len(),
-            now = ?now,
-            "playlist rebuilt"
-        );
+        match reason {
+            RebuildReason::InventoryChange => info!(
+                photos = multiplicities.len(),
+                scheduled = self.queue.len(),
+                prioritized = prioritized_set.len(),
+                now = ?now,
+                reason = ?reason,
+                "playlist rebuilt"
+            ),
+            RebuildReason::CycleExhausted => debug!(
+                photos = multiplicities.len(),
+                scheduled = self.queue.len(),
+                prioritized = prioritized_set.len(),
+                now = ?now,
+                reason = ?reason,
+                "playlist rebuilt"
+            ),
+        }
     }
 
     fn peek(&self) -> Option<&PathBuf> {
@@ -242,6 +257,12 @@ impl PlaylistState {
             self.dirty = true;
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RebuildReason {
+    InventoryChange,
+    CycleExhausted,
 }
 
 pub fn simulate_playlist<I>(

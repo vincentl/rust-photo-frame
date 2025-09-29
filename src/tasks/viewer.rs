@@ -1250,7 +1250,7 @@ pub fn run_windowed(
                     let path = next.path.clone();
                     self.current = Some(next);
                     self.displayed_at = Some(std::time::Instant::now());
-                    info!(
+                    debug!(
                         "transition_end kind={} path={} queue_depth={}",
                         state.kind,
                         path.display(),
@@ -1264,7 +1264,7 @@ pub fn run_windowed(
                     if shown_at.elapsed() >= std::time::Duration::from_millis(self.dwell_ms) {
                         if self.next.is_none() {
                             if let Some(stage) = self.pending.pop_front() {
-                                info!(
+                                debug!(
                                     "transition_stage path={} queue_depth={}",
                                     stage.path.display(),
                                     self.pending.len()
@@ -1281,7 +1281,7 @@ pub fn run_windowed(
                                 &mut self.rng,
                             );
                             if let Some(next) = &self.next {
-                                info!(
+                                debug!(
                                     "transition_start kind={} path={} queue_depth={}",
                                     kind,
                                     next.path.display(),
