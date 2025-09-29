@@ -61,25 +61,31 @@ get_target_dir() {
 }
 
 TARGET_DIR="$(get_target_dir)"
-BINARY_SRC="${TARGET_DIR}/rust-photo-frame"
-BINARY_DEST="${STAGE_DIR}/bin/rust-photo-frame"
-
 create_stage_layout
 
-if [[ ! -f "${BINARY_SRC}" ]]; then
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would take binary from ${BINARY_SRC}"
-    else
-        log ERROR "Expected binary not found at ${BINARY_SRC}. Run build module first."
-        exit 1
+stage_binary() {
+    local name="$1"
+    local src="${TARGET_DIR}/${name}"
+    local dest="${STAGE_DIR}/bin/${name}"
+    if [[ ! -f "${src}" ]]; then
+        if [[ "${DRY_RUN}" == "1" ]]; then
+            log INFO "DRY_RUN: would install ${name} from ${src}"
+        else
+            log ERROR "Expected binary not found at ${src}. Run build module first."
+            exit 1
+        fi
+        return
     fi
-fi
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        log INFO "DRY_RUN: would install ${src} -> ${dest}"
+    else
+        install -Dm755 "${src}" "${dest}"
+    fi
+}
 
-if [[ "${DRY_RUN}" == "1" ]]; then
-    log INFO "DRY_RUN: would install ${BINARY_SRC} -> ${BINARY_DEST}"
-else
-    install -Dm755 "${BINARY_SRC}" "${BINARY_DEST}"
-fi
+for bin in rust-photo-frame wifi-watcher wifi-setter; do
+    stage_binary "${bin}"
+done
 
 POWERCTL_SRC="${REPO_ROOT}/setup/app/powerctl"
 if [[ -f "${POWERCTL_SRC}" ]]; then
@@ -122,6 +128,24 @@ if [[ -d "${DOCS_SRC}" ]]; then
         log INFO "DRY_RUN: would sync documentation into ${STAGE_DIR}/docs"
     else
         rsync -a --delete "${DOCS_SRC}/" "${STAGE_DIR}/docs/"
+    fi
+fi
+
+STATUS_SRC="${REPO_ROOT}/setup/files/bin/photo-frame-status"
+if [[ -f "${STATUS_SRC}" ]]; then
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        log INFO "DRY_RUN: would install status helper to ${STAGE_DIR}/bin/photo-frame-status"
+    else
+        install -Dm755 "${STATUS_SRC}" "${STAGE_DIR}/bin/photo-frame-status"
+    fi
+fi
+
+WORDLIST_SRC="${REPO_ROOT}/setup/files/wordlist.txt"
+if [[ -f "${WORDLIST_SRC}" ]]; then
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        log INFO "DRY_RUN: would copy hotspot wordlist to ${STAGE_DIR}/share/wordlist.txt"
+    else
+        install -Dm644 "${WORDLIST_SRC}" "${STAGE_DIR}/share/wordlist.txt"
     fi
 fi
 

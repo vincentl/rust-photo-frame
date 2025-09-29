@@ -16,6 +16,8 @@ pub struct Settings {
     pub wordlist_path: PathBuf,
     pub poll_interval: Duration,
     pub startup_timeout: Duration,
+    pub photo_service_unit: String,
+    pub wifi_setter_unit: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -55,6 +57,16 @@ impl Settings {
         }
 
         let frame_user = env::var("FRAME_USER").unwrap_or_else(|_| "frame".to_string());
+        let hotspot_env_path = env::var("HOTSPOT_ENV_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/run/photo-frame/hotspot.env"));
+        let wordlist_path = env::var("HOTSPOT_WORDLIST")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/opt/photo-frame/share/wordlist.txt"));
+        let photo_service_unit = env::var("PHOTO_FRAME_SERVICE_UNIT")
+            .unwrap_or_else(|_| "photo-frame.service".to_string());
+        let wifi_setter_unit =
+            env::var("WIFI_SETTER_UNIT").unwrap_or_else(|_| "wifi-setter.service".to_string());
         let poll_interval = env::var("WIFI_WATCHER_POLL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -71,10 +83,12 @@ impl Settings {
             frame_user,
             hotspot_ssid,
             hotspot_ip,
-            hotspot_env_path: PathBuf::from("/run/photo-frame/hotspot.env"),
-            wordlist_path: PathBuf::from("/opt/photo-frame/share/wordlist.txt"),
+            hotspot_env_path,
+            wordlist_path,
             poll_interval,
             startup_timeout,
+            photo_service_unit,
+            wifi_setter_unit,
         })
     }
 }

@@ -1,6 +1,6 @@
 [Unit]
-Description=WiFi Provisioning Web UI
-After=NetworkManager.service wifi-hotspot@wlan0.service
+Description=Photo Frame Wi-Fi Provisioning API
+After=NetworkManager.service
 Requires=NetworkManager.service
 
 [Service]
@@ -10,8 +10,10 @@ Group=root
 Environment=RUST_LOG=info
 Environment=WIFI_IFNAME=wlan0
 Environment=HOTSPOT_IP=192.168.4.1
-ExecStart=/opt/photo-frame/bin/wifi-setter
+Environment=PHOTO_FRAME_CONFIG=@INSTALL_ROOT@/var/config.yaml
+ExecStart=@INSTALL_ROOT@/bin/wifi-setter
 Restart=on-failure
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
