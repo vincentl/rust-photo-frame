@@ -106,8 +106,8 @@ matting:
       max-upscale-factor: 1.0
     blur:
       minimum-mat-percentage: 3.5
-      sigma: 20.0
-      sample-scale: 1.0 # reduce toward 0.0 to trade fidelity for blur speed
+      sigma: 32.0
+      sample-scale: 0.125 # raise toward 1.0 for sharper mats at higher cost
       backend: neon # options: cpu, neon (auto-falls back to cpu if unsupported)
     studio:
       minimum-mat-percentage: 8.0

@@ -38,8 +38,10 @@ matting:
       max-upscale-factor: 1.0 # Limit for enlarging images when applying mats
       color: [0, 0, 0]
     blur:
-      minimum-mat-percentage: 4.0
-      sigma: 18.0
+      minimum-mat-percentage: 3.5
+      sigma: 32.0
+      sample-scale: 0.125
+      backend: neon
 ```
 
 If the frame launches to a black screen, double-check that `photo-library-path` points to a directory the runtime can read and that the user account has permission to access mounted network shares. You can validate a YAML edit quickly with `cargo run -- --playlist-dry-run 1`, which parses the config without opening the render window.
@@ -324,7 +326,7 @@ Each transition exposes a focused set of fields:
   - **`angle-selection`** (`random` or `sequential`, default `random`): Selection strategy for the angle list.
   - **`angle-jitter-degrees`** (float ≥ 0, default `0.0`): Randomizes the push direction by ±the provided degrees.
 - **`e-ink`**
-  - **`flash-count`** (integer, default `3`, capped at `6`): Number of alternating black/flash-color pulses before the reveal.
+  - **`flash-count`** (integer, default `0`, capped at `6`): Number of alternating black/flash-color pulses before the reveal.
   - **`reveal-portion`** (float, default `0.55`, clamped to `0.05–0.95`): Fraction of the timeline spent flashing before the stripes start uncovering the next slide.
   - **`stripe-count`** (integer ≥ 1, default `24`): How many horizontal bands sweep in; higher counts mimic a finer e-ink refresh.
   - **`flash-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB color used for the bright flash phases before the black inversion. Channels outside `0–255` are clamped.
@@ -370,7 +372,7 @@ matting:
       color: [0, 0, 0]
     blur:
       minimum-mat-percentage: 6.0
-      sigma: 18.0
+      sigma: 32.0
 ```
 
 Every entry inside `matting.options` accepts the shared settings below:
@@ -383,9 +385,9 @@ Every entry inside `matting.options` accepts the shared settings below:
 
 ### `blur`
 
-- **`sigma`** (float, default `20.0`): Gaussian blur radius applied to a scaled copy of the photo that covers the screen. Larger values yield softer backgrounds; zero disables the blur but keeps the scaled image.
-- **`sample-scale`** (float, default `1.0`): Ratio between the canvas resolution and the intermediate blur buffer. The renderer first scales the photo to the canvas at 1:1, then optionally downsamples by this factor before blurring. Values below `1.0` trade fidelity for speed; keep it at `1.0` for distortion-free mats.
-- **`backend`** (`cpu` or `neon`, default `cpu`): Blur implementation to use. `neon` opts into the vector-accelerated path on 64-bit ARM; if unsupported at runtime the app gracefully falls back to the CPU renderer.
+- **`sigma`** (float, default `32.0`): Gaussian blur radius applied to a scaled copy of the photo that covers the screen. Larger values yield softer backgrounds; zero disables the blur but keeps the scaled image.
+- **`sample-scale`** (float, default `0.125`): Ratio between the canvas resolution and the intermediate blur buffer. The renderer first scales the photo to the canvas at 1:1, then optionally downsamples by this factor before blurring. Raising the value toward `1.0` sharpens the backdrop at the expense of more GPU/CPU work.
+- **`backend`** (`cpu` or `neon`, default `neon`): Blur implementation to use. `neon` opts into the vector-accelerated path on 64-bit ARM; if unsupported at runtime the app gracefully falls back to the CPU renderer.
 
 ### `studio`
 

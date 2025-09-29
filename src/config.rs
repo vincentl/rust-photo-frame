@@ -367,7 +367,7 @@ pub enum FixedImageFit {
 
 impl Default for BlurBackend {
     fn default() -> Self {
-        Self::Cpu
+        Self::Neon
     }
 }
 
@@ -1300,11 +1300,11 @@ impl MattingMode {
     }
 
     const fn default_blur_sigma() -> f32 {
-        20.0
+        32.0
     }
 
     pub const fn default_blur_sample_scale() -> f32 {
-        1.0
+        0.125
     }
 
     const fn default_studio_bevel_width_px() -> f32 {
@@ -2247,7 +2247,7 @@ pub struct EInkTransition {
 impl Default for EInkTransition {
     fn default() -> Self {
         Self {
-            flash_count: 3,
+            flash_count: 0,
             reveal_portion: 0.55,
             stripe_count: 24,
             flash_color: [255, 255, 255],
