@@ -27,12 +27,12 @@ if [[ "${CARGO_PROFILE}" == "release" ]]; then
     profile_flag=(--release)
 fi
 
-log INFO "Building rust-photo-frame with cargo ${profile_flag[*]}"
+log INFO "Building workspace binaries with cargo ${profile_flag[*]}"
 cd "${REPO_ROOT}"
 if [[ "${DRY_RUN}" == "1" ]]; then
-    log INFO "DRY_RUN: would run cargo build ${profile_flag[*]}"
+    log INFO "DRY_RUN: would run cargo build --workspace --bins ${profile_flag[*]}"
 else
-    cargo build "${profile_flag[@]}"
+    cargo build --workspace --bins "${profile_flag[@]}"
 fi
 
 if [[ "${DRY_RUN}" != "1" && -d "${REPO_ROOT}/target" ]]; then
