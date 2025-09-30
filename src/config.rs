@@ -1912,17 +1912,13 @@ impl<'de> Visitor<'de> for PhotoEffectConfigVisitor {
             }
         }
 
-        if let Some(selection) = type_selection.as_ref() {
-            if types.as_ref().map_or(true, |t| t.is_empty()) {
-                return Err(de::Error::custom(format!(
-                    "photo-effect.type-selection {:?} requires photo-effect.types to select from",
-                    selection
-                )));
-            }
-        }
-
         let mut options = options.unwrap_or_default();
         let types = types.unwrap_or_default();
+        let type_selection = if types.is_empty() {
+            None
+        } else {
+            type_selection
+        };
 
         let selection = if types.is_empty() {
             PhotoEffectSelection::Disabled
