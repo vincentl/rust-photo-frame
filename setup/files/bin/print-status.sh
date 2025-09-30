@@ -54,17 +54,6 @@ unit_enabled() {
     fi
 }
 
-resolve_unit() {
-    local candidate
-    for candidate in "$@"; do
-        if unit_exists "${candidate}"; then
-            printf '%s' "${candidate}"
-            return 0
-        fi
-    done
-    return 1
-}
-
 print_header "Wi-Fi Connectivity"
 if command -v nmcli >/dev/null 2>&1; then
     CONNECTIVITY_FILE="${TMP_DIR}/connectivity"
@@ -146,11 +135,7 @@ fi
 
 print_header "Photo Frame"
 if [[ -z "${PHOTO_SERVICE:-}" ]]; then
-    if RESOLVED_PHOTO_SERVICE=$(resolve_unit photo-frame.service photo-app.service); then
-        PHOTO_SERVICE="${RESOLVED_PHOTO_SERVICE}"
-    else
-        PHOTO_SERVICE="photo-frame.service"
-    fi
+    PHOTO_SERVICE="photo-frame.service"
 fi
 PHOTO_STATUS="$(unit_status "${PHOTO_SERVICE}")"
 PHOTO_ENABLED="$(unit_enabled "${PHOTO_SERVICE}")"
@@ -158,15 +143,15 @@ printf '%s: %s (enabled: %s)\n' "${PHOTO_SERVICE}" "${PHOTO_STATUS}" "${PHOTO_EN
 
 print_header "Sync"
 if [[ -z "${SYNC_SERVICE:-}" ]]; then
-    if RESOLVED_SYNC_SERVICE=$(resolve_unit photo-sync.service sync-photos.service); then
-        SYNC_SERVICE="${RESOLVED_SYNC_SERVICE}"
+    if unit_exists "photo-sync.service"; then
+        SYNC_SERVICE="photo-sync.service"
     else
         SYNC_SERVICE=""
     fi
 fi
 if [[ -z "${SYNC_TIMER:-}" ]]; then
-    if RESOLVED_SYNC_TIMER=$(resolve_unit photo-sync.timer sync-photos.timer); then
-        SYNC_TIMER="${RESOLVED_SYNC_TIMER}"
+    if unit_exists "photo-sync.timer"; then
+        SYNC_TIMER="photo-sync.timer"
     else
         SYNC_TIMER=""
     fi

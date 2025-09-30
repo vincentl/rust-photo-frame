@@ -34,19 +34,6 @@ if [[ ${#units[@]} -eq 0 ]]; then
     exit 0
 fi
 
-legacy_units=(photo-app.service photo-app.target sync-photos.service sync-photos.timer wifi-hotspot@.service wifi-watcher.service wifi-setter.service)
-for legacy in "${legacy_units[@]}"; do
-    if [[ ! -f "${SYSTEMD_SOURCE}/${legacy}" && -e "${SYSTEMD_TARGET}/${legacy}" ]]; then
-        if [[ "${DRY_RUN}" == "1" ]]; then
-            log INFO "DRY_RUN: would remove legacy unit ${legacy}"
-        else
-            run_sudo systemctl disable "${legacy}" >/dev/null 2>&1 || true
-            run_sudo rm -f "${SYSTEMD_TARGET}/${legacy}"
-            log INFO "Removed legacy unit ${legacy}"
-        fi
-    fi
-done
-
 for unit in "${units[@]}"; do
     unit_name="$(basename "${unit}")"
     target_path="${SYSTEMD_TARGET}/${unit_name}"
@@ -98,23 +85,8 @@ activate_unit photo-frame.service
 enable_unit wifi-manager.service
 activate_unit wifi-manager.service
 
-select_unit_file() {
-    local candidate
-    for candidate in "$@"; do
-        if [[ -f "${SYSTEMD_SOURCE}/${candidate}" ]]; then
-            printf '%s' "${candidate}"
-            return 0
-        fi
-    done
-    return 1
-}
-
-if timer_unit=$(select_unit_file photo-sync.timer sync-photos.timer); then
-    enable_unit "${timer_unit}"
-    activate_unit "${timer_unit}"
-    if service_unit=$(select_unit_file photo-sync.service sync-photos.service); then
-        enable_unit "${service_unit}"
-    fi
-fi
+enable_unit photo-sync.timer
+activate_unit photo-sync.timer
+enable_unit photo-sync.service
 
 log INFO "Systemd units installed and activated"

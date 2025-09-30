@@ -405,7 +405,7 @@ matting:
 }
 
 #[test]
-fn parse_legacy_random_matting_type_uses_option_keys() {
+fn matting_type_field_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
@@ -413,16 +413,12 @@ matting:
   options:
     fixed-color:
       colors: [[5, 15, 25]]
-    blur:
-      sigma: 9.0
-      minimum-mat-percentage: 4.0
 "#;
 
-    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(
-        cfg.matting.selection(),
-        MattingSelection::Random(vec![MattingKind::FixedColor, MattingKind::Blur])
-    );
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("matting.type is no longer supported"));
 }
 
 #[test]
@@ -573,24 +569,20 @@ transition:
 }
 
 #[test]
-fn parse_legacy_random_transition_type_uses_option_keys() {
+fn transition_type_field_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
   type: random
   options:
-    wipe:
+    fade:
       duration-ms: 520
-    push:
-      duration-ms: 480
-      angle-list-degrees: [30.0]
 "#;
 
-    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(
-        cfg.transition.selection(),
-        TransitionSelection::Random(vec![TransitionKind::Wipe, TransitionKind::Push])
-    );
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("transition.type is no longer supported"));
 }
 
 #[test]
