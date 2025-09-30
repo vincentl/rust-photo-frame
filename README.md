@@ -14,12 +14,13 @@ A digital photo frame driver implemented in Rust with a pipeline tuned for Raspb
 
 1. [Hardware](#hardware)
 2. [Software Setup](#software-setup)
-3. [Features](#features)
-4. [Architecture Overview](#architecture-overview)
-5. [Configuration](#configuration)
-6. [Fabrication](#fabrication)
-7. [References](#references)
-8. [License](#license)
+3. [Wi-Fi Recovery & Provisioning](#wi-fi-recovery--provisioning)
+4. [Features](#features)
+5. [Architecture Overview](#architecture-overview)
+6. [Configuration](#configuration)
+7. [Fabrication](#fabrication)
+8. [References](#references)
+9. [License](#license)
 
 ## Hardware
 
@@ -29,49 +30,15 @@ Plan your build around a Raspberry Pi 5, a portrait-capable 4K monitor, and moun
 
 From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync services, the setup guide walks through every command you need to bring the slideshow online. It also documents CLI flags for local debugging and a quickstart checklist for provisioning. [Full details →](docs/software.md)
 
-### Deployment Pipeline
+## Wi-Fi Recovery & Provisioning
 
-The provisioning workflow now runs in two explicit stages so you can separate one-time operating-system preparation from rapid application iteration. Each stage is idempotent—safe to re-run whenever you need to update dependencies or redeploy a fresh build.
+When Wi-Fi drops, the frame pivots into a self-service recovery flow handled by the `wifi-manager` binary. It watches connectivity, launches a captive hotspot with a QR-code guided web UI, and writes fresh credentials back into NetworkManager—without ever running `cargo` as root.
 
-1. **System prerequisites**
+- **Automatic hotspot:** offline detection after a configurable grace period launches the **PhotoFrame-Setup** access point secured with a random three-word passphrase.
+- **Guided UI:** the on-device web server (default `http://192.168.4.1:8080/`) collects the replacement SSID/password and reports provisioning progress live.
+- **Systemd integration:** `wifi-manager.service` runs as the `photo-frame` user, restarts on failure, and keeps operational breadcrumbs in `/opt/photo-frame/var` (hotspot password, QR image, last provisioning attempt).
 
-   ```bash
-   ./setup/system/run.sh
-   ```
-
-   Installs apt dependencies, enables the 4K HDMI boot profile, and bootstraps a user-scoped Rust toolchain (`rustup`, `cargo`, `rustc`). The script only elevates for package-manager and firmware edits and exports `~/.cargo/bin` into `PATH` for subsequent stages.
-
-2. **Application build & install**
-
-   ```bash
-   ./setup/app/run.sh
-   ```
-
-   Builds the Rust binaries as the invoking user, stages the release artifacts, and installs them into `/opt/photo-frame`. Systemd unit files are copied into `/opt/photo-frame/systemd` and linked into `/etc/systemd/system`, then `photo-frame.service` is enabled and started.
-
-Both stages respect the following knobs:
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `INSTALL_ROOT` | `/opt/photo-frame` | Installation prefix for binaries, configs, docs, and unit files. |
-| `SERVICE_USER` | invoking user | Systemd user that owns `/opt/photo-frame/var` and runs the services. |
-| `SERVICE_GROUP` | invoking user's primary group | Group associated with `SERVICE_USER` that owns `/opt/photo-frame/var`. |
-| `CARGO_PROFILE` | `release` | Cargo profile used for builds (passed through to `cargo build`). |
-| `DRY_RUN` | unset | When set to `1`, modules print the actions they would take instead of executing them. |
-
-After a successful install the filesystem layout is:
-
-```
-/opt/photo-frame/
-  bin/       # Executables (e.g., rust-photo-frame)
-  lib/       # Reserved for shared assets and helper scripts
-  etc/       # Read-only configuration templates
-  var/       # Writable runtime state owned by ${SERVICE_USER}:${SERVICE_GROUP}
-  docs/      # Offline documentation and licensing
-  systemd/   # Deployed unit files sourced by the installer
-```
-
-The `photo-frame.service` unit runs the application with its working directory set to `/opt/photo-frame/var` and automatically restarts on failure. It exports the `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` variables so the compositor grants fullscreen access when the service starts outside an interactive login. Override configuration can be dropped in `/etc/default/photo-frame` when needed.
+Full operating procedures, configuration options, and troubleshooting steps are documented in [docs/wifi-manager.md](docs/wifi-manager.md).
 
 ## Features
 
