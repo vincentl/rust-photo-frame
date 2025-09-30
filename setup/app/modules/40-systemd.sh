@@ -95,6 +95,9 @@ activate_unit() {
 enable_unit photo-frame.service
 activate_unit photo-frame.service
 
+enable_unit wifi-manager.service
+activate_unit wifi-manager.service
+
 if [[ -f "${SYSTEMD_SOURCE}/photo-sync.timer" ]]; then
     enable_unit photo-sync.timer
     activate_unit photo-sync.timer

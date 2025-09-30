@@ -18,7 +18,10 @@ if [[ "${DRY_RUN}" == "1" ]]; then
 fi
 
 BIN_PATH="${INSTALL_ROOT}/bin/rust-photo-frame"
+WIFI_BIN_PATH="${INSTALL_ROOT}/bin/wifi-manager"
 CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/config.yaml"
+WIFI_CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/wifi-manager.yaml"
+WORDLIST_PATH="${INSTALL_ROOT}/share/wordlist.txt"
 VAR_DIR="${INSTALL_ROOT}/var"
 
 if [[ ! -x "${BIN_PATH}" ]]; then
@@ -26,8 +29,23 @@ if [[ ! -x "${BIN_PATH}" ]]; then
     exit 1
 fi
 
+if [[ ! -x "${WIFI_BIN_PATH}" ]]; then
+    log ERROR "Binary ${WIFI_BIN_PATH} missing or not executable"
+    exit 1
+fi
+
 if [[ ! -f "${CONFIG_TEMPLATE}" ]]; then
     log ERROR "Default config template missing at ${CONFIG_TEMPLATE}"
+    exit 1
+fi
+
+if [[ ! -f "${WIFI_CONFIG_TEMPLATE}" ]]; then
+    log ERROR "Wi-Fi manager config template missing at ${WIFI_CONFIG_TEMPLATE}"
+    exit 1
+fi
+
+if [[ ! -f "${WORDLIST_PATH}" ]]; then
+    log ERROR "Wi-Fi hotspot wordlist missing at ${WORDLIST_PATH}"
     exit 1
 fi
 
@@ -53,9 +71,20 @@ if ! systemctl is-enabled --quiet photo-frame.service; then
     log WARN "photo-frame.service is not enabled"
 fi
 
+if ! systemctl is-active --quiet wifi-manager.service; then
+    log ERROR "wifi-manager.service is not active"
+    systemctl status wifi-manager.service --no-pager || true
+    exit 1
+fi
+
+if ! systemctl is-enabled --quiet wifi-manager.service; then
+    log WARN "wifi-manager.service is not enabled"
+fi
+
 rustc_version=$(rustc --version 2>/dev/null || echo "rustc unavailable")
 cargo_version=$(cargo --version 2>/dev/null || echo "cargo unavailable")
 service_status=$(systemctl is-active photo-frame.service)
+wifi_service_status=$(systemctl is-active wifi-manager.service)
 
 log INFO "Deployment summary:"
 cat <<SUMMARY
@@ -66,9 +95,13 @@ Service group: ${SERVICE_GROUP}
 Binary       : ${BIN_PATH}
 Config (RO)  : ${CONFIG_TEMPLATE}
 Config (RW)  : ${INSTALL_ROOT}/var/config.yaml
+Wi-Fi binary : ${WIFI_BIN_PATH}
+Wi-Fi config : ${WIFI_CONFIG_TEMPLATE}
+Wi-Fi wordlist: ${WORDLIST_PATH}
 rustc        : ${rustc_version}
 cargo        : ${cargo_version}
 photo-frame.service : ${service_status}
+wifi-manager.service: ${wifi_service_status}
 Next steps:
   - Customize ${INSTALL_ROOT}/var/config.yaml for your site.
   - Review journal logs with 'journalctl -u photo-frame.service -f'.

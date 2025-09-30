@@ -5,10 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/photo-frame/bin/wifi-manager watch --config /opt/photo-frame/etc/wifi-manager.yaml
-User=photo-frame
-Group=photo-frame
-WorkingDirectory=/opt/photo-frame/var
+ExecStart=@INSTALL_ROOT@/bin/wifi-manager watch --config @INSTALL_ROOT@/etc/wifi-manager.yaml
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@INSTALL_ROOT@/var
 Restart=on-failure
 RestartSec=2
 
