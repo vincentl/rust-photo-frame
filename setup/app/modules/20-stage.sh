@@ -47,6 +47,7 @@ create_stage_layout() {
         "${STAGE_DIR}/docs" \
         "${STAGE_DIR}/systemd" \
         "${STAGE_DIR}/share" \
+        "${STAGE_DIR}/var" \
         "${STAGE_DIR}/share/backgrounds"; do
         ensure_dir "${dir}"
     done
