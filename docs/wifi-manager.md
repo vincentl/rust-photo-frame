@@ -83,7 +83,7 @@ All mutable state lives under `/opt/photo-frame/var` and is owned by the `photo-
 
 The Wi-Fi manager is fully integrated into the two-stage setup pipeline:
 
-- `setup/system/run.sh` ensures the target Linux user exists (exported as `FRAME_USER`) and installs the Rust toolchain.
+- `setup/system/run.sh` installs operating-system dependencies, applies the HDMI boot profile, provisions the Rust toolchain, configures logging, and now ensures the service account can manage NetworkManager (adds it to the `netdev` group and installs a tailored polkit rule).
 - `setup/app/modules/10-build.sh` compiles `wifi-manager` in release mode as the resolved `FRAME_USER` (never as root).
 - `setup/app/modules/20-stage.sh` stages the binary, config template, wordlist, and UI assets under `setup/app/stage/`.
 - `setup/app/modules/30-install.sh` installs artifacts into `/opt/photo-frame`, preserves existing configs, and sets directory ownership.

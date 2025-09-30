@@ -5,7 +5,7 @@ INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
 VAR_DIR="${VAR_DIR:-${INSTALL_ROOT}/var}"
 CONFIG_PATH="${CONFIG_PATH:-${INSTALL_ROOT}/etc/wifi-manager.yaml}"
 SERVICE_NAME="${SERVICE_NAME:-wifi-manager.service}"
-SERVICE_USER="${SERVICE_USER:-photo-frame}"
+SERVICE_USER="${SERVICE_USER:-$(id -un)}"
 MANAGER_BIN="${MANAGER_BIN:-${INSTALL_ROOT}/bin/wifi-manager}"
 HOTSPOT_ID="${HOTSPOT_ID:-pf-hotspot}"
 TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t wifi-status)"
@@ -13,6 +13,56 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 
 print_header() {
     printf '\n=== %s ===\n' "$1"
+}
+
+SYSTEMCTL_AVAILABLE=0
+if command -v systemctl >/dev/null 2>&1; then
+    SYSTEMCTL_AVAILABLE=1
+fi
+
+unit_exists() {
+    local unit="$1"
+    if [[ ${SYSTEMCTL_AVAILABLE} -ne 1 ]]; then
+        return 1
+    fi
+    systemctl cat "${unit}" >/dev/null 2>&1
+}
+
+unit_status() {
+    local unit="$1"
+    if [[ ${SYSTEMCTL_AVAILABLE} -ne 1 ]]; then
+        echo "systemctl-unavailable"
+        return
+    fi
+    if unit_exists "${unit}"; then
+        systemctl is-active "${unit}" 2>/dev/null || echo "inactive"
+    else
+        echo "not-found"
+    fi
+}
+
+unit_enabled() {
+    local unit="$1"
+    if [[ ${SYSTEMCTL_AVAILABLE} -ne 1 ]]; then
+        echo "systemctl-unavailable"
+        return
+    fi
+    if unit_exists "${unit}"; then
+        systemctl is-enabled "${unit}" 2>/dev/null || echo "disabled"
+    else
+        echo "not-found"
+    fi
+}
+
+resolve_unit() {
+    local candidate
+    for candidate in "$@"; do
+        if unit_exists "${candidate}"; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
 }
 
 print_header "Wi-Fi Connectivity"
@@ -50,13 +100,9 @@ if [[ "${HOTSPOT_STATE:-}" != "" ]]; then
 fi
 
 print_header "Wi-Fi Manager"
-SERVICE_ACTIVE="inactive"
-SERVICE_ENABLED="disabled"
-if command -v systemctl >/dev/null 2>&1; then
-    SERVICE_ACTIVE="$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || true)"
-    SERVICE_ENABLED="$(systemctl is-enabled "${SERVICE_NAME}" 2>/dev/null || true)"
-fi
-printf 'Service: %s (enabled: %s)\n' "${SERVICE_ACTIVE}" "${SERVICE_ENABLED}"
+MANAGER_STATUS="$(unit_status "${SERVICE_NAME}")"
+MANAGER_ENABLED="$(unit_enabled "${SERVICE_NAME}")"
+printf 'Service (%s): %s (enabled: %s)\n' "${SERVICE_NAME}" "${MANAGER_STATUS}" "${MANAGER_ENABLED}"
 
 if [[ -x "${MANAGER_BIN}" ]]; then
     if [[ $EUID -eq 0 && "${SERVICE_USER}" != "root" && $(id -u "${SERVICE_USER}" 2>/dev/null || echo) != "" ]]; then
@@ -98,26 +144,67 @@ else
     printf 'Last provisioning record: %s (not recorded yet)\n' "${LAST_JSON}"
 fi
 
-print_header "Photo App"
-PHOTO_STATE="$(systemctl is-active photo-app.service 2>/dev/null || true)"
-printf 'photo-app.service: %s\n' "${PHOTO_STATE:-unknown}"
-TARGET_STATE="$(systemctl is-active photo-app.target 2>/dev/null || true)"
-printf 'photo-app.target: %s\n' "${TARGET_STATE:-unknown}"
+print_header "Photo Frame"
+if [[ -z "${PHOTO_SERVICE:-}" ]]; then
+    if RESOLVED_PHOTO_SERVICE=$(resolve_unit photo-frame.service photo-app.service); then
+        PHOTO_SERVICE="${RESOLVED_PHOTO_SERVICE}"
+    else
+        PHOTO_SERVICE="photo-frame.service"
+    fi
+fi
+PHOTO_STATUS="$(unit_status "${PHOTO_SERVICE}")"
+PHOTO_ENABLED="$(unit_enabled "${PHOTO_SERVICE}")"
+printf '%s: %s (enabled: %s)\n' "${PHOTO_SERVICE}" "${PHOTO_STATUS}" "${PHOTO_ENABLED}"
 
 print_header "Sync"
-SYNC_STATE="$(systemctl is-active sync-photos.service 2>/dev/null || true)"
-printf 'sync-photos.service: %s\n' "${SYNC_STATE:-unknown}"
-NEXT_TIMER="$(systemctl list-timers --all 2>/dev/null | awk '/sync-photos.timer/ {print $5, "(left: "$6")"; exit}')"
-if [[ -n "${NEXT_TIMER}" ]]; then
-    printf 'Next sync: %s\n' "${NEXT_TIMER}"
-else
-    printf 'Next sync: timer inactive\n'
+if [[ -z "${SYNC_SERVICE:-}" ]]; then
+    if RESOLVED_SYNC_SERVICE=$(resolve_unit photo-sync.service sync-photos.service); then
+        SYNC_SERVICE="${RESOLVED_SYNC_SERVICE}"
+    else
+        SYNC_SERVICE=""
+    fi
 fi
-LAST_TRIGGER="$(systemctl show -p LastTriggerUSec sync-photos.timer 2>/dev/null | cut -d= -f2)"
-if [[ -n "${LAST_TRIGGER}" && "${LAST_TRIGGER}" != "n/a" ]]; then
-    printf 'Last sync trigger: %s\n' "${LAST_TRIGGER}"
+if [[ -z "${SYNC_TIMER:-}" ]]; then
+    if RESOLVED_SYNC_TIMER=$(resolve_unit photo-sync.timer sync-photos.timer); then
+        SYNC_TIMER="${RESOLVED_SYNC_TIMER}"
+    else
+        SYNC_TIMER=""
+    fi
+fi
+
+if [[ -n "${SYNC_SERVICE}" ]]; then
+    SYNC_STATUS="$(unit_status "${SYNC_SERVICE}")"
+    SYNC_ENABLED="$(unit_enabled "${SYNC_SERVICE}")"
+    printf '%s: %s (enabled: %s)\n' "${SYNC_SERVICE}" "${SYNC_STATUS}" "${SYNC_ENABLED}"
 else
-    printf 'Last sync trigger: never\n'
+    printf 'Sync service: not installed\n'
+fi
+
+if [[ -n "${SYNC_TIMER}" ]]; then
+    SYNC_TIMER_STATUS="$(unit_status "${SYNC_TIMER}")"
+    SYNC_TIMER_ENABLED="$(unit_enabled "${SYNC_TIMER}")"
+    printf '%s: %s (enabled: %s)\n' "${SYNC_TIMER}" "${SYNC_TIMER_STATUS}" "${SYNC_TIMER_ENABLED}"
+    if [[ ${SYSTEMCTL_AVAILABLE} -eq 1 && "${SYNC_TIMER_STATUS}" != "not-found" && "${SYNC_TIMER_STATUS}" != "systemctl-unavailable" ]]; then
+        NEXT_TIMER="$(systemctl list-timers --all --no-legend 2>/dev/null | awk -v unit="${SYNC_TIMER}" '$5==unit {print $1 " (left: "$2")"; exit}')"
+        if [[ -n "${NEXT_TIMER}" ]]; then
+            printf 'Next sync: %s\n' "${NEXT_TIMER}"
+        else
+            printf 'Next sync: timer inactive\n'
+        fi
+        LAST_TRIGGER_RAW="$(systemctl show -p LastTriggerUSec "${SYNC_TIMER}" 2>/dev/null | cut -d= -f2)"
+        if [[ -n "${LAST_TRIGGER_RAW}" && "${LAST_TRIGGER_RAW}" != "n/a" ]]; then
+            printf 'Last sync trigger: %s\n' "${LAST_TRIGGER_RAW}"
+        else
+            printf 'Last sync trigger: never\n'
+        fi
+    else
+        printf 'Next sync: unavailable\n'
+        printf 'Last sync trigger: unavailable\n'
+    fi
+else
+    printf 'Sync timer: not installed\n'
+    printf 'Next sync: timer not configured\n'
+    printf 'Last sync trigger: unavailable\n'
 fi
 
 printf '\nStatus summary complete.\n'
