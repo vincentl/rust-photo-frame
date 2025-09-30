@@ -150,19 +150,11 @@ else
     log WARN "Default config.yaml not found at repo root"
 fi
 
-B64_BACKGROUND_SRC="${REPO_ROOT}/assets/backgrounds/default-fixed.jpg.b64"
-BACKGROUND_DEST="${STAGE_DIR}/share/backgrounds/default-fixed.jpg"
-if [[ -f "${B64_BACKGROUND_SRC}" ]]; then
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would decode fixed background asset to ${BACKGROUND_DEST}"
-    else
-        if ! base64 --decode "${B64_BACKGROUND_SRC}" | install -Dm644 /dev/stdin "${BACKGROUND_DEST}"; then
-            log ERROR "Failed to decode fixed background asset from ${B64_BACKGROUND_SRC}"
-            exit 1
-        fi
-    fi
+BACKGROUND_SRC_DIR="${REPO_ROOT}/assets/background"
+if [[ -d "${BACKGROUND_SRC_DIR}" ]]; then
+    copy_tree "${BACKGROUND_SRC_DIR}" "${STAGE_DIR}/share/backgrounds" 644 "background asset"
 else
-    log WARN "Fixed background asset not found at ${B64_BACKGROUND_SRC}"
+    log INFO "No background assets found under ${BACKGROUND_SRC_DIR}"
 fi
 
 DOCS_SRC="${REPO_ROOT}/docs"
