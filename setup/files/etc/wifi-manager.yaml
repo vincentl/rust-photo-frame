@@ -1,0 +1,13 @@
+# Photo Frame Wi-Fi manager configuration
+interface: wlan0
+check-interval-sec: 5
+offline-grace-sec: 30
+wordlist-path: /opt/photo-frame/share/wordlist.txt
+var-dir: /opt/photo-frame/var
+hotspot:
+  connection-id: pf-hotspot
+  ssid: PhotoFrame-Setup
+  ipv4-addr: 192.168.4.1
+ui:
+  bind-address: 0.0.0.0
+  port: 8080

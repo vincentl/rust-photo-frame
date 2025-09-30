@@ -87,7 +87,7 @@ This workflow prepares a Raspberry Pi OS (Bookworm, 64-bit) image that boots dir
 
 ### Choose the application user for setup modules
 
-Most setup modules, including the Wi-Fi watcher build, try to run developer tooling (like `cargo`) as the non-root account that invokes `sudo`. The scripts automatically prefer, in order:
+Most setup modules, including the Wi-Fi manager build, try to run developer tooling (like `cargo`) as the non-root account that invokes `sudo`. The scripts automatically prefer, in order:
 
 1. A user supplied via `FRAME_USER=<name>` when invoking the script.
 1. The user recorded in `SUDO_USER` (i.e., the account that ran `sudo`).
@@ -103,7 +103,7 @@ This means you can clone the repository as your preferred account and let the au
 If you need to override the choice explicitly (for example, when staging a build for another user account), run the module with:
 
 ```bash
-FRAME_USER=photoframe sudo ./setup/app/modules/30-wifi-watcher.sh
+FRAME_USER=photoframe sudo ./setup/app/modules/10-build.sh
 ```
 
 The script will warn and fall back to an available account if the requested name cannot be found.
@@ -124,4 +124,4 @@ The script will warn and fall back to an available account if the requested name
 
    You will need to ssh back to the frame once it reboots to continue installation.
 
-1. The script `sudo ./setup/app/run.sh` calls scripts in `./setup/app/modules/` to build the photo frame application, configure cloud syncing, and install a Wi-Fi watcher to simplify moving the frame to a new Wi-Fi network.
+1. The script `sudo ./setup/app/run.sh` calls scripts in `./setup/app/modules/` to build the photo frame application, stage supporting assets, and install the Wi-Fi manager service that handles hotspot recovery and provisioning.

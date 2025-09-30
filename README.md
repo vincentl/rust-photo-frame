@@ -13,12 +13,13 @@ A digital photo frame driver implemented in Rust with a pipeline tuned for Raspb
 
 1. [Hardware](#hardware)
 2. [Software Setup](#software-setup)
-3. [Features](#features)
-4. [Architecture Overview](#architecture-overview)
-5. [Configuration](#configuration)
-6. [Fabrication](#fabrication)
-7. [References](#references)
-8. [License](#license)
+3. [Wi-Fi Recovery & Provisioning](#wi-fi-recovery--provisioning)
+4. [Features](#features)
+5. [Architecture Overview](#architecture-overview)
+6. [Configuration](#configuration)
+7. [Fabrication](#fabrication)
+8. [References](#references)
+9. [License](#license)
 
 ## Hardware
 
@@ -27,6 +28,16 @@ Plan your build around a Raspberry Pi 5, a portrait-capable 4K monitor, and moun
 ## Software Setup
 
 From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync services, the setup guide walks through every command you need to bring the slideshow online. It also documents CLI flags for local debugging and a quickstart checklist for provisioning. [Full details →](docs/software.md)
+
+## Wi-Fi Recovery & Provisioning
+
+When Wi-Fi drops, the frame pivots into a self-service recovery flow handled by the `wifi-manager` binary. It watches connectivity, launches a captive hotspot with a QR-code guided web UI, and writes fresh credentials back into NetworkManager—without ever running `cargo` as root.
+
+- **Automatic hotspot:** offline detection after a configurable grace period launches the **PhotoFrame-Setup** access point secured with a random three-word passphrase.
+- **Guided UI:** the on-device web server (default `http://192.168.4.1:8080/`) collects the replacement SSID/password and reports provisioning progress live.
+- **Systemd integration:** `wifi-manager.service` runs as the `photo-frame` user, restarts on failure, and keeps operational breadcrumbs in `/opt/photo-frame/var` (hotspot password, QR image, last provisioning attempt).
+
+Full operating procedures, configuration options, and troubleshooting steps are documented in [docs/wifi-manager.md](docs/wifi-manager.md).
 
 ## Features
 

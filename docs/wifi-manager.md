@@ -1,0 +1,134 @@
+# Wi-Fi Manager
+
+The `wifi-manager` crate is the frame's single entry point for Wi-Fi monitoring, hotspot recovery, and captive portal provisioning. It wraps NetworkManager's `nmcli` tooling, spawns the recovery web UI, and persists all operational breadcrumbs under `/opt/photo-frame/var`.
+
+## Capabilities at a glance
+
+- Detects connectivity loss by polling NetworkManager and verifying reachability of the default gateway.
+- Creates or updates an idempotent hotspot profile (`pf-hotspot`) and brings it online with a random three-word passphrase.
+- Serves a lightweight HTTP UI for submitting replacement SSID/password credentials, then provisions them via `nmcli`.
+- Renders a QR code that points to the recovery portal so phones can jump directly to the setup page.
+- Emits structured logs for every state transition (`ONLINE`, `OFFLINE`, `HOTSPOT`, `PROVISIONING`) and stores the last provisioning attempt in JSON.
+
+## Binary layout and subcommands
+
+The release build installs to `/opt/photo-frame/bin/wifi-manager` and exposes the following subcommands:
+
+| Subcommand | Purpose |
+| ---------- | ------- |
+| `watch`    | Default daemon mode. Monitors connectivity, raises the hotspot/UI when offline, and reconnects when provisioning succeeds. |
+| `ui`       | Runs only the HTTP UI server. This is spawned automatically by `watch` when the hotspot is active but can be used independently for debugging. |
+| `qr`       | Generates `/opt/photo-frame/var/wifi-qr.png`, a QR code pointing to the configured UI URL. |
+| `nm`       | Thin wrapper around `nmcli` operations (`add`, `modify`, `connect`) used internally. Safe to run manually for diagnostics. |
+
+Running the binary with `--help` or `--version` is permitted as root; all other modes refuse to start if `UID==0` to honour the project's "never run cargo as root" policy.
+
+## Configuration reference
+
+The template lives at `/opt/photo-frame/etc/wifi-manager.yaml` and is staged from `setup/files/etc/wifi-manager.yaml`. All keys use kebab-case to match the repository conventions.
+
+```yaml
+interface: wlan0
+check-interval-sec: 5
+offline-grace-sec: 30
+wordlist-path: /opt/photo-frame/share/wordlist.txt
+var-dir: /opt/photo-frame/var
+hotspot:
+  connection-id: pf-hotspot
+  ssid: PhotoFrame-Setup
+  ipv4-addr: 192.168.4.1
+ui:
+  bind-address: 0.0.0.0
+  port: 8080
+```
+
+| Key | Description |
+| --- | ----------- |
+| `interface` | Wireless device monitored for connectivity (default `wlan0`). |
+| `check-interval-sec` | Base delay between connectivity probes. A small jitter is added internally. |
+| `offline-grace-sec` | Seconds the frame must remain offline before the hotspot is activated. |
+| `wordlist-path` | Source file for the random three-word hotspot passphrase. Installed via setup. |
+| `var-dir` | Directory for runtime artifacts (password file, QR PNG, status JSON, temp sockets). |
+| `hotspot.connection-id` | NetworkManager profile name used for the AP. The manager will create or update it automatically. |
+| `hotspot.ssid` | Broadcast SSID for the recovery hotspot. |
+| `hotspot.ipv4-addr` | Address assigned to the hotspot interface and advertised via DHCP. |
+| `ui.bind-address` | Bind address for the HTTP UI. Normally `0.0.0.0`. |
+| `ui.port` | HTTP UI port (default `8080`). |
+
+Whenever you change the config, run `sudo systemctl restart wifi-manager` for the daemon to pick up the new settings.
+
+## Runtime files
+
+All mutable state lives under `/opt/photo-frame/var` and is owned by the `photo-frame` user (0755 directory permissions). Key files include:
+
+- `hotspot-password.txt` – the currently active random passphrase for **PhotoFrame-Setup**.
+- `wifi-qr.png` – QR code pointing to `http://<hotspot-ip>:<port>/`.
+- `wifi-last.json` – JSON log of the latest provisioning attempt (inputs masked, result + timestamps recorded).
+- `wifi-manager.log` (optional) – when configured, the service can redirect logs here for offline analysis; otherwise use `journalctl`.
+
+## Web provisioning flow
+
+1. The `watch` loop marks the frame `OFFLINE` after `offline-grace-sec` seconds without a gateway response.
+2. The hotspot profile (`pf-hotspot`) is ensured, then activated on the configured interface with WPA2-PSK security.
+3. A random three-word passphrase is selected from the bundled wordlist and written to `/opt/photo-frame/var/hotspot-password.txt`.
+4. The QR code generator produces `/opt/photo-frame/var/wifi-qr.png`, embedding the configured UI URL (default `http://192.168.4.1:8080/`).
+5. The HTTP UI binds to `0.0.0.0:<port>` and serves:
+   - `GET /` – single-page HTML form for SSID + password entry with inline guidance and QR instructions.
+   - `POST /submit` – validates inputs, uses `nmcli` to add/modify the connection, and reports progress.
+   - A status polling endpoint so the UI can reflect provisioning progress in near real time.
+6. On success, the hotspot is torn down only after NetworkManager confirms association and DHCP success on the new SSID. Failures leave the hotspot active for another attempt.
+7. Results (masked SSID, status, timestamps) are appended to `wifi-last.json` for later support review.
+
+## Setup automation
+
+The Wi-Fi manager is fully integrated into the two-stage setup pipeline:
+
+- `setup/system/run.sh` ensures the target Linux user exists (exported as `FRAME_USER`) and installs the Rust toolchain.
+- `setup/app/modules/10-build.sh` compiles `wifi-manager` in release mode as the resolved `FRAME_USER` (never as root).
+- `setup/app/modules/20-stage.sh` stages the binary, config template, wordlist, and UI assets under `setup/app/stage/`.
+- `setup/app/modules/30-install.sh` installs artifacts into `/opt/photo-frame`, preserves existing configs, and sets directory ownership.
+- `setup/app/modules/40-systemd.sh` installs and enables `/etc/systemd/system/wifi-manager.service`, then prints an install summary (version, paths, hotspot SSID, and UI URL).
+
+Re-running the modules is idempotent: binaries are replaced in-place, configs are preserved with `.default` suffixes, and the systemd unit is reloaded cleanly.
+
+## Service management
+
+Common operational commands:
+
+```bash
+# Tail live logs
+journalctl -u wifi-manager -f
+
+# Restart the watcher after editing the config
+sudo systemctl restart wifi-manager
+
+# Check summary status (hotspot profile, active connection, artifacts)
+/opt/photo-frame/bin/print-status.sh
+
+# Manually seed a connection via the helper subcommand
+sudo -u photo-frame /opt/photo-frame/bin/wifi-manager nm add --ssid "HomeWiFi" --psk "correct-horse-battery-staple"
+
+# Force the recovery hotspot for testing
+sudo nmcli connection up pf-hotspot
+```
+
+The systemd unit is defined in `setup/files/systemd/wifi-manager.service` and runs under the `photo-frame` user with `Restart=on-failure`. It depends on `network-online.target` so that the first connectivity check happens after boot networking is ready.
+
+## Acceptance test checklist
+
+These behavioural checks validate the full provisioning lifecycle:
+
+1. **Cold boot with no Wi-Fi configured** – within 30–60 seconds the hotspot appears, the QR code launches the UI, and submitting valid credentials connects the frame to the new network while shutting down the hotspot.
+2. **Incorrect stored password** – when the saved SSID fails to authenticate, the service transitions through `OFFLINE → HOTSPOT`, accepts updated credentials, and resumes watching online once they succeed.
+3. **Boot with valid Wi-Fi** – the hotspot never starts; `wifi-manager` logs remain in the `ONLINE` state while monitoring.
+4. **Service restarts** – `systemctl restart wifi-manager` leaves no stray hotspot or UI processes; monitoring resumes cleanly.
+5. **Idempotent setup** – rerunning the `setup/app` modules rebuilds and reinstalls `wifi-manager` without invoking `cargo` as root and without duplicating systemd units.
+
+## Troubleshooting
+
+- **Hotspot never appears:** confirm `journalctl -u wifi-manager` shows the `OFFLINE → HOTSPOT` transition. If not, verify the interface name in the config matches the Pi's Wi-Fi adapter (often `wlan0`).
+- **Portal unreachable:** ensure the UI port is free (`sudo lsof -iTCP:8080 -sTCP:LISTEN`). The daemon logs whenever it binds the HTTP server.
+- **Provisioning fails repeatedly:** inspect `/opt/photo-frame/var/wifi-last.json` for masked SSIDs and error codes. Run `sudo -u photo-frame /opt/photo-frame/bin/wifi-manager nm add --ssid <name> --psk <pass>` manually to confirm NetworkManager feedback.
+- **Wordlist missing:** rerun `setup/app/modules/20-stage.sh` and `30-install.sh` to restore `/opt/photo-frame/share/wordlist.txt`; the manager refuses to start without it so that hotspot passwords are never empty.
+
+With the Wi-Fi manager in place, the frame can recover from outages autonomously and guide users through reconnecting without opening the enclosure or attaching keyboards.
