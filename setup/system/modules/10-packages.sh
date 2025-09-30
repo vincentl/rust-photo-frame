@@ -35,6 +35,7 @@ PACKAGES=(
     curl
     git
     rsync
+    logrotate
 )
 
 log INFO "Installing required packages: ${PACKAGES[*]}"
