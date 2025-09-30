@@ -1,0 +1,16 @@
+[Unit]
+Description=PhotoFrame WiFi Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/photo-frame/bin/wifi-manager watch --config /opt/photo-frame/etc/wifi-manager.yaml
+User=photo-frame
+Group=photo-frame
+WorkingDirectory=/opt/photo-frame/var
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
