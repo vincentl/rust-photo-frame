@@ -128,8 +128,7 @@ matting:
       minimum-mat-percentage: 6.0
       path:
         [
-          /opt/photo-frame/share/backgrounds/default-0.jpg,
-          /opt/photo-frame/share/backgrounds/default-1.jpg,
+          /opt/photo-frame/share/backgrounds/blue-textured-brick-wall-background.jpg,
         ]
       path-selection: sequential # or random
       fit: cover # options: cover, contain, stretch

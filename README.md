@@ -84,6 +84,10 @@ Need help wiring the sleep schedule to Raspberry Pi + Dell HDMI hardware? The de
 
 Plan the physical build of the frame with dedicated fabrication guidance that covers laser cutting, 3D-printed brackets, cabinetry, and a final assembly checklist. [Full details →](docs/fabrication.md)
 
+## Credits
+
+See [assets/backgrounds/Credits.md](assets/backgrounds/Credits.md) for image attributions.
+
 ## References
 
 - **Procedural studio mat weave texture.** Our weave shading is adapted from Mike Cauchi’s breakdown of tillable cloth shading, which layers sine-profiled warp/weft threads with randomized grain to keep the pattern from banding. See ["Research – Tillable Images and Cloth Shading"](https://www.mikecauchiart.com/single-post/2017/01/23/research-tillable-images-and-cloth-shading).
