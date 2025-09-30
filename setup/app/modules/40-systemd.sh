@@ -98,11 +98,22 @@ activate_unit photo-frame.service
 enable_unit wifi-manager.service
 activate_unit wifi-manager.service
 
-if [[ -f "${SYSTEMD_SOURCE}/photo-sync.timer" ]]; then
-    enable_unit photo-sync.timer
-    activate_unit photo-sync.timer
-    if [[ -f "${SYSTEMD_SOURCE}/photo-sync.service" ]]; then
-        enable_unit photo-sync.service
+select_unit_file() {
+    local candidate
+    for candidate in "$@"; do
+        if [[ -f "${SYSTEMD_SOURCE}/${candidate}" ]]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if timer_unit=$(select_unit_file photo-sync.timer sync-photos.timer); then
+    enable_unit "${timer_unit}"
+    activate_unit "${timer_unit}"
+    if service_unit=$(select_unit_file photo-sync.service sync-photos.service); then
+        enable_unit "${service_unit}"
     fi
 fi
 

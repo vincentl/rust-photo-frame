@@ -95,6 +95,8 @@ Both setup stages should be launched as the deployment user. They call `sudo` in
    ./setup/system/run.sh
    ```
 
+   During this stage the installer also ensures the deployment user can manage NetworkManager by joining the `netdev` group and installing a polkit rule for headless control. If your account is newly added to `netdev`, log out and back in (or reconnect your SSH session) before continuing so the fresh group membership is applied.
+
 1. Reboot the pi to enable the boot changes.
 
    ```bash
