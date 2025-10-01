@@ -1,0 +1,409 @@
+use std::fs;
+use std::io;
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::{bail, Context, Result};
+use clap::Parser;
+use evdev::{Device, InputEventKind, Key};
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::EnvFilter;
+
+#[derive(Debug, Clone, Parser)]
+#[command(
+    name = "photo-buttond",
+    about = "Power button handler for the Rust photo frame"
+)]
+struct Args {
+    /// Input device path (evdev). Auto-detects when omitted.
+    #[arg(long)]
+    device: Option<PathBuf>,
+
+    /// Maximum press duration to treat as a short press (milliseconds).
+    #[arg(long, default_value_t = 250)]
+    single_window_ms: u64,
+
+    /// Window to detect a second press and trigger shutdown (milliseconds).
+    #[arg(long, default_value_t = 400)]
+    double_window_ms: u64,
+
+    /// Debounce window applied to press/release transitions (milliseconds).
+    #[arg(long, default_value_t = 20)]
+    debounce_ms: u64,
+
+    /// PID file used to look up the running photo-frame process.
+    #[arg(long)]
+    pidfile: Option<PathBuf>,
+
+    /// Process name fallback when no PID file is available.
+    #[arg(long, default_value = "rust-photo-frame")]
+    procname: String,
+
+    /// Shutdown helper to execute on a double press.
+    #[arg(long, default_value = "/opt/photo-frame/bin/photo-safe-shutdown")]
+    shutdown: PathBuf,
+
+    /// Logging level (error|warn|info|debug|trace).
+    #[arg(long, default_value = "info")]
+    log_level: String,
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    init_tracing(&args.log_level)?;
+
+    let durations = Durations::from_args(&args);
+    let (mut device, path) = open_device(&args)?;
+    set_nonblocking(&device)
+        .with_context(|| format!("failed to set {} non-blocking", path.display()))?;
+    info!(device = %path.display(), "listening for power button events");
+
+    let mut tracker = ButtonTracker::new(durations);
+
+    loop {
+        let now = Instant::now();
+        if let Some(action) = tracker.handle_timeout(now) {
+            perform_action(action, &args);
+            continue;
+        }
+
+        let idle = match device.fetch_events() {
+            Ok(events) => {
+                let mut handled = false;
+                for event in events {
+                    handled = true;
+                    match event.kind() {
+                        InputEventKind::Key(Key::KEY_POWER) => match event.value() {
+                            1 => {
+                                tracker.on_press(Instant::now());
+                            }
+                            0 => {
+                                if let Some(action) = tracker.on_release(Instant::now()) {
+                                    perform_action(action, &args);
+                                }
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                }
+                !handled
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => true,
+            Err(err) => return Err(err).with_context(|| "failed reading input events"),
+        };
+
+        if idle {
+            let sleep_for = tracker
+                .time_until_deadline(Instant::now())
+                .unwrap_or(Duration::from_millis(50));
+            if !sleep_for.is_zero() {
+                thread::sleep(sleep_for.min(Duration::from_millis(100)));
+            }
+        }
+    }
+}
+
+fn set_nonblocking(device: &Device) -> Result<()> {
+    let fd = device.as_raw_fd();
+    let current = fcntl(fd, FcntlArg::F_GETFL).context("F_GETFL failed")?;
+    let flags = OFlag::from_bits_truncate(current) | OFlag::O_NONBLOCK;
+    fcntl(fd, FcntlArg::F_SETFL(flags)).context("F_SETFL failed")?;
+    Ok(())
+}
+
+fn init_tracing(level: &str) -> Result<()> {
+    let filter = EnvFilter::builder()
+        .parse(level)
+        .with_context(|| format!("invalid log level '{level}'"))?;
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+    Ok(())
+}
+
+fn open_device(args: &Args) -> Result<(Device, PathBuf)> {
+    if let Some(path) = &args.device {
+        let device =
+            Device::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        ensure_power_key(&device, path)?;
+        return Ok((device, path.clone()));
+    }
+
+    if let Some(result) = scan_dir("/dev/input/by-path", true)? {
+        return Ok(result);
+    }
+
+    if let Some(result) = scan_dir("/dev/input", false)? {
+        return Ok(result);
+    }
+
+    bail!("no input devices advertising KEY_POWER found");
+}
+
+fn scan_dir<P: AsRef<Path>>(dir: P, filter_power_name: bool) -> Result<Option<(Device, PathBuf)>> {
+    let dir = dir.as_ref().to_path_buf();
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read directory {}", dir.display()))
+        }
+    };
+
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if filter_power_name {
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_ascii_lowercase(),
+                None => continue,
+            };
+            if !name.contains("power") {
+                continue;
+            }
+        }
+
+        if !filter_power_name {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if !name.starts_with("event") {
+                    continue;
+                }
+            }
+        }
+
+        match open_power_device(&path)? {
+            Some(device) => candidates.push((device, path)),
+            None => continue,
+        }
+    }
+
+    candidates.sort_by(|a, b| a.1.cmp(&b.1));
+    Ok(candidates.into_iter().next())
+}
+
+fn open_power_device(path: &Path) -> Result<Option<Device>> {
+    let device = match Device::open(path) {
+        Ok(device) => device,
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            warn!(device = %path.display(), "no permission to read device");
+            return Ok(None);
+        }
+        Err(err) => return Err(err).with_context(|| format!("failed to open {}", path.display())),
+    };
+    match ensure_power_key(&device, path) {
+        Ok(()) => Ok(Some(device)),
+        Err(err) => {
+            debug!(device = %path.display(), "{}", err);
+            Ok(None)
+        }
+    }
+}
+
+fn ensure_power_key(device: &Device, path: &Path) -> Result<()> {
+    let Some(keys) = device.supported_keys() else {
+        bail!("{} does not advertise any keys", path.display());
+    };
+    if !keys.contains(Key::KEY_POWER) {
+        bail!("{} does not support KEY_POWER", path.display());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct Durations {
+    debounce: Duration,
+    single_window: Duration,
+    double_window: Duration,
+}
+
+impl Durations {
+    fn from_args(args: &Args) -> Self {
+        Self {
+            debounce: Duration::from_millis(args.debounce_ms),
+            single_window: Duration::from_millis(args.single_window_ms),
+            double_window: Duration::from_millis(args.double_window_ms),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Action {
+    Single,
+    Double,
+}
+
+struct ButtonTracker {
+    durations: Durations,
+    state: State,
+    last_transition: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum State {
+    Idle,
+    Pressed { down_at: Instant, is_second: bool },
+    WaitingForSecond { deadline: Instant },
+}
+
+impl ButtonTracker {
+    fn new(durations: Durations) -> Self {
+        Self {
+            durations,
+            state: State::Idle,
+            last_transition: None,
+        }
+    }
+
+    fn on_press(&mut self, now: Instant) {
+        if !self.accept(now) {
+            return;
+        }
+        self.state = match self.state {
+            State::Idle => State::Pressed {
+                down_at: now,
+                is_second: false,
+            },
+            State::WaitingForSecond { deadline } if now <= deadline => State::Pressed {
+                down_at: now,
+                is_second: true,
+            },
+            State::WaitingForSecond { .. } => State::Pressed {
+                down_at: now,
+                is_second: false,
+            },
+            State::Pressed { down_at, is_second } => State::Pressed { down_at, is_second },
+        };
+    }
+
+    fn on_release(&mut self, now: Instant) -> Option<Action> {
+        if !self.accept(now) {
+            return None;
+        }
+
+        match self.state {
+            State::Pressed { down_at, is_second } => {
+                let held = now.saturating_duration_since(down_at);
+                self.state = State::Idle;
+                if held > self.durations.single_window {
+                    debug!(duration = ?held, "ignored long press");
+                    return None;
+                }
+                if is_second {
+                    return Some(Action::Double);
+                }
+                self.state = State::WaitingForSecond {
+                    deadline: now + self.durations.double_window,
+                };
+                None
+            }
+            State::Idle | State::WaitingForSecond { .. } => None,
+        }
+    }
+
+    fn handle_timeout(&mut self, now: Instant) -> Option<Action> {
+        match self.state {
+            State::WaitingForSecond { deadline } if now >= deadline => {
+                self.state = State::Idle;
+                Some(Action::Single)
+            }
+            _ => None,
+        }
+    }
+
+    fn time_until_deadline(&self, now: Instant) -> Option<Duration> {
+        match self.state {
+            State::WaitingForSecond { deadline } if deadline > now => Some(deadline - now),
+            State::WaitingForSecond { .. } => Some(Duration::from_millis(0)),
+            _ => None,
+        }
+    }
+
+    fn accept(&mut self, now: Instant) -> bool {
+        if let Some(last) = self.last_transition {
+            if now.saturating_duration_since(last) < self.durations.debounce {
+                debug!("debounced transition");
+                return false;
+            }
+        }
+        self.last_transition = Some(now);
+        true
+    }
+}
+
+fn perform_action(action: Action, args: &Args) {
+    match action {
+        Action::Single => {
+            info!("single press → SIGUSR1");
+            if let Err(err) = trigger_single(args) {
+                error!(?err, "failed to deliver SIGUSR1");
+            }
+        }
+        Action::Double => {
+            info!("double press → shutdown");
+            if let Err(err) = trigger_shutdown(&args.shutdown) {
+                error!(?err, "failed to run shutdown helper");
+            }
+        }
+    }
+}
+
+fn trigger_single(args: &Args) -> Result<()> {
+    if let Some(pidfile) = &args.pidfile {
+        match read_pid(pidfile) {
+            Ok(pid) => match send_signal(pid, Signal::SIGUSR1) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    warn!(?err, pid, "failed to signal pid from pidfile");
+                }
+            },
+            Err(err) => {
+                warn!(?err, file = %pidfile.display(), "failed to read pidfile");
+            }
+        }
+    }
+
+    warn!(process = %args.procname, "falling back to pkill");
+    let status = std::process::Command::new("pkill")
+        .arg("-USR1")
+        .arg("-f")
+        .arg(&args.procname)
+        .status()
+        .context("failed to execute pkill")?;
+    if !status.success() {
+        bail!("pkill exited with status {status}");
+    }
+    Ok(())
+}
+
+fn trigger_shutdown(path: &Path) -> Result<()> {
+    let status = std::process::Command::new(path)
+        .status()
+        .with_context(|| format!("failed to execute {}", path.display()))?;
+    if !status.success() {
+        bail!("shutdown helper exited with status {status}");
+    }
+    Ok(())
+}
+
+fn read_pid(path: &Path) -> Result<i32> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read pidfile {}", path.display()))?;
+    let pid: i32 = contents
+        .trim()
+        .parse()
+        .with_context(|| format!("invalid pid in {}", path.display()))?;
+    Ok(pid)
+}
+
+fn send_signal(pid: i32, signal: Signal) -> Result<()> {
+    let pid = Pid::from_raw(pid);
+    kill(pid, signal).with_context(|| format!("failed to signal pid {pid}"))
+}

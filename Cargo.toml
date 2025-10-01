@@ -39,6 +39,7 @@ base64 = "0.22.1"
 
 [workspace]
 members = [
+    "crates/buttond",
     "crates/wifi-manager",
 ]
 resolver = "2"
