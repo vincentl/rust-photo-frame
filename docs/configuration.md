@@ -404,6 +404,7 @@ Every entry inside `matting.options` accepts the shared settings below:
 ### `fixed-color`
 
 - **`colors`** (array of `[r, g, b]` triples, default `[[0, 0, 0]]`): One or more RGB swatches (0–255 per channel) to rotate through. Channels outside the valid range are clamped before rendering. Supply multiple entries to keep the frame palette fresh or stick with a single swatch for a consistent backdrop.
+- **`color`** (`[r, g, b]` triple): Convenience alias for `colors` when you only want to specify a single swatch.
 - **`color-selection`** (`sequential` or `random`; default `sequential`): Chooses how the viewer advances through the configured swatches. Sequential mode cycles in order, while random selects a new color for each slide.
 
 ### `blur`
