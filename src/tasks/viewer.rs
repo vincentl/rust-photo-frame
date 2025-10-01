@@ -24,6 +24,24 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+fn wait_for_retry(cancel: &CancellationToken, mut remaining: Duration) -> bool {
+    if remaining.is_zero() {
+        return cancel.is_cancelled();
+    }
+
+    const SLICE: Duration = Duration::from_millis(250);
+    while remaining > Duration::ZERO {
+        if cancel.is_cancelled() {
+            return true;
+        }
+        let sleep_for = if remaining > SLICE { SLICE } else { remaining };
+        thread::sleep(sleep_for);
+        remaining = remaining.saturating_sub(sleep_for);
+    }
+
+    cancel.is_cancelled()
+}
+
 pub fn run_windowed(
     from_loader: Receiver<PhotoLoaded>,
     to_manager_displayed: Sender<Displayed>,
@@ -1599,7 +1617,42 @@ pub fn run_windowed(
         }
     }
 
-    let event_loop = EventLoop::new()?;
+    let mut retry_attempt = 0usize;
+    let mut retry_delay = Duration::from_secs(2);
+    let max_retry_delay = Duration::from_secs(30);
+    let event_loop = loop {
+        match EventLoop::new() {
+            Ok(event_loop) => {
+                if retry_attempt > 0 {
+                    info!("viewer compositor connection restored");
+                }
+                break event_loop;
+            }
+            Err(winit::error::EventLoopError::Os(os_err)) => {
+                if cancel.is_cancelled() {
+                    info!("viewer initialization cancelled before compositor became available");
+                    return Ok(());
+                }
+
+                let wait_for = retry_delay;
+                retry_attempt += 1;
+                warn!(
+                    attempt = retry_attempt,
+                    wait_secs = wait_for.as_secs_f32(),
+                    error = %os_err,
+                    "failed to initialize display compositor; retrying"
+                );
+
+                if wait_for_retry(&cancel, wait_for) {
+                    info!("viewer initialization cancelled while waiting to retry");
+                    return Ok(());
+                }
+
+                retry_delay = (retry_delay * 2).min(max_retry_delay);
+            }
+            Err(other) => return Err(other.into()),
+        }
+    };
     let worker_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2)
