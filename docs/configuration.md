@@ -190,6 +190,26 @@ sleep:
 
 The default configuration installs `/opt/photo-frame/bin/powerctl`, a thin wrapper around the same commands. Replace the example strings with `/opt/photo-frame/bin/powerctl sleep` / `wake` to use the helper and share a consistent detection script across deployments.
 
+## Power button daemon
+
+`photo-buttond` watches the Raspberry Pi 5 power-pad button via evdev. The installer drops a systemd unit that starts the daemon as the `frame` user with the following defaults:
+
+```
+/opt/photo-frame/bin/photo-buttond \
+  --single-window-ms 250 \
+  --double-window-ms 400 \
+  --debounce-ms 20 \
+  --pidfile /run/photo-app.pid \
+  --procname rust-photo-frame \
+  --shutdown /opt/photo-frame/bin/photo-safe-shutdown
+```
+
+- **Short press:** sends `SIGUSR1` to the running app (using the pidfile when present, otherwise `pkill -USR1 -f rust-photo-frame`).
+- **Double press:** runs `/opt/photo-frame/bin/photo-safe-shutdown`, which wraps `shutdown -h now`.
+- **Long press:** bypassed so the Pi firmware can force power-off.
+
+Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. If the wrong device is chosen, override it by editing the unit to pass `--device /dev/input/by-path/...-event`. Debounce, single-press, and double-press windows are configurable in milliseconds.
+
 ### `matting`
 
 - **Purpose:** Chooses the mat/background style rendered behind every photo.

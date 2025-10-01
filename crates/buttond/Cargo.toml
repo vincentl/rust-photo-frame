@@ -1,0 +1,16 @@
+[package]
+name = "photo-buttond"
+version = "0.1.0"
+edition = "2021"
+description = "Power button handler daemon for the Rust photo frame"
+authors = ["Rust Photo Frame Team"]
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.48", features = ["derive"] }
+evdev = "0.12.1"
+tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
+tracing = "0.1.41"
+nix = { version = "0.29.0", default-features = false, features = ["signal", "fs"] }

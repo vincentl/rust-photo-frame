@@ -7,6 +7,8 @@ The photo frame targets Raspberry Pi hardware and a wall-mounted display. This g
 - **Raspberry Pi 5 (4 GiB or higher).** Provides the GPU performance and memory headroom needed to render transitions smoothly.
 - **4K monitor.** Any portrait-capable monitor with solid viewing angles works. Aim for thin bezels if you plan to hide the display behind a custom frame.
 - **Power supply.** Use an official Pi PSU or a USB-C power brick that can sustain the Pi 5 under load.
+- **Momentary power button.** Wire a normally-open pushbutton across the Pi 5 power pads. A short press is routed to the photo
+  frame daemon for sleep and shutdown control; a long hardware press still forces power-off through the firmware watchdog.
 - **HDMI cable.** Connects the Pi to the display. Keep runs short to avoid signal degradation.
 - **High-endurance SD card.** Stores the operating system, binaries, and cached thumbnails.
 - **Mounting plan.** Decide how you will secure the Pi behind the screen and route power safely.
