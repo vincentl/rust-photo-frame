@@ -103,7 +103,9 @@ copy_tree() {
     local dest_root="$2"
     local mode="$3"
     local description="$4"
-    [[ -d "${src_dir}" ]] || return
+    if [[ ! -d "${src_dir}" ]]; then
+        return 0
+    fi
     while IFS= read -r -d '' file; do
         local rel_path="${file#${src_dir}/}"
         local dest_path="${dest_root}/${rel_path}"
@@ -180,7 +182,9 @@ EXTRA_SYSTEMD_SRC="${FILES_ROOT}/systemd"
 
 stage_systemd_units() {
     local source_dir="$1"
-    [[ -d "${source_dir}" ]] || return
+    if [[ ! -d "${source_dir}" ]]; then
+        return 0
+    fi
     if [[ "${DRY_RUN}" == "1" ]]; then
         log INFO "DRY_RUN: would stage systemd units from ${source_dir} with INSTALL_ROOT=${INSTALL_ROOT} and SERVICE_USER=${SERVICE_USER}"
         return
