@@ -832,6 +832,13 @@ where
                     }
                     builder.fixed_colors = Some(inline_value_to::<Vec<[u8; 3]>, E>(value)?);
                 }
+                "color" => {
+                    if builder.fixed_colors.is_some() {
+                        return Err(de::Error::duplicate_field("color"));
+                    }
+                    let color = inline_value_to::<[u8; 3], E>(value)?;
+                    builder.fixed_colors = Some(vec![color]);
+                }
                 "color-selection" => {
                     if builder.color_selection.is_some() {
                         return Err(de::Error::duplicate_field("color-selection"));
@@ -843,6 +850,7 @@ where
                         other,
                         &[
                             "colors",
+                            "color",
                             "color-selection",
                             "minimum-mat-percentage",
                             "max-upscale-factor",
@@ -1269,6 +1277,13 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
                             }
                             builder.fixed_colors = Some(map.next_value()?);
                         }
+                        "color" => {
+                            if builder.fixed_colors.is_some() {
+                                return Err(de::Error::duplicate_field("color"));
+                            }
+                            let color: [u8; 3] = map.next_value()?;
+                            builder.fixed_colors = Some(vec![color]);
+                        }
                         "color-selection" => {
                             if builder.color_selection.is_some() {
                                 return Err(de::Error::duplicate_field("color-selection"));
@@ -1280,6 +1295,7 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
                                 other,
                                 &[
                                     "colors",
+                                    "color",
                                     "color-selection",
                                     "minimum-mat-percentage",
                                     "max-upscale-factor",

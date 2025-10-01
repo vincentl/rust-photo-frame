@@ -182,6 +182,29 @@ matting:
 }
 
 #[test]
+fn parse_fixed_color_single_color_alias() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  types: [fixed-color]
+  options:
+    fixed-color:
+      color: [17, 34, 51]
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let options = cfg.matting.options();
+    let fixed = options
+        .get(&MattingKind::FixedColor)
+        .expect("expected fixed-color mat option");
+    if let rust_photo_frame::config::MattingMode::FixedColor { colors, .. } = &fixed.style {
+        assert_eq!(colors.as_slice(), &[[17, 34, 51]]);
+    } else {
+        panic!("expected fixed-color matting");
+    }
+}
+
+#[test]
 fn parse_sequential_matting_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
