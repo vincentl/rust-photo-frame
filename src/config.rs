@@ -1015,32 +1015,14 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
         A: MapAccess<'de>,
     {
         let mut requested_types: Option<Vec<MattingKind>> = None;
-        let mut legacy_type: Option<LegacyMattingType> = None;
         let mut options: Option<BTreeMap<MattingKind, MattingOptions>> = None;
         let mut type_selection: Option<TypeSelection> = None;
         let mut inline_fields: Vec<(String, YamlValue)> = Vec::new();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                "type" => {
-                    if legacy_type.is_some() {
-                        return Err(de::Error::duplicate_field("type"));
-                    }
-                    if requested_types.is_some() {
-                        return Err(de::Error::custom(
-                            "matting configuration cannot mix type and types",
-                        ));
-                    }
-                    let raw: String = map.next_value()?;
-                    legacy_type = Some(parse_legacy_matting_type(&raw).map_err(de::Error::custom)?);
-                }
                 "types" => {
                     if requested_types.is_some() {
                         return Err(de::Error::duplicate_field("types"));
-                    }
-                    if legacy_type.is_some() {
-                        return Err(de::Error::custom(
-                            "matting configuration cannot mix type and types",
-                        ));
                     }
                     let raw: Vec<String> = map.next_value()?;
                     requested_types = Some(
@@ -1058,12 +1040,12 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
                     if type_selection.is_some() {
                         return Err(de::Error::duplicate_field("type-selection"));
                     }
-                    if legacy_type.is_some() {
-                        return Err(de::Error::custom(
-                            "matting configuration cannot mix type-selection with legacy type",
-                        ));
-                    }
                     type_selection = Some(map.next_value()?);
+                }
+                "type" => {
+                    return Err(de::Error::custom(
+                        "matting.type is no longer supported; use matting.types",
+                    ));
                 }
                 _ => {
                     let value = map.next_value::<YamlValue>()?;
@@ -1080,23 +1062,9 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
 
         let mut options = options.unwrap_or_default();
 
-        let types = if let Some(types) = requested_types {
-            types
-        } else if let Some(selection) = legacy_type {
-            match selection {
-                LegacyMattingType::Fixed(kind) => vec![kind],
-                LegacyMattingType::Random => options.keys().copied().collect(),
-            }
-        } else {
-            return Err(de::Error::missing_field("types"));
-        };
+        let types = requested_types.ok_or_else(|| de::Error::missing_field("types"))?;
 
         if types.is_empty() {
-            if matches!(legacy_type, Some(LegacyMattingType::Random)) {
-                return Err(de::Error::custom(
-                    "matting.type random requires matting.options to specify at least one entry",
-                ));
-            }
             return Err(de::Error::custom(
                 "matting.types must include at least one entry",
             ));
@@ -1199,32 +1167,6 @@ fn parse_matting_types(raw: Vec<String>) -> Result<Vec<MattingKind>> {
     }
 
     Ok(kinds)
-}
-
-#[derive(Clone, Copy)]
-enum LegacyMattingType {
-    Fixed(MattingKind),
-    Random,
-}
-
-fn parse_legacy_matting_type(raw: &str) -> Result<LegacyMattingType> {
-    if raw == "random" {
-        return Ok(LegacyMattingType::Random);
-    }
-
-    let kind = MattingKind::ALL
-        .iter()
-        .find(|candidate| raw == candidate.as_str())
-        .copied()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "unknown matting type '{}', expected one of: {}",
-                raw,
-                MattingKind::NAMES.join(", ")
-            )
-        })?;
-
-    Ok(LegacyMattingType::Fixed(kind))
 }
 
 struct MattingOptionsMapSeed;
@@ -2546,33 +2488,14 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
         A: MapAccess<'de>,
     {
         let mut requested_types: Option<Vec<TransitionKind>> = None;
-        let mut legacy_type: Option<LegacyTransitionType> = None;
         let mut options: Option<BTreeMap<TransitionKind, TransitionOptions>> = None;
         let mut type_selection: Option<TypeSelection> = None;
         let mut inline_fields: Vec<(String, YamlValue)> = Vec::new();
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                "type" => {
-                    if legacy_type.is_some() {
-                        return Err(de::Error::duplicate_field("type"));
-                    }
-                    if requested_types.is_some() {
-                        return Err(de::Error::custom(
-                            "transition configuration cannot mix type and types",
-                        ));
-                    }
-                    let raw: String = map.next_value()?;
-                    legacy_type =
-                        Some(parse_legacy_transition_type(&raw).map_err(de::Error::custom)?);
-                }
                 "types" => {
                     if requested_types.is_some() {
                         return Err(de::Error::duplicate_field("types"));
-                    }
-                    if legacy_type.is_some() {
-                        return Err(de::Error::custom(
-                            "transition configuration cannot mix type and types",
-                        ));
                     }
                     let raw: Vec<String> = map.next_value()?;
                     requested_types = Some(
@@ -2590,12 +2513,12 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
                     if type_selection.is_some() {
                         return Err(de::Error::duplicate_field("type-selection"));
                     }
-                    if legacy_type.is_some() {
-                        return Err(de::Error::custom(
-                            "transition configuration cannot mix type-selection with legacy type",
-                        ));
-                    }
                     type_selection = Some(map.next_value()?);
+                }
+                "type" => {
+                    return Err(de::Error::custom(
+                        "transition.type is no longer supported; use transition.types",
+                    ));
                 }
                 _ => {
                     let value = map.next_value::<YamlValue>()?;
@@ -2611,23 +2534,9 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
         }
 
         let mut options = options.unwrap_or_default();
-        let types = if let Some(types) = requested_types {
-            types
-        } else if let Some(selection) = legacy_type {
-            match selection {
-                LegacyTransitionType::Fixed(kind) => vec![kind],
-                LegacyTransitionType::Random => options.keys().copied().collect(),
-            }
-        } else {
-            return Err(de::Error::missing_field("types"));
-        };
+        let types = requested_types.ok_or_else(|| de::Error::missing_field("types"))?;
 
         if types.is_empty() {
-            if matches!(legacy_type, Some(LegacyTransitionType::Random)) {
-                return Err(de::Error::custom(
-                    "transition.type random requires transition.options to specify at least one entry",
-                ));
-            }
             return Err(de::Error::custom(
                 "transition.types must include at least one entry",
             ));
@@ -2731,32 +2640,6 @@ fn parse_transition_types(raw: Vec<String>) -> Result<Vec<TransitionKind>> {
     }
 
     Ok(kinds)
-}
-
-#[derive(Clone, Copy)]
-enum LegacyTransitionType {
-    Fixed(TransitionKind),
-    Random,
-}
-
-fn parse_legacy_transition_type(raw: &str) -> Result<LegacyTransitionType> {
-    if raw == "random" {
-        return Ok(LegacyTransitionType::Random);
-    }
-
-    let kind = TransitionKind::ALL
-        .iter()
-        .find(|candidate| raw == candidate.as_str())
-        .copied()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "unknown transition type '{}', expected one of: {}",
-                raw,
-                TransitionKind::NAMES.join(", ")
-            )
-        })?;
-
-    Ok(LegacyTransitionType::Fixed(kind))
 }
 
 struct TransitionOptionsMapSeed;
