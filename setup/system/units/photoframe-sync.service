@@ -1,0 +1,37 @@
+# Managed by setup/system/install-systemd-units.sh
+[Unit]
+Description=Photo Frame Library Sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kiosk
+Group=kiosk
+WorkingDirectory=/var/lib/photo-frame
+Environment=PHOTO_LIBRARY_PATH=/var/lib/photo-frame/photos
+Environment=SYNC_TOOL=rclone
+Environment="RCLONE_FLAGS=--checkers=8 --transfers=4 --retries=5 --copy-links"
+Environment="RSYNC_FLAGS=-av --delete"
+EnvironmentFile=-/etc/photoframe/sync.env
+ExecStart=/usr/bin/env bash -euo pipefail -c '
+DEST="${PHOTO_LIBRARY_PATH:-}"; if [[ -z "${DEST}" ]]; then echo "PHOTO_LIBRARY_PATH must be set" >&2; exit 2; fi
+case "${SYNC_TOOL}" in
+  rsync)
+    if [[ -z "${RSYNC_SOURCE:-}" ]]; then
+      echo "RSYNC_SOURCE must be set when SYNC_TOOL=rsync" >&2
+      exit 2
+    fi
+    exec rsync ${RSYNC_FLAGS} "${RSYNC_SOURCE}" "${DEST}"
+    ;;
+  *)
+    if [[ -z "${RCLONE_REMOTE:-}" ]]; then
+      echo "RCLONE_REMOTE must be set when SYNC_TOOL=rclone" >&2
+      exit 2
+    fi
+    exec rclone sync "${RCLONE_REMOTE}" "${DEST}" ${RCLONE_FLAGS}
+    ;;
+esac'
+
+[Install]
+WantedBy=multi-user.target

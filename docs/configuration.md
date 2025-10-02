@@ -7,7 +7,7 @@ The repository ships with a sample [`config.yaml`](../config.yaml) that you can 
 The example below targets a Pi driving a 4K portrait display backed by a NAS-mounted photo library. Inline comments explain why each value matters and what to tweak for common scenarios.
 
 ```yaml
-photo-library-path: /opt/photo-frame/var/photos
+photo-library-path: /var/lib/photo-frame/photos
 
 # Render/transition settings
 transition:
@@ -67,9 +67,9 @@ Use the quick reference below to locate the knobs you care about, then dive into
 
 - **Purpose:** Sets the root directory that will be scanned recursively for supported photo formats.
 - **Required?** Yes. Leave it unset and the application has no images to display.
-- **Accepted values & defaults:** Any absolute or relative filesystem path. The setup pipeline provisions `/opt/photo-frame/var/photos` and points the default configuration there so both the runtime and any cloud sync job start from a known location.
+- **Accepted values & defaults:** Any absolute or relative filesystem path. The setup pipeline provisions `/var/lib/photo-frame/photos` and points the default configuration there so both the runtime and any cloud sync job start from a known location.
 - **Effect on behavior:** Switching the path changes the library the watcher monitors; the viewer reloads the playlist when the directory contents change.
-- **Notes:** After the installer seeds `/opt/photo-frame/var/config.yaml`, edit that writable copy to move the library elsewhere (for example, to an attached drive or network share) if you do not want to keep photos under `/opt/photo-frame/var/photos`.
+- **Notes:** After the installer seeds `/var/lib/photo-frame/config.yaml`, edit that writable copy to move the library elsewhere (for example, to an attached drive or network share) if you do not want to keep photos under `/var/lib/photo-frame/photos`.
 
 ### `transition`
 
