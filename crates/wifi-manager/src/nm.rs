@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 use std::collections::HashSet;
 use std::process::Stdio;
 use tokio::process::Command;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Subcommand)]
 pub enum NmCommand {
@@ -176,21 +176,7 @@ pub async fn ensure_hotspot_profile(
         }
     } else {
         info!(id = %hotspot.connection_id, "creating hotspot profile");
-        let args = vec![
-            "connection",
-            "add",
-            "type",
-            "wifi",
-            "ifname",
-            interface,
-            "con-name",
-            &hotspot.connection_id,
-            "autoconnect",
-            "no",
-            "ssid",
-            &hotspot.ssid,
-        ];
-        nmcli(&args).await?;
+        add_hotspot_profile(&hotspot.connection_id, &hotspot.ssid, interface).await?;
         nmcli(&[
             "connection",
             "modify",
@@ -261,6 +247,61 @@ pub async fn ensure_hotspot_profile(
         .await?;
     }
     Ok(())
+}
+
+async fn add_hotspot_profile(connection_id: &str, ssid: &str, interface: &str) -> Result<()> {
+    let add_args = [
+        "connection",
+        "add",
+        "type",
+        "wifi",
+        "ifname",
+        interface,
+        "con-name",
+        connection_id,
+        "autoconnect",
+        "no",
+        "ssid",
+        ssid,
+    ];
+
+    match nmcli(&add_args).await {
+        Ok(_) => Ok(()),
+        Err(err) if should_retry_with_wildcard(&err) => {
+            warn!(
+                error = ?err,
+                interface,
+                "failed to bind hotspot to interface; retrying with wildcard"
+            );
+            let wildcard_args = [
+                "connection",
+                "add",
+                "type",
+                "wifi",
+                "ifname",
+                "*",
+                "con-name",
+                connection_id,
+                "autoconnect",
+                "no",
+                "ssid",
+                ssid,
+            ];
+            nmcli(&wildcard_args).await.map(|_| ())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn should_retry_with_wildcard(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_lowercase();
+    let mentions_ifname = msg.contains("ifname") || msg.contains("interface");
+    let indicates_missing_device = msg.contains("not available")
+        || msg.contains("no device")
+        || msg.contains("not found")
+        || msg.contains("not valid")
+        || msg.contains("is unavailable");
+    mentions_ifname && indicates_missing_device
 }
 
 pub async fn bring_hotspot_up(hotspot: &HotspotConfig) -> Result<()> {
