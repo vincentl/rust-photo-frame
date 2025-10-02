@@ -2,55 +2,34 @@
 set -euo pipefail
 
 MODULE="app:20-stage"
-DRY_RUN="${DRY_RUN:-0}"
 CARGO_PROFILE="${CARGO_PROFILE:-release}"
-INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
-SERVICE_USER="${SERVICE_USER:-$(id -un)}"
-SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn)}"
-INSTALL_ROOT_ESC="$(printf '%s' "${INSTALL_ROOT}" | sed 's/[&/]/\\&/g')"
-SERVICE_USER_ESC="$(printf '%s' "${SERVICE_USER}" | sed 's/[&/]/\\&/g')"
-SERVICE_GROUP_ESC="$(printf '%s' "${SERVICE_GROUP}" | sed 's/[&/]/\\&/g')"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 STAGE_ROOT="${STAGE_ROOT:-${SCRIPT_DIR}/../build}"
 STAGE_DIR="${STAGE_ROOT}/stage"
+
+FILES_ROOT="${REPO_ROOT}/setup/files"
+SYSTEM_UNITS_DIR="${REPO_ROOT}/setup/system/units"
+SYSTEM_TEMPLATE="${REPO_ROOT}/setup/system/cage@.service"
+SYSTEM_PAM_DIR="${REPO_ROOT}/setup/system/pam.d"
 
 log() {
     local level="$1"; shift
     printf '[%s] %s\n' "${MODULE}" "$level: $*"
 }
 
-ensure_dir() {
-    local dir="$1"
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would create directory ${dir}"
-    else
-        mkdir -p "${dir}"
-    fi
-}
-
 cleanup_stage() {
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would remove existing stage directory ${STAGE_DIR}"
-    else
-        rm -rf "${STAGE_DIR}"
-    fi
+    rm -rf "${STAGE_DIR}"
+    mkdir -p "${STAGE_DIR}"
 }
 
 create_stage_layout() {
+    local dir
     cleanup_stage
-    for dir in \
-        "${STAGE_DIR}" \
-        "${STAGE_DIR}/bin" \
-        "${STAGE_DIR}/lib" \
-        "${STAGE_DIR}/etc" \
-        "${STAGE_DIR}/docs" \
-        "${STAGE_DIR}/systemd" \
-        "${STAGE_DIR}/share" \
-        "${STAGE_DIR}/var" \
-        "${STAGE_DIR}/share/backgrounds"; do
-        ensure_dir "${dir}"
+    for dir in bin etc docs share systemd; do
+        mkdir -p "${STAGE_DIR}/${dir}"
     done
+    mkdir -p "${STAGE_DIR}/share/backgrounds"
 }
 
 get_target_dir() {
@@ -61,151 +40,76 @@ get_target_dir() {
     fi
 }
 
-TARGET_DIR="$(get_target_dir)"
-BINARY_SRC="${TARGET_DIR}/rust-photo-frame"
-BINARY_DEST="${STAGE_DIR}/bin/rust-photo-frame"
-WIFI_MANAGER_SRC="${TARGET_DIR}/wifi-manager"
-WIFI_MANAGER_DEST="${STAGE_DIR}/bin/wifi-manager"
-FILES_ROOT="${REPO_ROOT}/setup/files"
-
-create_stage_layout
-
-if [[ ! -f "${BINARY_SRC}" ]]; then
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would take binary from ${BINARY_SRC}"
-    else
-        log ERROR "Expected binary not found at ${BINARY_SRC}. Run build module first."
-        exit 1
-    fi
-fi
-
 stage_binary() {
-    local src="$1"
-    local dest="$2"
-    local name="$3"
+    local src="$1" dest="$2" label="$3"
     if [[ ! -f "${src}" ]]; then
-        if [[ "${DRY_RUN}" == "1" ]]; then
-            log INFO "DRY_RUN: would stage ${name} from ${src}"
-            return
-        fi
-        log ERROR "Expected ${name} binary not found at ${src}. Run build module first."
+        log ERROR "Expected ${label} binary not found at ${src}. Run the build module first."
         exit 1
     fi
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would install ${src} -> ${dest}"
-    else
-        install -Dm755 "${src}" "${dest}"
-    fi
+    install -Dm755 "${src}" "${dest}"
 }
 
 copy_tree() {
-    local src_dir="$1"
-    local dest_root="$2"
-    local mode="$3"
-    local description="$4"
-    if [[ ! -d "${src_dir}" ]]; then
-        return 0
-    fi
+    local src="$1" dest="$2" mode="$3"
+    [[ -d "${src}" ]] || return 0
     while IFS= read -r -d '' file; do
-        local rel_path="${file#${src_dir}/}"
-        local dest_path="${dest_root}/${rel_path}"
-        if [[ "${DRY_RUN}" == "1" ]]; then
-            log INFO "DRY_RUN: would install ${description} ${file} -> ${dest_path}"
-        else
-            install -Dm"${mode}" "${file}" "${dest_path}"
-        fi
-    done < <(find "${src_dir}" -type f -print0)
+        local rel="${file#${src}/}"
+        install -Dm"${mode}" "${file}" "${dest}/${rel}"
+    done < <(find "${src}" -type f -print0)
 }
 
-stage_binary "${BINARY_SRC}" "${BINARY_DEST}" "photo-frame"
-stage_binary "${WIFI_MANAGER_SRC}" "${WIFI_MANAGER_DEST}" "wifi-manager"
+create_stage_layout
 
-POWERCTL_SRC="${REPO_ROOT}/setup/app/powerctl"
-if [[ -f "${POWERCTL_SRC}" ]]; then
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would install powerctl helper to ${STAGE_DIR}/bin/powerctl"
-    else
-        install -Dm755 "${POWERCTL_SRC}" "${STAGE_DIR}/bin/powerctl"
-    fi
+TARGET_DIR="$(get_target_dir)"
+
+stage_binary "${TARGET_DIR}/rust-photo-frame" "${STAGE_DIR}/bin/rust-photo-frame" "photo-frame"
+stage_binary "${TARGET_DIR}/wifi-manager" "${STAGE_DIR}/bin/wifi-manager" "wifi-manager"
+if [[ -f "${TARGET_DIR}/photo-buttond" ]]; then
+    stage_binary "${TARGET_DIR}/photo-buttond" "${STAGE_DIR}/bin/photo-buttond" "photo-buttond"
+else
+    log WARN "photo-buttond binary not built; button service will not be installed"
 fi
 
-copy_tree "${FILES_ROOT}/bin" "${STAGE_DIR}/bin" 755 "helper script"
-copy_tree "${FILES_ROOT}/etc" "${STAGE_DIR}/etc" 644 "config template"
-copy_tree "${FILES_ROOT}/share" "${STAGE_DIR}/share" 644 "shared asset"
-
-WORDLIST_SRC="${FILES_ROOT}/wordlist.txt"
-if [[ -f "${WORDLIST_SRC}" ]]; then
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would install hotspot wordlist to ${STAGE_DIR}/share/wordlist.txt"
-    else
-        install -Dm644 "${WORDLIST_SRC}" "${STAGE_DIR}/share/wordlist.txt"
-    fi
+if [[ -f "${REPO_ROOT}/setup/app/powerctl" ]]; then
+    install -Dm755 "${REPO_ROOT}/setup/app/powerctl" "${STAGE_DIR}/bin/powerctl"
 fi
 
-CONFIG_SRC="${REPO_ROOT}/config.yaml"
-if [[ -f "${CONFIG_SRC}" ]]; then
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would copy default config to ${STAGE_DIR}/etc/config.yaml"
-    else
-        install -Dm644 "${CONFIG_SRC}" "${STAGE_DIR}/etc/config.yaml"
-    fi
+copy_tree "${FILES_ROOT}/bin" "${STAGE_DIR}/bin" 755
+copy_tree "${FILES_ROOT}/etc" "${STAGE_DIR}/etc" 644
+copy_tree "${FILES_ROOT}/share" "${STAGE_DIR}/share" 644
+
+if [[ -f "${FILES_ROOT}/wordlist.txt" ]]; then
+    install -Dm644 "${FILES_ROOT}/wordlist.txt" "${STAGE_DIR}/share/wordlist.txt"
+fi
+
+if [[ -f "${REPO_ROOT}/config.yaml" ]]; then
+    install -Dm644 "${REPO_ROOT}/config.yaml" "${STAGE_DIR}/etc/config.yaml"
 else
     log WARN "Default config.yaml not found at repo root"
 fi
 
-BACKGROUND_SRC_DIR="${REPO_ROOT}/assets/background"
-if [[ -d "${BACKGROUND_SRC_DIR}" ]]; then
-    copy_tree "${BACKGROUND_SRC_DIR}" "${STAGE_DIR}/share/backgrounds" 644 "background asset"
-else
-    log INFO "No background assets found under ${BACKGROUND_SRC_DIR}"
+if [[ -d "${REPO_ROOT}/assets/background" ]]; then
+    copy_tree "${REPO_ROOT}/assets/background" "${STAGE_DIR}/share/backgrounds" 644
 fi
 
-DOCS_SRC="${REPO_ROOT}/docs"
-if [[ -d "${DOCS_SRC}" ]]; then
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would sync documentation into ${STAGE_DIR}/docs"
-    else
-        rsync -a --delete "${DOCS_SRC}/" "${STAGE_DIR}/docs/"
-    fi
+if [[ -d "${REPO_ROOT}/docs" ]]; then
+    rsync -a --delete "${REPO_ROOT}/docs/" "${STAGE_DIR}/docs/"
 fi
 
 if [[ -f "${REPO_ROOT}/LICENSE" ]]; then
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would copy LICENSE into docs directory"
-    else
-        install -Dm644 "${REPO_ROOT}/LICENSE" "${STAGE_DIR}/docs/LICENSE"
-    fi
+    install -Dm644 "${REPO_ROOT}/LICENSE" "${STAGE_DIR}/docs/LICENSE"
 fi
 
-SYSTEMD_SRC="${SCRIPT_DIR}/../systemd"
-EXTRA_SYSTEMD_SRC="${FILES_ROOT}/systemd"
+if [[ -d "${SYSTEM_UNITS_DIR}" ]]; then
+    rsync -a --delete "${SYSTEM_UNITS_DIR}/" "${STAGE_DIR}/systemd/"
+fi
 
-stage_systemd_units() {
-    local source_dir="$1"
-    if [[ ! -d "${source_dir}" ]]; then
-        return 0
-    fi
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would stage systemd units from ${source_dir} with INSTALL_ROOT=${INSTALL_ROOT} and SERVICE_USER=${SERVICE_USER}"
-        return
-    fi
-    rsync -a "${source_dir}/" "${STAGE_DIR}/systemd/"
-}
+if [[ -f "${SYSTEM_TEMPLATE}" ]]; then
+    install -Dm644 "${SYSTEM_TEMPLATE}" "${STAGE_DIR}/systemd/cage@.service"
+fi
 
-stage_systemd_units "${SYSTEMD_SRC}"
-stage_systemd_units "${EXTRA_SYSTEMD_SRC}"
-
-if [[ "${DRY_RUN}" != "1" ]]; then
-    shopt -s nullglob
-    for unit in "${STAGE_DIR}/systemd"/*.service "${STAGE_DIR}/systemd"/*.timer; do
-        [[ -f "${unit}" ]] || continue
-        sed -i \
-            -e "s|@INSTALL_ROOT@|${INSTALL_ROOT_ESC}|g" \
-            -e "s|@SERVICE_USER@|${SERVICE_USER_ESC}|g" \
-            -e "s|@SERVICE_GROUP@|${SERVICE_GROUP_ESC}|g" \
-            "${unit}"
-    done
-    shopt -u nullglob
+if [[ -d "${SYSTEM_PAM_DIR}" ]]; then
+    rsync -a --delete "${SYSTEM_PAM_DIR}/" "${STAGE_DIR}/systemd/pam.d/"
 fi
 
 log INFO "Stage artifacts prepared at ${STAGE_DIR}"

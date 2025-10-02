@@ -3,7 +3,7 @@ interface: wlan0
 check-interval-sec: 5
 offline-grace-sec: 30
 wordlist-path: /opt/photo-frame/share/wordlist.txt
-var-dir: /opt/photo-frame/var
+var-dir: /var/lib/photo-frame
 hotspot:
   connection-id: pf-hotspot
   ssid: PhotoFrame-Setup

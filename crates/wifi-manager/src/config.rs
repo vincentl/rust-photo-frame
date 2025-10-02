@@ -89,7 +89,7 @@ fn default_wordlist_path() -> PathBuf {
 }
 
 fn default_var_dir() -> PathBuf {
-    PathBuf::from("/opt/photo-frame/var")
+    PathBuf::from("/var/lib/photo-frame")
 }
 
 fn default_hotspot_connection_id() -> String {

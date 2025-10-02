@@ -36,7 +36,7 @@ When Wi-Fi drops, the frame pivots into a self-service recovery flow handled by 
 
 - **Automatic hotspot:** offline detection after a configurable grace period launches the **PhotoFrame-Setup** access point secured with a random three-word passphrase.
 - **Guided UI:** the on-device web server (default `http://192.168.4.1:8080/`) collects the replacement SSID/password and reports provisioning progress live.
-- **Systemd integration:** `wifi-manager.service` runs as the `photo-frame` user, restarts on failure, and keeps operational breadcrumbs in `/opt/photo-frame/var` (hotspot password, QR image, last provisioning attempt).
+- **Systemd integration:** `photoframe-wifi-manager.service` runs as the `kiosk` user, restarts on failure, and keeps operational breadcrumbs in `/var/lib/photo-frame` (hotspot password, QR image, last provisioning attempt).
 
 Full operating procedures, configuration options, and troubleshooting steps are documented in [docs/wifi-manager.md](docs/wifi-manager.md).
 
