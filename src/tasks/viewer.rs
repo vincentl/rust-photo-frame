@@ -9,8 +9,8 @@ use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
 use crate::tasks::greeting_screen::GreetingScreen;
 use chrono::Utc;
-use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
-use image::{imageops, Rgba, RgbaImage};
+use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
+use image::{Rgba, RgbaImage, imageops};
 use rand::Rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -104,6 +104,7 @@ pub fn run_windowed(
     struct MatTask {
         image: PreparedImageCpu,
         params: MatParams,
+        priority: bool,
     }
 
     struct ImagePlane {
@@ -115,6 +116,12 @@ pub fn run_windowed(
     struct MatResult {
         path: std::path::PathBuf,
         canvas: ImagePlane,
+        priority: bool,
+    }
+
+    struct QueuedImage {
+        image: PreparedImageCpu,
+        priority: bool,
     }
 
     struct TransitionState {
@@ -186,7 +193,11 @@ pub fn run_windowed(
     }
 
     fn process_mat_task(task: MatTask) -> Option<MatResult> {
-        let MatTask { image, params } = task;
+        let MatTask {
+            image,
+            params,
+            priority,
+        } = task;
         let PreparedImageCpu {
             path,
             width,
@@ -292,7 +303,11 @@ pub fn run_windowed(
                 pixels: canvas.into_raw(),
             };
 
-            return Some(MatResult { path, canvas });
+            return Some(MatResult {
+                path,
+                canvas,
+                priority,
+            });
         }
 
         let (final_w, final_h) =
@@ -400,7 +415,11 @@ pub fn run_windowed(
             pixels: background.into_raw(),
         };
 
-        Some(MatResult { path, canvas })
+        Some(MatResult {
+            path,
+            canvas,
+            priority,
+        })
     }
 
     impl TransitionState {
@@ -554,7 +573,7 @@ pub fn run_windowed(
     }
 
     fn upload_mat_result(gpu: &GpuCtx, result: MatResult) -> Option<ImgTex> {
-        let MatResult { path, canvas } = result;
+        let MatResult { path, canvas, .. } = result;
         let plane = upload_plane(gpu, canvas)?;
         Some(ImgTex { plane, path })
     }
@@ -812,7 +831,7 @@ pub fn run_windowed(
         mat_pipeline: MattingPipeline,
         mat_inflight: usize,
         ready_results: VecDeque<MatResult>,
-        deferred_images: VecDeque<PreparedImageCpu>,
+        deferred_images: VecDeque<QueuedImage>,
         clear_color: wgpu::Color,
         rng: rand::rngs::ThreadRng,
         full_config: crate::config::Configuration,
@@ -1003,11 +1022,7 @@ pub fn run_windowed(
     }
 
     fn boundary_state(boundary: &ScheduleBoundary) -> &'static str {
-        if boundary.awake {
-            "awake"
-        } else {
-            "sleeping"
-        }
+        if boundary.awake { "awake" } else { "sleeping" }
     }
 
     impl ApplicationHandler for App {
@@ -1490,13 +1505,34 @@ pub fn run_windowed(
             let sleeping = self.sleep.as_ref().is_some_and(|ctrl| !ctrl.is_awake());
             while let Some(result) = self.mat_pipeline.try_recv() {
                 self.mat_inflight = self.mat_inflight.saturating_sub(1);
+                if result.priority {
+                    self.ready_results
+                        .retain(|existing| existing.path != result.path);
+                }
                 self.ready_results.push_back(result);
             }
             if let Some(gpu) = self.gpu.as_ref() {
                 while let Some(result) = self.ready_results.pop_front() {
+                    let path = result.path.clone();
+                    let priority = result.priority;
                     if let Some(new_tex) = upload_mat_result(gpu, result) {
-                        self.pending.push_back(new_tex);
-                        debug!("queued_image depth={}", self.pending.len());
+                        if priority {
+                            self.pending.retain(|queued| queued.path != path);
+                            let displaced_next =
+                                self.next.take().filter(|stage| stage.path != path);
+                            if let Some(stage) = displaced_next {
+                                self.pending.push_front(stage);
+                            }
+                            self.pending.push_front(new_tex);
+                        } else {
+                            self.pending.push_back(new_tex);
+                        }
+                        debug!(
+                            path = %path.display(),
+                            priority,
+                            depth = self.pending.len(),
+                            "queued_image"
+                        );
                     }
                 }
             }
@@ -1505,15 +1541,28 @@ pub fn run_windowed(
                     Some(img)
                 } else {
                     match self.from_loader.try_recv() {
-                        Ok(PhotoLoaded(img)) => Some(img),
+                        Ok(PhotoLoaded { prepared, priority }) => Some(QueuedImage {
+                            image: prepared,
+                            priority,
+                        }),
                         Err(_) => None,
                     }
                 };
-                let Some(img) = next_img else {
+                let Some(queued) = next_img else {
                     break;
                 };
+                let path = queued.image.path.clone();
+                if queued.priority {
+                    self.deferred_images
+                        .retain(|pending| pending.image.path != path);
+                    self.ready_results.retain(|pending| pending.path != path);
+                    self.pending.retain(|pending| pending.path != path);
+                    if matches!(self.next.as_ref(), Some(stage) if stage.path == path) {
+                        self.next = None;
+                    }
+                }
                 let Some(gpu) = self.gpu.as_ref() else {
-                    self.deferred_images.push_front(img);
+                    self.deferred_images.push_front(queued);
                     break;
                 };
                 let mut rng = rand::rng();
@@ -1525,13 +1574,24 @@ pub fn run_windowed(
                     max_dim: gpu.limits.max_texture_dimension_2d,
                     matting,
                 };
-                let task = MatTask { image: img, params };
+                let QueuedImage {
+                    image: img,
+                    priority,
+                } = queued;
+                let task = MatTask {
+                    image: img,
+                    params,
+                    priority,
+                };
                 match self.mat_pipeline.try_submit(task) {
                     Ok(()) => {
                         self.mat_inflight += 1;
                     }
-                    Err(MatTask { image, .. }) => {
-                        self.deferred_images.push_front(image);
+                    Err(MatTask {
+                        image, priority, ..
+                    }) => {
+                        self.deferred_images
+                            .push_front(QueuedImage { image, priority });
                         break;
                     }
                 }

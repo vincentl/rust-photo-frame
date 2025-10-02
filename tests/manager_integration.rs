@@ -48,10 +48,12 @@ async fn manager_ignores_spurious_remove_and_sends_load_on_add() {
         .await
         .unwrap();
 
-    let LoadPhoto(p) = tokio::time::timeout(std::time::Duration::from_secs(2), to_load_rx.recv())
-        .await
-        .expect("timeout waiting for LoadPhoto")
-        .expect("channel closed");
+    let LoadPhoto { path: p, priority } =
+        tokio::time::timeout(std::time::Duration::from_secs(2), to_load_rx.recv())
+            .await
+            .expect("timeout waiting for LoadPhoto")
+            .expect("channel closed");
+    assert!(priority, "first load for new photo should be prioritized");
     assert_eq!(p, real);
 
     cancel.cancel();
@@ -136,7 +138,7 @@ async fn manager_rotates_actual_sent_item() {
 }
 
 async fn receive_with_timeout(rx: &mut mpsc::Receiver<LoadPhoto>) -> PathBuf {
-    let LoadPhoto(path) = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+    let LoadPhoto { path, .. } = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
         .await
         .expect("timed out waiting for LoadPhoto")
         .expect("loader channel closed unexpectedly");
