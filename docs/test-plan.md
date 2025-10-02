@@ -75,8 +75,8 @@ Exercise each axis at least once per release cycle.
       start: "07:00"
       end: "22:00"
     display-power:
-      sleep-command: "/opt/photo-frame/bin/powerctl sleep"
-      wake-command: "/opt/photo-frame/bin/powerctl wake"
+      sleep-command: "wlr-randr --output @OUTPUT@ --off || vcgencmd display_power 0"
+      wake-command: "wlr-randr --output @OUTPUT@ --on  || vcgencmd display_power 1"
   ```
 - [ ] Populate `/opt/photo-frame/var/photos` (or configured library path) according to the test matrix scenario.
 
