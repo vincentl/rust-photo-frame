@@ -1,13 +1,13 @@
 use crate::config::PlaylistOptions;
 use crate::events::{Displayed, InventoryEvent, LoadPhoto, PhotoInfo};
 use anyhow::Result;
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tokio::select;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -51,7 +51,11 @@ pub async fn run(
                 let to_loader = to_loader.clone();
                 async move {
                     if let Some(p) = next {
-                        to_loader.send(LoadPhoto(p.clone())).await.map(|_| p).map_err(|_| ())
+                        let load = LoadPhoto {
+                            path: p.path.clone(),
+                            priority: p.priority,
+                        };
+                        to_loader.send(load).await.map(|_| p).map_err(|_| ())
                     } else {
                         Err(())
                     }
@@ -107,13 +111,19 @@ pub async fn run(
 }
 
 struct PlaylistState {
-    queue: VecDeque<PathBuf>,
+    queue: VecDeque<ScheduledPhoto>,
     known: HashMap<PathBuf, PhotoInfo>,
     prioritized: Vec<PathBuf>,
     rng: StdRng,
     options: PlaylistOptions,
     dirty: bool,
     now_override: Option<SystemTime>,
+}
+
+#[derive(Clone)]
+struct ScheduledPhoto {
+    path: PathBuf,
+    priority: bool,
 }
 
 impl PlaylistState {
@@ -150,8 +160,8 @@ impl PlaylistState {
         let now = self.now_override.unwrap_or_else(SystemTime::now);
         let prioritized = std::mem::take(&mut self.prioritized);
         let prioritized_set: HashSet<PathBuf> = prioritized.iter().cloned().collect();
-        let mut front: Vec<PathBuf> = Vec::new();
-        let mut rest: Vec<PathBuf> = Vec::new();
+        let mut front: Vec<ScheduledPhoto> = Vec::new();
+        let mut rest: Vec<ScheduledPhoto> = Vec::new();
         let mut multiplicities: Vec<(PathBuf, usize)> = Vec::new();
 
         let mut infos: Vec<&PhotoInfo> = self.known.values().collect();
@@ -162,15 +172,25 @@ impl PlaylistState {
             if multiplicity == 0 {
                 continue;
             }
-            multiplicities.push((info.path.clone(), multiplicity));
-            if prioritized_set.contains(&info.path) {
-                front.push(info.path.clone());
+            let path = info.path.clone();
+            multiplicities.push((path.clone(), multiplicity));
+            if prioritized_set.contains(&path) {
+                front.push(ScheduledPhoto {
+                    path: path.clone(),
+                    priority: true,
+                });
                 for _ in 1..multiplicity {
-                    rest.push(info.path.clone());
+                    rest.push(ScheduledPhoto {
+                        path: path.clone(),
+                        priority: false,
+                    });
                 }
             } else {
                 for _ in 0..multiplicity {
-                    rest.push(info.path.clone());
+                    rest.push(ScheduledPhoto {
+                        path: path.clone(),
+                        priority: false,
+                    });
                 }
             }
         }
@@ -179,15 +199,15 @@ impl PlaylistState {
 
         let mut queue = VecDeque::new();
         for path in prioritized {
-            if let Some(idx) = front.iter().position(|p| p == &path) {
+            if let Some(idx) = front.iter().position(|p| p.path == path) {
                 queue.push_back(front.remove(idx));
             }
         }
-        for path in front {
-            queue.push_back(path);
+        for entry in front {
+            queue.push_back(entry);
         }
-        for path in rest {
-            queue.push_back(path);
+        for entry in rest {
+            queue.push_back(entry);
         }
 
         self.queue = queue;
@@ -221,7 +241,7 @@ impl PlaylistState {
         }
     }
 
-    fn peek(&self) -> Option<&PathBuf> {
+    fn peek(&self) -> Option<&ScheduledPhoto> {
         self.queue.front()
     }
 
@@ -229,14 +249,14 @@ impl PlaylistState {
         self.queue.is_empty()
     }
 
-    fn mark_sent(&mut self, sent: &Path) {
+    fn mark_sent(&mut self, sent: &ScheduledPhoto) {
         if let Some(front) = self.queue.front() {
-            if front == sent {
+            if front.path == sent.path {
                 self.queue.pop_front();
                 return;
             }
         }
-        if let Some(pos) = self.queue.iter().position(|p| p == sent) {
+        if let Some(pos) = self.queue.iter().position(|p| p.path == sent.path) {
             self.queue.remove(pos);
         }
     }
@@ -253,7 +273,7 @@ impl PlaylistState {
     fn record_remove(&mut self, path: &Path) {
         if self.known.remove(path).is_some() {
             self.prioritized.retain(|p| p != path);
-            self.queue.retain(|p| p != path);
+            self.queue.retain(|p| p.path != path);
             self.dirty = true;
         }
     }
@@ -289,7 +309,7 @@ where
     for _ in 0..iterations {
         playlist.ensure_ready();
         if let Some(next) = playlist.peek().cloned() {
-            plan.push(next.clone());
+            plan.push(next.path.clone());
             playlist.mark_sent(&next);
         } else {
             break;

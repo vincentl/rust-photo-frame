@@ -87,6 +87,8 @@ pub async fn run(
 ) -> Result<()> {
     let mut in_flight: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
+    let mut priority_inflight: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
     let mut tasks: JoinSet<(std::path::PathBuf, Option<image::RgbaImage>)> = JoinSet::new();
     let mut pending_ready: Option<ReadyPhoto> = None;
     let mut last_sent_path: Option<PathBuf> = None;
@@ -99,7 +101,10 @@ pub async fn run(
             },
 
             // Accept new load requests while under limit
-            Some(LoadPhoto(path)) = load_rx.recv(), if in_flight.len() < max_in_flight => {
+            Some(LoadPhoto { path, priority }) = load_rx.recv(), if in_flight.len() < max_in_flight => {
+                if priority {
+                    priority_inflight.insert(path.clone());
+                }
                 if in_flight.insert(path.clone()) {
                     tasks.spawn({
                         let p = path.clone();
@@ -116,14 +121,16 @@ pub async fn run(
                 if let Ok((path, maybe_img)) = join_res {
                     // remove from in-flight set
                     in_flight.remove(&path);
+                    let priority = priority_inflight.remove(&path);
                     match maybe_img {
                         Some(rgba8) => {
                             debug!("loaded (rgba8): {}", path.display());
                             let (width, height) = rgba8.dimensions();
                             let prepared = PreparedImageCpu { path: path.clone(), width, height, pixels: rgba8.into_raw() };
+                            let event = PhotoLoaded { prepared, priority };
                             let ready = ReadyPhoto {
                                 path: path.clone(),
-                                event: PhotoLoaded(prepared),
+                                event,
                             };
                             send_ready(ready, &mut last_sent_path, &mut pending_ready, &to_viewer).await;
                         }
@@ -203,7 +210,10 @@ mod tests {
         };
         ReadyPhoto {
             path: path_buf,
-            event: PhotoLoaded(prepared),
+            event: PhotoLoaded {
+                prepared,
+                priority: false,
+            },
         }
     }
 
@@ -232,7 +242,9 @@ mod tests {
         let mut pending = None;
 
         send_ready(ready_for("a"), &mut last_sent, &mut pending, &tx).await;
-        assert_eq!(rx.recv().await.unwrap().0.path, PathBuf::from("a"));
+        let first = rx.recv().await.unwrap();
+        assert_eq!(first.prepared.path, PathBuf::from("a"));
+        assert!(!first.priority);
         assert!(pending.is_none());
 
         send_ready(ready_for("a"), &mut last_sent, &mut pending, &tx).await;
@@ -240,8 +252,12 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         send_ready(ready_for("b"), &mut last_sent, &mut pending, &tx).await;
-        assert_eq!(rx.recv().await.unwrap().0.path, PathBuf::from("b"));
-        assert_eq!(rx.recv().await.unwrap().0.path, PathBuf::from("a"));
+        let second = rx.recv().await.unwrap();
+        assert_eq!(second.prepared.path, PathBuf::from("b"));
+        assert!(!second.priority);
+        let third = rx.recv().await.unwrap();
+        assert_eq!(third.prepared.path, PathBuf::from("a"));
+        assert!(!third.priority);
         assert!(pending.is_none());
         assert_eq!(last_sent, Some(PathBuf::from("a")));
     }
@@ -253,14 +269,16 @@ mod tests {
         let mut pending = None;
 
         send_ready(ready_for("a"), &mut last_sent, &mut pending, &tx).await;
-        assert_eq!(rx.recv().await.unwrap().0.path, PathBuf::from("a"));
+        assert_eq!(rx.recv().await.unwrap().prepared.path, PathBuf::from("a"));
 
         send_ready(ready_for("a"), &mut last_sent, &mut pending, &tx).await;
         assert!(pending.is_some());
         assert!(rx.try_recv().is_err());
 
         flush_pending(&mut last_sent, &mut pending, &tx).await;
-        assert_eq!(rx.recv().await.unwrap().0.path, PathBuf::from("a"));
+        let flushed = rx.recv().await.unwrap();
+        assert_eq!(flushed.prepared.path, PathBuf::from("a"));
+        assert!(!flushed.priority);
         assert!(pending.is_none());
         assert_eq!(last_sent, Some(PathBuf::from("a")));
     }

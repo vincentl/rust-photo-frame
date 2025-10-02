@@ -2,7 +2,7 @@ use crate::config::{PhotoEffectConfig, PhotoEffectOptions};
 use crate::events::PhotoLoaded;
 use anyhow::Result;
 use image::RgbaImage;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 use tokio::select;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
@@ -57,7 +57,7 @@ async fn run_with_effects(
         select! {
             _ = cancel.cancelled() => break,
             maybe_loaded = from_loader.recv() => {
-                let Some(PhotoLoaded(mut prepared)) = maybe_loaded else {
+                let Some(PhotoLoaded { mut prepared, priority }) = maybe_loaded else {
                     break;
                 };
 
@@ -75,7 +75,11 @@ async fn run_with_effects(
                     }
                 }
 
-                if to_viewer.send(PhotoLoaded(prepared)).await.is_err() {
+                if to_viewer
+                    .send(PhotoLoaded { prepared, priority })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -119,12 +123,15 @@ mod tests {
         let cancel = CancellationToken::new();
 
         tx_in
-            .send(PhotoLoaded(PreparedImageCpu {
-                path: std::path::PathBuf::from("dummy"),
-                width: 1,
-                height: 1,
-                pixels: vec![10, 20, 30, 255],
-            }))
+            .send(PhotoLoaded {
+                prepared: PreparedImageCpu {
+                    path: std::path::PathBuf::from("dummy"),
+                    width: 1,
+                    height: 1,
+                    pixels: vec![10, 20, 30, 255],
+                },
+                priority: false,
+            })
             .await
             .unwrap();
         drop(tx_in);
@@ -134,8 +141,9 @@ mod tests {
             .unwrap();
 
         let received = rx_out.try_recv().unwrap();
-        let PhotoLoaded(prepared) = received;
+        let PhotoLoaded { prepared, priority } = received;
         assert_eq!(prepared.pixels, vec![10, 20, 30, 255]);
+        assert!(!priority);
     }
 
     #[tokio::test]
@@ -154,19 +162,23 @@ options:
         let cancel = CancellationToken::new();
 
         tx_in
-            .send(PhotoLoaded(PreparedImageCpu {
-                path: std::path::PathBuf::from("dummy"),
-                width: 2,
-                height: 1,
-                pixels: vec![10, 20, 30, 255, 200, 150, 100, 255],
-            }))
+            .send(PhotoLoaded {
+                prepared: PreparedImageCpu {
+                    path: std::path::PathBuf::from("dummy"),
+                    width: 2,
+                    height: 1,
+                    pixels: vec![10, 20, 30, 255, 200, 150, 100, 255],
+                },
+                priority: false,
+            })
             .await
             .unwrap();
         drop(tx_in);
 
         run(rx_in, tx_out, cancel, config).await.unwrap();
 
-        let PhotoLoaded(prepared) = rx_out.try_recv().unwrap();
+        let PhotoLoaded { prepared, priority } = rx_out.try_recv().unwrap();
         assert_ne!(prepared.pixels, vec![10, 20, 30, 255, 200, 150, 100, 255]);
+        assert!(!priority);
     }
 }
