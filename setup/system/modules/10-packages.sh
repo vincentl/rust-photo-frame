@@ -36,6 +36,9 @@ PACKAGES=(
     git
     rsync
     logrotate
+    cage
+    seatd
+    wlr-randr
 )
 
 log INFO "Installing required packages: ${PACKAGES[*]}"
