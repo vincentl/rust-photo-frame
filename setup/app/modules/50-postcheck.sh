@@ -4,8 +4,13 @@ set -euo pipefail
 MODULE="app:50-postcheck"
 DRY_RUN="${DRY_RUN:-0}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
-SERVICE_USER="${SERVICE_USER:-$(id -un)}"
-SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn)}"
+SERVICE_USER="${SERVICE_USER:-kiosk}"
+if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+    SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn "${SERVICE_USER}")}"
+else
+    SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
+fi
+KIOSK_SERVICE="${KIOSK_SERVICE:-cage@tty1.service}"
 
 log() {
     local level="$1"; shift
@@ -61,14 +66,14 @@ if [[ "${var_owner}" != "${SERVICE_USER}" || "${var_group}" != "${SERVICE_GROUP}
     exit 1
 fi
 
-if ! systemctl is-active --quiet photo-frame.service; then
-    log ERROR "photo-frame.service is not active"
-    systemctl status photo-frame.service --no-pager || true
+if ! systemctl is-active --quiet "${KIOSK_SERVICE}"; then
+    log ERROR "${KIOSK_SERVICE} is not active"
+    systemctl status "${KIOSK_SERVICE}" --no-pager || true
     exit 1
 fi
 
-if ! systemctl is-enabled --quiet photo-frame.service; then
-    log WARN "photo-frame.service is not enabled"
+if ! systemctl is-enabled --quiet "${KIOSK_SERVICE}"; then
+    log WARN "${KIOSK_SERVICE} is not enabled"
 fi
 
 if ! systemctl is-active --quiet wifi-manager.service; then
@@ -83,7 +88,7 @@ fi
 
 rustc_version=$(rustc --version 2>/dev/null || echo "rustc unavailable")
 cargo_version=$(cargo --version 2>/dev/null || echo "cargo unavailable")
-service_status=$(systemctl is-active photo-frame.service)
+service_status=$(systemctl is-active "${KIOSK_SERVICE}")
 wifi_service_status=$(systemctl is-active wifi-manager.service)
 
 log INFO "Deployment summary:"
@@ -100,11 +105,11 @@ Wi-Fi config : ${WIFI_CONFIG_TEMPLATE}
 Wi-Fi wordlist: ${WORDLIST_PATH}
 rustc        : ${rustc_version}
 cargo        : ${cargo_version}
-photo-frame.service : ${service_status}
+${KIOSK_SERVICE} : ${service_status}
 wifi-manager.service: ${wifi_service_status}
 Next steps:
   - Customize ${INSTALL_ROOT}/var/config.yaml for your site.
-  - Review journal logs with 'journalctl -u photo-frame.service -f'.
+  - Review journal logs with 'journalctl -u ${KIOSK_SERVICE} -f'.
 ----------------------------------------
 SUMMARY
 

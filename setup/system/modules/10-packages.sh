@@ -17,13 +17,17 @@ run_sudo() {
     fi
 }
 
-log INFO "Ensuring apt package index is fresh"
+log INFO "Refreshing apt package index"
 run_sudo apt-get update
 
-log INFO "Upgrading base operating system packages"
-run_sudo env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade
-
 PACKAGES=(
+    cage
+    libinput10
+    libwayland-client0
+    libgbm1
+    libdrm2
+    mesa-vulkan-drivers
+    seatd
     build-essential
     pkg-config
     libudev-dev
@@ -36,9 +40,8 @@ PACKAGES=(
     git
     rsync
     logrotate
-    cage
-    seatd
-    wlr-randr
+    vulkan-tools
+    kmscube
 )
 
 log INFO "Installing required packages: ${PACKAGES[*]}"
