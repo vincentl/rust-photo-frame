@@ -141,13 +141,15 @@ mod neon {
                     } else {
                         let sy = clamp_i((y as isize) + offset, height as isize);
                         ((sy * width) + x) * 4
-                    } as isize;
-                    let pix = vld1q_f32(src_ptr.offset(sample_index));
+                    };
+                    let pix = unsafe { vld1q_f32(src_ptr.add(sample_index)) };
                     let weight_vec = vdupq_n_f32(weight);
                     acc = vmlaq_f32(acc, pix, weight_vec);
                 }
-                let out_index = ((y * width + x) * 4) as isize;
-                vst1q_f32(dst_ptr.offset(out_index), acc);
+                let out_index = (y * width + x) * 4;
+                unsafe {
+                    vst1q_f32(dst_ptr.add(out_index), acc);
+                }
             }
         }
     }
