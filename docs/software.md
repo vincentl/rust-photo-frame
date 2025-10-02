@@ -105,7 +105,7 @@ Both setup stages should be launched as the deployment user. They call `sudo` in
 
    You will need to ssh back to the frame once it reboots to continue installation.
 
-1. The script `./setup/app/run.sh` builds the photo frame application, stages the release artifacts, installs them into `/opt/photo-frame`, and enables the `photo-frame.service` systemd unit. As part of the same run it now prepares a kiosk session so the frame boots directly into the slideshow.
+1. The script `./setup/app/run.sh` builds the photo frame application, stages the release artifacts, installs them into `/opt/photo-frame`, and enables the `photo-frame.service` systemd unit. The service now owns the kiosk session end to end so the frame boots directly into the slideshow without any shell profile hooks.
 
    ```bash
    ./setup/app/run.sh
@@ -125,9 +125,8 @@ Use the following environment variables to customize an installation:
 
 When `./setup/app/run.sh` completes successfully the Raspberry Pi is ready to boot directly into a kiosk session:
 
-- The helper binary `/opt/photo-frame/bin/photo-frame-kiosk` launches the app inside `cage` (if available) with sensible Wayland environment variables.
-- `getty@tty1` is configured to auto-login the deployment user so the session starts without manual input.
-- A shell snippet at `~/.config/photo-frame/kiosk-login.sh` executes the kiosk launcher whenever the user reaches the physical console on `tty1`.
-- `seatd.service` is enabled to provide the permissions `cage` requires on headless boots.
+- The systemd unit `photo-frame.service` binds to `/dev/tty1`, creates a private runtime directory, and `exec`s the kiosk helper with `Restart=on-failure` semantics. Crashes or manual `kill` events trigger an automatic relaunch after five seconds.
+- The helper binary `/opt/photo-frame/bin/photo-frame-kiosk` sets up Wayland environment variables, ensures `XDG_RUNTIME_DIR` exists, hides the pointer, and launches the app inside `cage -s` when available (falling back to direct execution otherwise).
+- `seatd.service` (when installed) is started alongside the kiosk unit so the compositor has device access on headless boots.
 
-To temporarily bypass the kiosk flow, export `PHOTO_FRAME_NO_KIOSK=1` before logging in on the console, or comment out the sourcing line in `~/.bash_profile`. Re-run `./setup/app/run.sh` if you ever need to restore the kiosk defaults.
+To pause the slideshow for maintenance, SSH into the Pi and run `sudo systemctl stop photo-frame.service`. The kiosk remains down until you start it again with `sudo systemctl start photo-frame.service`.
