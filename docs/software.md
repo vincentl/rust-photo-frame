@@ -125,8 +125,8 @@ Use the following environment variables to customize an installation:
 
 When `./setup/app/run.sh` completes successfully the Raspberry Pi is ready to boot directly into a kiosk session:
 
-- The systemd unit `photo-frame.service` binds to `/dev/tty1`, creates a private runtime directory, and `exec`s the kiosk helper with `Restart=on-failure` semantics. Crashes or manual `kill` events trigger an automatic relaunch after five seconds.
-- The helper binary `/opt/photo-frame/bin/photo-frame-kiosk` sets up Wayland environment variables, ensures `XDG_RUNTIME_DIR` exists, hides the pointer, and launches the app inside `cage -s` when available (falling back to direct execution otherwise).
+- The systemd unit `photo-frame.service` binds to `/dev/tty1`, pre-creates `/run/user/<uid>` so Cage and seatd see a valid Wayland runtime directory, and `exec`s the kiosk helper with `Restart=on-failure` semantics. Crashes or manual `kill` events trigger an automatic relaunch after five seconds.
+- The helper binary `/opt/photo-frame/bin/photo-frame-kiosk` sets up Wayland environment variables, ensures `XDG_RUNTIME_DIR` still has the expected permissions, hides the pointer, and launches the app inside `cage -s` when available (falling back to direct execution otherwise).
 - `seatd.service` (when installed) is started alongside the kiosk unit so the compositor has device access on headless boots.
 
 To pause the slideshow for maintenance, SSH into the Pi and run `sudo systemctl stop photo-frame.service`. The kiosk remains down until you start it again with `sudo systemctl start photo-frame.service`.
