@@ -105,7 +105,7 @@ Both setup stages should be launched as the deployment user. They call `sudo` in
 
    You will need to ssh back to the frame once it reboots to continue installation.
 
-1. The script `./setup/app/run.sh` builds the photo frame application, stages the release artifacts, installs them into `/opt/photo-frame`, and enables the `photo-frame.service` systemd unit.
+1. The script `./setup/app/run.sh` builds the photo frame application, stages the release artifacts, installs them into `/opt/photo-frame`, and enables the `photo-frame.service` systemd unit. As part of the same run it now prepares a kiosk session so the frame boots directly into the slideshow.
 
    ```bash
    ./setup/app/run.sh
@@ -113,10 +113,21 @@ Both setup stages should be launched as the deployment user. They call `sudo` in
 
 Use the following environment variables to customize an installation:
 
-| Variable        | Default                       | Notes                                                                           |
-| --------------- | ----------------------------- | ------------------------------------------------------------------------------- |
-| `INSTALL_ROOT`  | `/opt/photo-frame`            | Target installation prefix.                                                     |
-| `SERVICE_USER`  | invoking user                 | The systemd account that owns `/opt/photo-frame/var`. Must already exist.       |
-| `SERVICE_GROUP` | invoking user's primary group | Group that owns `/opt/photo-frame/var` alongside `SERVICE_USER`.                |
-| `CARGO_PROFILE` | `release`                     | Cargo profile passed to `cargo build`.                                          |
-| `DRY_RUN`       | unset                         | Set to `1` to see the actions that would be taken without modifying the system. |
+| Variable        | Default            | Notes |
+| --------------- | ------------------ | ----- |
+| `INSTALL_ROOT`  | `/opt/photo-frame` | Target installation prefix. |
+| `SERVICE_USER`  | invoking user      | The systemd account that owns `/opt/photo-frame/var`. Must already exist. |
+| `SERVICE_GROUP` | invoking user's primary group | Group that owns `/opt/photo-frame/var` alongside `SERVICE_USER`. |
+| `CARGO_PROFILE` | `release`          | Cargo profile passed to `cargo build`. |
+| `DRY_RUN`       | unset              | Set to `1` to see the actions that would be taken without modifying the system. |
+
+### Kiosk session configuration
+
+When `./setup/app/run.sh` completes successfully the Raspberry Pi is ready to boot directly into a kiosk session:
+
+- The helper binary `/opt/photo-frame/bin/photo-frame-kiosk` launches the app inside `cage` (if available) with sensible Wayland environment variables.
+- `getty@tty1` is configured to auto-login the deployment user so the session starts without manual input.
+- A shell snippet at `~/.config/photo-frame/kiosk-login.sh` executes the kiosk launcher whenever the user reaches the physical console on `tty1`.
+- `seatd.service` is enabled to provide the permissions `cage` requires on headless boots.
+
+To temporarily bypass the kiosk flow, export `PHOTO_FRAME_NO_KIOSK=1` before logging in on the console, or comment out the sourcing line in `~/.bash_profile`. Re-run `./setup/app/run.sh` if you ever need to restore the kiosk defaults.
