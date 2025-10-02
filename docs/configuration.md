@@ -184,11 +184,13 @@ sleep:
 
   # True power control (HDMI monitor over Wayland)
   display-power:
-    sleep-command: "wlr-randr --output HDMI-A-1 --off || vcgencmd display_power 0"
-    wake-command:  "wlr-randr --output HDMI-A-1 --on  || vcgencmd display_power 1"
+    # Leave the @OUTPUT@ placeholder so the app can substitute the detected
+    # connector. You can hard-code a name like HDMI-A-1 if preferred.
+    sleep-command: "wlr-randr --output @OUTPUT@ --off || vcgencmd display_power 0"
+    wake-command:  "wlr-randr --output @OUTPUT@ --on  || vcgencmd display_power 1"
 ```
 
-The default configuration installs `/opt/photo-frame/bin/powerctl`, a thin wrapper around the same commands. Replace the example strings with `/opt/photo-frame/bin/powerctl sleep` / `wake` to use the helper and share a consistent detection script across deployments.
+The setup pipeline installs `/opt/photo-frame/bin/powerctl`, a thin wrapper around the same logic. Swap the example strings for `/opt/photo-frame/bin/powerctl sleep` / `wake` if you prefer the helper script once the staged tree has been deployed to `/opt`.
 
 ## Power button daemon
 
