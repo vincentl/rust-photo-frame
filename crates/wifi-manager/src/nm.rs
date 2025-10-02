@@ -1,5 +1,5 @@
 use crate::config::{Config, HotspotConfig};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
 use std::collections::HashSet;
 use std::process::Stdio;
@@ -73,11 +73,31 @@ pub async fn gateway_reachable(interface: &str) -> Result<bool> {
 async fn default_gateway(interface: &str) -> Result<Option<String>> {
     let output = nmcli(&["-t", "-f", "IP4.GATEWAY", "device", "show", interface]).await?;
     for line in output.lines() {
-        if !line.trim().is_empty() {
-            return Ok(Some(line.trim().to_string()));
+        if let Some(value) = parse_nmcli_value(line) {
+            return Ok(Some(value));
         }
     }
     Ok(None)
+}
+
+fn parse_nmcli_value(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut parts = trimmed.splitn(2, ':');
+    let value = match (parts.next(), parts.next()) {
+        (Some(_key), Some(val)) => val.trim(),
+        (Some(val), None) => val.trim(),
+        _ => return None,
+    };
+
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 pub async fn ensure_hotspot_profile(
@@ -388,4 +408,27 @@ fn display_args(args: &[&str]) -> String {
         }
     }
     masked.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_nmcli_value;
+
+    #[test]
+    fn parse_nmcli_value_strips_key_prefix() {
+        let line = "IP4.GATEWAY:192.168.1.1";
+        assert_eq!(parse_nmcli_value(line), Some("192.168.1.1".to_string()));
+    }
+
+    #[test]
+    fn parse_nmcli_value_handles_value_only_line() {
+        let line = "192.168.1.1";
+        assert_eq!(parse_nmcli_value(line), Some("192.168.1.1".to_string()));
+    }
+
+    #[test]
+    fn parse_nmcli_value_ignores_blank_input() {
+        assert_eq!(parse_nmcli_value(""), None);
+        assert_eq!(parse_nmcli_value("   "), None);
+    }
 }
