@@ -13,8 +13,11 @@ pub struct PhotoInfo {
     pub created_at: SystemTime,
 }
 
-#[derive(Debug)]
-pub struct LoadPhoto(pub PathBuf);
+#[derive(Debug, Clone)]
+pub struct LoadPhoto {
+    pub path: PathBuf,
+    pub priority: bool,
+}
 
 #[derive(Debug, Clone)]
 pub struct PreparedImageCpu {
@@ -24,8 +27,11 @@ pub struct PreparedImageCpu {
     pub pixels: Vec<u8>,
 }
 
-#[derive(Debug)]
-pub struct PhotoLoaded(pub PreparedImageCpu);
+#[derive(Debug, Clone)]
+pub struct PhotoLoaded {
+    pub prepared: PreparedImageCpu,
+    pub priority: bool,
+}
 
 #[derive(Debug)]
 pub struct InvalidPhoto(pub PathBuf);
