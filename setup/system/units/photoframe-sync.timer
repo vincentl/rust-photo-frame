@@ -1,0 +1,12 @@
+# Managed by setup/system/install-systemd-units.sh
+[Unit]
+Description=Run Photo Frame Library Sync hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+AccuracySec=1m
+Unit=photoframe-sync.service
+
+[Install]
+WantedBy=timers.target

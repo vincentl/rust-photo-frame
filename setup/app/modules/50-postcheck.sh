@@ -2,7 +2,6 @@
 set -euo pipefail
 
 MODULE="app:50-postcheck"
-DRY_RUN="${DRY_RUN:-0}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
 SERVICE_USER="${SERVICE_USER:-kiosk}"
 if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
@@ -11,23 +10,22 @@ else
     SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
 fi
 KIOSK_SERVICE="${KIOSK_SERVICE:-cage@tty1.service}"
+WIFI_SERVICE="${WIFI_SERVICE:-photoframe-wifi-manager.service}"
+SYNC_TIMER="${SYNC_TIMER:-photoframe-sync.timer}"
+BUTTON_SERVICE="${BUTTON_SERVICE:-photoframe-buttond.service}"
 
 log() {
     local level="$1"; shift
     printf '[%s] %s\n' "${MODULE}" "$level: $*"
 }
 
-if [[ "${DRY_RUN}" == "1" ]]; then
-    log INFO "DRY_RUN: would perform post-install verification"
-    exit 0
-fi
-
 BIN_PATH="${INSTALL_ROOT}/bin/rust-photo-frame"
 WIFI_BIN_PATH="${INSTALL_ROOT}/bin/wifi-manager"
 CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/config.yaml"
 WIFI_CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/wifi-manager.yaml"
 WORDLIST_PATH="${INSTALL_ROOT}/share/wordlist.txt"
-VAR_DIR="${INSTALL_ROOT}/var"
+VAR_DIR="/var/lib/photo-frame"
+VAR_CONFIG="${VAR_DIR}/config/config.yaml"
 
 if [[ ! -x "${BIN_PATH}" ]]; then
     log ERROR "Binary ${BIN_PATH} missing or not executable"
@@ -66,6 +64,10 @@ if [[ "${var_owner}" != "${SERVICE_USER}" || "${var_group}" != "${SERVICE_GROUP}
     exit 1
 fi
 
+if [[ ! -f "${VAR_CONFIG}" ]]; then
+    log WARN "Runtime config missing at ${VAR_CONFIG}; seed it with setup/system/create-users-and-perms.sh and app install"
+fi
+
 if ! systemctl is-active --quiet "${KIOSK_SERVICE}"; then
     log ERROR "${KIOSK_SERVICE} is not active"
     systemctl status "${KIOSK_SERVICE}" --no-pager || true
@@ -76,20 +78,30 @@ if ! systemctl is-enabled --quiet "${KIOSK_SERVICE}"; then
     log WARN "${KIOSK_SERVICE} is not enabled"
 fi
 
-if ! systemctl is-active --quiet wifi-manager.service; then
-    log ERROR "wifi-manager.service is not active"
-    systemctl status wifi-manager.service --no-pager || true
+if ! systemctl is-active --quiet "${WIFI_SERVICE}"; then
+    log ERROR "${WIFI_SERVICE} is not active"
+    systemctl status "${WIFI_SERVICE}" --no-pager || true
     exit 1
 fi
 
-if ! systemctl is-enabled --quiet wifi-manager.service; then
-    log WARN "wifi-manager.service is not enabled"
+if ! systemctl is-enabled --quiet "${WIFI_SERVICE}"; then
+    log WARN "${WIFI_SERVICE} is not enabled"
+fi
+
+if ! systemctl is-active --quiet "${BUTTON_SERVICE}"; then
+    log WARN "${BUTTON_SERVICE} is not active"
+fi
+
+if ! systemctl is-active --quiet "${SYNC_TIMER}"; then
+    log WARN "${SYNC_TIMER} is not active"
 fi
 
 rustc_version=$(rustc --version 2>/dev/null || echo "rustc unavailable")
 cargo_version=$(cargo --version 2>/dev/null || echo "cargo unavailable")
 service_status=$(systemctl is-active "${KIOSK_SERVICE}")
-wifi_service_status=$(systemctl is-active wifi-manager.service)
+wifi_service_status=$(systemctl is-active "${WIFI_SERVICE}")
+button_status=$(systemctl is-active "${BUTTON_SERVICE}" || true)
+sync_status=$(systemctl is-active "${SYNC_TIMER}" || true)
 
 log INFO "Deployment summary:"
 cat <<SUMMARY
@@ -99,16 +111,18 @@ Service user : ${SERVICE_USER}
 Service group: ${SERVICE_GROUP}
 Binary       : ${BIN_PATH}
 Config (RO)  : ${CONFIG_TEMPLATE}
-Config (RW)  : ${INSTALL_ROOT}/var/config.yaml
+Config (RW)  : ${VAR_CONFIG}
 Wi-Fi binary : ${WIFI_BIN_PATH}
 Wi-Fi config : ${WIFI_CONFIG_TEMPLATE}
 Wi-Fi wordlist: ${WORDLIST_PATH}
 rustc        : ${rustc_version}
 cargo        : ${cargo_version}
 ${KIOSK_SERVICE} : ${service_status}
-wifi-manager.service: ${wifi_service_status}
+${WIFI_SERVICE}: ${wifi_service_status}
+${BUTTON_SERVICE}: ${button_status}
+${SYNC_TIMER}: ${sync_status}
 Next steps:
-  - Customize ${INSTALL_ROOT}/var/config.yaml for your site.
+  - Customize ${VAR_CONFIG} for your site.
   - Review journal logs with 'journalctl -u ${KIOSK_SERVICE} -f'.
 ----------------------------------------
 SUMMARY
