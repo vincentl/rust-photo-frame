@@ -9,11 +9,11 @@ User=@SERVICE_USER@
 Group=@SERVICE_GROUP@
 EnvironmentFile=-/etc/default/photo-frame
 WorkingDirectory=@INSTALL_ROOT@/var
-Environment=XDG_RUNTIME_DIR=%t/photo-frame
+PermissionsStartOnly=yes
+Environment=XDG_RUNTIME_DIR=/run/user/%U
 Environment=WAYLAND_DISPLAY=wayland-0
 Environment=MOZ_ENABLE_WAYLAND=1
-RuntimeDirectory=photo-frame
-RuntimeDirectoryMode=0700
+ExecStartPre=/usr/bin/install -d -m 0700 -o @SERVICE_USER@ -g @SERVICE_GROUP@ /run/user/%U
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
