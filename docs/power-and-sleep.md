@@ -9,8 +9,9 @@ This guide focuses on powering down HDMI monitors from the Raspberry Pi 5 runnin
    sudo apt update
    sudo apt install wlr-randr
    ```
-2. Install the app (`./setup/app/run.sh`) so `/opt/photo-frame/bin/powerctl` lands on the device.
-3. Enable sleep in `config.yaml` using the helper:
+2. (Optional) Install the app (`./setup/app/run.sh`) so `/opt/photo-frame/bin/powerctl` lands on the device. The helper mirrors
+   the default inline commands and can be referenced once the staged tree is deployed to `/opt`.
+3. Enable sleep in `config.yaml` using the built-in `@OUTPUT@` placeholder:
    ```yaml
    sleep-mode:
      timezone: America/New_York
@@ -19,8 +20,8 @@ This guide focuses on powering down HDMI monitors from the Raspberry Pi 5 runnin
        end:   "22:00"
      dim-brightness: 0.05
      display-power:
-       sleep-command: "/opt/photo-frame/bin/powerctl sleep"
-       wake-command: "/opt/photo-frame/bin/powerctl wake"
+       sleep-command: "wlr-randr --output @OUTPUT@ --off || vcgencmd display_power 0"
+       wake-command: "wlr-randr --output @OUTPUT@ --on  || vcgencmd display_power 1"
    ```
 4. Start the service. Pressing `SIGUSR1` (or a mapped GPIO button) now toggles sleep/wake regardless of schedule. Run a quick validation with `rust-photo-frame config.yaml --sleep-test 10`.
 

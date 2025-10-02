@@ -64,8 +64,12 @@ sleep-mode:
       end: "23:30"
   dim-brightness: 0.04
   display-power:
-    sleep-command: "/opt/photo-frame/bin/powerctl sleep"
-    wake-command: "/opt/photo-frame/bin/powerctl wake"
+    # The default commands auto-detect the active Wayland output (falling back to
+    # HDMI-A-1) and issue both a wlroots DPMS request and a vcgencmd fallback.
+    # Keep the `@OUTPUT@` placeholder so the app can substitute the detected
+    # connector name when it runs outside the staged /opt install tree.
+    sleep-command: "wlr-randr --output @OUTPUT@ --off || vcgencmd display_power 0"
+    wake-command:  "wlr-randr --output @OUTPUT@ --on  || vcgencmd display_power 1"
 
 # Number of images to preload in the viewer (aligns with channel capacity)
 viewer-preload-count: 3
