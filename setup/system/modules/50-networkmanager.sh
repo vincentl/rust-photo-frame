@@ -74,8 +74,8 @@ write_config_if_changed() {
 
 rule_content=$(cat <<EOF_INNER
 polkit.addRule(function(action, subject) {
-    if (subject.user == "${SERVICE_USER}" &&
-        action.id.indexOf("org.freedesktop.NetworkManager.") === 0) {
+    if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0 &&
+        (subject.user == "${SERVICE_USER}" || subject.isInGroup("${NETDEV_GROUP}"))) {
         return polkit.Result.YES;
     }
 });
