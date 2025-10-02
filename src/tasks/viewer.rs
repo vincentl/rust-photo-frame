@@ -9,8 +9,8 @@ use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
 use crate::tasks::greeting_screen::GreetingScreen;
 use chrono::Utc;
-use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
-use image::{imageops, Rgba, RgbaImage};
+use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
+use image::{Rgba, RgbaImage, imageops};
 use rand::Rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -1003,11 +1003,7 @@ pub fn run_windowed(
     }
 
     fn boundary_state(boundary: &ScheduleBoundary) -> &'static str {
-        if boundary.awake {
-            "awake"
-        } else {
-            "sleeping"
-        }
+        if boundary.awake { "awake" } else { "sleeping" }
     }
 
     impl ApplicationHandler for App {
@@ -1021,15 +1017,16 @@ pub fn run_windowed(
             self.displayed_at = None;
             self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
             self.mat_inflight = 0;
-            let monitor = event_loop.primary_monitor();
-            let attrs = Window::default_attributes()
-                .with_title("Photo Frame")
-                .with_decorations(false)
-                .with_fullscreen(Some(match monitor {
-                    Some(m) => Fullscreen::Borderless(Some(m)),
-                    None => Fullscreen::Borderless(None),
-                }));
+            let attrs = Window::default_attributes().with_title("Photo Frame");
             let window = Arc::new(event_loop.create_window(attrs).unwrap());
+            window.set_decorations(false);
+            let fullscreen_monitor = window
+                .current_monitor()
+                .or_else(|| event_loop.primary_monitor());
+            window.set_fullscreen(Some(match fullscreen_monitor {
+                Some(m) => Fullscreen::Borderless(Some(m)),
+                None => Fullscreen::Borderless(None),
+            }));
             window.set_cursor_visible(false);
 
             let instance = wgpu::Instance::default();
