@@ -2,9 +2,9 @@
 set -euo pipefail
 
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
-VAR_DIR="${VAR_DIR:-${INSTALL_ROOT}/var}"
+VAR_DIR="${VAR_DIR:-/var/lib/photo-frame}"
 CONFIG_PATH="${CONFIG_PATH:-${INSTALL_ROOT}/etc/wifi-manager.yaml}"
-SERVICE_NAME="${SERVICE_NAME:-wifi-manager.service}"
+SERVICE_NAME="${SERVICE_NAME:-photoframe-wifi-manager.service}"
 SERVICE_USER="${SERVICE_USER:-$(id -un)}"
 MANAGER_BIN="${MANAGER_BIN:-${INSTALL_ROOT}/bin/wifi-manager}"
 HOTSPOT_ID="${HOTSPOT_ID:-pf-hotspot}"
@@ -143,15 +143,15 @@ printf '%s: %s (enabled: %s)\n' "${PHOTO_SERVICE}" "${PHOTO_STATUS}" "${PHOTO_EN
 
 print_header "Sync"
 if [[ -z "${SYNC_SERVICE:-}" ]]; then
-    if unit_exists "photo-sync.service"; then
-        SYNC_SERVICE="photo-sync.service"
+    if unit_exists "photoframe-sync.service"; then
+        SYNC_SERVICE="photoframe-sync.service"
     else
         SYNC_SERVICE=""
     fi
 fi
 if [[ -z "${SYNC_TIMER:-}" ]]; then
-    if unit_exists "photo-sync.timer"; then
-        SYNC_TIMER="photo-sync.timer"
+    if unit_exists "photoframe-sync.timer"; then
+        SYNC_TIMER="photoframe-sync.timer"
     else
         SYNC_TIMER=""
     fi

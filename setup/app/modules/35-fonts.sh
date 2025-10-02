@@ -2,7 +2,6 @@
 set -euo pipefail
 
 MODULE="app:35-fonts"
-DRY_RUN="${DRY_RUN:-0}"
 
 FONT_NAME="Macondo"
 FONT_URL="https://github.com/google/fonts/raw/main/ofl/macondo/Macondo-Regular.ttf"
@@ -16,22 +15,10 @@ log() {
 }
 
 run_sudo() {
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: sudo $*"
-    else
-        sudo "$@"
-    fi
+    sudo "$@"
 }
 
 install_font() {
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would create ${FONT_DIR}"
-        log INFO "DRY_RUN: would download ${FONT_URL}"
-        log INFO "DRY_RUN: would install ${FONT_BASENAME} into ${FONT_DIR}"
-        log INFO "DRY_RUN: would refresh font cache"
-        return
-    fi
-
     run_sudo mkdir -p "${FONT_DIR}"
 
     tmpfile="$(mktemp)"
@@ -55,12 +42,8 @@ install_font() {
 
 if [[ -f "${FONT_PATH}" ]]; then
     log INFO "${FONT_NAME} font already present at ${FONT_PATH}; skipping download"
-    if [[ "${DRY_RUN}" == "1" ]]; then
-        log INFO "DRY_RUN: would refresh font cache"
-    else
-        log INFO "Refreshing font cache"
-        run_sudo fc-cache -fv >/dev/null
-    fi
+    log INFO "Refreshing font cache"
+    run_sudo fc-cache -fv >/dev/null
     exit 0
 fi
 

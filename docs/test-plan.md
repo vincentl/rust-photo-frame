@@ -47,24 +47,24 @@ Exercise each axis at least once per release cycle.
   git clone https://github.com/<org>/rust-photo-frame.git
   cd rust-photo-frame
   ```
-- [ ] Run the system bootstrap (installs/updates packages, enables 4K boot profile, provisions rustup, configures NetworkManager):
+- [ ] Run the system bootstrap scripts (install packages, create users/ACLs, configure polkit, install units):
   ```sh
-  ./setup/system/run.sh
+  sudo ./setup/system/install-packages.sh
+  sudo ./setup/system/create-users-and-perms.sh
+  sudo ./setup/system/configure-networkmanager.sh
+  sudo ./setup/system/install-sudoers.sh
+  sudo ./setup/system/install-systemd-units.sh
   ```
-  Note: this script refreshes apt metadata, installs GPU/Wayland prerequisites (cage, libinput, mesa, seatd), creates the `kiosk` account, configures log rotation, and grants NetworkManager permissions.
-- [ ] Reboot when prompted to apply boot config and group membership:
-  ```sh
-  sudo reboot now
-  ```
+  Note: reconnect your SSH session afterwards so the refreshed `kiosk`/`frame` group memberships apply.
 - [ ] After reconnecting, rerun the repo checkout if necessary and execute the app deploy stage (build + install + systemd wiring). Expect 5–7 minutes for the release build on a Pi 5 with active cooling:
   ```sh
   cd ~/rust-photo-frame
   ./setup/app/run.sh
   ```
-  This stage copies binaries into `/opt/photo-frame`, installs the Google “Macondo” font system-wide, and enables `wifi-manager.service` plus any optional sync units. The system stage installs and enables `cage@tty1.service`, which launches the compositor and app on boot.
-- [ ] Customize the writable config at `/opt/photo-frame/var/config.yaml`. Minimal example:
+  This stage copies binaries into `/opt/photo-frame`, installs the Google “Macondo” font system-wide, and enables `photoframe-wifi-manager.service` plus any optional sync units. The system stage installs and enables `cage@tty1.service`, which launches the compositor and app on boot.
+- [ ] Customize the writable config at `/var/lib/photo-frame/config.yaml`. Minimal example:
   ```yaml
-  photo-library-path: /opt/photo-frame/var/photos
+  photo-library-path: /var/lib/photo-frame/photos
   greeting-screen:
     message: "Welcome home!"
     font: "Macondo"
@@ -77,21 +77,21 @@ Exercise each axis at least once per release cycle.
       sleep-command: "wlr-randr --output @OUTPUT@ --off || vcgencmd display_power 0"
       wake-command: "wlr-randr --output @OUTPUT@ --on  || vcgencmd display_power 1"
   ```
-- [ ] Populate `/opt/photo-frame/var/photos` (or configured library path) according to the test matrix scenario.
+- [ ] Populate `/var/lib/photo-frame/photos` (or configured library path) according to the test matrix scenario.
 
 ## Phase 3 – Kiosk Autostart & Services
 - [ ] Confirm the setup script enabled expected units:
   ```sh
   systemctl status cage@tty1.service
-  systemctl status wifi-manager.service   # hotspot + provisioning
-  systemctl status photo-sync.timer       # optional if library sync configured
+  systemctl status photoframe-wifi-manager.service   # hotspot + provisioning
+  systemctl status photoframe-sync.timer       # optional if library sync configured
   ```
   Use `/opt/photo-frame/bin/print-status.sh` for a consolidated view.
 - [ ] Reboot (`sudo reboot`) and confirm `cage@tty1.service` claims `/dev/tty1` (no login prompt) and the app launches full-screen on HDMI-1.
 - [ ] Check logs for a clean startup:
   ```sh
   journalctl -u cage@tty1.service -n 200 --no-pager
-  journalctl -u wifi-manager.service -n 100 --no-pager
+  journalctl -u photoframe-wifi-manager.service -n 100 --no-pager
   ```
 
 ## Phase 4 – Display Mode & Frame Rate
@@ -138,7 +138,7 @@ Exercise each axis at least once per release cycle.
 - [ ] Evidence:
   ```sh
   nmcli dev status
-  journalctl -u wifi-manager.service -n 200 --no-pager
+  journalctl -u photoframe-wifi-manager.service -n 200 --no-pager
   journalctl -u cage@tty1.service -n 200 --no-pager | grep -i network
   ```
 
@@ -179,7 +179,7 @@ Exercise each axis at least once per release cycle.
   tests/collect_logs.sh
   ```
 - [ ] Verify artifact present: `ls artifacts/FRAME-logs-*.tar.gz`.
-- [ ] Bundle includes: system metadata, boot journal, `cage@tty1.service` + `wifi-manager.service` journals/status, optional sync unit details, NetworkManager snapshots, DRM modes + EDID, runtime metrics (top, temperature, binary `--version`), `/opt/photo-frame/var/config.yaml`, `/opt/photo-frame/etc/wifi-manager.yaml`, and `print-status` output.
+- [ ] Bundle includes: system metadata, boot journal, `cage@tty1.service` + `photoframe-wifi-manager.service` journals/status, optional sync unit details, NetworkManager snapshots, DRM modes + EDID, runtime metrics (top, temperature, binary `--version`), `/var/lib/photo-frame/config.yaml`, `/opt/photo-frame/etc/wifi-manager.yaml`, and `print-status` output.
 - [ ] Attach bundle to issue tracker entry with notes on observed behavior.
 
 ## Acceptance Criteria
@@ -195,11 +195,11 @@ Exercise each axis at least once per release cycle.
 
 ## Recovery & Rollback Notes
 - **Bad config.yaml:**
-  - [ ] Restore last-known-good from backup (`sudo cp /opt/photo-frame/var/config.yaml.bak /opt/photo-frame/var/config.yaml`).
-  - [ ] Validate YAML syntax with `yamllint` (if installed) or `python3 -c "import yaml,sys; yaml.safe_load(open('/opt/photo-frame/var/config.yaml'))"`.
+  - [ ] Restore last-known-good from backup (`sudo cp /var/lib/photo-frame/config.yaml.bak /var/lib/photo-frame/config.yaml`).
+  - [ ] Validate YAML syntax with `yamllint` (if installed) or `python3 -c "import yaml,sys; yaml.safe_load(open('/var/lib/photo-frame/config.yaml'))"`.
   - [ ] Restart service: `sudo systemctl restart cage@tty1.service`.
 - **Broken service (fails to start):**
-  - [ ] Inspect logs: `journalctl -u cage@tty1.service -b` and `journalctl -u wifi-manager.service -b`.
+  - [ ] Inspect logs: `journalctl -u cage@tty1.service -b` and `journalctl -u photoframe-wifi-manager.service -b`.
   - [ ] Rebuild binary: `cargo build --release`.
   - [ ] Validate unit file dependencies (Wayland, env vars) and run `sudo systemctl daemon-reload`.
 - **Failed update:**

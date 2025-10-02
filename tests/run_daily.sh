@@ -6,7 +6,7 @@ source "$REPO_ROOT/tests/lib/assert.sh"
 
 main() {
   local photo_service="${PHOTO_SERVICE:-cage@tty1.service}"
-  local wifi_service="${WIFI_SERVICE:-wifi-manager.service}"
+  local wifi_service="${WIFI_SERVICE:-photoframe-wifi-manager.service}"
 
   section "Service health"
   require_cmd systemctl

@@ -2,7 +2,6 @@
 set -euo pipefail
 
 MODULE="app:10-build"
-DRY_RUN="${DRY_RUN:-0}"
 CARGO_PROFILE="${CARGO_PROFILE:-release}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
@@ -29,13 +28,9 @@ fi
 
 log INFO "Building workspace binaries with cargo ${profile_flag[*]}"
 cd "${REPO_ROOT}"
-if [[ "${DRY_RUN}" == "1" ]]; then
-    log INFO "DRY_RUN: would run cargo build --workspace --bins ${profile_flag[*]}"
-else
-    cargo build --workspace --bins "${profile_flag[@]}"
-fi
+cargo build --workspace --bins "${profile_flag[@]}"
 
-if [[ "${DRY_RUN}" != "1" && -d "${REPO_ROOT}/target" ]]; then
+if [[ -d "${REPO_ROOT}/target" ]]; then
     if find "${REPO_ROOT}/target" -maxdepth 2 -user root -print -quit | grep -q .; then
         log ERROR "Detected root-owned files under ${REPO_ROOT}/target; clean them before continuing."
         exit 1

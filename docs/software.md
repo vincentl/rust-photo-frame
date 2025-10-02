@@ -87,23 +87,39 @@ This workflow prepares a Raspberry Pi OS (Bookworm, 64-bit) image that boots dir
 
 ## Run the automated setup
 
-Both setup stages should be launched as the deployment user. They call `sudo` internally for the few operations that need elevated privileges (apt packages, `/boot` updates, and copying into `/opt/photo-frame`). The stages are safe to re-run; unchanged modules will detect that no work is required.
+Run the system scripts as `root` (or via `sudo`); each script is idempotent and can be re-run safely.
 
-1. The script `./setup/system/run.sh` provisions operating-system dependencies, enables the 4K HDMI boot profile, and installs a user-scoped Rust toolchain.
-
-   ```bash
-   ./setup/system/run.sh
-   ```
-
-   During this stage the installer also ensures the deployment user can manage NetworkManager by joining the `netdev` group and installing a polkit rule for headless control. If your account is newly added to `netdev`, log out and back in (or reconnect your SSH session) before continuing so the fresh group membership is applied.
-
-1. Reboot the pi to enable the boot changes.
+1. Install base packages, GPU drivers, and toolchains:
 
    ```bash
-   sudo reboot now
+   sudo ./setup/system/install-packages.sh
    ```
 
-   You will need to ssh back to the frame once it reboots to continue installation.
+2. Create the `kiosk`/`frame` users, provision `/opt/photo-frame`, and set ACLs on `/var/lib/photo-frame`:
+
+   ```bash
+   sudo ./setup/system/create-users-and-perms.sh
+   ```
+
+3. Allow the `kiosk` user to control NetworkManager via polkit:
+
+   ```bash
+   sudo ./setup/system/configure-networkmanager.sh
+   ```
+
+4. Install the sudo policy for the `frame` operator:
+
+   ```bash
+   sudo ./setup/system/install-sudoers.sh
+   ```
+
+5. Install and enable the cage, sync, wifi, and buttond systemd units:
+
+   ```bash
+   sudo ./setup/system/install-systemd-units.sh
+   ```
+
+   Reconnect your SSH session afterwards so new group memberships take effect.
 
 1. The script `./setup/app/run.sh` builds the photo frame application, stages the release artifacts, and installs them into `/opt/photo-frame`. Combined with the system stage, this places the kiosk binary where the `cage@tty1.service` unit expects it so the frame boots directly into the slideshow without any shell profile hooks.
 
@@ -116,16 +132,15 @@ Use the following environment variables to customize an installation:
 | Variable        | Default            | Notes |
 | --------------- | ------------------ | ----- |
 | `INSTALL_ROOT`  | `/opt/photo-frame` | Target installation prefix. |
-| `SERVICE_USER`  | `kiosk`            | The systemd account that owns `/opt/photo-frame/var`. The system stage creates it when missing. |
-| `SERVICE_GROUP` | `kiosk` (or the primary group for `SERVICE_USER`) | Group that owns `/opt/photo-frame/var` alongside `SERVICE_USER`. |
+| `SERVICE_USER`  | `kiosk`            | The systemd account that owns `/var/lib/photo-frame`. The system stage creates it when missing. |
+| `SERVICE_GROUP` | `kiosk` (or the primary group for `SERVICE_USER`) | Group that owns `/var/lib/photo-frame` alongside `SERVICE_USER`. |
 | `CARGO_PROFILE` | `release`          | Cargo profile passed to `cargo build`. |
-| `DRY_RUN`       | unset              | Set to `1` to see the actions that would be taken without modifying the system. |
 
 ### Kiosk session configuration
 
 When both setup stages complete successfully the Raspberry Pi is ready to boot directly into a kiosk session:
 
-- The templated systemd unit `cage@tty1.service` binds to `/dev/tty1`, logs in the `kiosk` user through PAM, and `exec`s the Wayland compositor as `cage -- /opt/photo-frame/bin/rust-photo-frame /opt/photo-frame/var/config.yaml`. PAM/logind create a real session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` and DRM permissions flow automatically.
+- The templated systemd unit `cage@tty1.service` binds to `/dev/tty1`, logs in the `kiosk` user through PAM, and `exec`s the Wayland compositor as `cage -- /opt/photo-frame/bin/rust-photo-frame --config /opt/photo-frame/etc/config.yaml`. PAM/logind create a real session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` and DRM permissions flow automatically while the writable config lives under `/var/lib/photo-frame/config`.
 - Device access comes from the `kiosk` user belonging to the `render`, `video`, and `input` groups. The system stage wires this up, so Vulkan/GL stacks can open `/dev/dri/renderD128` without any extra udev hacks.
 - `seatd` remains optional on Bookworm but harmless to have installed; the compositor happily runs without manual socket management when launched via logind.
 - Disable any other display manager or compositor on the target TTY so Cage can claim DRM master and input devices without contention.
