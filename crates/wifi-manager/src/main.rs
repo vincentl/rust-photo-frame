@@ -94,7 +94,7 @@ fn guard_root_usage() -> Result<()> {
         if is_help || is_version {
             return Ok(());
         }
-        anyhow::bail!("Refusing to run wifi-manager as root; run as the photo-frame service user.");
+        anyhow::bail!("Refusing to run wifi-manager as root; run as the kiosk service user.");
     }
     Ok(())
 }

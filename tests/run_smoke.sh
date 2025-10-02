@@ -5,7 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$REPO_ROOT/tests/lib/assert.sh"
 
 main() {
-  local photo_service="${PHOTO_SERVICE:-photo-frame.service}"
+  local photo_service="${PHOTO_SERVICE:-cage@tty1.service}"
   local wifi_service="${WIFI_SERVICE:-wifi-manager.service}"
 
   section "Pre-flight"

@@ -135,7 +135,7 @@ fi
 
 print_header "Photo Frame"
 if [[ -z "${PHOTO_SERVICE:-}" ]]; then
-    PHOTO_SERVICE="photo-frame.service"
+    PHOTO_SERVICE="cage@tty1.service"
 fi
 PHOTO_STATUS="$(unit_status "${PHOTO_SERVICE}")"
 PHOTO_ENABLED="$(unit_enabled "${PHOTO_SERVICE}")"

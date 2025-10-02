@@ -4,7 +4,7 @@ set -euo pipefail
 MODULE="system:50-networkmanager"
 DRY_RUN="${DRY_RUN:-0}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
-SERVICE_USER="${SERVICE_USER:-$(id -un)}"
+SERVICE_USER="${SERVICE_USER:-kiosk}"
 NETDEV_GROUP="netdev"
 POLKIT_RULE="/etc/polkit-1/rules.d/90-photo-frame-network.rules"
 

@@ -106,9 +106,6 @@ activate_unit() {
     fi
 }
 
-enable_unit photo-frame.service
-activate_unit photo-frame.service
-
 enable_unit wifi-manager.service
 activate_unit wifi-manager.service
 
