@@ -62,7 +62,12 @@ async fn try_main() -> Result<()> {
         .config
         .unwrap_or_else(|| PathBuf::from("/opt/photo-frame/etc/wifi-manager.yaml"));
     let config = Config::load(&config_path)?;
-    std::env::set_var("WIFI_MANAGER_CONFIG", &config_path);
+    // Updating the process environment is an unsafe operation on Rust 2024.
+    // We only expose the configuration path to child processes, so the single
+    // assignment here is contained and justified.
+    unsafe {
+        std::env::set_var("WIFI_MANAGER_CONFIG", &config_path);
+    }
 
     info!(command = ?cli.command, config = %config_path.display(), "starting wifi-manager");
 
