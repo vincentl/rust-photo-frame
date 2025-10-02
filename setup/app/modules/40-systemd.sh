@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 MODULE="app:40-systemd"
 DRY_RUN="${DRY_RUN:-0}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
+SERVICE_USER="${SERVICE_USER:-$(id -un)}"
 SYSTEMD_SOURCE="${INSTALL_ROOT}/systemd"
 SYSTEMD_TARGET="/etc/systemd/system"
 
@@ -18,6 +21,28 @@ run_sudo() {
     else
         sudo "$@"
     fi
+}
+
+ensure_nm_permissions() {
+    local nm_module="${REPO_ROOT}/setup/system/modules/50-networkmanager.sh"
+
+    if [[ ! -f "${nm_module}" ]]; then
+        log WARN "NetworkManager permission helper missing at ${nm_module}; skipping"
+        return 0
+    fi
+
+    if [[ ! -x "${nm_module}" ]]; then
+        chmod +x "${nm_module}"
+    fi
+
+    log INFO "Ensuring NetworkManager permissions for ${SERVICE_USER}"
+
+    if ! SERVICE_USER="${SERVICE_USER}" DRY_RUN="${DRY_RUN}" "${nm_module}"; then
+        log ERROR "Failed to configure NetworkManager permissions for ${SERVICE_USER}"
+        exit 1
+    fi
+
+    return 0
 }
 
 if [[ ! -d "${SYSTEMD_SOURCE}" ]]; then
@@ -50,6 +75,8 @@ if [[ "${DRY_RUN}" == "1" ]]; then
 else
     run_sudo systemctl daemon-reload
 fi
+
+ensure_nm_permissions
 
 enable_unit() {
     local unit_name="$1"
