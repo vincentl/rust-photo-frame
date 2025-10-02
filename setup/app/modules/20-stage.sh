@@ -129,6 +129,15 @@ if [[ -f "${POWERCTL_SRC}" ]]; then
     fi
 fi
 
+KIOSK_LAUNCHER_SRC="${REPO_ROOT}/setup/app/kiosk/photo-frame-kiosk"
+if [[ -f "${KIOSK_LAUNCHER_SRC}" ]]; then
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        log INFO "DRY_RUN: would install kiosk launcher to ${STAGE_DIR}/bin/photo-frame-kiosk"
+    else
+        install -Dm755 "${KIOSK_LAUNCHER_SRC}" "${STAGE_DIR}/bin/photo-frame-kiosk"
+    fi
+fi
+
 copy_tree "${FILES_ROOT}/bin" "${STAGE_DIR}/bin" 755 "helper script"
 copy_tree "${FILES_ROOT}/etc" "${STAGE_DIR}/etc" 644 "config template"
 copy_tree "${FILES_ROOT}/share" "${STAGE_DIR}/share" 644 "shared asset"

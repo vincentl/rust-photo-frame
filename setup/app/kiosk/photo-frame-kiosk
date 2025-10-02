@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+APP_BIN="${INSTALL_ROOT}/bin/rust-photo-frame"
+CONFIG_PATH="${INSTALL_ROOT}/var/config.yaml"
+
+if [[ ! -x "${APP_BIN}" ]]; then
+    echo "photo-frame-kiosk: expected binary at ${APP_BIN}" >&2
+    exit 1
+fi
+
+if [[ ! -f "${CONFIG_PATH}" ]]; then
+    echo "photo-frame-kiosk: expected config at ${CONFIG_PATH}" >&2
+    exit 1
+fi
+
+uid="$(id -u)"
+if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+    export XDG_RUNTIME_DIR
+else
+    export XDG_RUNTIME_DIR="/run/user/${uid}"
+fi
+
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+export MOZ_ENABLE_WAYLAND="${MOZ_ENABLE_WAYLAND:-1}"
+
+if command -v cage >/dev/null 2>&1; then
+    exec cage -s -- "${APP_BIN}" "${CONFIG_PATH}"
+fi
+
+exec "${APP_BIN}" "${CONFIG_PATH}"
