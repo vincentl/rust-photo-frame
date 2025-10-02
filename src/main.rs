@@ -16,7 +16,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use clap::Parser;
 use humantime::{format_rfc3339, parse_rfc3339};
 use std::borrow::Cow;
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
@@ -130,7 +130,7 @@ async fn main() -> Result<()> {
     let cancel = CancellationToken::new();
 
     // Ctrl-D/Ctrl-C cancel the pipeline
-    {
+    if io::stdin().is_terminal() {
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || {
             let mut sink = Vec::new();
@@ -140,6 +140,8 @@ async fn main() -> Result<()> {
             }
             cancel.cancel();
         });
+    } else {
+        tracing::debug!("stdin is not a terminal; skipping shutdown watcher");
     }
 
     {
