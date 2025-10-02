@@ -105,7 +105,7 @@ Both setup stages should be launched as the deployment user. They call `sudo` in
 
    You will need to ssh back to the frame once it reboots to continue installation.
 
-1. The script `./setup/app/run.sh` builds the photo frame application, stages the release artifacts, installs them into `/opt/photo-frame`, and enables the `photo-frame.service` systemd unit. The service now owns the kiosk session end to end so the frame boots directly into the slideshow without any shell profile hooks.
+1. The script `./setup/app/run.sh` builds the photo frame application, stages the release artifacts, and installs them into `/opt/photo-frame`. Combined with the system stage, this places the kiosk binary where the `cage@tty1.service` unit expects it so the frame boots directly into the slideshow without any shell profile hooks.
 
    ```bash
    ./setup/app/run.sh
@@ -116,17 +116,20 @@ Use the following environment variables to customize an installation:
 | Variable        | Default            | Notes |
 | --------------- | ------------------ | ----- |
 | `INSTALL_ROOT`  | `/opt/photo-frame` | Target installation prefix. |
-| `SERVICE_USER`  | invoking user      | The systemd account that owns `/opt/photo-frame/var`. Must already exist. |
-| `SERVICE_GROUP` | invoking user's primary group | Group that owns `/opt/photo-frame/var` alongside `SERVICE_USER`. |
+| `SERVICE_USER`  | `kiosk`            | The systemd account that owns `/opt/photo-frame/var`. The system stage creates it when missing. |
+| `SERVICE_GROUP` | `kiosk` (or the primary group for `SERVICE_USER`) | Group that owns `/opt/photo-frame/var` alongside `SERVICE_USER`. |
 | `CARGO_PROFILE` | `release`          | Cargo profile passed to `cargo build`. |
 | `DRY_RUN`       | unset              | Set to `1` to see the actions that would be taken without modifying the system. |
 
 ### Kiosk session configuration
 
-When `./setup/app/run.sh` completes successfully the Raspberry Pi is ready to boot directly into a kiosk session:
+When both setup stages complete successfully the Raspberry Pi is ready to boot directly into a kiosk session:
 
-- The systemd unit `photo-frame.service` binds to `/dev/tty1`, pre-creates `/run/user/<uid>` so Cage and seatd see a valid Wayland runtime directory, and `exec`s the kiosk helper with `Restart=on-failure` semantics. Crashes or manual `kill` events trigger an automatic relaunch after five seconds.
-- The helper binary `/opt/photo-frame/bin/photo-frame-kiosk` sets up Wayland environment variables, ensures `XDG_RUNTIME_DIR` still has the expected permissions, hides the pointer, and launches the app inside `cage -s` when available (falling back to direct execution otherwise).
-- `seatd.service` (when installed) is started alongside the kiosk unit so the compositor has device access on headless boots.
+- The templated systemd unit `cage@tty1.service` binds to `/dev/tty1`, logs in the `kiosk` user through PAM, and `exec`s the Wayland compositor as `cage -- /opt/photo-frame/bin/rust-photo-frame /opt/photo-frame/var/config.yaml`. PAM/logind create a real session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` and DRM permissions flow automatically.
+- Device access comes from the `kiosk` user belonging to the `render`, `video`, and `input` groups. The system stage wires this up, so Vulkan/GL stacks can open `/dev/dri/renderD128` without any extra udev hacks.
+- `seatd` remains optional on Bookworm but harmless to have installed; the compositor happily runs without manual socket management when launched via logind.
+- Disable any other display manager or compositor on the target TTY so Cage can claim DRM master and input devices without contention.
 
-To pause the slideshow for maintenance, SSH into the Pi and run `sudo systemctl stop photo-frame.service`. The kiosk remains down until you start it again with `sudo systemctl start photo-frame.service`.
+For smoke testing, temporarily adjust the unit to run `kmscube` instead of the photo frame binary. A spinning cube on HDMI verifies DRM, GBM, and input permissions before deploying the full app.
+
+To pause the slideshow for maintenance, SSH into the Pi and run `sudo systemctl stop cage@tty1.service`. The kiosk remains down until you start it again with `sudo systemctl start cage@tty1.service`.
