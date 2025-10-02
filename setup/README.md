@@ -12,8 +12,18 @@ updates or image refreshes.
 
 ## System provisioning
 
-Run the system scripts as root (or with `sudo`). Execute them in the following
-order on a fresh Bookworm install:
+Run the system scripts as root (or with `sudo`). You can execute each script
+individually in the following order on a fresh Bookworm install, or run the
+wrapper to perform the full provisioning sequence:
+
+```bash
+sudo ./setup/system/run.sh
+```
+
+Pass `--with-legacy-cleanup` to also execute the optional migration step after
+provisioning.
+
+Individual scripts are available at:
 
 1. `./setup/system/install-packages.sh`
    - Installs Cage, GPU/video dependencies, build toolchains, and helper
