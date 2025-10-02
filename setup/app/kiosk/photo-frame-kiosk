@@ -24,6 +24,15 @@ else
     export XDG_RUNTIME_DIR="/run/user/${uid}"
 fi
 
+if [[ ! -d "${XDG_RUNTIME_DIR}" ]]; then
+    if ! mkdir -p -m 700 "${XDG_RUNTIME_DIR}"; then
+        echo "photo-frame-kiosk: failed to create XDG_RUNTIME_DIR at ${XDG_RUNTIME_DIR}" >&2
+        exit 1
+    fi
+else
+    chmod 700 "${XDG_RUNTIME_DIR}" || true
+fi
+
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 export MOZ_ENABLE_WAYLAND="${MOZ_ENABLE_WAYLAND:-1}"
 

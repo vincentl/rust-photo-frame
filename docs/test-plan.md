@@ -40,7 +40,6 @@ Exercise each axis at least once per release cycle.
 - [ ] On first boot, sign in as the deployment user (default `frame`) and confirm network connectivity.
 - [ ] (Optional) Run `sudo apt update && sudo apt upgrade -y` once; the automation will also perform a dist-upgrade but this reduces the first-run delta.
 - [ ] Confirm Wayland desktop capability: `echo "$XDG_SESSION_TYPE"` should report `wayland` after logging into the graphical session once.
-- [ ] Enable console autologin for the deployment user (raspi-config → System Options → Boot / Auto Login → Console Autologin). The setup scripts configure the kiosk session later.
 
 ## Phase 2 – Project Setup Pipeline
 - [ ] Clone repo:
@@ -88,7 +87,7 @@ Exercise each axis at least once per release cycle.
   systemctl status photo-sync.timer       # optional if library sync configured
   ```
   Use `/opt/photo-frame/bin/print-status.sh` for a consolidated view.
-- [ ] Reboot (`sudo reboot`) and confirm the kiosk session logs in automatically and launches the app full-screen on HDMI-1.
+- [ ] Reboot (`sudo reboot`) and confirm `photo-frame.service` claims `/dev/tty1` (no login prompt) and the app launches full-screen on HDMI-1.
 - [ ] Check logs for a clean startup:
   ```sh
   journalctl -u photo-frame.service -n 200 --no-pager
@@ -167,7 +166,7 @@ Exercise each axis at least once per release cycle.
 
 ## Phase 10 – Power Loss & Recovery
 - [ ] Use 52Pi PD board (if equipped) to momentarily cut power (per manufacturer safe window).
-- [ ] Confirm auto-boot, kiosk autologin, and slideshow resume within expected timeframe.
+- [ ] Confirm auto-boot, kiosk service startup, and slideshow resume within expected timeframe.
 - [ ] Check for filesystem warnings:
   ```sh
   journalctl -b | grep -i fsck
