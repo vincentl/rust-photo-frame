@@ -65,6 +65,11 @@ done
 
 systemctl daemon-reload
 
+# Ensure the system boots into graphical.target so cage starts automatically.
+if [[ "$(systemctl get-default)" != "graphical.target" ]]; then
+    systemctl set-default graphical.target
+fi
+
 ENABLE_UNITS=(
     cage@tty1.service
     photoframe-wifi-manager.service
