@@ -4,8 +4,12 @@ set -euo pipefail
 MODULE="app:30-install"
 DRY_RUN="${DRY_RUN:-0}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
-SERVICE_USER="${SERVICE_USER:-$(id -un)}"
-SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn)}"
+SERVICE_USER="${SERVICE_USER:-kiosk}"
+if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+    SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn "${SERVICE_USER}")}"
+else
+    SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE_ROOT="${STAGE_ROOT:-${SCRIPT_DIR}/../build}"
 STAGE_DIR="${STAGE_ROOT}/stage"

@@ -4,8 +4,13 @@ set -euo pipefail
 MODULE="system:40-logging"
 DRY_RUN="${DRY_RUN:-0}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
-SERVICE_USER="${SERVICE_USER:-$(id -un)}"
-SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn)}"
+SERVICE_USER="${SERVICE_USER:-kiosk}"
+if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+    SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn "${SERVICE_USER}")}"
+else
+    SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
+fi
+PHOTO_SERVICE="${PHOTO_SERVICE:-cage@tty1.service}"
 
 log() {
     local level="$1"; shift
@@ -76,7 +81,7 @@ ${LOG_DIR}/*.log {
     su ${SERVICE_USER} ${SERVICE_GROUP}
     create 0640 ${SERVICE_USER} ${SERVICE_GROUP}
     postrotate
-        systemctl kill -s SIGUSR1 photo-frame.service >/dev/null 2>&1 || true
+        systemctl kill -s SIGUSR1 ${PHOTO_SERVICE} >/dev/null 2>&1 || true
     endscript
 }
 EOF

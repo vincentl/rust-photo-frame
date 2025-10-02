@@ -36,7 +36,7 @@ This roadmap tracks the tasks required to automate the provisioning of a Raspber
 
 ### TODO
 
-- [ ] Document kiosk mode configuration and automation of the rust-photo-frame service.
+- [ ] Document kiosk mode configuration and automation of the `cage@tty1.service` flow.
 - [ ] Implement background sync service configuration from cloud storage providers.
 - [ ] Add setup module for button monitor service deployment and systemd integration.
 - [ ] Add setup module for Wi-Fi connectivity checks and captive portal configuration workflow.
