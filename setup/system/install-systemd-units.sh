@@ -41,6 +41,7 @@ fi
 systemctl daemon-reload
 
 LEGACY_UNITS=(
+    photo-frame.service
     sync-photos.service
     sync-photos.timer
     wifi-manager.service
