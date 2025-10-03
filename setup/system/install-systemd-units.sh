@@ -12,6 +12,8 @@ UNIT_SRC="${SCRIPT_DIR}/units"
 PAM_SRC="${SCRIPT_DIR}/pam.d"
 SYSTEMD_DIR=/etc/systemd/system
 PAM_DIR=/etc/pam.d
+LOGIND_SRC="${SCRIPT_DIR}/logind.conf.d"
+LOGIND_DIR=/etc/systemd/logind.conf.d
 
 install_unit() {
     local src="$1" name
@@ -36,6 +38,14 @@ if [[ -d "${PAM_SRC}" ]]; then
         name="$(basename "${pam}")"
         install -D -m 0644 "${pam}" "${PAM_DIR}/${name}"
     done < <(find "${PAM_SRC}" -maxdepth 1 -type f -print0)
+fi
+
+if [[ -d "${LOGIND_SRC}" ]]; then
+    install -d -m 0755 "${LOGIND_DIR}"
+    while IFS= read -r -d '' dropin; do
+        name="$(basename "${dropin}")"
+        install -D -m 0644 "${dropin}" "${LOGIND_DIR}/${name}"
+    done < <(find "${LOGIND_SRC}" -maxdepth 1 -type f -print0)
 fi
 
 systemctl daemon-reload
@@ -65,6 +75,10 @@ for unit in "${LEGACY_UNITS[@]}"; do
 done
 
 systemctl daemon-reload
+
+if systemctl list-unit-files systemd-logind.service >/dev/null 2>&1; then
+    systemctl restart systemd-logind.service
+fi
 
 # Ensure the system boots into graphical.target so cage starts automatically.
 if [[ "$(systemctl get-default)" != "graphical.target" ]]; then
