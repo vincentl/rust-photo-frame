@@ -10,6 +10,28 @@ service accounts:
 The scripts in this directory are idempotent and can be re-run after package
 updates or image refreshes.
 
+## Package provisioning
+
+Run the package stage as root (or with `sudo`). It installs both apt
+dependencies and a system-wide Rust toolchain:
+
+```bash
+sudo ./setup/packages/run.sh
+```
+
+Individual scripts are available at:
+
+1. `./setup/packages/install-apt-packages.sh`
+   - Installs Cage, GPU/video dependencies, build toolchains, and helper
+     utilities such as `rclone`.
+2. `./setup/packages/install-rust.sh`
+   - Installs or updates the Rust toolchain under `/usr/local/cargo` and adds
+     a profile snippet so new shells inherit the `cargo` binary in their
+     `PATH`.
+
+After the script completes, reconnect your SSH session so the updated
+environment variables take effect.
+
 ## System provisioning
 
 Run the system scripts as root (or with `sudo`). You can execute each script
@@ -20,15 +42,9 @@ wrapper to perform the full provisioning sequence:
 sudo ./setup/system/run.sh
 ```
 
-Pass `--with-legacy-cleanup` to also execute the optional migration step after
-provisioning.
-
 Individual scripts are available at:
 
-1. `./setup/system/install-packages.sh`
-   - Installs Cage, GPU/video dependencies, build toolchains, and helper
-     utilities such as `rclone`.
-2. `./setup/system/create-users-and-perms.sh`
+1. `./setup/system/create-users-and-perms.sh`
    - Ensures the `kiosk` and `frame` users exist, adds `kiosk` to the
      `render`, `video`, and `input` groups, and prepares the runtime
      directories:
@@ -46,6 +62,7 @@ Individual scripts are available at:
 5. `./setup/system/install-systemd-units.sh`
    - Copies the standard units (`cage@.service`, `photoframe-*`) and PAM
      drop-ins into `/etc`, enables them, and removes legacy unit files.
+
 6. (Optional) `sudo ./setup/migrate/legacy-cleanup.sh`
    - Removes unit files and directories from pre-kiosk builds.
 
