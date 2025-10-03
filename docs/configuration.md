@@ -209,6 +209,7 @@ The setup pipeline installs `/opt/photo-frame/bin/powerctl`, a thin wrapper arou
 - **Short press:** sends `SIGUSR1` to the running app (using the pidfile when present, otherwise `pkill -USR1 -f rust-photo-frame`).
 - **Double press:** runs `/opt/photo-frame/bin/photo-safe-shutdown`, which wraps `shutdown -h now`.
 - **Long press:** bypassed so the Pi firmware can force power-off.
+- **System integration:** The provisioning script also installs a `systemd-logind` drop-in that sets `HandlePowerKey=ignore` so the desktop stack never interprets the press as a global poweroff request; only the daemon reacts to the event.
 
 Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. If the wrong device is chosen, override it by editing the unit to pass `--device /dev/input/by-path/...-event`. Debounce, single-press, and double-press windows are configurable in milliseconds.
 
