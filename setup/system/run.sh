@@ -50,9 +50,6 @@ main() {
   local script_dir
   script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-  log_step "Installing packages"
-  "${script_dir}/install-packages.sh"
-
   log_step "Creating users and setting permissions"
   "${script_dir}/create-users-and-perms.sh"
 

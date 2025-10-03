@@ -47,21 +47,13 @@ Exercise each axis at least once per release cycle.
   git clone https://github.com/<org>/rust-photo-frame.git
   cd rust-photo-frame
   ```
-- [ ] Run the system bootstrap scripts (install packages, create users/ACLs, configure polkit, install units):
+- [ ] Run the provisioning scripts (install packages, build the app, configure the system):
   ```sh
-  sudo ./setup/system/install-packages.sh
-  sudo ./setup/system/create-users-and-perms.sh
-  sudo ./setup/system/configure-networkmanager.sh
-  sudo ./setup/system/install-sudoers.sh
-  sudo ./setup/system/install-systemd-units.sh
-  ```
-  Note: reconnect your SSH session afterwards so the refreshed `kiosk`/`frame` group memberships apply.
-- [ ] After reconnecting, rerun the repo checkout if necessary and execute the app deploy stage (build + install + systemd wiring). Expect 5–7 minutes for the release build on a Pi 5 with active cooling:
-  ```sh
-  cd ~/rust-photo-frame
+  sudo ./setup/packages/run.sh
   ./setup/app/run.sh
+  sudo ./setup/system/run.sh
   ```
-  This stage copies binaries into `/opt/photo-frame`, installs the Google “Macondo” font system-wide, and enables `photoframe-wifi-manager.service` plus any optional sync units. The system stage installs and enables `cage@tty1.service`, which launches the compositor and app on boot.
+  Expect 5–7 minutes for the release build on a Pi 5 with active cooling. Reconnect your SSH session after the system stage so refreshed `kiosk`/`frame` group memberships apply. The app stage copies binaries into `/opt/photo-frame`, installs the Google “Macondo” font system-wide, and seeds `/var/lib/photo-frame` (ownership is fixed once service accounts exist). The system stage installs and enables `cage@tty1.service`, which launches the compositor and app on boot.
 - [ ] Customize the writable config at `/var/lib/photo-frame/config.yaml`. Minimal example:
   ```yaml
   photo-library-path: /var/lib/photo-frame/photos

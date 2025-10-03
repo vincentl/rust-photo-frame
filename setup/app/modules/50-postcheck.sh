@@ -19,8 +19,48 @@ log() {
     printf '[%s] %s\n' "${MODULE}" "$level: $*"
 }
 
+systemctl_cmd() {
+    if [[ $(id -u) -eq 0 ]]; then
+        systemctl "$@"
+    else
+        sudo systemctl "$@"
+    fi
+}
+
+ensure_active() {
+    local unit="$1"
+    local friendly="$2"
+    local optional="${3:-0}"
+
+    if systemctl is-active --quiet "${unit}"; then
+        return 0
+    fi
+
+    log INFO "Starting ${friendly:-${unit}}"
+    if ! systemctl_cmd start "${unit}"; then
+        if [[ "${optional}" -eq 1 ]]; then
+            log WARN "${friendly:-${unit}} failed to start"
+            return 0
+        fi
+        log ERROR "Failed to start ${friendly:-${unit}}"
+        systemctl_cmd status "${unit}" --no-pager || true
+        exit 1
+    fi
+
+    if ! systemctl is-active --quiet "${unit}"; then
+        if [[ "${optional}" -eq 1 ]]; then
+            log WARN "${friendly:-${unit}} is not active after start"
+            return 0
+        fi
+        log ERROR "${friendly:-${unit}} is not active after start"
+        systemctl_cmd status "${unit}" --no-pager || true
+        exit 1
+    fi
+}
+
 BIN_PATH="${INSTALL_ROOT}/bin/rust-photo-frame"
 WIFI_BIN_PATH="${INSTALL_ROOT}/bin/wifi-manager"
+BUTTON_BIN_PATH="${INSTALL_ROOT}/bin/photo-buttond"
 CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/config.yaml"
 WIFI_CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/wifi-manager.yaml"
 WORDLIST_PATH="${INSTALL_ROOT}/share/wordlist.txt"
@@ -68,33 +108,25 @@ if [[ ! -f "${VAR_CONFIG}" ]]; then
     log WARN "Runtime config missing at ${VAR_CONFIG}; seed it with setup/system/create-users-and-perms.sh and app install"
 fi
 
-if ! systemctl is-active --quiet "${KIOSK_SERVICE}"; then
-    log ERROR "${KIOSK_SERVICE} is not active"
-    systemctl status "${KIOSK_SERVICE}" --no-pager || true
-    exit 1
-fi
+ensure_active "${KIOSK_SERVICE}" "${KIOSK_SERVICE}"
 
 if ! systemctl is-enabled --quiet "${KIOSK_SERVICE}"; then
     log WARN "${KIOSK_SERVICE} is not enabled"
 fi
 
-if ! systemctl is-active --quiet "${WIFI_SERVICE}"; then
-    log ERROR "${WIFI_SERVICE} is not active"
-    systemctl status "${WIFI_SERVICE}" --no-pager || true
-    exit 1
-fi
+ensure_active "${WIFI_SERVICE}" "${WIFI_SERVICE}"
 
 if ! systemctl is-enabled --quiet "${WIFI_SERVICE}"; then
     log WARN "${WIFI_SERVICE} is not enabled"
 fi
 
-if ! systemctl is-active --quiet "${BUTTON_SERVICE}"; then
-    log WARN "${BUTTON_SERVICE} is not active"
+if [[ -x "${BUTTON_BIN_PATH}" ]]; then
+    ensure_active "${BUTTON_SERVICE}" "${BUTTON_SERVICE}" 1
+else
+    log WARN "${BUTTON_BIN_PATH} missing; button service will remain stopped"
 fi
 
-if ! systemctl is-active --quiet "${SYNC_TIMER}"; then
-    log WARN "${SYNC_TIMER} is not active"
-fi
+ensure_active "${SYNC_TIMER}" "${SYNC_TIMER}" 1
 
 rustc_version=$(rustc --version 2>/dev/null || echo "rustc unavailable")
 cargo_version=$(cargo --version 2>/dev/null || echo "cargo unavailable")

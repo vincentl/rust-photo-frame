@@ -15,6 +15,7 @@ OPT_ROOT=/opt/photo-frame
 OPT_SUBDIRS=(bin etc share)
 VAR_ROOT=/var/lib/photo-frame
 VAR_SUBDIRS=(photos config)
+CONFIG_FILE="${VAR_ROOT}/config/config.yaml"
 CACHE_ROOT=/var/cache/photo-frame
 LOG_ROOT=/var/log/photo-frame
 
@@ -94,5 +95,11 @@ ensure_directory "${CACHE_ROOT}" 0750 "${KIOSK_USER}" "${KIOSK_USER}"
 ensure_directory "${LOG_ROOT}" 0750 "${KIOSK_USER}" "${KIOSK_USER}"
 setfacl -m "u:${FRAME_USER}:rx,mask::rwx" "${LOG_ROOT}"
 setfacl -d -m "u:${FRAME_USER}:rx,u:${KIOSK_USER}:rwx,g:${KIOSK_USER}:rwx,mask::rwx,other::---" "${LOG_ROOT}"
+
+if [[ -f "${CONFIG_FILE}" ]]; then
+    chown "${KIOSK_USER}:${KIOSK_USER}" "${CONFIG_FILE}"
+    chmod 0660 "${CONFIG_FILE}"
+    setfacl -m "u:${FRAME_USER}:rw,u:${KIOSK_USER}:rw,g:${KIOSK_USER}:rw,mask::rw,other::---" "${CONFIG_FILE}"
+fi
 
 printf 'Users and permissions ready for kiosk=%s frame=%s\n' "${KIOSK_USER}" "${FRAME_USER}"

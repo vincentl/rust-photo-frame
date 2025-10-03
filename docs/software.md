@@ -87,21 +87,29 @@ This workflow prepares a Raspberry Pi OS (Bookworm, 64-bit) image that boots dir
 
 ## Run the automated setup
 
-Run the system automation with the orchestration script; it ensures each step runs in order and re-prompts with `sudo` when necessary. Every stage is idempotent and safe to re-run.
+Run the automation in three stages; each script re-prompts for `sudo` when necessary and can be re-run safely.
 
-1. Provision the operating system dependencies:
+1. Install the operating system prerequisites, including the Rust toolchain, GPU drivers, and build utilities:
+
+   ```bash
+   sudo ./setup/packages/run.sh
+   ```
+
+   This wrapper currently calls `install-packages.sh`, which refreshes `apt` and installs the packages required by the compositor, sync services, and build stack. When it finishes, reconnect your SSH session so new groups take effect.
+
+1. Build and install the application artifacts as the unprivileged operator account. The script stages the workspace under `setup/app/build`, copies binaries, assets, and systemd drop-ins into `/opt/photo-frame`, and seeds `/var/lib/photo-frame` (the system stage corrects ownership if the service accounts are created later).
+
+   ```bash
+   ./setup/app/run.sh
+   ```
+
+1. Apply system configuration:
 
    ```bash
    sudo ./setup/system/run.sh
    ```
 
-   Pass `--with-legacy-cleanup` if you need to apply the optional migration script after provisioning. When the script finishes, reconnect your SSH session so new group memberships take effect.
-
-1. The script `./setup/app/run.sh` builds the photo frame application, stages the release artifacts, and installs them into `/opt/photo-frame`. Run it as the unprivileged operator account; it will ask for `sudo` only when needed. Combined with the system stage, this places the kiosk binary where the `cage@tty1.service` unit expects it so the frame boots directly into the slideshow without any shell profile hooks.
-
-   ```bash
-   ./setup/app/run.sh
-   ```
+   The system stage creates the `kiosk` and `frame` accounts, places them in the necessary video/input groups, installs sudoers and polkit rules, and enables the systemd units. Pass `--with-legacy-cleanup` to include the optional migration script after provisioning.
 
 Use the following environment variables to customize an installation:
 

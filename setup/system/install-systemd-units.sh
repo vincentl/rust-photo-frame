@@ -92,20 +92,39 @@ ENABLE_UNITS=(
     photoframe-sync.timer
 )
 
+declare -A UNIT_REQUIREMENTS=(
+    [cage@tty1.service]="/opt/photo-frame/bin/rust-photo-frame"
+    [photoframe-wifi-manager.service]="/opt/photo-frame/bin/wifi-manager"
+    [photoframe-buttond.service]="/opt/photo-frame/bin/photo-buttond"
+)
+
 for unit in "${ENABLE_UNITS[@]}"; do
-    if systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
-        systemctl enable "${unit}"
+    if ! systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
+        printf 'Skipping %s: unit file not registered with systemd yet.\n' "${unit}"
+        continue
     fi
+
+    systemctl enable "${unit}"
+
+    requirement=""
+    if [[ -v UNIT_REQUIREMENTS[${unit}] ]]; then
+        requirement="${UNIT_REQUIREMENTS[${unit}]}"
+    fi
+    if [[ -n "${requirement}" && ! -x "${requirement}" ]]; then
+        printf 'Deferring start of %s until %s is installed.\n' "${unit}" "${requirement}"
+        continue
+    fi
+
     if [[ "${unit}" == *.timer ]]; then
         systemctl start "${unit}"
+        continue
     fi
-    if [[ "${unit}" != *.timer ]] && systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
-        if systemctl is-active --quiet "${unit}"; then
-            systemctl reload-or-restart "${unit}"
-        else
-            systemctl start "${unit}"
-        fi
+
+    if systemctl is-active --quiet "${unit}"; then
+        systemctl reload-or-restart "${unit}"
+    else
+        systemctl start "${unit}"
     fi
 done
 
-printf 'Systemd units installed. Active services: %s\n' "${ENABLE_UNITS[*]}"
+printf 'Systemd units installed. Enabled services: %s\n' "${ENABLE_UNITS[*]}"

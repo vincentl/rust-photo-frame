@@ -4,11 +4,11 @@ set -euo pipefail
 MODULE="app:30-install"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
 SERVICE_USER="${SERVICE_USER:-kiosk}"
-SERVICE_GROUP="${SERVICE_GROUP:-}"
+DEFAULT_SERVICE_GROUP="${SERVICE_USER}"
 if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
-    SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn "${SERVICE_USER}")}"
+    DEFAULT_SERVICE_GROUP="$(id -gn "${SERVICE_USER}")"
 fi
-SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
+SERVICE_GROUP="${SERVICE_GROUP:-${DEFAULT_SERVICE_GROUP}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE_ROOT="${STAGE_ROOT:-${SCRIPT_DIR}/../build}"
 STAGE_DIR="${STAGE_ROOT}/stage"
@@ -31,20 +31,29 @@ require_stage_dir() {
     fi
 }
 
+declare -i SERVICE_PRINCIPAL_READY=0
+INSTALL_OWNER="root"
+INSTALL_GROUP="root"
+
 validate_service_principal() {
+    SERVICE_PRINCIPAL_READY=1
     if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
-        log ERROR "Service user ${SERVICE_USER} does not exist."
-        exit 1
+        SERVICE_PRINCIPAL_READY=0
     fi
     if ! getent group "${SERVICE_GROUP}" >/dev/null 2>&1; then
-        log ERROR "Service group ${SERVICE_GROUP} does not exist."
-        exit 1
+        SERVICE_PRINCIPAL_READY=0
     fi
-    if ! id -Gn "${SERVICE_USER}" | tr ' ' '\n' | grep -Fxq "${SERVICE_GROUP}"; then
-        log ERROR "Service user ${SERVICE_USER} is not a member of ${SERVICE_GROUP}."
-        exit 1
+    if (( SERVICE_PRINCIPAL_READY )) && ! id -Gn "${SERVICE_USER}" | tr ' ' '\n' | grep -Fxq "${SERVICE_GROUP}"; then
+        SERVICE_PRINCIPAL_READY=0
     fi
-    log INFO "Using service account ${SERVICE_USER}:${SERVICE_GROUP}"
+
+    if (( SERVICE_PRINCIPAL_READY )); then
+        INSTALL_OWNER="${SERVICE_USER}"
+        INSTALL_GROUP="${SERVICE_GROUP}"
+        log INFO "Using service account ${SERVICE_USER}:${SERVICE_GROUP}"
+    else
+        log WARN "Service account ${SERVICE_USER}:${SERVICE_GROUP} is not available. Proceeding with root ownership; rerun setup/system/run.sh afterward to finalize permissions."
+    fi
 }
 
 install_tree() {
@@ -63,17 +72,17 @@ install_tree() {
 
 bootstrap_runtime() {
     if [[ ! -d "${VAR_ROOT}" ]]; then
-        run_sudo install -d -m 750 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${VAR_ROOT}"
+        run_sudo install -d -m 750 -o "${INSTALL_OWNER}" -g "${INSTALL_GROUP}" "${VAR_ROOT}"
     fi
     local subdir
     for subdir in photos config; do
         local path="${VAR_ROOT}/${subdir}"
         if [[ ! -d "${path}" ]]; then
-            run_sudo install -d -m 770 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${path}"
+            run_sudo install -d -m 770 -o "${INSTALL_OWNER}" -g "${INSTALL_GROUP}" "${path}"
         fi
     done
     if [[ -f "${STAGE_DIR}/etc/config.yaml" && ! -f "${CONFIG_DEST}" ]]; then
-        run_sudo install -m 660 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${STAGE_DIR}/etc/config.yaml" "${CONFIG_DEST}"
+        run_sudo install -m 660 -o "${INSTALL_OWNER}" -g "${INSTALL_GROUP}" "${STAGE_DIR}/etc/config.yaml" "${CONFIG_DEST}"
         log INFO "Seeded default config at ${CONFIG_DEST}"
     fi
 }

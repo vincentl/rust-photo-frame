@@ -22,6 +22,8 @@ PACKAGES=(
     libssl-dev
     libclang-dev
     clang
+    cargo
+    rustc
     cmake
     python3
     curl

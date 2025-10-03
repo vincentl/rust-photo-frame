@@ -10,57 +10,21 @@ service accounts:
 The scripts in this directory are idempotent and can be re-run after package
 updates or image refreshes.
 
-## System provisioning
+## Provisioning workflow
 
-Run the system scripts as root (or with `sudo`). You can execute each script
-individually in the following order on a fresh Bookworm install, or run the
-wrapper to perform the full provisioning sequence:
+The provisioning pipeline now runs in three stages:
 
-```bash
-sudo ./setup/system/run.sh
-```
+1. `sudo ./setup/packages/run.sh` installs the operating system dependencies
+   including the Rust toolchain.
+2. `./setup/app/run.sh` builds the workspace and installs artifacts into
+   `/opt/photo-frame`.
+3. `sudo ./setup/system/run.sh` creates service accounts, applies permissions,
+   and configures systemd.
 
-Pass `--with-legacy-cleanup` to also execute the optional migration step after
-provisioning.
+Pass `--with-legacy-cleanup` to the system stage to run optional migrations.
 
-Individual scripts are available at:
-
-1. `./setup/system/install-packages.sh`
-   - Installs Cage, GPU/video dependencies, build toolchains, and helper
-     utilities such as `rclone`.
-2. `./setup/system/create-users-and-perms.sh`
-   - Ensures the `kiosk` and `frame` users exist, adds `kiosk` to the
-     `render`, `video`, and `input` groups, and prepares the runtime
-     directories:
-     - `/opt/photo-frame/{bin,etc,share}` owned by `root:root`.
-     - `/var/lib/photo-frame`, `/var/cache/photo-frame`, and
-       `/var/log/photo-frame` owned by `kiosk:kiosk`.
-     - `/var/lib/photo-frame/photos` and `/var/lib/photo-frame/config` grant
-       read/write ACLs to both `kiosk` and `frame`.
-3. `./setup/system/configure-networkmanager.sh`
-   - Installs a polkit rule so the `kiosk` user can control NetworkManager
-     without broad sudo or extra groups.
-4. `./setup/system/install-sudoers.sh`
-   - Installs `/etc/sudoers.d/photoframe` so `frame` can manage photoframe
-     services and read their logs.
-5. `./setup/system/install-systemd-units.sh`
-   - Copies the standard units (`cage@.service`, `photoframe-*`) and PAM
-     drop-ins into `/etc`, enables them, and removes legacy unit files.
-6. (Optional) `sudo ./setup/migrate/legacy-cleanup.sh`
-   - Removes unit files and directories from pre-kiosk builds.
-
-## Application deployment
-
-Build and install the app artifacts from a non-root shell:
-
-```bash
-./setup/app/run.sh
-```
-
-The app stage builds the workspace, stages binaries and assets under
-`setup/app/build/stage`, and installs them into `/opt/photo-frame`.
-Default configuration files live in `/opt/photo-frame/etc`, while writable
-state is stored under `/var/lib/photo-frame`.
+See [`docs/software.md`](../docs/software.md) for detailed guidance, expected
+outputs, and operational notes for each step.
 
 ## Operators: using the `frame` account
 
