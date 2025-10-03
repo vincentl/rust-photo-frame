@@ -37,16 +37,13 @@ if [[ $(id -u) -eq 0 ]]; then
     exit 1
 fi
 
-CARGO_HOME_DEFAULT="${HOME}/.cargo"
-if [[ -d "/usr/local/cargo/bin" ]]; then
-    CARGO_HOME_DEFAULT="/usr/local/cargo"
-fi
-CARGO_HOME="${CARGO_HOME:-${CARGO_HOME_DEFAULT}}"
-if [[ -d "${CARGO_HOME}/bin" ]]; then
+CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
+SYSTEM_CARGO_BIN="/usr/local/cargo/bin"
+if [[ -d "${SYSTEM_CARGO_BIN}" ]]; then
     case ":${PATH}:" in
-        *:"${CARGO_HOME}/bin":*) ;;
+        *:"${SYSTEM_CARGO_BIN}":*) ;;
         *)
-            export PATH="${CARGO_HOME}/bin:${PATH}"
+            export PATH="${SYSTEM_CARGO_BIN}:${PATH}"
             ;;
     esac
 fi
