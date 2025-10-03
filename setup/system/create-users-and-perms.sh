@@ -71,6 +71,35 @@ ensure_user "${KIOSK_USER}" /usr/sbin/nologin "${VAR_ROOT}" system
 ensure_home_owner "${KIOSK_USER}" "${VAR_ROOT}"
 ensure_user "${FRAME_USER}" /bin/bash "/home/${FRAME_USER}" regular
 
+ensure_cargo_env_stub() {
+    local user="$1" home_dir="$2"
+    local system_env="/usr/local/cargo/env"
+    local user_cargo_dir="${home_dir}/.cargo"
+    local user_env="${user_cargo_dir}/env"
+
+    if [[ ! -f "${system_env}" ]]; then
+        return
+    fi
+
+    if [[ -e "${user_env}" ]]; then
+        return
+    fi
+
+    install -d -m 0750 -o "${user}" -g "${user}" "${user_cargo_dir}"
+    cat <<'ENV' >"${user_env}"
+# shellcheck shell=sh
+# Auto-generated: bridge the system Rust installation into the user environment.
+if [ -f /usr/local/cargo/env ]; then
+    # shellcheck source=/dev/null
+    . /usr/local/cargo/env
+fi
+ENV
+    chown "${user}:${user}" "${user_env}"
+    chmod 0644 "${user_env}"
+}
+
+ensure_cargo_env_stub "${FRAME_USER}" "/home/${FRAME_USER}"
+
 for group in "${KIOSK_GROUPS[@]}"; do
     ensure_group_membership "${KIOSK_USER}" "${group}"
 done
