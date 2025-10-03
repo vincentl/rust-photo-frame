@@ -49,7 +49,7 @@ Exercise each axis at least once per release cycle.
   ```
 - [ ] Run the system bootstrap scripts (install packages, create users/ACLs, configure polkit, install units):
   ```sh
-  sudo ./setup/system/install-packages.sh
+  sudo ./setup/packages/install-apt-packages.sh
   sudo ./setup/system/create-users-and-perms.sh
   sudo ./setup/system/configure-networkmanager.sh
   sudo ./setup/system/install-sudoers.sh

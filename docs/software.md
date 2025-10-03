@@ -87,21 +87,31 @@ This workflow prepares a Raspberry Pi OS (Bookworm, 64-bit) image that boots dir
 
 ## Run the automated setup
 
-Run the system automation with the orchestration script; it ensures each step runs in order and re-prompts with `sudo` when necessary. Every stage is idempotent and safe to re-run.
+Run the automation in three stages. Each script is idempotent, so you can safely re-run it if the connection drops or you need to retry after a reboot.
 
-1. Provision the operating system dependencies:
+1. Provision OS packages and the Rust toolchain:
+
+   ```bash
+   sudo ./setup/packages/run.sh
+   ```
+
+   This script installs the apt dependencies and a system-wide Rust toolchain under `/usr/local/cargo`. Log out and back in (or reconnect your SSH session) afterwards so your shell picks up the updated `PATH`.
+
+1. Build and install the application:
+
+   ```bash
+   ./setup/app/run.sh
+   ```
+
+   Run this command as the unprivileged operator account. It compiles the photo frame, stages the release artifacts, and installs them into `/opt/photo-frame`.
+
+1. Configure system services and permissions:
 
    ```bash
    sudo ./setup/system/run.sh
    ```
 
-   Pass `--with-legacy-cleanup` if you need to apply the optional migration script after provisioning. When the script finishes, reconnect your SSH session so new group memberships take effect.
-
-1. The script `./setup/app/run.sh` builds the photo frame application, stages the release artifacts, and installs them into `/opt/photo-frame`. Run it as the unprivileged operator account; it will ask for `sudo` only when needed. Combined with the system stage, this places the kiosk binary where the `cage@tty1.service` unit expects it so the frame boots directly into the slideshow without any shell profile hooks.
-
-   ```bash
-   ./setup/app/run.sh
-   ```
+   When the script finishes, reconnect your SSH session so new group memberships take effect.
 
 Use the following environment variables to customize an installation:
 

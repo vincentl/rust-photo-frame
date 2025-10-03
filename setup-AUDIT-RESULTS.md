@@ -12,7 +12,7 @@
 - **setup/files/systemd/** (sync-photos, wifi-manager) – **Delete**: replaced with standardized photoframe units.
 - **setup/modules/buttond/** – **Delete**: button daemon now shipped via staged binary + new systemd unit.
 - **setup/system/modules/** & `setup/system/run.sh` – **Delete**: legacy modular framework removed.
-- **setup/system/install-packages.sh** – **Add**: consolidated apt dependencies, including `acl` and `rclone`.
+- **setup/packages/install-apt-packages.sh** – **Add**: consolidated apt dependencies, including `acl` and `rclone`.
 - **setup/system/create-users-and-perms.sh** – **Add**: provisions `kiosk`/`frame`, directories, and ACLs.
 - **setup/system/configure-networkmanager.sh** – **Add**: installs a minimal polkit rule for NetworkManager access.
 - **setup/system/install-sudoers.sh** – **Add**: installs `/etc/sudoers.d/photoframe` with restricted commands.

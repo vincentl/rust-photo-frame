@@ -83,7 +83,7 @@ All mutable state lives under `/var/lib/photo-frame` and is owned by the `photo-
 
 The Wi-Fi manager is wired into the refreshed setup pipeline:
 
-- `setup/system/install-packages.sh` pulls in NetworkManager, Cage, GPU drivers, and build prerequisites.
+- `setup/packages/install-apt-packages.sh` pulls in NetworkManager, Cage, GPU drivers, and build prerequisites.
 - `setup/system/create-users-and-perms.sh` prepares the `kiosk` runtime account, directory ACLs, and `/var/lib/photo-frame` runtime storage.
 - `setup/system/configure-networkmanager.sh` grants the `kiosk` user NetworkManager control through a minimal polkit rule (no `netdev` group membership required).
 - `setup/app/modules/10-build.sh` compiles `wifi-manager` in release mode as the invoking user (never root).
