@@ -76,6 +76,34 @@ done
 
 systemctl daemon-reload
 
+# Disable any pre-existing display managers so the kiosk session owns the
+# framebuffer. This matters on Raspberry Pi OS where lightdm ships enabled by
+# default and will otherwise grab tty1 before cage starts.
+LEGACY_DISPLAY_MANAGERS=(
+    lightdm.service
+    gdm.service
+    gdm3.service
+    sddm.service
+    lxdm.service
+    slim.service
+)
+
+for dm in "${LEGACY_DISPLAY_MANAGERS[@]}"; do
+    if systemctl list-unit-files "${dm}" >/dev/null 2>&1; then
+        systemctl disable "${dm}" >/dev/null 2>&1 || true
+    fi
+    if systemctl is-active --quiet "${dm}"; then
+        systemctl stop "${dm}" || true
+    fi
+    rm -f "${SYSTEMD_DIR}/${dm}" 2>/dev/null || true
+    rm -rf "${SYSTEMD_DIR}/${dm}.d" 2>/dev/null || true
+    rm -f "/etc/systemd/system/graphical.target.wants/${dm}" 2>/dev/null || true
+done
+
+# Make sure systemd forgets any removed display manager aliases before we
+# install our own cage@ alias.
+systemctl daemon-reload
+
 if systemctl list-unit-files systemd-logind.service >/dev/null 2>&1; then
     systemctl restart systemd-logind.service
 fi
