@@ -36,13 +36,22 @@ env RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" \
 
 echo "Ensuring PATH export for system-wide cargo bin directory"
 cat <<'PROFILE' >/etc/profile.d/cargo-bin.sh
-if [ -d "${CARGO_HOME}/bin" ]; then
+SYSTEM_CARGO_BIN="/usr/local/cargo/bin"
+
+if [ "$(id -u)" -eq 0 ] && [ -f "/usr/local/cargo/env" ]; then
+    # shellcheck source=/dev/null
+    . /usr/local/cargo/env
+fi
+
+if [ -d "${SYSTEM_CARGO_BIN}" ]; then
     case ":${PATH}:" in
-        *:"${CARGO_HOME}/bin":*) ;;
-        *) PATH="${CARGO_HOME}/bin:${PATH}" ;;
+        *:"${SYSTEM_CARGO_BIN}":*) ;;
+        *) PATH="${SYSTEM_CARGO_BIN}:${PATH}" ;;
     esac
 fi
-export PATH
+
+: "${CARGO_HOME:=${HOME}/.cargo}"
+export PATH CARGO_HOME
 PROFILE
 
 chmod 0644 /etc/profile.d/cargo-bin.sh
