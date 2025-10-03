@@ -837,6 +837,7 @@ pub fn run_windowed(
         full_config: crate::config::Configuration,
         sleep: Option<SleepController>,
         display_power: Option<DisplayPowerController>,
+        pending_redraw: bool,
     }
 
     impl App {
@@ -915,6 +916,8 @@ pub fn run_windowed(
                 actual_awake,
                 override_state,
             } = event;
+
+            self.pending_redraw = true;
 
             let schedule_source = describe_schedule_source(snapshot.active_source);
             let next_info = snapshot.next_transition.as_ref().map(|boundary| {
@@ -1036,6 +1039,7 @@ pub fn run_windowed(
             self.displayed_at = None;
             self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
             self.mat_inflight = 0;
+            self.pending_redraw = true;
             let attrs = Window::default_attributes().with_title("Photo Frame");
             let window = Arc::new(event_loop.create_window(attrs).unwrap());
             window.set_decorations(false);
@@ -1673,7 +1677,10 @@ pub fn run_windowed(
                 }
             }
             if let Some(window) = self.window.as_ref() {
-                window.request_redraw();
+                if self.pending_redraw || !sleeping {
+                    window.request_redraw();
+                    self.pending_redraw = false;
+                }
             }
         }
     }
@@ -1777,6 +1784,7 @@ pub fn run_windowed(
         full_config: cfg.clone(),
         sleep: sleep_controller.take(),
         display_power,
+        pending_redraw: false,
     };
     if let Some(event) = startup_transition {
         app.handle_sleep_transition(Some(event));
