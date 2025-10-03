@@ -15,7 +15,7 @@ User=kiosk
 WorkingDirectory=/var/lib/photo-frame
 Environment=PHOTOF_APP_BIN=/opt/photo-frame/bin/rust-photo-frame
 Environment=PHOTOF_CONFIG=/opt/photo-frame/etc/config.yaml
-ExecStart=/usr/bin/cage -- /opt/photo-frame/bin/rust-photo-frame --config /opt/photo-frame/etc/config.yaml
+ExecStart=/usr/bin/cage -- /opt/photo-frame/bin/rust-photo-frame /opt/photo-frame/etc/config.yaml
 Restart=always
 RestartSec=5s
 TTYPath=/dev/%I
