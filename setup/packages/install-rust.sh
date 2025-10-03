@@ -38,7 +38,7 @@ echo "Ensuring PATH export for system-wide cargo bin directory"
 cat <<'PROFILE' >/etc/profile.d/cargo-bin.sh
 SYSTEM_CARGO_BIN="/usr/local/cargo/bin"
 
-if [ -f "/usr/local/cargo/env" ]; then
+if [ "$(id -u)" -eq 0 ] && [ -f "/usr/local/cargo/env" ]; then
     # shellcheck source=/dev/null
     . /usr/local/cargo/env
 fi
