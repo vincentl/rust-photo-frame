@@ -660,15 +660,26 @@ impl MattingOptions {
 
             let mut backgrounds = Vec::with_capacity(paths.len());
             for path in paths {
-                let background = FixedImageBackground::new(path.clone()).with_context(|| {
-                    format!(
-                        "failed to prepare fixed background image at {}",
-                        path.display()
-                    )
-                })?;
-                backgrounds.push(Arc::new(background));
+                match FixedImageBackground::new(path.clone()) {
+                    Ok(background) => backgrounds.push(Arc::new(background)),
+                    Err(err) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %err,
+                            "skipping fixed background image that failed to prepare"
+                        );
+                    }
+                }
             }
-            self.runtime.fixed_image = Some(FixedImageRuntime::new(backgrounds, *path_selection));
+
+            if backgrounds.is_empty() {
+                tracing::warn!(
+                    "all configured fixed-image backgrounds failed to load; disabling fixed-image matting"
+                );
+            } else {
+                self.runtime.fixed_image =
+                    Some(FixedImageRuntime::new(backgrounds, *path_selection));
+            }
         }
         Ok(())
     }
