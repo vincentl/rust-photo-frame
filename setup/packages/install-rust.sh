@@ -36,7 +36,6 @@ env RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" \
 
 echo "Ensuring PATH export for system-wide cargo bin directory"
 cat <<'PROFILE' >/etc/profile.d/cargo-bin.sh
-export CARGO_HOME="${CARGO_HOME:-/usr/local/cargo}"
 if [ -d "${CARGO_HOME}/bin" ]; then
     case ":${PATH}:" in
         *:"${CARGO_HOME}/bin":*) ;;
@@ -47,9 +46,5 @@ export PATH
 PROFILE
 
 chmod 0644 /etc/profile.d/cargo-bin.sh
-
-if [[ -f /root/.profile ]] && ! grep -q 'cargo/bin' /root/.profile; then
-    printf '\n# Added by Photo Frame setup: ensure cargo is on PATH\nexport PATH="%s/bin:${PATH}"\n' "${CARGO_HOME}" >> /root/.profile
-fi
 
 echo "Rust toolchain installation complete"
