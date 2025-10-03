@@ -68,38 +68,61 @@ if [[ ! -f "${VAR_CONFIG}" ]]; then
     log WARN "Runtime config missing at ${VAR_CONFIG}; seed it with setup/system/create-users-and-perms.sh and app install"
 fi
 
-if ! systemctl is-active --quiet "${KIOSK_SERVICE}"; then
-    log ERROR "${KIOSK_SERVICE} is not active"
-    systemctl status "${KIOSK_SERVICE}" --no-pager || true
-    exit 1
-fi
+if command -v systemctl >/dev/null 2>&1; then
+    in_container=0
+    if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet --container; then
+        in_container=1
+        log WARN "Running inside a container; service activation checks will be treated as warnings"
+    fi
 
-if ! systemctl is-enabled --quiet "${KIOSK_SERVICE}"; then
-    log WARN "${KIOSK_SERVICE} is not enabled"
-fi
+    check_service() {
+        local service="$1"
+        local level_on_fail="$2"
+        local message="${service} is not active"
+        local log_level="${level_on_fail}"
 
-if ! systemctl is-active --quiet "${WIFI_SERVICE}"; then
-    log ERROR "${WIFI_SERVICE} is not active"
-    systemctl status "${WIFI_SERVICE}" --no-pager || true
-    exit 1
-fi
+        if systemctl is-active --quiet "${service}"; then
+            return 0
+        fi
 
-if ! systemctl is-enabled --quiet "${WIFI_SERVICE}"; then
-    log WARN "${WIFI_SERVICE} is not enabled"
-fi
+        systemctl status "${service}" --no-pager || true
 
-if ! systemctl is-active --quiet "${BUTTON_SERVICE}"; then
-    log WARN "${BUTTON_SERVICE} is not active"
-fi
+        if [[ "${level_on_fail}" == "ERROR" ]] && [[ ${in_container} -eq 0 ]]; then
+            log ERROR "${message}"
+            exit 1
+        fi
 
-if ! systemctl is-active --quiet "${SYNC_TIMER}"; then
-    log WARN "${SYNC_TIMER} is not active"
+        if [[ "${level_on_fail}" == "ERROR" ]] && [[ ${in_container} -eq 1 ]]; then
+            log_level="WARN"
+            message+=" (allowed in container environments)"
+        fi
+
+        log "${log_level}" "${message}"
+    }
+
+    check_enabled() {
+        local service="$1"
+        if ! systemctl is-enabled --quiet "${service}"; then
+            log WARN "${service} is not enabled"
+        fi
+    }
+
+    check_service "${KIOSK_SERVICE}" "ERROR"
+    check_enabled "${KIOSK_SERVICE}"
+
+    check_service "${WIFI_SERVICE}" "ERROR"
+    check_enabled "${WIFI_SERVICE}"
+
+    check_service "${BUTTON_SERVICE}" "WARN"
+    check_service "${SYNC_TIMER}" "WARN"
+else
+    log WARN "systemctl not available; skipping service state checks"
 fi
 
 rustc_version=$(rustc --version 2>/dev/null || echo "rustc unavailable")
 cargo_version=$(cargo --version 2>/dev/null || echo "cargo unavailable")
-service_status=$(systemctl is-active "${KIOSK_SERVICE}")
-wifi_service_status=$(systemctl is-active "${WIFI_SERVICE}")
+service_status=$(systemctl is-active "${KIOSK_SERVICE}" || true)
+wifi_service_status=$(systemctl is-active "${WIFI_SERVICE}" || true)
 button_status=$(systemctl is-active "${BUTTON_SERVICE}" || true)
 sync_status=$(systemctl is-active "${SYNC_TIMER}" || true)
 
