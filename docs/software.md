@@ -87,41 +87,17 @@ This workflow prepares a Raspberry Pi OS (Bookworm, 64-bit) image that boots dir
 
 ## Run the automated setup
 
-Run the system scripts as `root` (or via `sudo`); each script is idempotent and can be re-run safely.
+Run the system automation with the orchestration script; it ensures each step runs in order and re-prompts with `sudo` when necessary. Every stage is idempotent and safe to re-run.
 
-1. Install base packages, GPU drivers, and toolchains:
-
-   ```bash
-   sudo ./setup/system/install-packages.sh
-   ```
-
-2. Create the `kiosk`/`frame` users, provision `/opt/photo-frame`, and set ACLs on `/var/lib/photo-frame`:
+1. Provision the operating system dependencies:
 
    ```bash
-   sudo ./setup/system/create-users-and-perms.sh
+   sudo ./setup/system/run.sh
    ```
 
-3. Allow the `kiosk` user to control NetworkManager via polkit:
+   Pass `--with-legacy-cleanup` if you need to apply the optional migration script after provisioning. When the script finishes, reconnect your SSH session so new group memberships take effect.
 
-   ```bash
-   sudo ./setup/system/configure-networkmanager.sh
-   ```
-
-4. Install the sudo policy for the `frame` operator:
-
-   ```bash
-   sudo ./setup/system/install-sudoers.sh
-   ```
-
-5. Install and enable the cage, sync, wifi, and buttond systemd units:
-
-   ```bash
-   sudo ./setup/system/install-systemd-units.sh
-   ```
-
-   Reconnect your SSH session afterwards so new group memberships take effect.
-
-1. The script `./setup/app/run.sh` builds the photo frame application, stages the release artifacts, and installs them into `/opt/photo-frame`. Combined with the system stage, this places the kiosk binary where the `cage@tty1.service` unit expects it so the frame boots directly into the slideshow without any shell profile hooks.
+1. The script `./setup/app/run.sh` builds the photo frame application, stages the release artifacts, and installs them into `/opt/photo-frame`. Run it as the unprivileged operator account; it will ask for `sudo` only when needed. Combined with the system stage, this places the kiosk binary where the `cage@tty1.service` unit expects it so the frame boots directly into the slideshow without any shell profile hooks.
 
    ```bash
    ./setup/app/run.sh
