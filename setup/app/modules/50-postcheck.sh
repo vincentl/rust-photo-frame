@@ -19,6 +19,10 @@ log() {
     printf '[%s] %s\n' "${MODULE}" "$level: $*"
 }
 
+run_sudo() {
+    sudo "$@"
+}
+
 BIN_PATH="${INSTALL_ROOT}/bin/rust-photo-frame"
 WIFI_BIN_PATH="${INSTALL_ROOT}/bin/wifi-manager"
 CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/config.yaml"
@@ -64,7 +68,7 @@ if [[ "${var_owner}" != "${SERVICE_USER}" || "${var_group}" != "${SERVICE_GROUP}
     exit 1
 fi
 
-if [[ ! -f "${VAR_CONFIG}" ]]; then
+if ! run_sudo -u "${SERVICE_USER}" test -f "${VAR_CONFIG}"; then
     log WARN "Runtime config missing at ${VAR_CONFIG}; copy ${CONFIG_TEMPLATE} or rerun ./setup/app/run.sh"
 fi
 
