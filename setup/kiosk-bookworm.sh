@@ -11,7 +11,7 @@ log() {
 
 usage() {
     cat <<USAGE
-Usage: sudo ./setup/10-kiosk-bookworm.sh [--user NAME] [--app PATH]
+Usage: sudo ./setup/kiosk-bookworm.sh [--user NAME] [--app PATH]
 
 Options:
   --user NAME   Kiosk service account to run Cage (default: kiosk)
@@ -165,14 +165,12 @@ enable_units() {
 
     local enable_list=(cage@tty1.service photoframe-wifi-manager.service photoframe-buttond.service photoframe-sync.timer)
     for unit in "${enable_list[@]}"; do
-        if systemd_unit_exists "${unit}"; then
-            log "Enabling ${unit}"
-            systemd_enable_unit "${unit}"
-            if [[ "${unit}" == *.timer ]]; then
-                systemd_start_unit "${unit}" || true
-            else
-                systemd_restart_unit "${unit}" || true
-            fi
+        log "Enabling ${unit}"
+        systemd_enable_unit "${unit}"
+        if [[ "${unit}" == *.timer ]]; then
+            systemd_start_unit "${unit}" || true
+        else
+            systemd_restart_unit "${unit}" || true
         fi
     done
 

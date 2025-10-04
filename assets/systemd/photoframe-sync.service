@@ -1,4 +1,4 @@
-# Managed by setup/10-kiosk-bookworm.sh
+# Managed by setup/kiosk-bookworm.sh
 [Unit]
 Description=Photo Frame Library Sync
 After=network-online.target

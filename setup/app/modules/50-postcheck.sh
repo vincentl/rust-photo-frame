@@ -65,7 +65,7 @@ if [[ "${var_owner}" != "${SERVICE_USER}" || "${var_group}" != "${SERVICE_GROUP}
 fi
 
 if [[ ! -f "${VAR_CONFIG}" ]]; then
-    log WARN "Runtime config missing at ${VAR_CONFIG}; seed it with setup/10-kiosk-bookworm.sh and app install"
+    log WARN "Runtime config missing at ${VAR_CONFIG}; seed it with setup/kiosk-bookworm.sh and app install"
 fi
 
 if command -v systemctl >/dev/null 2>&1; then

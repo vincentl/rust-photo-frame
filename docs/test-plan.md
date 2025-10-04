@@ -49,7 +49,7 @@ Exercise each axis at least once per release cycle.
   ```
 - [ ] Run the kiosk bootstrapper (installs packages, creates the kiosk user, installs units, and enables Cage on tty1):
   ```sh
-  sudo ./setup/10-kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
+  sudo ./setup/kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
   ```
   Note: reconnect your SSH session afterwards so refreshed group memberships apply.
 - [ ] After reconnecting, rerun the repo checkout if necessary and execute the app deploy stage (build + install + systemd wiring). Expect 5–7 minutes for the release build on a Pi 5 with active cooling:

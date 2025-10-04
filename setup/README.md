@@ -10,7 +10,7 @@ Provision a Raspberry Pi OS Bookworm kiosk with the canonical Cage + systemd
 recipe:
 
 ```bash
-sudo ./setup/10-kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
+sudo ./setup/kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
 ```
 
 The script performs the following actions:
