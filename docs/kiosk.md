@@ -1,78 +1,68 @@
-# Raspberry Pi OS Trixie Kiosk
+# Debian 13 Wayland Kiosk
 
-This guide documents the canonical Raspberry Pi 5 kiosk stack for Trixie (Debian 13.1,
-released September 6, 2025, following the initial 13.0 launch on August 9, 2025): a
-headless boot into Cage on `tty1`, managed entirely by systemd.
+The photo frame boots straight into the Wayland app using a greetd-managed
+session on Debian 13 (trixie). greetd starts `cage` on virtual terminal 1 and
+runs the photo frame as the dedicated `kiosk` user—no display manager shims or
+PAM templates are required.
 
-## Canonical recipe
+## Provisioning workflow
 
-1. **Packages** – install `cage`, `seatd`, and `plymouth`, then enable
-   `seatd.service`.
-2. **Kiosk user** – ensure the `kiosk` account exists and belongs to the
-   `render`, `video`, and `input` groups.
-3. **Systemd** – install the templated `cage@.service` and PAM stack from
-   `assets/`, plus the `photoframe-*` helper units. Cage runs the target app
-   directly (`ExecStart=/usr/bin/cage /usr/local/bin/photo-app`).
-4. **Boot target** – set the default to `graphical.target`, enable
-   `cage@tty1.service`, and disable competing display managers and
-   `getty@tty1.service`.
-5. **Seat/session** – Cage starts After `systemd-logind`; `seatd` provides DRM
-   access. The session acquires a real logind seat so Wayland permissions flow
-   without sudo.
-6. **No console flash** – remove `console=tty1` from `/boot/firmware/cmdline.txt`
-   to keep Plymouth (or the splash) visible until Cage starts.
-
-## One-liner setup
-
-Run the provisioning script as root (it re-execs with `sudo` if needed):
+Run the kiosk installer on a fresh Debian 13 (or Raspberry Pi OS trixie)
+image:
 
 ```bash
-sudo ./setup/kiosk-trixie.sh --user kiosk --app /usr/local/bin/photo-app
+sudo ./setup/kiosk-trixie.sh
 ```
 
-Flags:
+The script performs the following actions:
 
-- `--user` – kiosk account name (default `kiosk`).
-- `--app` – binary Cage launches (default `/usr/local/bin/photo-app`).
+- verifies `/etc/os-release` reports `VERSION_CODENAME=trixie`;
+- installs the Wayland stack required for kiosk mode (`greetd`, `cage`,
+  `mesa-vulkan-drivers`, `vulkan-tools`, `wlr-randr`, and
+  `wayland-protocols`);
+- creates the `kiosk` account with a locked shell and ensures it belongs to the
+  `video`, `render`, and `input` groups;
+- writes `/etc/greetd/config.toml` so virtual terminal 1 runs
+  `cage -s -- /usr/local/bin/photo-app` as the `kiosk` user;
+- deploys the `photoframe-*` helper units (wifi manager, sync timer, button
+  daemon); and
+- enables `greetd.service`, `photoframe-wifi-manager.service`,
+  `photoframe-buttond.service`, and `photoframe-sync.timer`.
 
-The script is idempotent; re-running it updates packages, rewrites the Cage unit
-from the template, and reapplies group membership without duplicating entries.
+Re-run the script after OS updates to reapply package dependencies or to repair
+systemd units; it is idempotent.
 
-## Installed assets
+## Resulting configuration
 
-- `assets/systemd/cage@.service` – canonical unit template (renders with the
-  selected user/app path).
-- `assets/pam/cage` – PAM stack for kiosk sessions.
-- `assets/systemd/photoframe-*.service|.timer` – wifi manager, sync timer, and
-  button daemon units copied into `/etc/systemd/system/`.
+`/etc/greetd/config.toml` should match the canonical configuration:
 
-## Acceptance checklist
+```toml
+[terminal]
+vt = 1
 
-After provisioning on real hardware:
+[default_session]
+command = "cage -s -- /usr/local/bin/photo-app"
+user = "kiosk"
+```
 
-- **Cold boot** – Plymouth (if installed) stays on screen until Cage launches
-  the photo app; no `tty1` text flash.
-- **Crash restart** – `sudo systemctl kill -s SIGKILL cage@tty1` respawns the
-  kiosk automatically.
-- **Permissions** – `loginctl` shows a seat for the kiosk session and the app
-  has GPU/input access without sudo.
-- **Idempotency** – running the setup script twice produces no additional
-  changes.
-- **Logging** – `journalctl -u cage@tty1.service` contains app logs without PAM
-  or seat errors.
-- **Rollback** – restore `console=tty1` and disable `cage@tty1.service` to bring
-  back the interactive getty.
+Check the kiosk stack with the following commands:
 
-## Migration notes
+```bash
+grep VERSION_CODENAME /etc/os-release
+systemctl status greetd
+journalctl -u greetd -b
+```
 
-The following legacy paths were removed in favour of the single Cage workflow:
+`systemctl status greetd` should show the unit as `active (running)` with
+`/usr/bin/cage -s -- /usr/local/bin/photo-app` in the command line. The journal
+contains both greetd session logs and the photo frame application output.
 
-- `setup/system/**` – replaced by `setup/kiosk-trixie.sh`.
-- `setup/migrate/legacy-cleanup.sh` – superseded by the idempotent installer.
-- `setup/system/cage@.service` and `setup/system/pam.d/cage` – consolidated in
-  `assets/systemd/` and `assets/pam/`.
-- `setup/system/units/photoframe-*` – moved to `assets/systemd/` for staging and
-  provisioning.
+## Operations quick reference
 
-All legacy flows have been removed; rely solely on the Trixie script outlined
-above.
+- Restart the kiosk session: `sudo systemctl restart greetd`.
+- Tail runtime logs: `sudo journalctl -u greetd -f`.
+- Pause the slideshow: `sudo systemctl stop greetd` (resume with `start`).
+- Inspect display state: `wlr-randr` (installed by the kiosk setup script).
+
+No `display-manager.service`, login overrides, or tty autologin hacks are
+required—the greetd unit owns kiosk launch entirely.

@@ -6,27 +6,26 @@ refreshes.
 
 ## One-command kiosk bootstrap (Trixie)
 
-Provision a Raspberry Pi OS Trixie kiosk with the canonical Cage + systemd
-recipe:
+Provision a Raspberry Pi OS Trixie kiosk with the greetd + cage workflow:
 
 ```bash
-sudo ./setup/kiosk-trixie.sh --user kiosk --app /usr/local/bin/photo-app
+sudo ./setup/kiosk-trixie.sh
 ```
 
 The script performs the following actions:
 
 - verifies the OS is Raspberry Pi OS Trixie,
-- installs `cage`, `seatd`, and `plymouth` and enables the seatd service,
-- ensures the `kiosk` user exists and belongs to the `render`, `video`, and
-  `input` groups,
-- installs the templated `cage@.service`, PAM stack, and supporting
-  `photoframe-*` units,
-- disables conflicting display managers and `getty@tty1.service`,
-- removes `console=tty1` from `/boot/firmware/cmdline.txt`, and
-- boots the system into `graphical.target` with Cage on `tty1`.
+- installs `greetd`, `cage`, `mesa-vulkan-drivers`, `vulkan-tools`,
+  `wlr-randr`, and `wayland-protocols`,
+- ensures the `kiosk` user exists with `/usr/sbin/nologin` and belongs to the
+  `render`, `video`, and `input` groups,
+- writes `/etc/greetd/config.toml` to launch `cage -s -- /usr/local/bin/photo-app`
+  on virtual terminal 1, and
+- deploys and enables the supporting `photoframe-*` helper units alongside
+  `greetd.service`.
 
-Override the kiosk user or application binary path with the `--user` and
-`--app` options as needed.
+Re-run the script after OS updates to reapply package dependencies or repair
+systemd state; it is safe and idempotent.
 
 ## Package provisioning helpers
 
@@ -54,9 +53,9 @@ the artifacts into `/opt/photo-frame`.
 
 ## Operator quick reference
 
-- Inspect the running session: `sudo systemctl status cage@tty1.service`
+- Inspect the running session: `sudo systemctl status greetd`
 - Restart helpers: `sudo systemctl restart photoframe-wifi-manager.service`
-- Tail compositor logs: `sudo journalctl -u cage@tty1.service -f`
+- Tail kiosk logs: `sudo journalctl -u greetd -f`
 - Upload new media: copy into `/var/lib/photo-frame/photos`
 
 The kiosk account is unprivileged; use the `frame` operator account (see

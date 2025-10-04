@@ -112,12 +112,12 @@ Run the automation in three stages. Each script is idempotent, so you can safely
    >
    > Keeping code and mutable state separate allows updates to replace the staged artifacts in `/opt` without disturbing operator-managed data in `/var/lib/photo-frame`.
 
-   The postcheck now defers systemd validation until the kiosk environment is provisioned. Expect warnings about `cage@tty1.service` and related helper units until you run the kiosk installer in the next step.
+   The postcheck now defers systemd validation until the kiosk environment is provisioned. Expect warnings about `greetd.service` and related helper units until you run the kiosk installer in the next step.
 
 1. Configure system services and permissions:
 
    ```bash
-  sudo ./setup/kiosk-trixie.sh --user kiosk --app /usr/local/bin/photo-app
+   sudo ./setup/kiosk-trixie.sh
    ```
 
    When the script finishes, reconnect your SSH session so new group memberships take effect.
@@ -135,11 +135,10 @@ Use the following environment variables to customize an installation:
 
 When both setup stages complete successfully the Raspberry Pi is ready to boot directly into a kiosk session:
 
-- The templated systemd unit `cage@tty1.service` binds to `/dev/tty1`, logs in the `kiosk` user through PAM, and `exec`s the Wayland compositor as `cage /usr/local/bin/photo-app`. PAM/logind create a real session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` and DRM permissions flow automatically while the writable config lives under `/var/lib/photo-frame/config`.
+- `/etc/greetd/config.toml` binds greetd to virtual terminal 1 and runs `cage -s -- /usr/local/bin/photo-app` as the `kiosk` user. greetd creates the login session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` while `/var/lib/photo-frame` remains writable by the kiosk account.
 - Device access comes from the `kiosk` user belonging to the `render`, `video`, and `input` groups. The setup stage wires this up so Vulkan/GL stacks can open `/dev/dri/renderD128` without any extra udev hacks.
-- `seatd` is installed and enabled automatically; Cage binds through logind, so DRM master and input devices are granted without sudo.
-- Disable any other display manager or compositor on the target TTY so Cage can claim DRM master and input devices without contention.
+- The kiosk stack relies on `greetd` + `cage`; no display-manager compatibility targets or tty autologin services are installed.
 
-For smoke testing, temporarily adjust the unit to run `kmscube` instead of the photo frame binary. A spinning cube on HDMI verifies DRM, GBM, and input permissions before deploying the full app.
+For smoke testing, temporarily modify `/etc/greetd/config.toml` to run `kmscube` instead of the photo frame binary. A spinning cube on HDMI verifies DRM, GBM, and input permissions before deploying the full app.
 
-To pause the slideshow for maintenance, SSH into the Pi and run `sudo systemctl stop cage@tty1.service`. The kiosk remains down until you start it again with `sudo systemctl start cage@tty1.service`.
+To pause the slideshow for maintenance, SSH into the Pi and run `sudo systemctl stop greetd`. Start it again with `sudo systemctl start greetd` when you are ready to resume playback.

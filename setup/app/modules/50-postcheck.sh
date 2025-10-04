@@ -9,7 +9,7 @@ if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
 else
     SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
 fi
-KIOSK_SERVICE="${KIOSK_SERVICE:-cage@tty1.service}"
+KIOSK_SERVICE="${KIOSK_SERVICE:-greetd.service}"
 WIFI_SERVICE="${WIFI_SERVICE:-photoframe-wifi-manager.service}"
 SYNC_TIMER="${SYNC_TIMER:-photoframe-sync.timer}"
 BUTTON_SERVICE="${BUTTON_SERVICE:-photoframe-buttond.service}"
