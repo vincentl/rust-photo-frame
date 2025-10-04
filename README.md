@@ -42,6 +42,15 @@ When Wi-Fi drops, the frame pivots into a self-service recovery flow handled by 
 
 Full operating procedures, configuration options, and troubleshooting steps are documented in [docs/wifi-manager.md](docs/wifi-manager.md).
 
+## Repository Layout
+
+- `crates/photo-frame`: primary slideshow application crate.
+- `crates/buttond`: systemd-friendly hardware button daemon.
+- `crates/wifi-manager`: captive portal and Wi-Fi recovery agent.
+- `setup/`: provisioning scripts used during Pi imaging.
+- `docs/`: operational and architecture guides.
+- `tests/`: manual smoke and diagnostics scripts.
+
 ## Features
 
 - Recursively scans a configurable photo library directory

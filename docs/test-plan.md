@@ -153,7 +153,7 @@ Exercise each axis at least once per release cycle.
   ```sh
   git fetch origin
   git checkout <release-tag>
-  cargo build --release
+  cargo build --release -p rust-photo-frame
   sudo systemctl restart cage@tty1.service
   ```
 - [ ] Validate new version via `rust-photo-frame --version` in logs or manual run.
@@ -196,7 +196,7 @@ Exercise each axis at least once per release cycle.
   - [ ] Restart service: `sudo systemctl restart cage@tty1.service`.
 - **Broken service (fails to start):**
   - [ ] Inspect logs: `journalctl -u cage@tty1.service -b` and `journalctl -u photoframe-wifi-manager.service -b`.
-  - [ ] Rebuild binary: `cargo build --release`.
+  - [ ] Rebuild binary: `cargo build --release -p rust-photo-frame`.
   - [ ] Validate unit file dependencies (Wayland, env vars) and run `sudo systemctl daemon-reload`.
 - **Failed update:**
   - [ ] `git checkout <previous-good>`.

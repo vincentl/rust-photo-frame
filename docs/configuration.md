@@ -45,7 +45,7 @@ matting:
       backend: neon
 ```
 
-If the frame launches to a black screen, double-check that `photo-library-path` points to a directory the runtime can read and that the user account has permission to access mounted network shares. You can validate a YAML edit quickly with `cargo run -- --playlist-dry-run 1`, which parses the config without opening the render window.
+If the frame launches to a black screen, double-check that `photo-library-path` points to a directory the runtime can read and that the user account has permission to access mounted network shares. You can validate a YAML edit quickly with `cargo run -p rust-photo-frame -- --playlist-dry-run 1`, which parses the config without opening the render window.
 
 ## Top-level keys
 
@@ -237,7 +237,7 @@ Where `age` is the difference between the active playlist clock and the photo's 
 Use the dry-run tooling to validate a configuration without launching the UI:
 
 ```bash
-cargo run --release -- \
+cargo run -p rust-photo-frame --release -- \
   config.yaml \
   --playlist-now 2025-01-01T00:00:00Z \
   --playlist-dry-run 32 \
