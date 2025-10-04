@@ -4,18 +4,18 @@ This directory houses idempotent provisioning scripts for Raspberry Pi photo
 frame deployments. Each script can be re-run safely after OS updates or image
 refreshes.
 
-## One-command kiosk bootstrap (Bookworm)
+## One-command kiosk bootstrap (Trixie)
 
-Provision a Raspberry Pi OS Bookworm kiosk with the canonical Cage + systemd
+Provision a Raspberry Pi OS Trixie kiosk with the canonical Cage + systemd
 recipe:
 
 ```bash
-sudo ./setup/kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
+sudo ./setup/kiosk-trixie.sh --user kiosk --app /usr/local/bin/photo-app
 ```
 
 The script performs the following actions:
 
-- verifies the OS is Raspberry Pi OS Bookworm,
+- verifies the OS is Raspberry Pi OS Trixie,
 - installs `cage`, `seatd`, and `plymouth` and enables the seatd service,
 - ensures the `kiosk` user exists and belongs to the `render`, `video`, and
   `input` groups,

@@ -1,6 +1,7 @@
-# Raspberry Pi OS Bookworm Kiosk
+# Raspberry Pi OS Trixie Kiosk
 
-This guide documents the canonical Raspberry Pi 5 kiosk stack for Bookworm: a
+This guide documents the canonical Raspberry Pi 5 kiosk stack for Trixie (Debian 13.1,
+released September 6, 2025, following the initial 13.0 launch on August 9, 2025): a
 headless boot into Cage on `tty1`, managed entirely by systemd.
 
 ## Canonical recipe
@@ -26,7 +27,7 @@ headless boot into Cage on `tty1`, managed entirely by systemd.
 Run the provisioning script as root (it re-execs with `sudo` if needed):
 
 ```bash
-sudo ./setup/kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
+sudo ./setup/kiosk-trixie.sh --user kiosk --app /usr/local/bin/photo-app
 ```
 
 Flags:
@@ -66,12 +67,12 @@ After provisioning on real hardware:
 
 The following legacy paths were removed in favour of the single Cage workflow:
 
-- `setup/system/**` – replaced by `setup/kiosk-bookworm.sh`.
+- `setup/system/**` – replaced by `setup/kiosk-trixie.sh`.
 - `setup/migrate/legacy-cleanup.sh` – superseded by the idempotent installer.
 - `setup/system/cage@.service` and `setup/system/pam.d/cage` – consolidated in
   `assets/systemd/` and `assets/pam/`.
 - `setup/system/units/photoframe-*` – moved to `assets/systemd/` for staging and
   provisioning.
 
-All legacy flows have been removed; rely solely on the Bookworm script outlined
+All legacy flows have been removed; rely solely on the Trixie script outlined
 above.

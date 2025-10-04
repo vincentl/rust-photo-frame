@@ -1,6 +1,6 @@
 # Display Power and Sleep Guide
 
-This guide focuses on powering down HDMI monitors from the Raspberry Pi 5 running Raspberry Pi OS (Bookworm) under Wayfire/wlroots. It explains how the sleep schedule interacts with `wlr-randr`, the default `powerctl` helper, and what to check when the Dell S2725QC refuses to cooperate.
+This guide focuses on powering down HDMI monitors from the Raspberry Pi 5 running Raspberry Pi OS (Trixie) under Wayfire/wlroots. It explains how the sleep schedule interacts with `wlr-randr`, the default `powerctl` helper, and what to check when the Dell S2725QC refuses to cooperate.
 
 ## Quick start
 

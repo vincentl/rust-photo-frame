@@ -1,4 +1,4 @@
-# Managed by setup/kiosk-bookworm.sh
+# Managed by setup/kiosk-trixie.sh
 [Unit]
 Description=Photo Frame Wi-Fi Manager
 After=network-online.target

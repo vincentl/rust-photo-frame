@@ -11,7 +11,7 @@ log() {
 
 usage() {
     cat <<USAGE
-Usage: sudo ./setup/kiosk-bookworm.sh [--user NAME] [--app PATH]
+Usage: sudo ./setup/kiosk-trixie.sh [--user NAME] [--app PATH]
 
 Options:
   --user NAME   Kiosk service account to run Cage (default: kiosk)
@@ -53,15 +53,15 @@ parse_args() {
     done
 }
 
-require_bookworm() {
+require_trixie() {
     if [[ ! -f /etc/os-release ]]; then
         echo "/etc/os-release not found; unable to detect OS" >&2
         exit 1
     fi
     # shellcheck disable=SC1091
     . /etc/os-release
-    if [[ "${VERSION_CODENAME:-}" != "bookworm" ]]; then
-        echo "This script supports Raspberry Pi OS Bookworm only." >&2
+    if [[ "${VERSION_CODENAME:-}" != "trixie" ]]; then
+        echo "This script supports Raspberry Pi OS Trixie only." >&2
         exit 1
     fi
 }
@@ -202,7 +202,7 @@ update_cmdline() {
 main() {
     reexec_as_root "$@"
     parse_args "$@"
-    require_bookworm
+    require_trixie
     require_commands
     # shellcheck source=/dev/null
     . "${LIB_DIR}/systemd.sh"

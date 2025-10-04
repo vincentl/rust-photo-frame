@@ -38,7 +38,7 @@ maker/cleat-spacers.scad
 maker/cleat-spacers.stl
 maker/maker.md
 setup-AUDIT-RESULTS.md
-setup/10-kiosk-bookworm.sh
+setup/10-kiosk-trixie.sh
 setup/README.md
 setup/app/modules/10-build.sh
 setup/app/modules/20-stage.sh

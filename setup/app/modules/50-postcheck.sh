@@ -125,7 +125,7 @@ if command -v systemctl >/dev/null 2>&1; then
         fi
     }
 
-    kiosk_hint="run setup/kiosk-bookworm.sh to provision kiosk services"
+    kiosk_hint="run setup/kiosk-trixie.sh to provision kiosk services"
 
     check_service "${KIOSK_SERVICE}" "ERROR" "${kiosk_hint}"
     check_enabled "${KIOSK_SERVICE}" "${kiosk_hint}"
