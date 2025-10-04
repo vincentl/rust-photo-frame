@@ -30,6 +30,13 @@ Plan your build around a Raspberry Pi 5, a portrait-capable 4K monitor, and moun
 
 From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync services, the setup guide walks through every command you need to bring the slideshow online. It also documents CLI flags for local debugging and a quickstart checklist for provisioning. [Full details →](docs/software.md)
 
+> **Install layout at a glance**
+>
+> - `/opt/photo-frame` holds the read-only release artifacts that ship with the project: compiled binaries, unit files, and the pristine configuration templates staged by the setup scripts.
+> - `/var/lib/photo-frame` carries the live state: the editable configuration (`config/config.yaml`), logs, caches, hotspot artifacts, and any synchronized media. Treat this tree as the working area that systemd services mutate at runtime.
+>
+> This split keeps upgrades simple—rerunning the installer refreshes `/opt` without clobbering the operator-managed data living under `/var`.
+
 Looking for the Pi 5 kiosk recipe? The Bookworm-specific instructions live in [docs/kiosk.md](docs/kiosk.md).
 
 ## Wi-Fi Recovery & Provisioning
