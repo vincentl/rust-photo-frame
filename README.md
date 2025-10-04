@@ -30,6 +30,8 @@ Plan your build around a Raspberry Pi 5, a portrait-capable 4K monitor, and moun
 
 From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync services, the setup guide walks through every command you need to bring the slideshow online. It also documents CLI flags for local debugging and a quickstart checklist for provisioning. [Full details →](docs/software.md)
 
+Looking for the Pi 5 kiosk recipe? The Bookworm-specific instructions live in [docs/kiosk.md](docs/kiosk.md).
+
 ## Wi-Fi Recovery & Provisioning
 
 When Wi-Fi drops, the frame pivots into a self-service recovery flow handled by the `wifi-manager` binary. It watches connectivity, launches a captive hotspot with a QR-code guided web UI, and writes fresh credentials back into NetworkManager—without ever running `cargo` as root.

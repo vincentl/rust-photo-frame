@@ -9,9 +9,8 @@ STAGE_ROOT="${STAGE_ROOT:-${SCRIPT_DIR}/../build}"
 STAGE_DIR="${STAGE_ROOT}/stage"
 
 FILES_ROOT="${REPO_ROOT}/setup/files"
-SYSTEM_UNITS_DIR="${REPO_ROOT}/setup/system/units"
-SYSTEM_TEMPLATE="${REPO_ROOT}/setup/system/cage@.service"
-SYSTEM_PAM_DIR="${REPO_ROOT}/setup/system/pam.d"
+SYSTEM_UNITS_DIR="${REPO_ROOT}/assets/systemd"
+SYSTEM_PAM_DIR="${REPO_ROOT}/assets/pam"
 
 log() {
     local level="$1"; shift
@@ -102,10 +101,6 @@ fi
 
 if [[ -d "${SYSTEM_UNITS_DIR}" ]]; then
     rsync -a --delete "${SYSTEM_UNITS_DIR}/" "${STAGE_DIR}/systemd/"
-fi
-
-if [[ -f "${SYSTEM_TEMPLATE}" ]]; then
-    install -Dm644 "${SYSTEM_TEMPLATE}" "${STAGE_DIR}/systemd/cage@.service"
 fi
 
 if [[ -d "${SYSTEM_PAM_DIR}" ]]; then

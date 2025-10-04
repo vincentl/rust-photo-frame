@@ -1,4 +1,4 @@
-# Managed by setup/system/install-systemd-units.sh
+# Managed by setup/10-kiosk-bookworm.sh
 [Unit]
 Description=Photo Frame Power Button Monitor
 After=graphical.target

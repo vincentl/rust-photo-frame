@@ -1,104 +1,62 @@
 # Photo Frame Setup Pipeline
 
-The setup tooling provisions a Raspberry Pi for the kiosk workload using two
-service accounts:
+This directory houses idempotent provisioning scripts for Raspberry Pi photo
+frame deployments. Each script can be re-run safely after OS updates or image
+refreshes.
 
-- `kiosk` runs the compositor, the slideshow process, and helper daemons.
-- `frame` is the operator account used to deploy content, inspect logs, and
-  restart services.
+## One-command kiosk bootstrap (Bookworm)
 
-The scripts in this directory are idempotent and can be re-run after package
-updates or image refreshes.
+Provision a Raspberry Pi OS Bookworm kiosk with the canonical Cage + systemd
+recipe:
 
-## Package provisioning
+```bash
+sudo ./setup/10-kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
+```
 
-Run the package stage as root (or with `sudo`). It installs both apt
-dependencies and a system-wide Rust toolchain:
+The script performs the following actions:
+
+- verifies the OS is Raspberry Pi OS Bookworm,
+- installs `cage`, `seatd`, and `plymouth` and enables the seatd service,
+- ensures the `kiosk` user exists and belongs to the `render`, `video`, and
+  `input` groups,
+- installs the templated `cage@.service`, PAM stack, and supporting
+  `photoframe-*` units,
+- disables conflicting display managers and `getty@tty1.service`,
+- removes `console=tty1` from `/boot/firmware/cmdline.txt`, and
+- boots the system into `graphical.target` with Cage on `tty1`.
+
+Override the kiosk user or application binary path with the `--user` and
+`--app` options as needed.
+
+## Package provisioning helpers
+
+For development images you may still want the extended toolchain provided by
+`setup/packages/run.sh`:
 
 ```bash
 sudo ./setup/packages/run.sh
 ```
 
-Individual scripts are available at:
-
-1. `./setup/packages/install-apt-packages.sh`
-   - Installs Cage, GPU/video dependencies, build toolchains, and helper
-     utilities such as `rclone`.
-2. `./setup/packages/install-rust.sh`
-   - Installs or updates the Rust toolchain under `/usr/local/cargo` and adds
-     a profile snippet so new shells inherit the `cargo` binary in their
-     `PATH`.
-
-After the script completes, reconnect your SSH session so the updated
-environment variables take effect.
-
-## System provisioning
-
-Run the system scripts as root (or with `sudo`). You can execute each script
-individually in the following order on a fresh Bookworm install, or run the
-wrapper to perform the full provisioning sequence:
-
-```bash
-sudo ./setup/system/run.sh
-```
-
-Individual scripts are available at:
-
-1. `./setup/system/create-users-and-perms.sh`
-   - Ensures the `kiosk` and `frame` users exist, adds `kiosk` to the
-     `render`, `video`, and `input` groups, and prepares the runtime
-     directories:
-     - `/opt/photo-frame/{bin,etc,share}` owned by `root:root`.
-     - `/var/lib/photo-frame`, `/var/cache/photo-frame`, and
-       `/var/log/photo-frame` owned by `kiosk:kiosk`.
-     - `/var/lib/photo-frame/photos` and `/var/lib/photo-frame/config` grant
-       read/write ACLs to both `kiosk` and `frame`.
-3. `./setup/system/configure-networkmanager.sh`
-   - Installs a polkit rule so the `kiosk` user can control NetworkManager
-     without broad sudo or extra groups.
-4. `./setup/system/install-sudoers.sh`
-   - Installs `/etc/sudoers.d/photoframe` so `frame` can manage photoframe
-     services and read their logs.
-5. `./setup/system/install-systemd-units.sh`
-   - Copies the standard units (`cage@.service`, `photoframe-*`) and PAM
-     drop-ins into `/etc`, enables them, and removes legacy unit files.
-
-6. (Optional) `sudo ./setup/migrate/legacy-cleanup.sh`
-   - Removes unit files and directories from pre-kiosk builds.
+This installs the Rust toolchain under `/usr/local/cargo` and pulls additional
+utilities (e.g., `rclone`, `kmscube`) useful during development.
 
 ## Application deployment
 
-Build and install the app artifacts from a non-root shell:
+Build and install release artifacts from an unprivileged shell:
 
 ```bash
 ./setup/app/run.sh
 ```
 
-The app stage builds the workspace, stages binaries and assets under
+The app stage compiles the workspace, stages binaries and documentation under
 `setup/app/build/stage`, and installs them into `/opt/photo-frame`.
-Default configuration files live in `/opt/photo-frame/etc`, while writable
-state is stored under `/var/lib/photo-frame`.
 
-## Operators: using the `frame` account
+## Operator quick reference
 
-The `frame` user does not run the compositor but can manage services without a
-password prompt:
+- Inspect the running session: `sudo systemctl status cage@tty1.service`
+- Restart helpers: `sudo systemctl restart photoframe-wifi-manager.service`
+- Tail compositor logs: `sudo journalctl -u cage@tty1.service -f`
+- Upload new media: copy into `/var/lib/photo-frame/photos`
 
-- `sudo systemctl status cage@tty1.service`
-- `sudo systemctl restart photoframe-wifi-manager.service`
-- `sudo journalctl -u photoframe-sync.timer -b -f`
-
-Content uploads should be placed in `/var/lib/photo-frame/photos`. ACLs ensure
-both `frame` and `kiosk` can read and write new files.
-
-To view kiosk logs live:
-
-```bash
-sudo journalctl -u cage@tty1.service -f
-```
-
-For GPU sanity checks, run `kmscube` inside the kiosk session:
-
-```bash
-sudo -u kiosk WAYLAND_DISPLAY=wayland-0 kmscube
-```
+The kiosk account is unprivileged; use the `frame` operator account (see
+`docs/configuration.md`) for maintenance commands.
