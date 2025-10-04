@@ -73,5 +73,5 @@ The following legacy paths were removed in favour of the single Cage workflow:
 - `setup/system/units/photoframe-*` – moved to `assets/systemd/` for staging and
   provisioning.
 
-For historical context on the old flows see `setup-AUDIT-RESULTS.md`; new builds
-should rely solely on the Bookworm script outlined above.
+All legacy flows have been removed; rely solely on the Bookworm script outlined
+above.

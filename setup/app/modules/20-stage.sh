@@ -69,10 +69,6 @@ else
     log WARN "photo-buttond binary not built; button service will not be installed"
 fi
 
-if [[ -f "${REPO_ROOT}/setup/app/powerctl" ]]; then
-    install -Dm755 "${REPO_ROOT}/setup/app/powerctl" "${STAGE_DIR}/bin/powerctl"
-fi
-
 copy_tree "${FILES_ROOT}/bin" "${STAGE_DIR}/bin" 755
 copy_tree "${FILES_ROOT}/etc" "${STAGE_DIR}/etc" 644
 copy_tree "${FILES_ROOT}/share" "${STAGE_DIR}/share" 644
