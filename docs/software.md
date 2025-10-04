@@ -105,6 +105,13 @@ Run the automation in three stages. Each script is idempotent, so you can safely
 
    Run this command as the unprivileged operator account. It compiles the photo frame, stages the release artifacts, and installs them into `/opt/photo-frame`. The stage verifies the kiosk service account exists and will prompt for sudo to create it (along with its primary group) when missing. The closing postcheck confirms binaries and templates are in place and will warn if the runtime config at `/var/lib/photo-frame/config/config.yaml` is missing; re-running the command recreates it from the staged template.
 
+   > **Filesystem roles**
+   >
+   > - `/opt/photo-frame` is treated as read-only at runtime. It contains the versioned binaries, systemd unit templates, and stock configuration files delivered by the setup scripts.
+   > - `/var/lib/photo-frame` is writable and owned by the service account. Configuration overrides, logs, hotspot artifacts, and synchronized media all live here. Systemd services expect to mutate this tree, so backups and troubleshooting should start in `/var`.
+   >
+   > Keeping code and mutable state separate allows updates to replace the staged artifacts in `/opt` without disturbing operator-managed data in `/var/lib/photo-frame`.
+
    The postcheck now defers systemd validation until the kiosk environment is provisioned. Expect warnings about `cage@tty1.service` and related helper units until you run the kiosk installer in the next step.
 
 1. Configure system services and permissions:
