@@ -26,7 +26,7 @@ headless boot into Cage on `tty1`, managed entirely by systemd.
 Run the provisioning script as root (it re-execs with `sudo` if needed):
 
 ```bash
-sudo ./setup/10-kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
+sudo ./setup/kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
 ```
 
 Flags:
@@ -66,7 +66,7 @@ After provisioning on real hardware:
 
 The following legacy paths were removed in favour of the single Cage workflow:
 
-- `setup/system/**` – replaced by `setup/10-kiosk-bookworm.sh`.
+- `setup/system/**` – replaced by `setup/kiosk-bookworm.sh`.
 - `setup/migrate/legacy-cleanup.sh` – superseded by the idempotent installer.
 - `setup/system/cage@.service` and `setup/system/pam.d/cage` – consolidated in
   `assets/systemd/` and `assets/pam/`.

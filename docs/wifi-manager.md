@@ -83,12 +83,12 @@ All mutable state lives under `/var/lib/photo-frame` and is owned by the `photo-
 
 The Wi-Fi manager is wired into the refreshed setup pipeline:
 
-- `setup/10-kiosk-bookworm.sh` provisions the kiosk user, installs the Cage session units, and enables seat management.
+- `setup/kiosk-bookworm.sh` provisions the kiosk user, installs the Cage session units, and enables seat management.
 - `setup/packages/install-apt-packages.sh` pulls in NetworkManager, Cage, GPU drivers, and build prerequisites.
 - `setup/app/modules/10-build.sh` compiles `wifi-manager` in release mode as the invoking user (never root).
 - `setup/app/modules/20-stage.sh` stages the binary, config template, wordlist, and docs.
 - `setup/app/modules/30-install.sh` installs artifacts into `/opt/photo-frame` and seeds `/var/lib/photo-frame/config/config.yaml` if missing.
-- `setup/10-kiosk-bookworm.sh` installs and enables `/etc/systemd/system/photoframe-wifi-manager.service` alongside the other kiosk units.
+- `setup/kiosk-bookworm.sh` installs and enables `/etc/systemd/system/photoframe-wifi-manager.service` alongside the other kiosk units.
 
 Re-running the scripts is idempotent: binaries are replaced in place, configs are preserved, ACLs stay intact, and systemd units reload cleanly.
 

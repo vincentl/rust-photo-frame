@@ -108,7 +108,7 @@ Run the automation in three stages. Each script is idempotent, so you can safely
 1. Configure system services and permissions:
 
    ```bash
-   sudo ./setup/10-kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
+   sudo ./setup/kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
    ```
 
    When the script finishes, reconnect your SSH session so new group memberships take effect.
