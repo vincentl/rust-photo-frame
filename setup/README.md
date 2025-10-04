@@ -49,7 +49,8 @@ Build and install release artifacts from an unprivileged shell:
 ```
 
 The app stage compiles the workspace, stages binaries and documentation under
-`setup/app/build/stage`, and installs them into `/opt/photo-frame`.
+`setup/app/build/stage`, ensures the kiosk service user exists, and installs
+the artifacts into `/opt/photo-frame`.
 
 ## Operator quick reference
 
