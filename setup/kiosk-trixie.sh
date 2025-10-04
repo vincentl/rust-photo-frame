@@ -163,7 +163,7 @@ enable_units() {
     systemd_disable_unit getty@tty1.service
     systemd_stop_unit getty@tty1.service
 
-    local enable_list=(cage@tty1.service photoframe-wifi-manager.service photoframe-buttond.service photoframe-sync.timer)
+    local enable_list=(photoframe-display-manager.service cage@tty1.service photoframe-wifi-manager.service photoframe-buttond.service photoframe-sync.timer)
     for unit in "${enable_list[@]}"; do
         log "Enabling ${unit}"
         systemd_enable_unit "${unit}"
