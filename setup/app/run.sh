@@ -37,9 +37,17 @@ if [[ $(id -u) -eq 0 ]]; then
     exit 1
 fi
 
-CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
-SYSTEM_CARGO_BIN="/usr/local/cargo/bin"
+SYSTEM_CARGO_HOME="/usr/local/cargo"
+SYSTEM_RUSTUP_HOME="/usr/local/rustup"
+SYSTEM_CARGO_BIN="${SYSTEM_CARGO_HOME}/bin"
+
 if [[ -d "${SYSTEM_CARGO_BIN}" ]]; then
+    if [[ -z "${CARGO_HOME+x}" ]]; then
+        CARGO_HOME="${SYSTEM_CARGO_HOME}"
+    fi
+    if [[ -z "${RUSTUP_HOME+x}" ]]; then
+        RUSTUP_HOME="${SYSTEM_RUSTUP_HOME}"
+    fi
     case ":${PATH}:" in
         *:"${SYSTEM_CARGO_BIN}":*) ;;
         *)
@@ -48,11 +56,17 @@ if [[ -d "${SYSTEM_CARGO_BIN}" ]]; then
     esac
 fi
 
+CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
+RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
+
 STAGE_ROOT="${STAGE_ROOT:-${SCRIPT_DIR}/build}"
 export STAGE_ROOT
 
+# The app stage expects the system-level Rust toolchain installed by
+# setup/packages/install-rust.sh, but developers may override the toolchain
+# location by setting CARGO_HOME and RUSTUP_HOME before invoking this script.
 export INSTALL_ROOT SERVICE_USER SERVICE_GROUP CARGO_PROFILE REPO_ROOT
-export CARGO_HOME
+export CARGO_HOME RUSTUP_HOME
 export PATH
 
 shopt -s nullglob
