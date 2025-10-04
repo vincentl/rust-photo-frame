@@ -1,0 +1,14 @@
+[Unit]
+Description=Photoframe display manager shim
+Documentation=https://github.com/vincentl/rust-photo-frame
+Requires=cage@tty1.service
+After=cage@tty1.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=yes
+
+[Install]
+Alias=display-manager.service
+WantedBy=graphical.target

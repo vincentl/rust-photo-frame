@@ -7,6 +7,7 @@ Wants=dbus.socket systemd-logind.service
 After=dbus.socket systemd-logind.service
 Conflicts=getty@%i.service
 After=getty@%i.service
+PartOf=display-manager.service
 
 [Service]
 Type=simple
@@ -25,5 +26,4 @@ PAMName=cage
 
 [Install]
 WantedBy=graphical.target
-Alias=display-manager.service
 DefaultInstance=tty1
