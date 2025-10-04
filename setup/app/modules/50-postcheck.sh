@@ -73,6 +73,12 @@ if command -v systemctl >/dev/null 2>&1; then
     if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet --container; then
         in_container=1
         log WARN "Running inside a container; service activation checks will be treated as warnings"
+    else
+        pid1_comm="$(ps -p 1 -o comm= 2>/dev/null || true)"
+        if [[ "${pid1_comm}" != "systemd" ]]; then
+            in_container=1
+            log WARN "systemd is not PID 1 (${pid1_comm:-unknown}); treating service activation checks as warnings"
+        fi
     fi
 
     check_service() {
@@ -81,11 +87,13 @@ if command -v systemctl >/dev/null 2>&1; then
         local message="${service} is not active"
         local log_level="${level_on_fail}"
 
-        if systemctl is-active --quiet "${service}"; then
+        if systemctl is-active --quiet "${service}" 2>/dev/null; then
             return 0
         fi
 
-        systemctl status "${service}" --no-pager || true
+        if [[ ${in_container} -eq 0 ]]; then
+            systemctl status "${service}" --no-pager || true
+        fi
 
         if [[ "${level_on_fail}" == "ERROR" ]] && [[ ${in_container} -eq 0 ]]; then
             log ERROR "${message}"
@@ -102,6 +110,9 @@ if command -v systemctl >/dev/null 2>&1; then
 
     check_enabled() {
         local service="$1"
+        if [[ ${in_container} -ne 0 ]]; then
+            return
+        fi
         if ! systemctl is-enabled --quiet "${service}"; then
             log WARN "${service} is not enabled"
         fi
@@ -121,10 +132,17 @@ fi
 
 rustc_version=$(rustc --version 2>/dev/null || echo "rustc unavailable")
 cargo_version=$(cargo --version 2>/dev/null || echo "cargo unavailable")
-service_status=$(systemctl is-active "${KIOSK_SERVICE}" || true)
-wifi_service_status=$(systemctl is-active "${WIFI_SERVICE}" || true)
-button_status=$(systemctl is-active "${BUTTON_SERVICE}" || true)
-sync_status=$(systemctl is-active "${SYNC_TIMER}" || true)
+if command -v systemctl >/dev/null 2>&1 && [[ ${in_container:-0} -eq 0 ]]; then
+    service_status=$(systemctl is-active "${KIOSK_SERVICE}" 2>/dev/null || true)
+    wifi_service_status=$(systemctl is-active "${WIFI_SERVICE}" 2>/dev/null || true)
+    button_status=$(systemctl is-active "${BUTTON_SERVICE}" 2>/dev/null || true)
+    sync_status=$(systemctl is-active "${SYNC_TIMER}" 2>/dev/null || true)
+else
+    service_status="unavailable"
+    wifi_service_status="unavailable"
+    button_status="unavailable"
+    sync_status="unavailable"
+fi
 
 log INFO "Deployment summary:"
 cat <<SUMMARY
