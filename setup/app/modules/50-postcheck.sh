@@ -65,14 +65,29 @@ if [[ "${var_owner}" != "${SERVICE_USER}" || "${var_group}" != "${SERVICE_GROUP}
 fi
 
 if [[ ! -f "${VAR_CONFIG}" ]]; then
-    log WARN "Runtime config missing at ${VAR_CONFIG}; seed it with setup/kiosk-bookworm.sh and app install"
+    log WARN "Runtime config missing at ${VAR_CONFIG}; copy ${CONFIG_TEMPLATE} or rerun ./setup/app/run.sh"
 fi
 
 if command -v systemctl >/dev/null 2>&1; then
+    systemd_unit_exists() {
+        local unit="$1"
+        systemctl cat "${unit}" >/dev/null 2>&1
+    }
+
     check_service() {
         local service="$1"
         local level_on_fail="$2"
+        local missing_hint="$3"
         local message="${service} is not active"
+
+        if ! systemd_unit_exists "${service}"; then
+            if [[ -n "${missing_hint}" ]]; then
+                log WARN "${service} not installed; ${missing_hint}"
+            else
+                log WARN "${service} not installed"
+            fi
+            return 0
+        fi
 
         if systemctl is-active --quiet "${service}"; then
             return 0
@@ -90,19 +105,32 @@ if command -v systemctl >/dev/null 2>&1; then
 
     check_enabled() {
         local service="$1"
+        local missing_hint="$2"
+
+        if ! systemd_unit_exists "${service}"; then
+            if [[ -n "${missing_hint}" ]]; then
+                log WARN "${service} not installed; ${missing_hint}"
+            else
+                log WARN "${service} not installed"
+            fi
+            return
+        fi
+
         if ! systemctl is-enabled --quiet "${service}"; then
             log WARN "${service} is not enabled"
         fi
     }
 
-    check_service "${KIOSK_SERVICE}" "ERROR"
-    check_enabled "${KIOSK_SERVICE}"
+    kiosk_hint="run setup/kiosk-bookworm.sh to provision kiosk services"
 
-    check_service "${WIFI_SERVICE}" "ERROR"
-    check_enabled "${WIFI_SERVICE}"
+    check_service "${KIOSK_SERVICE}" "ERROR" "${kiosk_hint}"
+    check_enabled "${KIOSK_SERVICE}" "${kiosk_hint}"
 
-    check_service "${BUTTON_SERVICE}" "WARN"
-    check_service "${SYNC_TIMER}" "WARN"
+    check_service "${WIFI_SERVICE}" "ERROR" "${kiosk_hint}"
+    check_enabled "${WIFI_SERVICE}" "${kiosk_hint}"
+
+    check_service "${BUTTON_SERVICE}" "WARN" "${kiosk_hint}"
+    check_service "${SYNC_TIMER}" "WARN" "${kiosk_hint}"
 else
     log WARN "systemctl not available; skipping service state checks"
 fi
