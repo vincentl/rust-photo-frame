@@ -47,15 +47,11 @@ Exercise each axis at least once per release cycle.
   git clone https://github.com/<org>/rust-photo-frame.git
   cd rust-photo-frame
   ```
-- [ ] Run the system bootstrap scripts (install packages, create users/ACLs, configure polkit, install units):
+- [ ] Run the kiosk bootstrapper (installs packages, creates the kiosk user, installs units, and enables Cage on tty1):
   ```sh
-  sudo ./setup/packages/install-apt-packages.sh
-  sudo ./setup/system/create-users-and-perms.sh
-  sudo ./setup/system/configure-networkmanager.sh
-  sudo ./setup/system/install-sudoers.sh
-  sudo ./setup/system/install-systemd-units.sh
+  sudo ./setup/10-kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
   ```
-  Note: reconnect your SSH session afterwards so the refreshed `kiosk`/`frame` group memberships apply.
+  Note: reconnect your SSH session afterwards so refreshed group memberships apply.
 - [ ] After reconnecting, rerun the repo checkout if necessary and execute the app deploy stage (build + install + systemd wiring). Expect 5–7 minutes for the release build on a Pi 5 with active cooling:
   ```sh
   cd ~/rust-photo-frame

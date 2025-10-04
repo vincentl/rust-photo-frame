@@ -108,7 +108,7 @@ Run the automation in three stages. Each script is idempotent, so you can safely
 1. Configure system services and permissions:
 
    ```bash
-   sudo ./setup/system/run.sh
+   sudo ./setup/10-kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
    ```
 
    When the script finishes, reconnect your SSH session so new group memberships take effect.
@@ -126,9 +126,9 @@ Use the following environment variables to customize an installation:
 
 When both setup stages complete successfully the Raspberry Pi is ready to boot directly into a kiosk session:
 
-- The templated systemd unit `cage@tty1.service` binds to `/dev/tty1`, logs in the `kiosk` user through PAM, and `exec`s the Wayland compositor as `cage -- /opt/photo-frame/bin/rust-photo-frame --config /opt/photo-frame/etc/config.yaml`. PAM/logind create a real session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` and DRM permissions flow automatically while the writable config lives under `/var/lib/photo-frame/config`.
-- Device access comes from the `kiosk` user belonging to the `render`, `video`, and `input` groups. The system stage wires this up, so Vulkan/GL stacks can open `/dev/dri/renderD128` without any extra udev hacks.
-- `seatd` remains optional on Bookworm but harmless to have installed; the compositor happily runs without manual socket management when launched via logind. We force the `LIBSEAT_BACKEND=logind` environment for `cage@tty1.service` so the compositor always binds through logind even when the seatd daemon happens to be present.
+- The templated systemd unit `cage@tty1.service` binds to `/dev/tty1`, logs in the `kiosk` user through PAM, and `exec`s the Wayland compositor as `cage /usr/local/bin/photo-app`. PAM/logind create a real session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` and DRM permissions flow automatically while the writable config lives under `/var/lib/photo-frame/config`.
+- Device access comes from the `kiosk` user belonging to the `render`, `video`, and `input` groups. The setup stage wires this up so Vulkan/GL stacks can open `/dev/dri/renderD128` without any extra udev hacks.
+- `seatd` is installed and enabled automatically; Cage binds through logind, so DRM master and input devices are granted without sudo.
 - Disable any other display manager or compositor on the target TTY so Cage can claim DRM master and input devices without contention.
 
 For smoke testing, temporarily adjust the unit to run `kmscube` instead of the photo frame binary. A spinning cube on HDMI verifies DRM, GBM, and input permissions before deploying the full app.
