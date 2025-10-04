@@ -37,7 +37,7 @@ From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync servic
 >
 > This split keeps upgrades simple—rerunning the installer refreshes `/opt` without clobbering the operator-managed data living under `/var`.
 
-Looking for the Pi 5 kiosk recipe? The Bookworm-specific instructions live in [docs/kiosk.md](docs/kiosk.md).
+Looking for the Pi 5 kiosk recipe? The Trixie-specific instructions live in [docs/kiosk.md](docs/kiosk.md).
 
 ## Wi-Fi Recovery & Provisioning
 

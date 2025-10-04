@@ -33,12 +33,12 @@ Recent releases of Raspberry Pi Imager (v1.8 and newer) prompt for customization
 
 ## Setup with Raspberry Pi Imager
 
-This workflow prepares a Raspberry Pi OS (Bookworm, 64-bit) image that boots directly into a network-connected, SSH-ready system.
+This workflow prepares a Raspberry Pi OS (Trixie, 64-bit) image that boots directly into a network-connected, SSH-ready system.
 
 1. Download and install the latest [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
 1. Insert the target microSD card into your computer and launch Raspberry Pi Imager.
 1. **Choose Device:** Raspberry Pi 5
-1. **Choose OS:** select _Raspberry Pi OS (64-bit)_ (Bookworm).
+1. **Choose OS:** select _Raspberry Pi OS (64-bit)_ (Trixie).
 1. **Choose Storage:** pick the microSD card.
 1. Click **Next**. When prompted to apply OS customization, choose **Edit Settings**. The older gear icon has been replaced with this dialog in recent releases.
 1. In **General** settings:
@@ -117,7 +117,7 @@ Run the automation in three stages. Each script is idempotent, so you can safely
 1. Configure system services and permissions:
 
    ```bash
-   sudo ./setup/kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
+  sudo ./setup/kiosk-trixie.sh --user kiosk --app /usr/local/bin/photo-app
    ```
 
    When the script finishes, reconnect your SSH session so new group memberships take effect.

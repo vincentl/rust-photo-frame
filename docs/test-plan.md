@@ -36,7 +36,7 @@ Exercise each axis at least once per release cycle.
 - [ ] Capture evidence via `tests/collect_logs.sh` (provides modes, EDID, journals).
 
 ## Phase 1 – Blank-Pi Install
-- [ ] Flash the latest Raspberry Pi OS (Bookworm, 64-bit) onto a reliable microSD using Raspberry Pi Imager (preload hostname, user, Wi-Fi, SSH key).
+- [ ] Flash the latest Raspberry Pi OS (Trixie, 64-bit) onto a reliable microSD using Raspberry Pi Imager (preload hostname, user, Wi-Fi, SSH key).
 - [ ] On first boot, sign in as the deployment user (default `frame`) and confirm network connectivity.
 - [ ] (Optional) Run `sudo apt update && sudo apt upgrade -y` once; the automation will also perform a dist-upgrade but this reduces the first-run delta.
 - [ ] Confirm Wayland desktop capability: `echo "$XDG_SESSION_TYPE"` should report `wayland` after logging into the graphical session once.
@@ -49,7 +49,7 @@ Exercise each axis at least once per release cycle.
   ```
 - [ ] Run the kiosk bootstrapper (installs packages, creates the kiosk user, installs units, and enables Cage on tty1):
   ```sh
-  sudo ./setup/kiosk-bookworm.sh --user kiosk --app /usr/local/bin/photo-app
+  sudo ./setup/kiosk-trixie.sh --user kiosk --app /usr/local/bin/photo-app
   ```
   Note: reconnect your SSH session afterwards so refreshed group memberships apply.
 - [ ] After reconnecting, rerun the repo checkout if necessary and execute the app deploy stage (build + install + systemd wiring). Expect 5–7 minutes for the release build on a Pi 5 with active cooling:
