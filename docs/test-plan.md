@@ -47,9 +47,9 @@ Exercise each axis at least once per release cycle.
   git clone https://github.com/<org>/rust-photo-frame.git
   cd rust-photo-frame
   ```
-- [ ] Run the kiosk bootstrapper (installs packages, creates the kiosk user, installs units, and enables Cage on tty1):
+- [ ] Run the kiosk bootstrapper (installs greetd/cage, creates the kiosk user, installs helper units, and enables greetd on tty1):
   ```sh
-  sudo ./setup/kiosk-trixie.sh --user kiosk --app /usr/local/bin/photo-app
+  sudo ./setup/kiosk-trixie.sh
   ```
   Note: reconnect your SSH session afterwards so refreshed group memberships apply.
 - [ ] After reconnecting, rerun the repo checkout if necessary and execute the app deploy stage (build + install + systemd wiring). Expect 5–7 minutes for the release build on a Pi 5 with active cooling:
@@ -57,7 +57,7 @@ Exercise each axis at least once per release cycle.
   cd ~/rust-photo-frame
   ./setup/app/run.sh
   ```
-  This stage copies binaries into `/opt/photo-frame`, installs the Google “Macondo” font system-wide, and enables `photoframe-wifi-manager.service` plus any optional sync units. The system stage installs and enables `cage@tty1.service`, which launches the compositor and app on boot.
+  This stage copies binaries into `/opt/photo-frame`, installs the Google “Macondo” font system-wide, and enables `photoframe-wifi-manager.service` plus any optional sync units. The system stage installs and enables `greetd.service`, which launches the compositor and app on boot.
 - [ ] Customize the writable config at `/var/lib/photo-frame/config.yaml`. Minimal example:
   ```yaml
   photo-library-path: /var/lib/photo-frame/photos
@@ -78,15 +78,15 @@ Exercise each axis at least once per release cycle.
 ## Phase 3 – Kiosk Autostart & Services
 - [ ] Confirm the setup script enabled expected units:
   ```sh
-  systemctl status cage@tty1.service
+  systemctl status greetd.service
   systemctl status photoframe-wifi-manager.service   # hotspot + provisioning
   systemctl status photoframe-sync.timer       # optional if library sync configured
   ```
   Use `/opt/photo-frame/bin/print-status.sh` for a consolidated view.
-- [ ] Reboot (`sudo reboot`) and confirm `cage@tty1.service` claims `/dev/tty1` (no login prompt) and the app launches full-screen on HDMI-1.
+- [ ] Reboot (`sudo reboot`) and confirm `greetd.service` claims `/dev/tty1` (no login prompt) and the app launches full-screen on HDMI-1.
 - [ ] Check logs for a clean startup:
   ```sh
-  journalctl -u cage@tty1.service -n 200 --no-pager
+  journalctl -u greetd.service -n 200 --no-pager
   journalctl -u photoframe-wifi-manager.service -n 100 --no-pager
   ```
 
@@ -112,7 +112,7 @@ Exercise each axis at least once per release cycle.
 - [ ] Long press → document expected behavior (hard-off). **Do not perform if risk of corruption.**
 - [ ] Evidence:
   ```sh
-  journalctl -u cage@tty1.service -n 100 --no-pager | grep -i "sleep"
+  journalctl -u greetd.service -n 100 --no-pager | grep -i "sleep"
   sudo journalctl -b | grep -i "systemd-logind" | tail -20
   ```
 
@@ -135,7 +135,7 @@ Exercise each axis at least once per release cycle.
   ```sh
   nmcli dev status
   journalctl -u photoframe-wifi-manager.service -n 200 --no-pager
-  journalctl -u cage@tty1.service -n 200 --no-pager | grep -i network
+  journalctl -u greetd.service -n 200 --no-pager | grep -i network
   ```
 
 ## Phase 8 – Library Ingest & Rendering
@@ -145,7 +145,7 @@ Exercise each axis at least once per release cycle.
   top -H -p $(pidof rust-photo-frame)
   vcgencmd measure_temp
   ```
-- [ ] Watch for stutters or decode warnings in `journalctl -u cage@tty1.service`.
+- [ ] Watch for stutters or decode warnings in `journalctl -u greetd.service`.
 - [ ] Note performance metrics in appendix.
 
 ## Phase 9 – Updates & Rollback
@@ -154,11 +154,11 @@ Exercise each axis at least once per release cycle.
   git fetch origin
   git checkout <release-tag>
   cargo build --release -p rust-photo-frame
-  sudo systemctl restart cage@tty1.service
+  sudo systemctl restart greetd.service
   ```
 - [ ] Validate new version via `rust-photo-frame --version` in logs or manual run.
 - [ ] Rollback rehearsal: checkout previous known-good commit/tag, rebuild, restart service.
-- [ ] Ensure unit file remains untouched (compare with `systemctl cat cage@tty1.service`).
+- [ ] Ensure unit file remains untouched (compare with `systemctl cat greetd.service`).
 
 ## Phase 10 – Power Loss & Recovery
 - [ ] Use 52Pi PD board (if equipped) to momentarily cut power (per manufacturer safe window).
@@ -175,7 +175,7 @@ Exercise each axis at least once per release cycle.
   tests/collect_logs.sh
   ```
 - [ ] Verify artifact present: `ls artifacts/FRAME-logs-*.tar.gz`.
-- [ ] Bundle includes: system metadata, boot journal, `cage@tty1.service` + `photoframe-wifi-manager.service` journals/status, optional sync unit details, NetworkManager snapshots, DRM modes + EDID, runtime metrics (top, temperature, binary `--version`), `/var/lib/photo-frame/config.yaml`, `/opt/photo-frame/etc/wifi-manager.yaml`, and `print-status` output.
+- [ ] Bundle includes: system metadata, boot journal, `greetd.service` + `photoframe-wifi-manager.service` journals/status, optional sync unit details, NetworkManager snapshots, DRM modes + EDID, runtime metrics (top, temperature, binary `--version`), `/var/lib/photo-frame/config.yaml`, `/opt/photo-frame/etc/wifi-manager.yaml`, and `print-status` output.
 - [ ] Attach bundle to issue tracker entry with notes on observed behavior.
 
 ## Acceptance Criteria
@@ -193,14 +193,14 @@ Exercise each axis at least once per release cycle.
 - **Bad config.yaml:**
   - [ ] Restore last-known-good from backup (`sudo cp /var/lib/photo-frame/config.yaml.bak /var/lib/photo-frame/config.yaml`).
   - [ ] Validate YAML syntax with `yamllint` (if installed) or `python3 -c "import yaml,sys; yaml.safe_load(open('/var/lib/photo-frame/config.yaml'))"`.
-  - [ ] Restart service: `sudo systemctl restart cage@tty1.service`.
+  - [ ] Restart service: `sudo systemctl restart greetd.service`.
 - **Broken service (fails to start):**
-  - [ ] Inspect logs: `journalctl -u cage@tty1.service -b` and `journalctl -u photoframe-wifi-manager.service -b`.
+  - [ ] Inspect logs: `journalctl -u greetd.service -b` and `journalctl -u photoframe-wifi-manager.service -b`.
   - [ ] Rebuild binary: `cargo build --release -p rust-photo-frame`.
   - [ ] Validate unit file dependencies (Wayland, env vars) and run `sudo systemctl daemon-reload`.
 - **Failed update:**
   - [ ] `git checkout <previous-good>`.
-  - [ ] Rebuild + restart service (`sudo systemctl restart cage@tty1.service`).
+  - [ ] Rebuild + restart service (`sudo systemctl restart greetd.service`).
   - [ ] If binary corrupted, delete `target/` and rebuild.
 - **Network stuck offline:**
   - [ ] Verify Wi-Fi credentials (`nmcli connection show`).
@@ -211,7 +211,7 @@ Exercise each axis at least once per release cycle.
 ### Appendix A – Helper Commands
 - Temperature: `vcgencmd measure_temp`
 - Display info: `wlr-randr`, `modetest -c`, `cat /sys/class/drm/card*/card*/modes`
-- Services: `systemctl status cage@tty1.service`, `journalctl -u cage@tty1.service -n 200 --no-pager`
+- Services: `systemctl status greetd.service`, `journalctl -u greetd.service -n 200 --no-pager`
 - Network: `nmcli dev status`, `nmcli connection show --active`
 - Signals: `kill -USR1 $(pidof rust-photo-frame)`
 - Button events: `sudo evtest`

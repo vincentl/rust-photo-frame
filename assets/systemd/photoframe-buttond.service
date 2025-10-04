@@ -1,8 +1,8 @@
 # Managed by setup/kiosk-trixie.sh
 [Unit]
 Description=Photo Frame Power Button Monitor
-After=graphical.target
-Wants=graphical.target
+After=multi-user.target
+Wants=multi-user.target
 
 [Service]
 Type=simple

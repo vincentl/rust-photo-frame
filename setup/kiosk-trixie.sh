@@ -3,234 +3,155 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-LIB_DIR="${SCRIPT_DIR}/lib"
 
 log() {
     printf '[kiosk-setup] %s\n' "$*"
 }
 
-usage() {
-    cat <<USAGE
-Usage: sudo ./setup/kiosk-trixie.sh [--user NAME] [--app PATH]
-
-Options:
-  --user NAME   Kiosk service account to run Cage (default: kiosk)
-  --app PATH    Wayland kiosk binary executed by Cage (default: /usr/local/bin/photo-app)
-  --help        Show this message and exit
-USAGE
+die() {
+    printf '[kiosk-setup] ERROR: %s\n' "$*" >&2
+    exit 1
 }
 
-reexec_as_root() {
+require_root() {
     if [[ ${EUID} -ne 0 ]]; then
         exec sudo -- "$0" "$@"
     fi
 }
 
-parse_args() {
-    KIOSK_USER="kiosk"
-    APP_PATH="/usr/local/bin/photo-app"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --user)
-                KIOSK_USER="$2"
-                shift 2
-                ;;
-            --app)
-                APP_PATH="$2"
-                shift 2
-                ;;
-            --help)
-                usage
-                exit 0
-                ;;
-            *)
-                echo "Unknown argument: $1" >&2
-                usage >&2
-                exit 1
-                ;;
-        esac
-    done
-}
-
 require_trixie() {
-    if [[ ! -f /etc/os-release ]]; then
-        echo "/etc/os-release not found; unable to detect OS" >&2
-        exit 1
+    if [[ ! -r /etc/os-release ]]; then
+        die "/etc/os-release not found; cannot detect OS"
     fi
     # shellcheck disable=SC1091
     . /etc/os-release
     if [[ "${VERSION_CODENAME:-}" != "trixie" ]]; then
-        echo "This script supports Raspberry Pi OS Trixie only." >&2
-        exit 1
+        die "Debian 13 (trixie) is required"
     fi
 }
 
 require_commands() {
+    local missing=()
     local cmd
-    for cmd in install getent usermod useradd groupadd id apt-get python3 systemctl; do
+    for cmd in apt-get install getent groupadd id install mkdir systemctl useradd usermod; do
         if ! command -v "${cmd}" >/dev/null 2>&1; then
-            echo "Missing required command: ${cmd}" >&2
-            exit 1
+            missing+=("${cmd}")
         fi
     done
+    if (( ${#missing[@]} > 0 )); then
+        die "Missing required commands: ${missing[*]}"
+    fi
 }
 
 ensure_packages() {
-    local packages=(cage seatd plymouth)
+    local packages=(
+        cage
+        greetd
+        mesa-vulkan-drivers
+        vulkan-tools
+        wayland-protocols
+        wlr-randr
+    )
     log "Installing packages: ${packages[*]}"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get install -y --no-install-recommends "${packages[@]}"
 }
 
-ensure_seatd_active() {
-    if ! systemctl is-enabled seatd.service >/dev/null 2>&1; then
-        log "Enabling seatd.service"
-        systemctl enable seatd.service
+ensure_kiosk_user() {
+    local user="kiosk"
+    if ! id -u "${user}" >/dev/null 2>&1; then
+        log "Creating kiosk user ${user}"
+        useradd --create-home --shell /usr/sbin/nologin "${user}"
+    else
+        log "User ${user} already exists"
+        usermod --shell /usr/sbin/nologin "${user}" >/dev/null 2>&1 || true
+        if [[ ! -d "/home/${user}" ]]; then
+            log "Ensuring home directory for ${user}"
+            install -d -m 0750 "/home/${user}"
+            chown "${user}:${user}" "/home/${user}"
+        fi
     fi
-    if ! systemctl is-active seatd.service >/dev/null 2>&1; then
-        log "Starting seatd.service"
-        systemctl start seatd.service
+
+    local group
+    for group in render video input; do
+        if ! getent group "${group}" >/dev/null 2>&1; then
+            log "Creating group ${group}"
+            groupadd "${group}"
+        fi
+        if ! id -nG "${user}" | tr ' ' '\n' | grep -Fxq "${group}"; then
+            log "Adding ${user} to ${group}"
+            usermod -aG "${group}" "${user}"
+        fi
+    done
+
+    if [[ ! -d "/home/${user}" ]]; then
+        log "Creating home directory for ${user}"
+        install -d -m 0750 "/home/${user}"
+        chown "${user}:${user}" "/home/${user}"
     fi
 }
 
-ensure_user_exists() {
-    local user="$1"
-    if id -u "${user}" >/dev/null 2>&1; then
-        return
-    fi
-    log "Creating kiosk user ${user}"
-    useradd --create-home --shell /usr/sbin/nologin "${user}"
-}
+write_greetd_config() {
+    local config_dir="/etc/greetd"
+    local config_file="${config_dir}/config.toml"
+    log "Writing ${config_file}"
+    install -d -m 0755 "${config_dir}"
+    cat <<'CONFIG' >"${config_file}"
+[terminal]
+vt = 1
 
-ensure_group_membership() {
-    local user="$1" group="$2"
-    if ! getent group "${group}" >/dev/null 2>&1; then
-        log "Creating missing group ${group}"
-        groupadd "${group}"
-    fi
-    if id -nG "${user}" | tr ' ' '\n' | grep -Fxq "${group}"; then
-        return
-    fi
-    log "Adding ${user} to ${group}"
-    usermod -aG "${group}" "${user}"
-}
-
-render_template() {
-    local template="$1" dest="$2"
-    local tmp
-    tmp="$(mktemp)"
-    python3 - "$template" "$tmp" "$KIOSK_USER" "$APP_PATH" <<'PY'
-import pathlib
-import sys
-
-src = pathlib.Path(sys.argv[1]).read_text()
-dest = pathlib.Path(sys.argv[2])
-user = sys.argv[3]
-app = sys.argv[4]
-rendered = src.replace('{{KIOSK_USER}}', user).replace('{{APP_PATH}}', app)
-dest.write_text(rendered)
-PY
-    install -D -m 0644 "${tmp}" "${dest}"
-    rm -f "${tmp}"
-}
-
-install_cage_unit() {
-    local template="${REPO_ROOT}/assets/systemd/cage@.service"
-    local dest="/etc/systemd/system/cage@.service"
-    render_template "${template}" "${dest}"
-}
-
-install_pam_stack() {
-    local src="${REPO_ROOT}/assets/pam/cage"
-    install -D -m 0644 "${src}" /etc/pam.d/cage
+[default_session]
+command = "cage -s -- /usr/local/bin/photo-app"
+user = "kiosk"
+CONFIG
+    chmod 0644 "${config_file}"
 }
 
 install_auxiliary_units() {
+    log "Installing photoframe systemd units"
     local unit
-    shopt -s nullglob
     for unit in "${REPO_ROOT}"/assets/systemd/photoframe-*; do
+        [ -f "${unit}" ] || continue
         install -D -m 0644 "${unit}" "/etc/systemd/system/$(basename "${unit}")"
     done
-    shopt -u nullglob
 }
 
-enable_units() {
-    local unit
-    systemd_daemon_reload
+enable_systemd_units() {
+    log "Enabling kiosk services"
+    systemctl daemon-reload
 
-    systemd_disable_unit getty@tty1.service
-    systemd_stop_unit getty@tty1.service
-
-    local enable_list=(photoframe-display-manager.service cage@tty1.service photoframe-wifi-manager.service photoframe-buttond.service photoframe-sync.timer)
-    for unit in "${enable_list[@]}"; do
-        log "Enabling ${unit}"
-        systemd_enable_unit "${unit}"
-        if [[ "${unit}" == *.timer ]]; then
-            systemd_start_unit "${unit}" || true
-        else
-            systemd_restart_unit "${unit}" || true
-        fi
-    done
-
-    systemctl set-default graphical.target
-}
-
-cleanup_display_managers() {
-    local dm
-    local managers=(lightdm.service gdm.service gdm3.service sddm.service lxdm.service slim.service)
-    for dm in "${managers[@]}"; do
-        if systemd_unit_exists "${dm}"; then
-            systemd_disable_unit "${dm}"
-            systemd_stop_unit "${dm}"
-        fi
-    done
-
-    local alias_path="/etc/systemd/system/display-manager.service"
-    if [[ -L "${alias_path}" || -e "${alias_path}" ]]; then
-        log "Removing existing display-manager.service alias"
-        rm -f "${alias_path}"
+    if systemctl list-unit-files getty@tty1.service >/dev/null 2>&1; then
+        systemctl disable --now getty@tty1.service >/dev/null 2>&1 || true
     fi
-}
 
-update_cmdline() {
-    # shellcheck source=/dev/null
-    . "${LIB_DIR}/raspi_boot.sh"
-    local changed=0
-    ensure_cmdline_without_console_tty1 "${RASPI_CMDLINE:-/boot/firmware/cmdline.txt}" changed
-    if [[ "${changed}" -eq 1 ]]; then
-        log "Removed console=tty1 from cmdline.txt"
-        update_initramfs_if_available
+    systemctl enable --now greetd.service
+
+    local unit
+    for unit in photoframe-wifi-manager.service photoframe-buttond.service; do
+        if systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
+            systemctl enable --now "${unit}"
+        fi
+    done
+
+    if systemctl list-unit-files photoframe-sync.timer >/dev/null 2>&1; then
+        systemctl enable photoframe-sync.timer
+        systemctl start photoframe-sync.timer || true
     fi
 }
 
 main() {
-    reexec_as_root "$@"
-    parse_args "$@"
+    require_root "$@"
     require_trixie
     require_commands
-    # shellcheck source=/dev/null
-    . "${LIB_DIR}/systemd.sh"
 
     ensure_packages
-    ensure_seatd_active
-    ensure_user_exists "${KIOSK_USER}"
-    local group
-    for group in render video input; do
-        ensure_group_membership "${KIOSK_USER}" "${group}"
-    done
-
-    cleanup_display_managers
-    install_cage_unit
-    install_pam_stack
+    ensure_kiosk_user
+    write_greetd_config
     install_auxiliary_units
+    enable_systemd_units
 
-    update_cmdline
-    enable_units
-
-    log "Kiosk environment configured for user ${KIOSK_USER} running ${APP_PATH}"
-    log "Reboot to launch Cage on tty1."
+    log "Kiosk provisioning complete. greetd will launch cage on tty1 as kiosk."
 }
 
 main "$@"
