@@ -103,7 +103,7 @@ Run the automation in three stages. Each script is idempotent, so you can safely
    ./setup/app/run.sh
    ```
 
-   Run this command as the unprivileged operator account. It compiles the photo frame, stages the release artifacts, and installs them into `/opt/photo-frame`.
+   Run this command as the unprivileged operator account. It compiles the photo frame, stages the release artifacts, and installs them into `/opt/photo-frame`. The stage verifies the kiosk service account exists and will prompt for sudo to create it (along with its primary group) when missing.
 
 1. Configure system services and permissions:
 
@@ -118,7 +118,7 @@ Use the following environment variables to customize an installation:
 | Variable        | Default            | Notes |
 | --------------- | ------------------ | ----- |
 | `INSTALL_ROOT`  | `/opt/photo-frame` | Target installation prefix. |
-| `SERVICE_USER`  | `kiosk`            | The systemd account that owns `/var/lib/photo-frame`. The system stage creates it when missing. |
+| `SERVICE_USER`  | `kiosk`            | The systemd account that owns `/var/lib/photo-frame`. The app stage creates it on demand before installing artifacts. |
 | `SERVICE_GROUP` | `kiosk` (or the primary group for `SERVICE_USER`) | Group that owns `/var/lib/photo-frame` alongside `SERVICE_USER`. |
 | `CARGO_PROFILE` | `release`          | Cargo profile passed to `cargo build`. |
 
