@@ -186,6 +186,12 @@ cleanup_display_managers() {
             systemd_stop_unit "${dm}"
         fi
     done
+
+    local alias_path="/etc/systemd/system/display-manager.service"
+    if [[ -L "${alias_path}" || -e "${alias_path}" ]]; then
+        log "Removing existing display-manager.service alias"
+        rm -f "${alias_path}"
+    fi
 }
 
 update_cmdline() {
