@@ -135,7 +135,7 @@ Use the following environment variables to customize an installation:
 
 When both setup stages complete successfully the Raspberry Pi is ready to boot directly into a kiosk session:
 
-- `/etc/greetd/config.toml` binds greetd to virtual terminal 1 and runs `cage -s -- /usr/local/bin/photo-app` as the `kiosk` user. greetd creates the login session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` while `/var/lib/photo-frame` remains writable by the kiosk account.
+- `/etc/greetd/config.toml` binds greetd to virtual terminal 1 and runs `cage -s -- /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` as the `kiosk` user. greetd creates the login session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` while `/var/lib/photo-frame` remains writable by the kiosk account.
 - Device access comes from the `kiosk` user belonging to the `render`, `video`, and `input` groups. The setup stage wires this up so Vulkan/GL stacks can open `/dev/dri/renderD128` without any extra udev hacks.
 - The kiosk stack relies on `greetd` + `cage`; no display-manager compatibility targets or tty autologin services are installed.
 
