@@ -102,7 +102,7 @@ write_greetd_config() {
 vt = 1
 
 [default_session]
-command = "cage -s -- /usr/local/bin/photo-app"
+command = "cage -s -- /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml"
 user = "kiosk"
 CONFIG
     chmod 0644 "${config_file}"

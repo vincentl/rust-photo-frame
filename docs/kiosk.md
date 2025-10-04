@@ -23,7 +23,7 @@ The script performs the following actions:
 - creates the `kiosk` account with a locked shell and ensures it belongs to the
   `video`, `render`, and `input` groups;
 - writes `/etc/greetd/config.toml` so virtual terminal 1 runs
-  `cage -s -- /usr/local/bin/photo-app` as the `kiosk` user;
+  `cage -s -- /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` as the `kiosk` user;
 - deploys the `photoframe-*` helper units (wifi manager, sync timer, button
   daemon); and
 - enables `greetd.service`, `photoframe-wifi-manager.service`,
@@ -41,7 +41,7 @@ systemd units; it is idempotent.
 vt = 1
 
 [default_session]
-command = "cage -s -- /usr/local/bin/photo-app"
+command = "cage -s -- /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml"
 user = "kiosk"
 ```
 
@@ -54,7 +54,7 @@ journalctl -u greetd -b
 ```
 
 `systemctl status greetd` should show the unit as `active (running)` with
-`/usr/bin/cage -s -- /usr/local/bin/photo-app` in the command line. The journal
+`/usr/bin/cage -s -- /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` in the command line. The journal
 contains both greetd session logs and the photo frame application output.
 
 ## Operations quick reference

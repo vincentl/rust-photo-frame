@@ -19,7 +19,7 @@ The script performs the following actions:
   `wlr-randr`, and `wayland-protocols`,
 - ensures the `kiosk` user exists with `/usr/sbin/nologin` and belongs to the
   `render`, `video`, and `input` groups,
-- writes `/etc/greetd/config.toml` to launch `cage -s -- /usr/local/bin/photo-app`
+- writes `/etc/greetd/config.toml` to launch `cage -s -- /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml`
   on virtual terminal 1, and
 - deploys and enables the supporting `photoframe-*` helper units alongside
   `greetd.service`.

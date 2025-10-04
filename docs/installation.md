@@ -49,7 +49,7 @@ journalctl -u greetd -b
 ```
 
 `systemctl status` should report `active (running)` and show `cage -s --
-/usr/local/bin/photo-app` in the command line. The journal should contain the
+/opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` in the command line. The journal should contain the
 photo frame application logs for the current boot.
 
 Once these checks pass, reboot the device to land directly in the fullscreen
