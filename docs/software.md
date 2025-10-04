@@ -4,9 +4,9 @@ These instructions describe how to prepare a Raspberry Pi the Photo Frame projec
 
 ## Create or identify SSH keys (do this before imaging)
 
-Recent releases of Raspberry Pi Imager (v1.8 and newer) prompt for customization _after_ you choose the OS and storage. Because you will need an SSH public key at that point, confirm that one is available before you begin flashing the card. Commands in this section are examples that should work on macOS or Linux. Consult documentation about your computer's OS for details about how to carryout these steps. See `ssh-keygen` documentation to choose appropriate parameters if you generate a new ssh key.
+Recent releases of Raspberry Pi Imager (v1.8 and newer) prompt for customization _after_ you choose the OS and storage. Because you will need an SSH public key at that point, confirm that one is available before you begin flashing the card. Commands in this section are examples that should work on macOS or Linux. Consult documentation about your computer's OS for details about how to carry out these steps. See `ssh-keygen` documentation to choose appropriate parameters if you generate a new ssh key.
 
-1. Check for existing public ssky key.
+1. Check for an existing public SSH key.
 
    ```bash
    ls ~/.ssh/id_*.pub
@@ -114,7 +114,7 @@ Run the automation in three stages. Each script is idempotent, so you can safely
 
    The postcheck now defers systemd validation until the kiosk environment is provisioned. Expect warnings about `greetd.service` and related helper units until you run the kiosk installer in the next step.
 
-1. Configure system services and permissions:
+1. Configure system services and permissions with the [Trixie kiosk installer](../setup/kiosk-trixie.sh):
 
    ```bash
    sudo ./setup/kiosk-trixie.sh
