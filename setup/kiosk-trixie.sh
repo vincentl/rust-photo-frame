@@ -121,11 +121,28 @@ enable_systemd_units() {
     log "Enabling kiosk services"
     systemctl daemon-reload
 
+    local dm
+    for dm in gdm3.service sddm.service lightdm.service; do
+        if systemctl list-unit-files "${dm}" >/dev/null 2>&1; then
+            log "Disabling conflicting display manager ${dm}"
+            systemctl disable --now "${dm}" >/dev/null 2>&1 || true
+        fi
+    done
+
+    log "Setting default boot target to graphical.target"
+    systemctl set-default graphical.target
+
     if systemctl list-unit-files getty@tty1.service >/dev/null 2>&1; then
+        log "Disabling and masking getty@tty1.service to avoid VT contention"
         systemctl disable --now getty@tty1.service >/dev/null 2>&1 || true
+        systemctl mask getty@tty1.service >/dev/null 2>&1 || true
     fi
 
-    systemctl enable --now greetd.service
+    log "Setting greetd as the system display manager"
+    systemctl enable --now greetd.service >/dev/null 2>&1 || true
+
+    log "Verifying display-manager alias"
+    systemctl status display-manager.service --no-pager || true
 
     local unit
     for unit in photoframe-wifi-manager.service photoframe-buttond.service; do

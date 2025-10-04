@@ -24,6 +24,10 @@ The script performs the following actions:
   `video`, `render`, and `input` groups;
 - writes `/etc/greetd/config.toml` so virtual terminal 1 runs
   `cage -s -- /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` as the `kiosk` user;
+- disables other display managers (`gdm3`, `sddm`, `lightdm`), enables
+  `greetd.service` as the system `display-manager.service`, sets
+  `graphical.target` as the default boot target, and masks `getty@tty1.service`
+  to keep greetd in control of tty1;
 - deploys the `photoframe-*` helper units (wifi manager, sync timer, button
   daemon); and
 - enables `greetd.service`, `photoframe-wifi-manager.service`,
@@ -50,6 +54,7 @@ Check the kiosk stack with the following commands:
 ```bash
 grep VERSION_CODENAME /etc/os-release
 systemctl status greetd
+systemctl status display-manager
 journalctl -u greetd -b
 ```
 

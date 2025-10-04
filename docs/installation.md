@@ -36,8 +36,10 @@ sudo ./setup/kiosk-trixie.sh
 
 The script installs `greetd`, `cage`, `mesa-vulkan-drivers`, `vulkan-tools`,
 `wlr-randr`, and `wayland-protocols`; creates the locked `kiosk` user; writes
-`/etc/greetd/config.toml`; and enables `greetd` alongside the
-`photoframe-*` helpers.
+`/etc/greetd/config.toml`; disables other display managers in favor of the
+`greetd`-provided `display-manager.service`, sets the default boot target to
+`graphical.target`, masks `getty@tty1.service`; and enables `greetd` alongside
+the `photoframe-*` helpers.
 
 ## 4. Validate the kiosk stack
 
@@ -45,6 +47,7 @@ Use the following checks to confirm the kiosk environment is live:
 
 ```bash
 systemctl status greetd
+systemctl status display-manager
 journalctl -u greetd -b
 ```
 
