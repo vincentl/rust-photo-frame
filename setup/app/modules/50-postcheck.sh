@@ -69,17 +69,10 @@ if [[ ! -f "${VAR_CONFIG}" ]]; then
 fi
 
 if command -v systemctl >/dev/null 2>&1; then
-    in_container=0
-    if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt --quiet --container; then
-        in_container=1
-        log WARN "Running inside a container; service activation checks will be treated as warnings"
-    fi
-
     check_service() {
         local service="$1"
         local level_on_fail="$2"
         local message="${service} is not active"
-        local log_level="${level_on_fail}"
 
         if systemctl is-active --quiet "${service}"; then
             return 0
@@ -87,17 +80,12 @@ if command -v systemctl >/dev/null 2>&1; then
 
         systemctl status "${service}" --no-pager || true
 
-        if [[ "${level_on_fail}" == "ERROR" ]] && [[ ${in_container} -eq 0 ]]; then
+        if [[ "${level_on_fail}" == "ERROR" ]]; then
             log ERROR "${message}"
             exit 1
         fi
 
-        if [[ "${level_on_fail}" == "ERROR" ]] && [[ ${in_container} -eq 1 ]]; then
-            log_level="WARN"
-            message+=" (allowed in container environments)"
-        fi
-
-        log "${log_level}" "${message}"
+        log "${level_on_fail}" "${message}"
     }
 
     check_enabled() {
@@ -121,10 +109,18 @@ fi
 
 rustc_version=$(rustc --version 2>/dev/null || echo "rustc unavailable")
 cargo_version=$(cargo --version 2>/dev/null || echo "cargo unavailable")
-service_status=$(systemctl is-active "${KIOSK_SERVICE}" || true)
-wifi_service_status=$(systemctl is-active "${WIFI_SERVICE}" || true)
-button_status=$(systemctl is-active "${BUTTON_SERVICE}" || true)
-sync_status=$(systemctl is-active "${SYNC_TIMER}" || true)
+
+if command -v systemctl >/dev/null 2>&1; then
+    service_status=$(systemctl show -p ActiveState --value "${KIOSK_SERVICE}" 2>/dev/null || echo "not-found")
+    wifi_service_status=$(systemctl show -p ActiveState --value "${WIFI_SERVICE}" 2>/dev/null || echo "not-found")
+    button_status=$(systemctl show -p ActiveState --value "${BUTTON_SERVICE}" 2>/dev/null || echo "not-found")
+    sync_status=$(systemctl show -p ActiveState --value "${SYNC_TIMER}" 2>/dev/null || echo "not-found")
+else
+    service_status="not checked (systemctl unavailable)"
+    wifi_service_status="not checked (systemctl unavailable)"
+    button_status="not checked (systemctl unavailable)"
+    sync_status="not checked (systemctl unavailable)"
+fi
 
 log INFO "Deployment summary:"
 cat <<SUMMARY
