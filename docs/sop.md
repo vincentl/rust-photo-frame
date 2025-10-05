@@ -24,10 +24,20 @@ command = "cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=deb
 user = "kiosk"
 ```
 
-Apply the change by restarting the kiosk session:
+Apply the change by bouncing the kiosk session:
 
 ```bash
-sudo systemctl restart greetd.service
+sudo systemctl stop greetd.service
+sleep 1
+sudo systemctl start greetd.service
 ```
 
-Revert the command to `RUST_LOG=info` once troubleshooting is complete to reduce noise in the journal.
+`systemctl restart` tends to race with logind releasing tty1/DRM to the new session; inserting a short pause keeps the relaunch reliable. Revert the command to `RUST_LOG=info` once troubleshooting is complete to reduce noise in the journal.
+
+## Starting, stopping, and restarting the viewer
+
+- **Stop**: `sudo systemctl stop greetd.service` - immediately tears down the kiosk session and blanks the display.
+- **Start**: `sudo systemctl start greetd.service` - brings greetd back on tty1, which in turn launches `cage` and the photo frame.
+- **Restart**: `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service` - give logind a moment to release the seat before greetd grabs it again.
+
+If you prefer a reusable helper, wrap the sequence in a shell alias or script (e.g. `restart-greetd()`); just keep the pause in place when you need to refresh the viewer.
