@@ -24,6 +24,8 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(4);
+
 fn wait_for_retry(cancel: &CancellationToken, mut remaining: Duration) -> bool {
     if remaining.is_zero() {
         return cancel.is_cancelled();
@@ -51,7 +53,7 @@ pub fn run_windowed(
 ) -> anyhow::Result<()> {
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
-    use winit::event_loop::{ActiveEventLoop, EventLoop};
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
     use winit::window::{Fullscreen, Window, WindowId};
 
     #[repr(C)]
@@ -1704,6 +1706,9 @@ pub fn run_windowed(
             }
 
             self.process_tick(event_loop);
+
+            let wake_at = Instant::now() + CONTROL_TICK_INTERVAL;
+            event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at));
         }
     }
 
