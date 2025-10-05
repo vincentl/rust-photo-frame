@@ -14,8 +14,7 @@ The `maker` directory contains files used to outfit a Dell 27-inch 4K monitor (m
 
 ## Manifest
 
-- `cleat-spacers.scad`: OpenSCAD source file for spacer blocks.  
-  Ensures the French cleat bolts tighten into the VESA screw holes without crushing the monitor’s plastic back shell.
+- `cleat-spacers.scad`: OpenSCAD source file for spacer blocks. Ensures the French cleat bolts tighten into the VESA screw holes without crushing the monitor’s plastic back shell.
 
 - `cleat-spacers.stl`: STL render of the spacer blocks, ready for 3D printing.
 
