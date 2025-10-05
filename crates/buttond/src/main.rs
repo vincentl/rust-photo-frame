@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use evdev::{Device, InputEventKind, Key};
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
-use nix::sys::signal::{kill, Signal};
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -150,7 +150,7 @@ fn scan_dir<P: AsRef<Path>>(dir: P, filter_power_name: bool) -> Result<Option<(D
         Ok(entries) => entries,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
-            return Err(err).with_context(|| format!("failed to read directory {}", dir.display()))
+            return Err(err).with_context(|| format!("failed to read directory {}", dir.display()));
         }
     };
 
@@ -234,7 +234,7 @@ impl Durations {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
     Single,
     Double,
@@ -249,8 +249,15 @@ struct ButtonTracker {
 #[derive(Debug, Clone, Copy)]
 enum State {
     Idle,
-    Pressed { down_at: Instant, is_second: bool },
-    WaitingForSecond { deadline: Instant },
+    Pressed {
+        down_at: Instant,
+        is_second: bool,
+    },
+    WaitingForSecond {
+        deadline: Instant,
+        first_down_at: Instant,
+        released_at: Instant,
+    },
 }
 
 impl ButtonTracker {
@@ -271,10 +278,30 @@ impl ButtonTracker {
                 down_at: now,
                 is_second: false,
             },
-            State::WaitingForSecond { deadline } if now <= deadline => State::Pressed {
-                down_at: now,
-                is_second: true,
-            },
+            State::WaitingForSecond {
+                deadline,
+                first_down_at,
+                released_at,
+            } if now <= deadline => {
+                let guard = self.second_press_guard();
+                if now.saturating_duration_since(released_at) < guard {
+                    debug!(
+                        since_release = ?now.saturating_duration_since(released_at),
+                        ?guard,
+                        "press treated as bounce"
+                    );
+                    self.last_transition = Some(released_at);
+                    State::Pressed {
+                        down_at: first_down_at,
+                        is_second: false,
+                    }
+                } else {
+                    State::Pressed {
+                        down_at: now,
+                        is_second: true,
+                    }
+                }
+            }
             State::WaitingForSecond { .. } => State::Pressed {
                 down_at: now,
                 is_second: false,
@@ -301,6 +328,8 @@ impl ButtonTracker {
                 }
                 self.state = State::WaitingForSecond {
                     deadline: now + self.durations.double_window,
+                    first_down_at: down_at,
+                    released_at: now,
                 };
                 None
             }
@@ -310,7 +339,7 @@ impl ButtonTracker {
 
     fn handle_timeout(&mut self, now: Instant) -> Option<Action> {
         match self.state {
-            State::WaitingForSecond { deadline } if now >= deadline => {
+            State::WaitingForSecond { deadline, .. } if now >= deadline => {
                 self.state = State::Idle;
                 Some(Action::Single)
             }
@@ -320,7 +349,7 @@ impl ButtonTracker {
 
     fn time_until_deadline(&self, now: Instant) -> Option<Duration> {
         match self.state {
-            State::WaitingForSecond { deadline } if deadline > now => Some(deadline - now),
+            State::WaitingForSecond { deadline, .. } if deadline > now => Some(deadline - now),
             State::WaitingForSecond { .. } => Some(Duration::from_millis(0)),
             _ => None,
         }
@@ -335,6 +364,13 @@ impl ButtonTracker {
         }
         self.last_transition = Some(now);
         true
+    }
+
+    fn second_press_guard(&self) -> Duration {
+        const MIN_GUARD_MS: u64 = 75;
+        self.durations
+            .debounce
+            .max(Duration::from_millis(MIN_GUARD_MS))
     }
 }
 
@@ -406,4 +442,78 @@ fn read_pid(path: &Path) -> Result<i32> {
 fn send_signal(pid: i32, signal: Signal) -> Result<()> {
     let pid = Pid::from_raw(pid);
     kill(pid, signal).with_context(|| format!("failed to signal pid {pid}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Action, ButtonTracker, Durations};
+    use std::time::{Duration, Instant};
+
+    fn durations() -> Durations {
+        Durations {
+            debounce: Duration::from_millis(20),
+            single_window: Duration::from_millis(250),
+            double_window: Duration::from_millis(400),
+        }
+    }
+
+    #[test]
+    fn single_press_triggers_single_action() {
+        let mut tracker = ButtonTracker::new(durations());
+        let start = Instant::now();
+
+        tracker.on_press(start);
+        assert!(
+            tracker
+                .on_release(start + Duration::from_millis(100))
+                .is_none()
+        );
+        assert_eq!(
+            tracker.handle_timeout(start + Duration::from_millis(600)),
+            Some(Action::Single)
+        );
+    }
+
+    #[test]
+    fn double_press_triggers_double_action() {
+        let mut tracker = ButtonTracker::new(durations());
+        let start = Instant::now();
+
+        tracker.on_press(start);
+        assert!(
+            tracker
+                .on_release(start + Duration::from_millis(120))
+                .is_none()
+        );
+
+        let second_press = start + Duration::from_millis(220);
+        tracker.on_press(second_press);
+        assert_eq!(
+            tracker.on_release(second_press + Duration::from_millis(80)),
+            Some(Action::Double)
+        );
+    }
+
+    #[test]
+    fn bouncing_release_does_not_trigger_double() {
+        let mut tracker = ButtonTracker::new(durations());
+        let start = Instant::now();
+
+        tracker.on_press(start);
+        let bounce_release = start + Duration::from_millis(60);
+        assert!(tracker.on_release(bounce_release).is_none());
+
+        let bounce_press = bounce_release + Duration::from_millis(40);
+        tracker.on_press(bounce_press);
+        assert!(
+            tracker
+                .on_release(bounce_press + Duration::from_millis(60))
+                .is_none()
+        );
+
+        assert_eq!(
+            tracker.handle_timeout(start + Duration::from_millis(700)),
+            Some(Action::Single)
+        );
+    }
 }
