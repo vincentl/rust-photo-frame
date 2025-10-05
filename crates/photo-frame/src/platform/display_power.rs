@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Default)]
@@ -66,7 +66,6 @@ pub struct OutputSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputSource {
     Autodetected,
-    Fallback,
 }
 
 type CommandRunner = Arc<dyn Fn(&str) -> Result<CommandOutput> + Send + Sync>;
@@ -264,15 +263,6 @@ impl DisplayPowerInner {
                 *cache = Some(selection.clone());
                 Some(selection)
             }
-            OutputDetection::Fallback { name } => {
-                warn!(output = name, "falling back to default output name");
-                let selection = OutputSelection {
-                    name,
-                    source: OutputSource::Fallback,
-                };
-                *cache = Some(selection.clone());
-                Some(selection)
-            }
             OutputDetection::Unavailable => None,
         }
     }
@@ -365,7 +355,6 @@ enum PreparedCommand {
 #[derive(Debug)]
 enum OutputDetection {
     Detected { name: String },
-    Fallback { name: String },
     Unavailable,
 }
 
@@ -385,40 +374,105 @@ fn detect_output(runner: &dyn Fn(&str) -> Result<CommandOutput>) -> OutputDetect
                 stderr = output.stderr,
                 "wlr-randr command failed"
             );
-            OutputDetection::Fallback {
-                name: "HDMI-A-1".to_string(),
-            }
+            OutputDetection::Unavailable
         }
         Err(err) => {
-            warn!(error = %err, "failed to invoke wlr-randr; using fallback output");
-            OutputDetection::Fallback {
-                name: "HDMI-A-1".to_string(),
-            }
+            warn!(error = %err, "failed to invoke wlr-randr");
+            OutputDetection::Unavailable
         }
     }
 }
 
 fn parse_wlr_randr_outputs(stdout: &str) -> Option<String> {
-    let mut fallback = None;
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    #[derive(Debug, Default, Clone)]
+    struct ConnectorState {
+        name: String,
+        internal: bool,
+        enabled: Option<bool>,
+        status_connected: Option<bool>,
+    }
+
+    impl ConnectorState {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                internal: name.starts_with("eDP") || name.starts_with("LVDS"),
+                enabled: None,
+                status_connected: None,
+            }
         }
-        let mut parts = trimmed.split_whitespace();
-        let name = parts.next()?;
-        let status = parts.next().unwrap_or("");
-        if status != "connected" {
-            continue;
+
+        fn mark_enabled(&mut self, value: &str) {
+            let value = value.trim().to_ascii_lowercase();
+            match value.as_str() {
+                "yes" | "on" | "true" | "1" => self.enabled = Some(true),
+                "no" | "off" | "false" | "0" => self.enabled = Some(false),
+                _ => {}
+            }
         }
-        if !name.starts_with("eDP") && !name.starts_with("LVDS") {
-            return Some(name.to_string());
+
+        fn mark_status(&mut self, value: &str) {
+            let value = value.trim().to_ascii_lowercase();
+            if value.starts_with("connected") {
+                self.status_connected = Some(true);
+            } else if value.starts_with("disconnected") {
+                self.status_connected = Some(false);
+            }
         }
-        if fallback.is_none() {
-            fallback = Some(name.to_string());
+
+        fn is_connected(&self) -> bool {
+            if let Some(status) = self.status_connected {
+                status
+            } else if let Some(enabled) = self.enabled {
+                enabled
+            } else {
+                false
+            }
         }
     }
-    fallback
+
+    fn finalize(current: Option<ConnectorState>) -> Option<String> {
+        let connector = current?;
+        if connector.is_connected() && !connector.internal {
+            Some(connector.name)
+        } else {
+            None
+        }
+    }
+
+    let mut current: Option<ConnectorState> = None;
+
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let first = line.chars().next();
+        if first.map(|c| c.is_whitespace()).unwrap_or(false) {
+            if let Some(connector) = current.as_mut() {
+                let trimmed = line.trim_start();
+                if let Some(rest) = trimmed.strip_prefix("Enabled:") {
+                    connector.mark_enabled(rest);
+                } else if let Some(rest) = trimmed.strip_prefix("Status:") {
+                    connector.mark_status(rest);
+                }
+            }
+            continue;
+        }
+
+        if let Some(result) = finalize(current.take()) {
+            return Some(result);
+        }
+
+        let trimmed = line.trim();
+        let mut parts = trimmed.split_whitespace();
+        if let Some(name) = parts.next() {
+            current = Some(ConnectorState::new(name));
+        } else {
+            current = None;
+        }
+    }
+
+    finalize(current)
 }
 
 fn ensure_not_blank(value: &str, label: &str) -> Result<()> {
@@ -462,12 +516,52 @@ impl CommandTemplate {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::fs;
     use std::sync::{Arc, Mutex as StdMutex};
 
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
     #[cfg(not(unix))]
     use std::process::Command;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    const MODERN_WLR_EXTERNAL: &str = r#"HDMI-A-1 "Dell Inc. DELL U2723QE"
+    Enabled: yes
+    Mode: 3840x2160 @ 60.000000 Hz
+    Position: 0,0
+    Status: connected
+
+DP-1 "Dell Inc. DELL U2723QE"
+    Enabled: no
+    Status: disconnected
+
+eDP-1 "BOE 0x0BBD"
+    Enabled: yes
+    Mode: 2256x1504 @ 60.000000 Hz
+    Position: 0,0
+    Status: connected
+"#;
+
+    const MODERN_WLR_INTERNAL_ONLY: &str = r#"eDP-1 "BOE 0x0BBD"
+    Enabled: yes
+    Mode: 2256x1504 @ 60.000000 Hz
+    Position: 0,0
+    Status: connected
+
+LVDS-1 "Generic Panel"
+    Enabled: no
+    Status: disconnected
+"#;
+
+    const MODERN_WLR_NONE: &str = r#"HDMI-A-1 "Dell Inc. DELL U2723QE"
+    Enabled: no
+    Status: disconnected
+
+DP-1 "Dell Inc. DELL U2723QE"
+    Status: disconnected
+"#;
 
     fn status(code: i32) -> ExitStatus {
         #[cfg(unix)]
@@ -525,7 +619,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(
             "wlr-randr".to_string(),
-            vec![command_output(0, "HDMI-A-1 connected 3840x2160@60Hz\n", "")],
+            vec![command_output(0, MODERN_WLR_EXTERNAL, "")],
         );
         map.insert(
             "wlr-randr --output HDMI-A-1 --off || vcgencmd display_power 0".to_string(),
@@ -559,15 +653,11 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_when_detection_fails() {
+    fn skips_command_when_detection_fails() {
         let mut map = HashMap::new();
         map.insert(
             "wlr-randr".to_string(),
             vec![command_output(1, "", "missing binary")],
-        );
-        map.insert(
-            "wlr-randr --output HDMI-A-1 --on  || vcgencmd display_power 1".to_string(),
-            vec![command_output(0, "", "")],
         );
         let runner = StubRunner::new(map).into_runner();
         let plan = DisplayPowerPlan {
@@ -580,15 +670,10 @@ mod tests {
 
         let controller = DisplayPowerController::with_runner(plan, runner).unwrap();
         let report = controller.wake();
-        assert!(report.success());
-        assert_eq!(
-            report.output.as_ref().map(|sel| sel.source),
-            Some(OutputSource::Fallback)
-        );
-        assert_eq!(
-            report.commands[0].command,
-            "wlr-randr --output HDMI-A-1 --on  || vcgencmd display_power 1"
-        );
+        assert!(!report.success());
+        assert!(report.output.is_none());
+        assert_eq!(report.commands.len(), 1);
+        assert_eq!(report.commands[0].command, "no connected outputs detected");
     }
 
     #[test]
@@ -596,11 +681,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(
             "wlr-randr".to_string(),
-            vec![command_output(
-                0,
-                "HDMI-A-1 disconnected\nDP-1 disconnected\n",
-                "",
-            )],
+            vec![command_output(0, MODERN_WLR_NONE, "")],
         );
         let runner = StubRunner::new(map).into_runner();
         let plan = DisplayPowerPlan {
@@ -634,5 +715,122 @@ mod tests {
         assert!(report.sysfs[0].success);
         let contents = std::fs::read_to_string(path).unwrap();
         assert_eq!(contents, "1");
+    }
+
+    #[test]
+    fn parse_prefers_non_internal_output() {
+        let detected = parse_wlr_randr_outputs(MODERN_WLR_EXTERNAL);
+        assert_eq!(detected.as_deref(), Some("HDMI-A-1"));
+    }
+
+    #[test]
+    fn parse_returns_none_when_only_internal_outputs() {
+        let detected = parse_wlr_randr_outputs(MODERN_WLR_INTERNAL_ONLY);
+        assert_eq!(detected, None);
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &std::path::Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn stub_environment(dir: &std::path::Path) {
+        let wlr_stub = dir.join("wlr-randr");
+        write_executable_script(
+            &wlr_stub,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 0 ]]; then
+  if [[ "${POWERCTL_WLR_FAIL_DETECT:-}" == "1" ]]; then
+    exit 1
+  fi
+  cat "${POWERCTL_WLR_FIXTURE}"
+  exit 0
+fi
+printf "%s\n" "$*" >> "${POWERCTL_WLR_LOG}"
+if [[ "${POWERCTL_WLR_FAIL_COMMAND:-}" == "1" ]]; then
+  exit 1
+fi
+exit 0
+"#,
+        );
+
+        let vcgencmd_stub = dir.join("vcgencmd");
+        write_executable_script(
+            &vcgencmd_stub,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf "%s\n" "$*" >> "${POWERCTL_VCGENCMD_LOG}"
+exit 0
+"#,
+        );
+    }
+
+    #[cfg(unix)]
+    fn run_powerctl_with_env(
+        mode: &str,
+        fixture: &str,
+        fail_detect: bool,
+        fail_command: bool,
+    ) -> (std::process::ExitStatus, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture_path = dir.path().join("fixture.txt");
+        fs::write(&fixture_path, fixture).unwrap();
+        let wlr_log = dir.path().join("wlr-log.txt");
+        let vcgencmd_log = dir.path().join("vcgencmd-log.txt");
+        stub_environment(dir.path());
+
+        let script_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("setup/files/bin/powerctl");
+
+        let mut command = std::process::Command::new(script_path);
+        command.arg(mode);
+        command.env(
+            "PATH",
+            format!(
+                "{}:{}",
+                dir.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        command.env("POWERCTL_WLR_FIXTURE", &fixture_path);
+        command.env("POWERCTL_WLR_LOG", &wlr_log);
+        command.env("POWERCTL_VCGENCMD_LOG", &vcgencmd_log);
+        if fail_detect {
+            command.env("POWERCTL_WLR_FAIL_DETECT", "1");
+        }
+        if fail_command {
+            command.env("POWERCTL_WLR_FAIL_COMMAND", "1");
+        }
+
+        let status = command.status().expect("powerctl execution failed");
+        let wlr_contents = fs::read_to_string(&wlr_log).unwrap_or_else(|_| String::new());
+        let vcgencmd_contents = fs::read_to_string(&vcgencmd_log).unwrap_or_else(|_| String::new());
+        (status, wlr_contents, vcgencmd_contents)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn powerctl_detects_modern_external_output() {
+        let (status, wlr_log, vcgencmd_log) =
+            run_powerctl_with_env("sleep", MODERN_WLR_EXTERNAL, false, false);
+        assert!(status.success());
+        assert!(wlr_log.contains("--output HDMI-A-1 --off"));
+        assert!(vcgencmd_log.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn powerctl_reports_failure_when_detection_fails() {
+        let (status, wlr_log, vcgencmd_log) =
+            run_powerctl_with_env("wake", MODERN_WLR_INTERNAL_ONLY, true, true);
+        assert!(!status.success());
+        assert!(wlr_log.is_empty());
+        assert!(vcgencmd_log.is_empty());
     }
 }
