@@ -5,8 +5,7 @@
 - UPDATE: 2
 - DELETE: 5
 
-Major themes: retired historical setup documentation and unused tooling; consolidated staging assets under a single path.
-CI status: repository ships no GitHub workflows after this sweep.
+Major themes: retired historical setup documentation and unused tooling; consolidated staging assets under a single path. CI status: repository ships no GitHub workflows after this sweep.
 
 ## Findings
 

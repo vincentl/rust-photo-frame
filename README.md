@@ -120,7 +120,6 @@ This project was developed with significant assistance from OpenAI’s AI tools:
 
 ## License
 
-This project is licensed under the **MIT License**.
-See the [LICENSE](LICENSE) file for full text.
+This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for full text.
 
 © 2025 Vincent Lucarelli

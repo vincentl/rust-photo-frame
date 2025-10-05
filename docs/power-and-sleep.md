@@ -9,8 +9,7 @@ This guide focuses on powering down HDMI monitors from the Raspberry Pi 5 runnin
    sudo apt update
    sudo apt install wlr-randr
    ```
-2. (Optional) Install the app (`./setup/app/run.sh`) so `/opt/photo-frame/bin/powerctl` lands on the device. The helper mirrors
-   the default inline commands and can be referenced once the staged tree is deployed to `/opt`.
+2. (Optional) Install the app (`./setup/app/run.sh`) so `/opt/photo-frame/bin/powerctl` lands on the device. The helper mirrors the default inline commands and can be referenced once the staged tree is deployed to `/opt`.
 3. Enable sleep in `config.yaml` using the built-in `@OUTPUT@` placeholder:
    ```yaml
    sleep-mode:
