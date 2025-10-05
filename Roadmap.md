@@ -17,12 +17,9 @@
   - [ ] Design sync cadence: periodic pull, manual trigger, conflict handling policy.
   - [ ] Implement sync worker (hashing, temp staging, graceful failover when offline).
   - [ ] Surface manual sync trigger (button event + future web UI hook).
-- [ ] **Configuration & UX**
-  - [ ] Expand config schema to cover matting, schedules, sync, admin settings.
-  - [ ] Define UX flows for first-run wifi setup and device naming.
-- [ ] **Deployment automation**
-  - [ ] Systemd unit files for manager, viewer, and background sync services.
-  - [ ] End-to-end setup validation script (lint config, check dependencies, smoke test viewer).
+- [x] **Configuration & UX**
+  - [x] Expand config schema to cover matting, schedules, sync, admin settings.
+  - [x] Define UX flows for first-run wifi setup and device naming.
 
 ## Setup Roadmap
 
