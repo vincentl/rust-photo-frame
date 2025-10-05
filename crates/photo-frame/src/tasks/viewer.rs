@@ -9,8 +9,8 @@ use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
 use crate::tasks::greeting_screen::GreetingScreen;
 use chrono::Utc;
-use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
-use image::{Rgba, RgbaImage, imageops};
+use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
+use image::{imageops, Rgba, RgbaImage};
 use rand::Rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::time::{interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -703,12 +703,6 @@ pub fn run_windowed(
         applied: bool,
     }
 
-    struct SleepToggleOutcome {
-        transition: Option<SleepTransitionEvent>,
-        override_state: Option<ManualOverride>,
-        issued_target_awake: Option<bool>,
-    }
-
     struct SleepController {
         runtime: SleepModeRuntime,
         override_state: Option<ManualOverride>,
@@ -776,38 +770,17 @@ pub fn run_windowed(
             self.override_state
         }
 
-        fn toggle(&mut self) -> SleepToggleOutcome {
-            self.refresh_snapshot();
-            let target_awake = !self.awake;
-            let desired_override = if target_awake {
-                ManualOverride::ForcedAwake
-            } else {
-                ManualOverride::ForcedSleep
-            };
-            let apply_override = if self.snapshot.awake == target_awake {
-                None
-            } else {
-                Some(desired_override)
-            };
-            self.override_state = apply_override;
-            let transition = self.apply_target(target_awake, SleepCommandSource::Manual);
-            SleepToggleOutcome {
-                transition,
-                override_state: self.override_state,
-                issued_target_awake: Some(target_awake),
-            }
-        }
-
         fn go_to_sleep(&mut self, source: SleepCommandSource) -> SleepCommandResult {
             self.refresh_snapshot();
             match source {
                 SleepCommandSource::Manual => {
                     self.override_state = Some(ManualOverride::ForcedSleep);
                     let transition = self.apply_target(false, SleepCommandSource::Manual);
+                    let applied = transition.is_some();
                     SleepCommandResult {
                         transition,
                         override_state: self.override_state,
-                        applied: true,
+                        applied,
                     }
                 }
                 SleepCommandSource::Schedule => {
@@ -819,10 +792,11 @@ pub fn run_windowed(
                         };
                     }
                     let transition = self.apply_target(false, SleepCommandSource::Schedule);
+                    let applied = transition.is_some();
                     SleepCommandResult {
                         transition,
                         override_state: None,
-                        applied: true,
+                        applied,
                     }
                 }
             }
@@ -834,10 +808,11 @@ pub fn run_windowed(
                 SleepCommandSource::Manual => {
                     self.override_state = Some(ManualOverride::ForcedAwake);
                     let transition = self.apply_target(true, SleepCommandSource::Manual);
+                    let applied = transition.is_some();
                     SleepCommandResult {
                         transition,
                         override_state: self.override_state,
-                        applied: true,
+                        applied,
                     }
                 }
                 SleepCommandSource::Schedule => {
@@ -849,10 +824,11 @@ pub fn run_windowed(
                         };
                     }
                     let transition = self.apply_target(true, SleepCommandSource::Schedule);
+                    let applied = transition.is_some();
                     SleepCommandResult {
                         transition,
                         override_state: None,
-                        applied: true,
+                        applied,
                     }
                 }
             }
@@ -1072,33 +1048,36 @@ pub fn run_windowed(
         fn handle_control_command(&mut self, cmd: ViewerCommand) {
             match cmd {
                 ViewerCommand::ToggleSleep => {
-                    let (outcome, previous_override) = if let Some(ctrl) = self.sleep.as_mut() {
-                        let was_awake = ctrl.is_awake();
-                        let previous = ctrl.current_override();
-                        let outcome = ctrl.toggle();
-                        let target_awake = outcome
-                            .issued_target_awake
-                            .unwrap_or_else(|| ctrl.is_awake());
-                        info!(
-                            sleep_toggle_previous_state =
-                                if was_awake { "awake" } else { "sleeping" },
-                            sleep_toggle_target_state =
-                                if target_awake { "awake" } else { "sleeping" },
-                            sleep_toggle_previous_override = previous.map(ManualOverride::as_str),
-                            sleep_toggle_new_override =
-                                outcome.override_state.map(ManualOverride::as_str),
-                            "sleep toggle command processed",
-                        );
-                        if outcome.transition.is_none() {
-                            debug!("sleep toggle produced no transition");
-                        }
-                        (outcome, previous)
-                    } else {
+                    let Some(ctrl) = self.sleep.as_mut() else {
                         warn!("sleep mode toggle requested but configuration is absent");
                         return;
                     };
-                    self.log_override_change(previous_override, outcome.override_state);
-                    self.handle_sleep_transition(outcome.transition);
+                    let previous_override = ctrl.current_override();
+                    let was_sleeping = self.mode.is_sleeping();
+                    let (result, target_awake) = if was_sleeping {
+                        info!("sleep toggle dispatching awake-now request");
+                        (ctrl.wake_now(SleepCommandSource::Manual), true)
+                    } else {
+                        info!("sleep toggle dispatching go-to-sleep request");
+                        (ctrl.go_to_sleep(SleepCommandSource::Manual), false)
+                    };
+                    info!(
+                        sleep_toggle_previous_state =
+                            if was_sleeping { "sleeping" } else { "awake" },
+                        sleep_toggle_target_state = if target_awake { "awake" } else { "sleeping" },
+                        sleep_toggle_previous_override =
+                            previous_override.map(ManualOverride::as_str),
+                        sleep_toggle_new_override =
+                            result.override_state.map(ManualOverride::as_str),
+                        sleep_toggle_state_applied = result.applied,
+                        sleep_toggle_transition = result.transition.is_some(),
+                        "sleep toggle command processed",
+                    );
+                    if !result.applied {
+                        debug!("sleep toggle matched existing state");
+                    }
+                    self.log_override_change(previous_override, result.override_state);
+                    self.handle_sleep_transition(result.transition);
                 }
                 ViewerCommand::GoToSleep(source) => {
                     if let Some(ctrl) = self.sleep.as_mut() {
@@ -1106,6 +1085,9 @@ pub fn run_windowed(
                         let result = ctrl.go_to_sleep(source);
                         if matches!(source, SleepCommandSource::Manual) {
                             self.log_override_change(previous, result.override_state);
+                            if !result.applied {
+                                debug!("manual sleep request matched existing sleep state");
+                            }
                         } else if !result.applied {
                             if let Some(state) = result.override_state {
                                 info!(
@@ -1119,10 +1101,7 @@ pub fn run_windowed(
                             }
                         }
                         if result.applied && result.transition.is_none() {
-                            debug!(
-                                trigger = ?source,
-                                "sleep command matched existing sleep state"
-                            );
+                            debug!(trigger = ?source, "sleep command matched existing sleep state");
                         }
                         self.handle_sleep_transition(result.transition);
                     } else {
@@ -1135,6 +1114,9 @@ pub fn run_windowed(
                         let result = ctrl.wake_now(source);
                         if matches!(source, SleepCommandSource::Manual) {
                             self.log_override_change(previous, result.override_state);
+                            if !result.applied {
+                                debug!("manual wake request matched existing awake state");
+                            }
                         } else if !result.applied {
                             if let Some(state) = result.override_state {
                                 info!(
@@ -1148,10 +1130,7 @@ pub fn run_windowed(
                             }
                         }
                         if result.applied && result.transition.is_none() {
-                            debug!(
-                                trigger = ?source,
-                                "wake command matched existing awake state"
-                            );
+                            debug!(trigger = ?source, "wake command matched existing awake state");
                         }
                         self.handle_sleep_transition(result.transition);
                     } else {
@@ -1516,7 +1495,11 @@ pub fn run_windowed(
     }
 
     fn boundary_state(boundary: &ScheduleBoundary) -> &'static str {
-        if boundary.awake { "awake" } else { "sleeping" }
+        if boundary.awake {
+            "awake"
+        } else {
+            "sleeping"
+        }
     }
 
     impl ApplicationHandler<ViewerEvent> for App {
