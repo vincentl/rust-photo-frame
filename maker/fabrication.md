@@ -43,5 +43,3 @@ The `maker` directory contains files used to outfit a Dell 27-inch 4K monitor (m
 2. Attach French cleats or your preferred wall-mounting hardware.
 3. Install the electronics, route cables, and secure strain relief.
 4. Close the frame, power it on, and run the software setup steps.
-
-# Support Files for Constructing a Wall-Mounted Frame
