@@ -62,7 +62,7 @@ check_greetd_config() {
         err 'config missing "vt = 1"'
     fi
 
-    if grep -Fxq 'command = "cage -s -- /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml"' "${config}"; then
+    if grep -Fxq 'command = "cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml"' "${config}"; then
         ok 'command matches cage launch'
     else
         err 'config missing cage command'
