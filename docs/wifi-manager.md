@@ -8,6 +8,7 @@ The `wifi-manager` crate is the frame's single entry point for Wi-Fi monitoring,
 - Creates or updates an idempotent hotspot profile (`pf-hotspot`) and brings it online with a random three-word passphrase.
 - Serves a lightweight HTTP UI for submitting replacement SSID/password credentials, then provisions them via `nmcli`.
 - Renders a QR code that points to the recovery portal so phones can jump directly to the setup page.
+- Drives the `photo-frame.service`/`wifi-manager.service` hand-off so the recovery instructions occupy the screen whenever Wi-Fi needs attention.
 - Emits structured logs for every state transition (`ONLINE`, `OFFLINE`, `HOTSPOT`, `PROVISIONING`) and stores the last provisioning attempt in JSON.
 
 ## Binary layout and subcommands
@@ -40,6 +41,9 @@ hotspot:
 ui:
   bind-address: 0.0.0.0
   port: 8080
+display:
+  photo-frame-service: photo-frame.service
+  wifi-manager-service: wifi-manager.service
 ```
 
 | Key | Description |
@@ -54,6 +58,9 @@ ui:
 | `hotspot.ipv4-addr` | Address assigned to the hotspot interface and advertised via DHCP. |
 | `ui.bind-address` | Bind address for the HTTP UI. Normally `0.0.0.0`. |
 | `ui.port` | HTTP UI port (default `8080`). |
+| `display.photo-frame-service` | Systemd unit that owns the primary photo frame session. |
+| `display.wifi-manager-service` | Systemd unit that presents the Wi-Fi recovery UI in Cage. |
+| `display.systemctl-path` | Override path to `systemctl` if not `/usr/bin/systemctl`. |
 
 Whenever you change the config, run `sudo systemctl restart wifi-manager` for the daemon to pick up the new settings.
 
@@ -69,14 +76,14 @@ All mutable state lives under `/var/lib/photo-frame` and is owned by the `photo-
 ## Web provisioning flow
 
 1. The `watch` loop marks the frame `OFFLINE` after `offline-grace-sec` seconds without a gateway response.
-2. The hotspot profile (`pf-hotspot`) is ensured, then activated on the configured interface with WPA2-PSK security.
+2. The hotspot profile (`pf-hotspot`) is ensured, then activated on the configured interface with WPA2-PSK security. The watcher simultaneously starts `wifi-manager.service`, which stops the photo frame session and launches the Cage-hosted recovery UI on `tty1`.
 3. A random three-word passphrase is selected from the bundled wordlist and written to `/var/lib/photo-frame/hotspot-password.txt`.
 4. The QR code generator produces `/var/lib/photo-frame/wifi-qr.png`, embedding the configured UI URL (default `http://192.168.4.1:8080/`).
 5. The HTTP UI binds to `0.0.0.0:<port>` and serves:
    - `GET /` – single-page HTML form for SSID + password entry with inline guidance and QR instructions.
    - `POST /submit` – validates inputs, uses `nmcli` to add/modify the connection, and reports progress.
    - A status polling endpoint so the UI can reflect provisioning progress in near real time.
-6. On success, the hotspot is torn down only after NetworkManager confirms association and DHCP success on the new SSID. Failures leave the hotspot active for another attempt.
+6. On success, the hotspot is torn down only after NetworkManager confirms association and DHCP success on the new SSID. At that point the watcher restarts `photo-frame.service`, returning the slideshow to `tty1`. Failures leave the hotspot active for another attempt.
 7. Results (masked SSID, status, timestamps) are appended to `wifi-last.json` for later support review.
 
 ## Setup automation
