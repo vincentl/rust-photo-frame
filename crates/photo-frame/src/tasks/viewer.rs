@@ -74,6 +74,7 @@ async fn drive_viewer_events(
             }
             _ = ticker.tick() => {
                 if proxy.send_event(ViewerEvent::Tick).is_err() {
+                    warn!("viewer event proxy rejected tick event; stopping driver loop");
                     break;
                 }
             }
@@ -81,11 +82,14 @@ async fn drive_viewer_events(
                 match cmd {
                     Some(cmd) => {
                         if proxy.send_event(ViewerEvent::Command(cmd)).is_err() {
+                            warn!("viewer event proxy rejected command event; stopping driver loop");
                             break;
                         }
                     }
                     None => {
                         control_open = false;
+                        warn!("viewer control channel closed; stopping driver loop");
+                        break;
                     }
                 }
             }
