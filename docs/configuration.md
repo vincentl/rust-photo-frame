@@ -20,7 +20,7 @@ oversample: 1.0 # GPU render oversample vs. screen size
 startup-shuffle-seed: null # Optional deterministic seed for initial shuffle
 
 photo-effect:
-  types: [print-simulation] # Set to [] to disable all effects
+  types: [] # Optional effects; add entries (e.g., print-simulation) to enable
   options:
     print-simulation:
       relief-strength: 0.35
@@ -124,7 +124,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 
 - **Type:** mapping (see [Photo effect configuration](#photo-effect-configuration))
 - **Default:** disabled (`types: []`)
-- **What it does:** Inserts an optional post-processing stage between the loader and viewer. The built-in `print-simulation` effect relights each frame with directional shading and paper sheen inspired by _3D Simulation of Prints for Improved Soft Proofing_.
+- **What it does:** Inserts an optional post-processing stage between the loader and viewer. The built-in `print-simulation` effect relights each frame with directional shading and paper sheen inspired by _3D Simulation of Prints for Improved Soft Proofing_. Add it to `types` when you want that treatment; leaving the list empty keeps the stage off.
 - **When to change it:** Enable when you want the frame to mimic how ink interacts with paper under gallery lighting, or when you add additional effects in future releases.
 
 ### `greeting-screen`
@@ -255,7 +255,7 @@ The command prints the multiplicity assigned to each discovered photo and the fi
 
 ## Photo effect configuration
 
-The optional `photo-effect` task sits between the loader and the viewer. When enabled it reconstructs the decoded RGBA pixels, applies any configured effects, and forwards the modified image downstream. Leave `types` empty (or omit the block entirely) to short-circuit the stage and pass photos through untouched.
+The optional `photo-effect` task sits between the loader and the viewer. When enabled it reconstructs the decoded RGBA pixels, applies any configured effects, and forwards the modified image downstream. Leave `types` empty (or omit the block entirely) to short-circuit the stage and pass photos through untouched. The sample configuration ships with the stage disabled by default.
 
 ### Scheduling effects
 
@@ -263,7 +263,7 @@ The optional `photo-effect` task sits between the loader and the viewer. When en
 - **`type-selection`** — Optional. `random` (default) or `sequential`. `random` draws an effect independently for each slide, while `sequential` walks the `types` list in order and loops back to the first entry after the last.
 - **`options`** — Map of per-effect controls. Every effect referenced in `types` must appear here so the runtime can look up its parameters.
 
-Example: enable the print simulation effect while keeping its debug split active for quick before/after checks.
+Example: enable the print simulation effect (disabled by default) while keeping its debug split active for quick before/after checks.
 
 ```yaml
 photo-effect:
