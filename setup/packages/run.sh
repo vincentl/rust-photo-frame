@@ -24,10 +24,12 @@ main() {
 
   log_step "Installing Rust toolchain"
   "${script_dir}/install-rust.sh"
-
+  
+  green=$(tput setaf 2)
+  
   echo
-  echo "[photoframe-setup] Package provisioning completed successfully."
-  echo "[photoframe-setup] Reconnect your shell to pick up the updated PATH if this was your first run."
+  echo "[photoframe-setup]${green} Package provisioning completed successfully."
+  echo "[photoframe-setup]${green} Exit and reconnect to get a new shell that picks up the updated PATH if this was your first run."
 }
 
 main "$@"
