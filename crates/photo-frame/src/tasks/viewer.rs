@@ -25,7 +25,7 @@ use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(250);
+const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(4);
 
 fn wait_for_retry(cancel: &CancellationToken, mut remaining: Duration) -> bool {
     if remaining.is_zero() {
@@ -742,23 +742,9 @@ pub fn run_windowed(
             if self.override_state.is_some() {
                 self.override_state = None;
                 let transition = self.apply_target(self.snapshot.awake, SleepTrigger::Manual);
-                if transition.is_some() {
-                    SleepToggleOutcome {
-                        transition,
-                        override_state: None,
-                    }
-                } else {
-                    let state = if self.awake {
-                        ManualOverride::ForcedSleep
-                    } else {
-                        ManualOverride::ForcedAwake
-                    };
-                    self.override_state = Some(state);
-                    let transition = self.apply_target(state.desired_awake(), SleepTrigger::Manual);
-                    SleepToggleOutcome {
-                        transition,
-                        override_state: Some(state),
-                    }
+                SleepToggleOutcome {
+                    transition,
+                    override_state: None,
                 }
             } else {
                 let state = if self.awake {
@@ -1109,6 +1095,7 @@ pub fn run_windowed(
                     if let Some(first) = self.pending.pop_front() {
                         info!("first_image path={}", first.path.display());
                         self.current = Some(first);
+                        self.pending_redraw = true;
                         self.greeting_deadline = None;
                         self.displayed_at = Some(std::time::Instant::now());
                         if let Some(cur) = &self.current {
@@ -1132,6 +1119,7 @@ pub fn run_windowed(
                 if let Some(next) = self.next.take() {
                     let path = next.path.clone();
                     self.current = Some(next);
+                    self.pending_redraw = true;
                     self.displayed_at = Some(std::time::Instant::now());
                     debug!(
                         "transition_end kind={} path={} queue_depth={}",
@@ -1179,7 +1167,12 @@ pub fn run_windowed(
             }
 
             if let Some(window) = self.window.as_ref() {
-                if self.pending_redraw || !sleeping {
+                let should_redraw = if sleeping {
+                    self.pending_redraw
+                } else {
+                    self.pending_redraw || self.transition_state.is_some()
+                };
+                if should_redraw {
                     window.request_redraw();
                     self.pending_redraw = false;
                 }
