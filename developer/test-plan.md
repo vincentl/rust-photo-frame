@@ -154,7 +154,9 @@ Exercise each axis at least once per release cycle.
   git fetch origin
   git checkout <release-tag>
   cargo build --release -p rust-photo-frame
-  sudo systemctl restart greetd.service
+  sudo systemctl stop greetd.service
+  sleep 1
+  sudo systemctl start greetd.service
   ```
 - [ ] Validate new version via `rust-photo-frame --version` in logs or manual run.
 - [ ] Rollback rehearsal: checkout previous known-good commit/tag, rebuild, restart service.
@@ -193,14 +195,14 @@ Exercise each axis at least once per release cycle.
 - **Bad config.yaml:**
   - [ ] Restore last-known-good from backup (`sudo cp /var/lib/photo-frame/config.yaml.bak /var/lib/photo-frame/config.yaml`).
   - [ ] Validate YAML syntax with `yamllint` (if installed) or `python3 -c "import yaml,sys; yaml.safe_load(open('/var/lib/photo-frame/config.yaml'))"`.
-  - [ ] Restart service: `sudo systemctl restart greetd.service`.
+  - [ ] Restart service: `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service`.
 - **Broken service (fails to start):**
   - [ ] Inspect logs: `journalctl -u greetd.service -b` and `journalctl -u photoframe-wifi-manager.service -b`.
   - [ ] Rebuild binary: `cargo build --release -p rust-photo-frame`.
   - [ ] Validate unit file dependencies (Wayland, env vars) and run `sudo systemctl daemon-reload`.
 - **Failed update:**
   - [ ] `git checkout <previous-good>`.
-  - [ ] Rebuild + restart service (`sudo systemctl restart greetd.service`).
+  - [ ] Rebuild + restart service (`sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service`).
   - [ ] If binary corrupted, delete `target/` and rebuild.
 - **Network stuck offline:**
   - [ ] Verify Wi-Fi credentials (`nmcli connection show`).

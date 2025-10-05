@@ -48,9 +48,12 @@ journalctl -u greetd -b
 
 ## Operations quick reference
 
-- Restart the kiosk session: `sudo systemctl restart greetd`.
+- Restart the kiosk session: `sudo systemctl stop greetd && sleep 1 && sudo systemctl start greetd`.
 - Tail runtime logs: `sudo journalctl -u greetd -f`.
 - Pause the slideshow: `sudo systemctl stop greetd` (resume with `start`).
 - Inspect display state: `wlr-randr` (installed by the kiosk setup script).
+
+`systemctl restart greetd` tends to relaunch the unit before logind releases tty1 and the DRM devices from the previous kiosk sess
+ion. Stopping, waiting a beat, and then starting avoids that race.
 
 No `display-manager.service`, login overrides, or tty autologin hacks are required—the greetd unit owns kiosk launch entirely.
