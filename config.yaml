@@ -82,7 +82,7 @@ startup-shuffle-seed: null
 
 photo-effect:
   # List zero or more effect types; set to [] to disable the stage entirely.
-  types: [print-simulation]
+  types: []
   # Choose how to iterate through effects when multiple are configured.
   type-selection: random
   options:
