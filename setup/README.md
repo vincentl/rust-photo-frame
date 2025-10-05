@@ -15,7 +15,7 @@ The script performs the following actions:
 - verifies the OS is Raspberry Pi OS Trixie,
 - installs `greetd`, `cage`, `mesa-vulkan-drivers`, `vulkan-tools`, `wlr-randr`, and `wayland-protocols`,
 - ensures the `kiosk` user exists with `/usr/sbin/nologin` and belongs to the `render`, `video`, and `input` groups,
-- writes `/etc/greetd/config.toml` to launch `cage -s -- /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` on virtual terminal 1,
+- writes `/etc/greetd/config.toml` to launch `cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` on virtual terminal 1,
 - disables conflicting display managers (`gdm3`, `sddm`, `lightdm`), enables `greetd.service` as the system `display-manager.service`, sets the default boot target to `graphical.target`, and masks `getty@tty1.service` to avoid VT races, and
 - deploys and enables the supporting `photoframe-*` helper units.
 

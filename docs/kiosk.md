@@ -15,7 +15,7 @@ The script performs the following actions:
 - verifies `/etc/os-release` reports `VERSION_CODENAME=trixie`;
 - installs the Wayland stack required for kiosk mode (`greetd`, `cage`, `mesa-vulkan-drivers`, `vulkan-tools`, `wlr-randr`, and `wayland-protocols`);
 - creates the `kiosk` account with a locked shell and ensures it belongs to the `video`, `render`, and `input` groups;
-- writes `/etc/greetd/config.toml` so virtual terminal 1 runs `cage -s -- /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` as the `kiosk` user;
+- writes `/etc/greetd/config.toml` so virtual terminal 1 runs `cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` as the `kiosk` user;
 - disables other display managers (`gdm3`, `sddm`, `lightdm`), enables `greetd.service` as the system `display-manager.service`, sets `graphical.target` as the default boot target, and masks `getty@tty1.service` to keep greetd in control of tty1;
 - deploys the `photoframe-*` helper units (wifi manager, sync timer, button daemon); and
 - enables `greetd.service`, `photoframe-wifi-manager.service`, `photoframe-buttond.service`, and `photoframe-sync.timer`.
@@ -31,7 +31,7 @@ Re-run the script after OS updates to reapply package dependencies or to repair 
 vt = 1
 
 [default_session]
-command = "cage -s -- /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml"
+command = "cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml"
 user = "kiosk"
 ```
 
@@ -44,7 +44,7 @@ systemctl status display-manager
 journalctl -u greetd -b
 ```
 
-`systemctl status greetd` should show the unit as `active (running)` with `/usr/bin/cage -s -- /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` in the command line. The journal contains both greetd session logs and the photo frame application output.
+`systemctl status greetd` should show the unit as `active (running)` with `/usr/bin/cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` in the command line. The journal contains both greetd session logs and the photo frame application output.
 
 ## Operations quick reference
 
