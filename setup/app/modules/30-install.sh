@@ -72,9 +72,13 @@ bootstrap_runtime() {
             run_sudo install -d -m 770 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${path}"
         fi
     done
-    if [[ -f "${STAGE_DIR}/etc/config.yaml" && ! -f "${CONFIG_DEST}" ]]; then
-        run_sudo install -m 660 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${STAGE_DIR}/etc/config.yaml" "${CONFIG_DEST}"
-        log INFO "Seeded default config at ${CONFIG_DEST}"
+    if [[ -f "${STAGE_DIR}/etc/config.yaml" ]]; then
+        if run_sudo test -f "${CONFIG_DEST}"; then
+            log INFO "Preserving existing runtime config at ${CONFIG_DEST}"
+        else
+            run_sudo install -m 660 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${STAGE_DIR}/etc/config.yaml" "${CONFIG_DEST}"
+            log INFO "Seeded default config at ${CONFIG_DEST}"
+        fi
     fi
 }
 
