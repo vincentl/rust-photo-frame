@@ -51,7 +51,7 @@ pub fn run_windowed(
 ) -> anyhow::Result<()> {
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
-    use winit::event_loop::{ActiveEventLoop, EventLoop};
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
     use winit::window::{Fullscreen, Window, WindowId};
 
     #[repr(C)]
@@ -1706,6 +1706,43 @@ pub fn run_windowed(
                     self.pending_redraw = false;
                 }
             }
+
+            const FAST_TICK: Duration = Duration::from_millis(16);
+            const IDLE_TICK: Duration = Duration::from_millis(250);
+
+            let now = Instant::now();
+            let mut next_wake = now + IDLE_TICK;
+
+            if self.transition_state.is_some()
+                || self.pending_redraw
+                || self.next.is_some()
+                || (sleeping && self.current.is_some())
+            {
+                next_wake = now + FAST_TICK;
+            } else {
+                if let Some(deadline) = self.greeting_deadline {
+                    if deadline <= now {
+                        next_wake = now + FAST_TICK;
+                    } else {
+                        let wait = deadline.saturating_duration_since(now);
+                        let candidate = now + wait;
+                        if candidate < next_wake {
+                            next_wake = candidate;
+                        }
+                    }
+                }
+
+                if let Some(shown_at) = self.displayed_at {
+                    let dwell_deadline = shown_at + Duration::from_millis(self.dwell_ms);
+                    if dwell_deadline <= now {
+                        next_wake = now + FAST_TICK;
+                    } else if dwell_deadline < next_wake {
+                        next_wake = dwell_deadline;
+                    }
+                }
+            }
+
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next_wake));
         }
     }
 
