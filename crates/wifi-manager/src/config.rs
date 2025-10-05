@@ -21,6 +21,8 @@ pub struct Config {
     pub hotspot: HotspotConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub display: DisplayConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -41,6 +43,17 @@ pub struct UiConfig {
     pub bind_address: String,
     #[serde(default = "default_ui_port")]
     pub port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct DisplayConfig {
+    #[serde(default = "default_photo_frame_service")]
+    pub photo_frame_service: String,
+    #[serde(default = "default_wifi_manager_service")]
+    pub wifi_manager_service: String,
+    #[serde(default = "default_systemctl_path")]
+    pub systemctl_path: PathBuf,
 }
 
 impl Config {
@@ -68,6 +81,16 @@ impl Default for UiConfig {
         Self {
             bind_address: default_ui_bind(),
             port: default_ui_port(),
+        }
+    }
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            photo_frame_service: default_photo_frame_service(),
+            wifi_manager_service: default_wifi_manager_service(),
+            systemctl_path: default_systemctl_path(),
         }
     }
 }
@@ -110,4 +133,16 @@ fn default_ui_bind() -> String {
 
 fn default_ui_port() -> u16 {
     8080
+}
+
+fn default_photo_frame_service() -> String {
+    "photo-frame.service".to_string()
+}
+
+fn default_wifi_manager_service() -> String {
+    "wifi-manager.service".to_string()
+}
+
+fn default_systemctl_path() -> PathBuf {
+    PathBuf::from("/usr/bin/systemctl")
 }

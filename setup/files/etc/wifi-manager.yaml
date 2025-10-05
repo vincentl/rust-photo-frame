@@ -11,3 +11,6 @@ hotspot:
 ui:
   bind-address: 0.0.0.0
   port: 8080
+display:
+  photo-frame-service: photo-frame.service
+  wifi-manager-service: wifi-manager.service
