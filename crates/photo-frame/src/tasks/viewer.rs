@@ -691,9 +691,24 @@ pub fn run_windowed(
             if self.override_state.is_some() {
                 self.override_state = None;
                 let transition = self.apply_target(self.snapshot.awake, SleepTrigger::Manual);
-                SleepToggleOutcome {
-                    transition,
-                    override_state: None,
+                if transition.is_some() {
+                    SleepToggleOutcome {
+                        transition,
+                        override_state: None,
+                    }
+                } else {
+                    let state = if self.awake {
+                        ManualOverride::ForcedSleep
+                    } else {
+                        ManualOverride::ForcedAwake
+                    };
+                    self.override_state = Some(state);
+                    let transition =
+                        self.apply_target(state.desired_awake(), SleepTrigger::Manual);
+                    SleepToggleOutcome {
+                        transition,
+                        override_state: Some(state),
+                    }
                 }
             } else {
                 let state = if self.awake {
