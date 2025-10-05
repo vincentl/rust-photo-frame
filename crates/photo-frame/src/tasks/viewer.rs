@@ -51,7 +51,7 @@ pub fn run_windowed(
 ) -> anyhow::Result<()> {
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
-    use winit::event_loop::{ActiveEventLoop, EventLoop};
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
     use winit::window::{Fullscreen, Window, WindowId};
 
     #[repr(C)]
@@ -720,6 +720,18 @@ pub fn run_windowed(
             self.snapshot = self.runtime.schedule_snapshot(Utc::now());
         }
 
+        fn next_schedule_deadline(&self) -> Option<Instant> {
+            let boundary = self.snapshot.next_transition.as_ref()?;
+            let now_instant = Instant::now();
+            let now_utc = Utc::now();
+            let delta = boundary.at_utc - now_utc;
+            let wait = match delta.to_std() {
+                Ok(duration) => duration,
+                Err(_) => Duration::ZERO,
+            };
+            Some(now_instant + wait)
+        }
+
         fn apply_target(
             &mut self,
             target_awake: bool,
@@ -807,6 +819,8 @@ pub fn run_windowed(
         }
     }
 
+    const IDLE_TICK_INTERVAL: Duration = Duration::from_millis(100);
+
     struct App {
         from_loader: Receiver<PhotoLoaded>,
         to_manager_displayed: Sender<Displayed>,
@@ -839,6 +853,23 @@ pub fn run_windowed(
     }
 
     impl App {
+        fn next_idle_deadline(&self, now: Instant) -> Instant {
+            let mut deadline = now + IDLE_TICK_INTERVAL;
+            if let Some(deadline_at) = self.greeting_deadline {
+                deadline = deadline.min(deadline_at.max(now));
+            }
+            if let Some(shown_at) = self.displayed_at {
+                let dwell_deadline = shown_at + Duration::from_millis(self.dwell_ms);
+                deadline = deadline.min(dwell_deadline.max(now));
+            }
+            if let Some(ctrl) = self.sleep.as_ref() {
+                if let Some(next_sleep) = ctrl.next_schedule_deadline() {
+                    deadline = deadline.min(next_sleep.max(now));
+                }
+            }
+            deadline
+        }
+
         fn log_power_report(&self, attempt: &str, report: &PowerCommandReport) {
             let output_name = report.output.as_ref().map(|sel| sel.name.as_str());
             let output_source = report
@@ -1125,6 +1156,10 @@ pub fn run_windowed(
                     self.pending_redraw = false;
                 }
             }
+
+            let now = Instant::now();
+            let deadline = self.next_idle_deadline(now);
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
 
         fn handle_sleep_transition(&mut self, transition: Option<SleepTransitionEvent>) {
