@@ -26,7 +26,6 @@ docs/configuration.md
 docs/fabrication.md
 docs/hardware.md
 docs/images/.gitkeep
-docs/installation.md
 docs/kiosk.md
 docs/power-and-sleep.md
 docs/setup-audit.md
