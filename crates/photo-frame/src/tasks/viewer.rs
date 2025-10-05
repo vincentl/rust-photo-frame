@@ -21,11 +21,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-
-const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(4);
 
 fn wait_for_retry(cancel: &CancellationToken, mut remaining: Duration) -> bool {
     if remaining.is_zero() {
@@ -45,54 +42,6 @@ fn wait_for_retry(cancel: &CancellationToken, mut remaining: Duration) -> bool {
     cancel.is_cancelled()
 }
 
-#[derive(Debug)]
-enum ViewerEvent {
-    Tick,
-    Command(ViewerCommand),
-    Cancelled,
-}
-
-async fn drive_viewer_events(
-    mut control: Receiver<ViewerCommand>,
-    cancel: CancellationToken,
-    proxy: winit::event_loop::EventLoopProxy<ViewerEvent>,
-) {
-    let mut ticker = interval(CONTROL_TICK_INTERVAL);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    if proxy.send_event(ViewerEvent::Tick).is_err() {
-        return;
-    }
-
-    let mut control_open = true;
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                let _ = proxy.send_event(ViewerEvent::Cancelled);
-                break;
-            }
-            _ = ticker.tick() => {
-                if proxy.send_event(ViewerEvent::Tick).is_err() {
-                    break;
-                }
-            }
-            cmd = control.recv(), if control_open => {
-                match cmd {
-                    Some(cmd) => {
-                        if proxy.send_event(ViewerEvent::Command(cmd)).is_err() {
-                            break;
-                        }
-                    }
-                    None => {
-                        control_open = false;
-                    }
-                }
-            }
-        }
-    }
-}
-
 pub fn run_windowed(
     from_loader: Receiver<PhotoLoaded>,
     to_manager_displayed: Sender<Displayed>,
@@ -102,7 +51,7 @@ pub fn run_windowed(
 ) -> anyhow::Result<()> {
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
-    use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+    use winit::event_loop::{ActiveEventLoop, EventLoop};
     use winit::window::{Fullscreen, Window, WindowId};
 
     #[repr(C)]
@@ -739,25 +688,17 @@ pub fn run_windowed(
 
         fn toggle(&mut self) -> SleepToggleOutcome {
             self.refresh_snapshot();
-            if self.override_state.is_some() {
-                self.override_state = None;
-                let transition = self.apply_target(self.snapshot.awake, SleepTrigger::Manual);
-                SleepToggleOutcome {
-                    transition,
-                    override_state: None,
-                }
+            let target_awake = !self.awake;
+            let state = if target_awake {
+                ManualOverride::ForcedAwake
             } else {
-                let state = if self.awake {
-                    ManualOverride::ForcedSleep
-                } else {
-                    ManualOverride::ForcedAwake
-                };
-                self.override_state = Some(state);
-                let transition = self.apply_target(state.desired_awake(), SleepTrigger::Manual);
-                SleepToggleOutcome {
-                    transition,
-                    override_state: Some(state),
-                }
+                ManualOverride::ForcedSleep
+            };
+            self.override_state = Some(state);
+            let transition = self.apply_target(target_awake, SleepTrigger::Manual);
+            SleepToggleOutcome {
+                transition,
+                override_state: Some(state),
             }
         }
 
@@ -864,6 +805,7 @@ pub fn run_windowed(
         from_loader: Receiver<PhotoLoaded>,
         to_manager_displayed: Sender<Displayed>,
         cancel: CancellationToken,
+        control: Receiver<ViewerCommand>,
         window: Option<Arc<Window>>,
         gpu: Option<GpuCtx>,
         current: Option<ImgTex>,
@@ -962,7 +904,7 @@ pub fn run_windowed(
                         match result.override_state {
                             Some(state) => info!(
                                 sleep_mode_manual_override = state.as_str(),
-                                "sleep mode manual override engaged"
+                                "sleep mode manual override set"
                             ),
                             None => info!(
                                 sleep_mode_manual_override = "schedule",
@@ -1303,7 +1245,7 @@ pub fn run_windowed(
         if boundary.awake { "awake" } else { "sleeping" }
     }
 
-    impl ApplicationHandler<ViewerEvent> for App {
+    impl ApplicationHandler for App {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
             self.pending.clear();
             self.ready_results.clear();
@@ -1751,15 +1693,17 @@ pub fn run_windowed(
             }
         }
 
-        fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ViewerEvent) {
-            match event {
-                ViewerEvent::Tick => self.process_tick(event_loop),
-                ViewerEvent::Command(cmd) => {
-                    self.handle_control_command(cmd);
-                    self.process_tick(event_loop);
-                }
-                ViewerEvent::Cancelled => event_loop.exit(),
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            if self.cancel.is_cancelled() {
+                event_loop.exit();
+                return;
             }
+
+            while let Ok(cmd) = self.control.try_recv() {
+                self.handle_control_command(cmd);
+            }
+
+            self.process_tick(event_loop);
         }
     }
 
@@ -1767,7 +1711,7 @@ pub fn run_windowed(
     let mut retry_delay = Duration::from_secs(2);
     let max_retry_delay = Duration::from_secs(30);
     let event_loop = loop {
-        match EventLoop::<ViewerEvent>::with_user_event().build() {
+        match EventLoop::new() {
             Ok(event_loop) => {
                 if retry_attempt > 0 {
                     info!("viewer compositor connection restored");
@@ -1834,13 +1778,11 @@ pub fn run_windowed(
         }
         startup_transition = ctrl.initialize_state();
     }
-    let proxy: EventLoopProxy<ViewerEvent> = event_loop.create_proxy();
-    let control_cancel = cancel.clone();
-    let control_driver = tokio::spawn(drive_viewer_events(control, control_cancel, proxy));
     let mut app = App {
         from_loader,
         to_manager_displayed,
         cancel,
+        control,
         window: None,
         gpu: None,
         current: None,
@@ -1870,14 +1812,6 @@ pub fn run_windowed(
         app.handle_sleep_transition(Some(event));
     }
     event_loop.run_app(&mut app)?;
-
-    control_driver.abort();
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        let _ = handle.block_on(async {
-            let _ = control_driver.await;
-        });
-    }
-
     Ok(())
 }
 
