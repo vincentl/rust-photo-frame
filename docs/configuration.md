@@ -90,7 +90,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Purpose:** Sets the number of decoded images the viewer keeps queued ahead of the slide currently on screen.
 - **Required?** Optional.
 - **Accepted values & defaults:** Positive integer; default `3`. Validation ensures the count stays above zero.
-- **Effect on behavior:** Higher counts buffer more content, smoothing playback on slower storage but increasing GPU memory usage; lower counts conserve memory at the risk of showing load hitches.
+- **Effect on behavior:** Higher counts buffer more content, smoothing playback on slower storage but increasing GPU and CPU memory usage; lower counts conserve memory at the risk of showing load hitches. See [Memory profile and tuning](memory.md) for concrete sizing guidance.
 
 ### `loader-max-concurrent-decodes`
 
