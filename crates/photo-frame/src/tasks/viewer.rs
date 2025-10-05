@@ -778,29 +778,23 @@ pub fn run_windowed(
 
         fn toggle(&mut self) -> SleepToggleOutcome {
             self.refresh_snapshot();
-            if self.override_state.is_some() {
-                self.override_state = None;
-                let target_awake = self.snapshot.awake;
-                let transition = self.apply_target(target_awake, SleepCommandSource::Manual);
-                SleepToggleOutcome {
-                    transition,
-                    override_state: None,
-                    issued_target_awake: Some(target_awake),
-                }
+            let target_awake = !self.awake;
+            let desired_override = if target_awake {
+                ManualOverride::ForcedAwake
             } else {
-                let state = if self.awake {
-                    ManualOverride::ForcedSleep
-                } else {
-                    ManualOverride::ForcedAwake
-                };
-                self.override_state = Some(state);
-                let target_awake = state.desired_awake();
-                let transition = self.apply_target(target_awake, SleepCommandSource::Manual);
-                SleepToggleOutcome {
-                    transition,
-                    override_state: Some(state),
-                    issued_target_awake: Some(target_awake),
-                }
+                ManualOverride::ForcedSleep
+            };
+            let apply_override = if self.snapshot.awake == target_awake {
+                None
+            } else {
+                Some(desired_override)
+            };
+            self.override_state = apply_override;
+            let transition = self.apply_target(target_awake, SleepCommandSource::Manual);
+            SleepToggleOutcome {
+                transition,
+                override_state: self.override_state,
+                issued_target_awake: Some(target_awake),
             }
         }
 
@@ -1078,25 +1072,33 @@ pub fn run_windowed(
         fn handle_control_command(&mut self, cmd: ViewerCommand) {
             match cmd {
                 ViewerCommand::ToggleSleep => {
-                    if let Some(ctrl) = self.sleep.as_mut() {
+                    let (outcome, previous_override) = if let Some(ctrl) = self.sleep.as_mut() {
+                        let was_awake = ctrl.is_awake();
                         let previous = ctrl.current_override();
                         let outcome = ctrl.toggle();
-                        if let Some(target_awake) = outcome.issued_target_awake {
-                            let action = if target_awake {
-                                "awake-now"
-                            } else {
-                                "go-to-sleep"
-                            };
-                            debug!(
-                                sleep_mode_toggle_action = action,
-                                "sleep toggle generated manual command"
-                            );
+                        let target_awake = outcome
+                            .issued_target_awake
+                            .unwrap_or_else(|| ctrl.is_awake());
+                        info!(
+                            sleep_toggle_previous_state =
+                                if was_awake { "awake" } else { "sleeping" },
+                            sleep_toggle_target_state =
+                                if target_awake { "awake" } else { "sleeping" },
+                            sleep_toggle_previous_override = previous.map(ManualOverride::as_str),
+                            sleep_toggle_new_override =
+                                outcome.override_state.map(ManualOverride::as_str),
+                            "sleep toggle command processed",
+                        );
+                        if outcome.transition.is_none() {
+                            debug!("sleep toggle produced no transition");
                         }
-                        self.log_override_change(previous, outcome.override_state);
-                        self.handle_sleep_transition(outcome.transition);
+                        (outcome, previous)
                     } else {
                         warn!("sleep mode toggle requested but configuration is absent");
-                    }
+                        return;
+                    };
+                    self.log_override_change(previous_override, outcome.override_state);
+                    self.handle_sleep_transition(outcome.transition);
                 }
                 ViewerCommand::GoToSleep(source) => {
                     if let Some(ctrl) = self.sleep.as_mut() {
@@ -2084,6 +2086,7 @@ pub fn run_windowed(
             run_schedule_driver(runtime, cancel_global, cancel_local, tx);
         })
     });
+    let greeting_duration = cfg.greeting_screen.effective_duration();
     let mut app = App {
         from_loader,
         to_manager_displayed,
@@ -2095,8 +2098,8 @@ pub fn run_windowed(
         transition_state: None,
         displayed_at: None,
         dwell_ms: cfg.dwell_ms,
-        greeting_duration: cfg.greeting_screen.effective_duration(),
-        greeting_deadline: None,
+        greeting_duration,
+        greeting_deadline: Some(Instant::now() + greeting_duration),
         pending: VecDeque::new(),
         preload_count: cfg.viewer_preload_count,
         oversample: cfg.oversample,
