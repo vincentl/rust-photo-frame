@@ -26,10 +26,11 @@ main() {
   "${script_dir}/install-rust.sh"
   
   green=$(tput setaf 2)
+  reset=$(tput sgr0) 
   
   echo
-  echo "[photoframe-setup]${green} Package provisioning completed successfully."
-  echo "[photoframe-setup]${green} Exit and reconnect to get a new shell that picks up the updated PATH if this was your first run."
+  echo "[photoframe-setup]${green} Package provisioning completed successfully.${reset}"
+  echo "[photoframe-setup]${green} Exit and reconnect to get a new shell that picks up the updated PATH if this was your first run.${reset}"
 }
 
 main "$@"
