@@ -10,7 +10,6 @@ STAGE_DIR="${STAGE_ROOT}/stage"
 
 FILES_ROOT="${REPO_ROOT}/setup/files"
 SYSTEM_UNITS_DIR="${REPO_ROOT}/assets/systemd"
-SYSTEM_PAM_DIR="${REPO_ROOT}/assets/pam"
 
 log() {
     local level="$1"; shift
@@ -83,10 +82,6 @@ else
     log WARN "Default config.yaml not found at repo root"
 fi
 
-if [[ -d "${REPO_ROOT}/assets/background" ]]; then
-    copy_tree "${REPO_ROOT}/assets/background" "${STAGE_DIR}/share/backgrounds" 644
-fi
-
 if [[ -d "${REPO_ROOT}/docs" ]]; then
     rsync -a --delete "${REPO_ROOT}/docs/" "${STAGE_DIR}/docs/"
 fi
@@ -97,10 +92,6 @@ fi
 
 if [[ -d "${SYSTEM_UNITS_DIR}" ]]; then
     rsync -a --delete "${SYSTEM_UNITS_DIR}/" "${STAGE_DIR}/systemd/"
-fi
-
-if [[ -d "${SYSTEM_PAM_DIR}" ]]; then
-    rsync -a --delete "${SYSTEM_PAM_DIR}/" "${STAGE_DIR}/systemd/pam.d/"
 fi
 
 log INFO "Stage artifacts prepared at ${STAGE_DIR}"
