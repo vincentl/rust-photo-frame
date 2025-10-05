@@ -51,7 +51,7 @@ pub fn run_windowed(
 ) -> anyhow::Result<()> {
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
-    use winit::event_loop::{ActiveEventLoop, EventLoop};
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
     use winit::window::{Fullscreen, Window, WindowId};
 
     #[repr(C)]
@@ -1716,6 +1716,10 @@ pub fn run_windowed(
             }
 
             self.process_tick(event_loop);
+
+            const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+            let wake_at = Instant::now() + IDLE_POLL_INTERVAL;
+            event_loop.set_control_flow(ControlFlow::WaitUntil(wake_at));
         }
     }
 
