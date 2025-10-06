@@ -21,6 +21,21 @@ The script performs the following actions:
 
 Re-run the script after OS updates to reapply package dependencies or repair systemd state; it is safe and idempotent.
 
+## Replace the legacy swapfile with zram
+
+Raspberry Pi OS ships with a disk-backed swapfile that can wear out SD cards
+and competes with the photo frame's IO needs. Replace it with compressed
+in-memory swap backed by zram during provisioning:
+
+```bash
+sudo ./setup/install-zram.sh
+```
+
+The helper script disables and removes the default `dphys-swapfile` service,
+installs `systemd-zram-generator`, writes `/etc/systemd/zram-generator.conf.d/photoframe.conf`
+to size the zram swap device to half of physical RAM (capped at 2 GiB), and
+restarts the generated `systemd-zram-setup@zram0.service` unit.
+
 ## Package provisioning helpers
 
 For development images you may still want the extended toolchain provided by `setup/packages/run.sh`:
