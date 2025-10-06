@@ -4,6 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# shellcheck source=setup/lib/raspi_boot.sh
+. "${SCRIPT_DIR}/lib/raspi_boot.sh"
+
 log() {
     printf '[kiosk-setup] %s\n' "$*"
 }
@@ -161,6 +164,8 @@ main() {
     require_root "$@"
     require_trixie
     require_commands
+
+    ensure_boot_config_4k
 
     ensure_packages
     ensure_kiosk_user
