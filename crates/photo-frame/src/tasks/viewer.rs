@@ -18,6 +18,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -26,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(4);
+const SLEEP_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewerMode {
@@ -404,6 +406,7 @@ async fn drive_viewer_events(
     mut control: Receiver<ViewerCommand>,
     cancel: CancellationToken,
     proxy: winit::event_loop::EventLoopProxy<ViewerEvent>,
+    sleeping: Arc<AtomicBool>,
 ) {
     let mut ticker = interval(CONTROL_TICK_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -412,6 +415,9 @@ async fn drive_viewer_events(
         return;
     }
 
+    let mut last_tick_sent = Instant::now();
+    let mut was_sleeping = sleeping.load(Ordering::Relaxed);
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -419,10 +425,25 @@ async fn drive_viewer_events(
                 break;
             }
             _ = ticker.tick() => {
-                if proxy.send_event(ViewerEvent::Tick).is_err() {
-                    warn!("viewer event proxy rejected tick event; stopping driver loop");
-                    break;
+                let sleeping_now = sleeping.load(Ordering::Relaxed);
+                let should_dispatch = if sleeping_now {
+                    if was_sleeping {
+                        last_tick_sent.elapsed() >= SLEEP_TICK_INTERVAL
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                };
+
+                if should_dispatch {
+                    if proxy.send_event(ViewerEvent::Tick).is_err() {
+                        warn!("viewer event proxy rejected tick event; stopping driver loop");
+                        break;
+                    }
+                    last_tick_sent = Instant::now();
                 }
+                was_sleeping = sleeping_now;
             }
             cmd = control.recv() => {
                 match cmd {
@@ -1007,6 +1028,7 @@ pub fn run_windowed(
         mode: ViewerMode,
         display_power: Option<DisplayPowerController>,
         pending_redraw: bool,
+        sleep_state: Arc<AtomicBool>,
     }
 
     impl App {
@@ -1476,6 +1498,7 @@ pub fn run_windowed(
             match kind {
                 SleepTransitionKind::EnteredSleep => {
                     self.mode = ViewerMode::Sleeping;
+                    self.sleep_state.store(true, Ordering::Relaxed);
                     info!(
                         ?trigger,
                         override_state = override_label,
@@ -1505,6 +1528,7 @@ pub fn run_windowed(
                 }
                 SleepTransitionKind::ExitedSleep => {
                     self.mode = ViewerMode::Awake;
+                    self.sleep_state.store(false, Ordering::Relaxed);
                     info!(
                         ?trigger,
                         override_state = override_label,
@@ -2116,7 +2140,13 @@ pub fn run_windowed(
             }
         })
     };
-    let control_driver = tokio::spawn(drive_viewer_events(command_rx, control_cancel, proxy));
+    let sleep_state = Arc::new(AtomicBool::new(initial_mode.is_sleeping()));
+    let control_driver = tokio::spawn(drive_viewer_events(
+        command_rx,
+        control_cancel,
+        proxy,
+        sleep_state.clone(),
+    ));
     let schedule_cancel = CancellationToken::new();
     let schedule_driver = sleep_runtime.clone().map(|runtime| {
         let cancel_global = cancel.clone();
@@ -2156,6 +2186,7 @@ pub fn run_windowed(
         mode: initial_mode,
         display_power,
         pending_redraw: false,
+        sleep_state: sleep_state.clone(),
     };
     if let Some(event) = startup_transition {
         app.handle_sleep_transition(Some(event));
