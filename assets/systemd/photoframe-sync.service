@@ -14,12 +14,15 @@ Environment=SYNC_TOOL=rclone
 Environment="RCLONE_FLAGS=--checkers=8 --transfers=4 --retries=5 --copy-links"
 Environment="RSYNC_FLAGS=-av --delete"
 EnvironmentFile=-/etc/photoframe/sync.env
+# Syncs remote content into the cloud-backed mirror inside ${PHOTO_LIBRARY_PATH}.
 ExecStart=/usr/bin/env bash -euo pipefail -c '\
-DEST="${PHOTO_LIBRARY_PATH:-}"; \
-if [[ -z "${DEST}" ]]; then \
+LIBRARY_ROOT="${PHOTO_LIBRARY_PATH:-}"; \
+if [[ -z "${LIBRARY_ROOT}" ]]; then \
   echo "PHOTO_LIBRARY_PATH must be set" >&2; \
   exit 2; \
 fi; \
+DEST="${LIBRARY_ROOT%/}/cloud"; \
+mkdir -p "${DEST}"; \
 case "${SYNC_TOOL}" in \
   rsync) \
     if [[ -z "${RSYNC_SOURCE:-}" ]]; then \
