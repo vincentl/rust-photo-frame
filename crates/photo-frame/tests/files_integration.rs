@@ -1,4 +1,4 @@
-use rand::{seq::SliceRandom, SeedableRng};
+use rand::{SeedableRng, seq::SliceRandom};
 use rust_photo_frame::config::Configuration;
 use rust_photo_frame::events::{InvalidPhoto, InventoryEvent};
 use rust_photo_frame::tasks::files;

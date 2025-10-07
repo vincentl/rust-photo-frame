@@ -1,24 +1,18 @@
 use crate::config::{
-    MattingConfig, MattingMode, MattingOptions, ScheduleBoundary, ScheduleSource, SleepModeRuntime,
-    SleepScheduleSnapshot, TransitionConfig, TransitionKind, TransitionMode, TransitionOptions,
+    MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionKind, TransitionMode,
+    TransitionOptions,
 };
-use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu, SleepCommandSource, ViewerCommand};
-use crate::platform::display_power::{DisplayPowerController, PowerCommandReport};
+use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand};
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
 use crate::tasks::greeting_screen::GreetingScreen;
-use chrono::{DateTime, Utc};
 use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
 use image::{Rgba, RgbaImage, imageops};
 use rand::Rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
-use std::env;
-use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -27,323 +21,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(4);
-const SLEEP_TICK_INTERVAL: Duration = Duration::from_secs(1);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ViewerMode {
-    Awake,
-    Sleeping,
-}
-
-impl ViewerMode {
-    fn is_sleeping(self) -> bool {
-        matches!(self, ViewerMode::Sleeping)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SleepTransitionKind {
-    EnteredSleep,
-    ExitedSleep,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ManualOverride {
-    ForcedAwake,
-    ForcedSleep,
-}
-
-impl ManualOverride {
-    fn desired_awake(self) -> bool {
-        matches!(self, ManualOverride::ForcedAwake)
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            ManualOverride::ForcedAwake => "forced-awake",
-            ManualOverride::ForcedSleep => "forced-sleep",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct SleepTransitionEvent {
-    kind: SleepTransitionKind,
-    trigger: SleepCommandSource,
-    snapshot: SleepScheduleSnapshot,
-    actual_awake: bool,
-    override_state: Option<ManualOverride>,
-}
-
-struct SleepCommandResult {
-    transition: Option<SleepTransitionEvent>,
-    override_state: Option<ManualOverride>,
-    applied: bool,
-}
-
-pub(crate) struct SleepController {
-    runtime: SleepModeRuntime,
-    override_state: Option<ManualOverride>,
-    awake: bool,
-    snapshot: SleepScheduleSnapshot,
-    initialized: bool,
-    clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
-}
-
-impl SleepController {
-    fn new(runtime: SleepModeRuntime) -> Self {
-        let clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync> = Arc::new(|| Utc::now());
-        Self::with_clock(runtime, clock)
-    }
-
-    fn with_clock(
-        runtime: SleepModeRuntime,
-        clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
-    ) -> Self {
-        let now = clock.as_ref()();
-        Self::build(runtime, clock, now)
-    }
-
-    fn build(
-        runtime: SleepModeRuntime,
-        clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
-        now: DateTime<Utc>,
-    ) -> Self {
-        let snapshot = runtime.schedule_snapshot(now);
-        let mut awake = runtime.is_awake(now);
-        let mut override_state = None;
-        if let Some((state, source)) = Self::detect_startup_override() {
-            info!(
-                sleep_mode_manual_override = state.as_str(),
-                source = %source,
-                "sleep mode override restored at startup"
-            );
-            awake = state.desired_awake();
-            override_state = Some(state);
-        }
-        Self {
-            runtime,
-            override_state,
-            awake,
-            snapshot,
-            initialized: false,
-            clock,
-        }
-    }
-
-    fn initialize_state(&mut self) -> Option<SleepTransitionEvent> {
-        if self.initialized {
-            return None;
-        }
-        self.initialized = true;
-        self.refresh_snapshot();
-        if self.awake {
-            None
-        } else {
-            Some(self.create_event(
-                SleepTransitionKind::EnteredSleep,
-                self.current_trigger(),
-                false,
-            ))
-        }
-    }
-
-    fn is_awake(&self) -> bool {
-        self.awake
-    }
-
-    fn now(&self) -> DateTime<Utc> {
-        self.clock.as_ref()()
-    }
-
-    fn dim_color(&self) -> wgpu::Color {
-        let level = self.runtime.dim_brightness().clamp(0.0, 1.0) as f64;
-        wgpu::Color {
-            r: level,
-            g: level,
-            b: level,
-            a: 1.0,
-        }
-    }
-
-    fn current_override(&self) -> Option<ManualOverride> {
-        self.override_state
-    }
-
-    fn toggle_manual(&mut self) -> SleepCommandResult {
-        self.refresh_snapshot();
-        if self.override_state.is_some() {
-            let target_awake = self.snapshot.awake;
-            self.override_state = None;
-            let transition = self.apply_target(target_awake, SleepCommandSource::Manual);
-            let applied = transition.is_some();
-            SleepCommandResult {
-                transition,
-                override_state: self.override_state,
-                applied,
-            }
-        } else {
-            let target_awake = !self.awake;
-            let next_override = if target_awake {
-                ManualOverride::ForcedAwake
-            } else {
-                ManualOverride::ForcedSleep
-            };
-            self.override_state = Some(next_override);
-            let transition = self.apply_target(target_awake, SleepCommandSource::Manual);
-            let applied = transition.is_some();
-            SleepCommandResult {
-                transition,
-                override_state: self.override_state,
-                applied,
-            }
-        }
-    }
-
-    fn go_to_sleep(&mut self, source: SleepCommandSource) -> SleepCommandResult {
-        self.refresh_snapshot();
-        match source {
-            SleepCommandSource::Manual => {
-                self.override_state = Some(ManualOverride::ForcedSleep);
-                let transition = self.apply_target(false, SleepCommandSource::Manual);
-                let applied = transition.is_some();
-                SleepCommandResult {
-                    transition,
-                    override_state: self.override_state,
-                    applied,
-                }
-            }
-            SleepCommandSource::Schedule => {
-                let previous_override = self.override_state;
-                self.override_state = None;
-                let transition = self.apply_target(false, SleepCommandSource::Schedule);
-                let applied = transition.is_some() || previous_override.is_some();
-                SleepCommandResult {
-                    transition,
-                    override_state: self.override_state,
-                    applied,
-                }
-            }
-        }
-    }
-
-    fn wake_now(&mut self, source: SleepCommandSource) -> SleepCommandResult {
-        self.refresh_snapshot();
-        match source {
-            SleepCommandSource::Manual => {
-                self.override_state = Some(ManualOverride::ForcedAwake);
-                let transition = self.apply_target(true, SleepCommandSource::Manual);
-                let applied = transition.is_some();
-                SleepCommandResult {
-                    transition,
-                    override_state: self.override_state,
-                    applied,
-                }
-            }
-            SleepCommandSource::Schedule => {
-                let previous_override = self.override_state;
-                self.override_state = None;
-                let transition = self.apply_target(true, SleepCommandSource::Schedule);
-                let applied = transition.is_some() || previous_override.is_some();
-                SleepCommandResult {
-                    transition,
-                    override_state: self.override_state,
-                    applied,
-                }
-            }
-        }
-    }
-
-    fn refresh_snapshot(&mut self) {
-        self.snapshot = self.runtime.schedule_snapshot(self.now());
-    }
-
-    fn apply_target(
-        &mut self,
-        target_awake: bool,
-        trigger: SleepCommandSource,
-    ) -> Option<SleepTransitionEvent> {
-        if target_awake == self.awake {
-            return None;
-        }
-        self.awake = target_awake;
-        let kind = if target_awake {
-            SleepTransitionKind::ExitedSleep
-        } else {
-            SleepTransitionKind::EnteredSleep
-        };
-        let event = self.create_event(kind, trigger, target_awake);
-        self.refresh_snapshot();
-        Some(event)
-    }
-
-    fn current_trigger(&self) -> SleepCommandSource {
-        if self.override_state.is_some() {
-            SleepCommandSource::Manual
-        } else {
-            SleepCommandSource::Schedule
-        }
-    }
-
-    fn create_event(
-        &self,
-        kind: SleepTransitionKind,
-        trigger: SleepCommandSource,
-        actual_awake: bool,
-    ) -> SleepTransitionEvent {
-        SleepTransitionEvent {
-            kind,
-            trigger,
-            snapshot: self.snapshot.clone(),
-            actual_awake,
-            override_state: self.override_state,
-        }
-    }
-
-    fn detect_startup_override() -> Option<(ManualOverride, String)> {
-        if let Some(path) = env::var_os("PHOTO_FRAME_SLEEP_OVERRIDE_FILE") {
-            let path = PathBuf::from(path);
-            match fs::read_to_string(&path) {
-                Ok(contents) => {
-                    if let Some(state) = Self::parse_override(contents.trim()) {
-                        return Some((state, format!("file:{}", path.display())));
-                    } else {
-                        warn!(
-                            path = %path.display(),
-                            "unknown contents in PHOTO_FRAME_SLEEP_OVERRIDE_FILE"
-                        );
-                    }
-                }
-                Err(err) => {
-                    warn!(
-                        path = %path.display(),
-                        error = %err,
-                        "failed to read PHOTO_FRAME_SLEEP_OVERRIDE_FILE"
-                    );
-                }
-            }
-        }
-
-        if let Ok(raw) = env::var("PHOTO_FRAME_SLEEP_OVERRIDE") {
-            if let Some(state) = Self::parse_override(&raw) {
-                return Some((state, "env:PHOTO_FRAME_SLEEP_OVERRIDE".to_string()));
-            } else {
-                warn!("PHOTO_FRAME_SLEEP_OVERRIDE has unrecognized value: {}", raw);
-            }
-        }
-
-        None
-    }
-
-    fn parse_override(raw: &str) -> Option<ManualOverride> {
-        let normalized = raw.trim().to_ascii_lowercase();
-        match normalized.as_str() {
-            "wake" | "awake" | "on" | "up" => Some(ManualOverride::ForcedAwake),
-            "sleep" | "asleep" | "off" | "down" => Some(ManualOverride::ForcedSleep),
-            _ => None,
-        }
-    }
-}
 
 fn wait_for_retry(cancel: &CancellationToken, mut remaining: Duration) -> bool {
     if remaining.is_zero() {
@@ -363,28 +40,6 @@ fn wait_for_retry(cancel: &CancellationToken, mut remaining: Duration) -> bool {
     cancel.is_cancelled()
 }
 
-fn wait_for_schedule_tick(
-    cancel_global: &CancellationToken,
-    cancel_local: &CancellationToken,
-    mut remaining: Duration,
-) -> bool {
-    if remaining.is_zero() {
-        return cancel_global.is_cancelled() || cancel_local.is_cancelled();
-    }
-
-    const SLICE: Duration = Duration::from_millis(250);
-    while remaining > Duration::ZERO {
-        if cancel_global.is_cancelled() || cancel_local.is_cancelled() {
-            return true;
-        }
-        let sleep_for = if remaining > SLICE { SLICE } else { remaining };
-        thread::sleep(sleep_for);
-        remaining = remaining.saturating_sub(sleep_for);
-    }
-
-    cancel_global.is_cancelled() || cancel_local.is_cancelled()
-}
-
 #[derive(Debug)]
 enum ViewerEvent {
     Tick,
@@ -396,7 +51,6 @@ async fn drive_viewer_events(
     mut control: Receiver<ViewerCommand>,
     cancel: CancellationToken,
     proxy: winit::event_loop::EventLoopProxy<ViewerEvent>,
-    sleeping: Arc<AtomicBool>,
 ) {
     let mut ticker = interval(CONTROL_TICK_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -405,9 +59,6 @@ async fn drive_viewer_events(
         return;
     }
 
-    let mut last_tick_sent = Instant::now();
-    let mut was_sleeping = sleeping.load(Ordering::Relaxed);
-
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -415,25 +66,10 @@ async fn drive_viewer_events(
                 break;
             }
             _ = ticker.tick() => {
-                let sleeping_now = sleeping.load(Ordering::Relaxed);
-                let should_dispatch = if sleeping_now {
-                    if was_sleeping {
-                        last_tick_sent.elapsed() >= SLEEP_TICK_INTERVAL
-                    } else {
-                        true
-                    }
-                } else {
-                    true
-                };
-
-                if should_dispatch {
-                    if proxy.send_event(ViewerEvent::Tick).is_err() {
-                        warn!("viewer event proxy rejected tick event; stopping driver loop");
-                        break;
-                    }
-                    last_tick_sent = Instant::now();
+                if proxy.send_event(ViewerEvent::Tick).is_err() {
+                    warn!("viewer event proxy rejected tick event; stopping driver loop");
+                    break;
                 }
-                was_sleeping = sleeping_now;
             }
             cmd = control.recv() => {
                 match cmd {
@@ -1014,321 +650,14 @@ pub fn run_windowed(
         clear_color: wgpu::Color,
         rng: rand::rngs::ThreadRng,
         full_config: crate::config::Configuration,
-        sleep: Option<SleepController>,
-        mode: ViewerMode,
-        display_power: Option<DisplayPowerController>,
         pending_redraw: bool,
-        sleep_state: Arc<AtomicBool>,
     }
 
     impl App {
-        fn log_power_report(&self, attempt: &str, report: &PowerCommandReport) {
-            let output_name = report.output.as_ref().map(|sel| sel.name.as_str());
-            let output_source = report
-                .output
-                .as_ref()
-                .map(|sel| format!("{:?}", sel.source));
-            let stderr_messages: Vec<&str> = report
-                .commands
-                .iter()
-                .filter(|cmd| !cmd.stderr.trim().is_empty())
-                .map(|cmd| cmd.stderr.as_str())
-                .collect();
-            let stderr_combined = if stderr_messages.is_empty() {
-                None
-            } else {
-                Some(stderr_messages.join("; "))
-            };
-
-            if report.success() {
-                info!(
-                    action = ?report.action,
-                    attempt,
-                    output = output_name,
-                    output_source = output_source.as_deref(),
-                    "display power action succeeded"
-                );
-            } else {
-                warn!(
-                    action = ?report.action,
-                    attempt,
-                    output = output_name,
-                    output_source = output_source.as_deref(),
-                    stderr = stderr_combined.as_deref(),
-                    "display power action failed"
-                );
-            }
-
-            for cmd in &report.commands {
-                debug!(
-                    action = ?report.action,
-                    attempt,
-                    command = cmd.command,
-                    success = cmd.success,
-                    exit_code = cmd.exit_code,
-                    stderr = cmd.stderr,
-                    stdout = cmd.stdout,
-                    "display power command detail"
-                );
-            }
-
-            for sysfs in &report.sysfs {
-                debug!(
-                    action = ?report.action,
-                    attempt,
-                    path = %sysfs.path.display(),
-                    value = sysfs.value,
-                    success = sysfs.success,
-                    error = ?sysfs.error,
-                    "display power sysfs detail"
-                );
-            }
-        }
-
-        fn log_override_change(
-            &self,
-            previous: Option<ManualOverride>,
-            current: Option<ManualOverride>,
-        ) {
-            if previous == current {
-                return;
-            }
-            match (previous, current) {
-                (Some(_), None) => info!(
-                    sleep_mode_manual_override = "schedule",
-                    "sleep mode manual override cleared"
-                ),
-                (None, Some(state)) => info!(
-                    sleep_mode_manual_override = state.as_str(),
-                    "sleep mode manual override engaged"
-                ),
-                (Some(_), Some(state)) => info!(
-                    sleep_mode_manual_override = state.as_str(),
-                    "sleep mode manual override updated"
-                ),
-                (None, None) => {}
-            }
-        }
-
         fn handle_control_command(&mut self, cmd: ViewerCommand) {
             match cmd {
                 ViewerCommand::ToggleSleep => {
-                    let Some(ctrl) = self.sleep.as_mut() else {
-                        warn!("sleep mode toggle requested but configuration is absent");
-                        return;
-                    };
-                    let previous_override = ctrl.current_override();
-                    let was_sleeping = self.mode.is_sleeping();
-                    let result = ctrl.toggle_manual();
-                    let target_awake = result
-                        .transition
-                        .as_ref()
-                        .map(|event| event.actual_awake)
-                        .unwrap_or_else(|| ctrl.is_awake());
-                    let actual_awake_after = target_awake;
-                    let toggle_action = match (previous_override, result.override_state) {
-                        (None, Some(ManualOverride::ForcedAwake)) => "manual-force-awake",
-                        (None, Some(ManualOverride::ForcedSleep)) => "manual-force-sleep",
-                        (Some(_), None) => "manual-release",
-                        (Some(prev), Some(next)) if prev != next => "manual-override-updated",
-                        (Some(_), Some(_)) => "manual-override-retained",
-                        (None, None) => "schedule",
-                    };
-                    let forcing_sleep =
-                        matches!(result.override_state, Some(ManualOverride::ForcedSleep))
-                            || result
-                                .transition
-                                .as_ref()
-                                .map(|event| !event.actual_awake)
-                                .unwrap_or(false);
-                    let forcing_wake =
-                        matches!(result.override_state, Some(ManualOverride::ForcedAwake))
-                            || result
-                                .transition
-                                .as_ref()
-                                .map(|event| event.actual_awake)
-                                .unwrap_or(false);
-                    let releasing_override =
-                        previous_override.is_some() && result.override_state.is_none();
-                    let toggle_message = if releasing_override {
-                        if actual_awake_after {
-                            "sleep toggle releasing manual override and returning to wake"
-                        } else {
-                            "sleep toggle releasing manual override and returning to sleep"
-                        }
-                    } else if forcing_sleep {
-                        "sleep toggle forcing sleep"
-                    } else if forcing_wake {
-                        "sleep toggle forcing wake"
-                    } else {
-                        "sleep toggle made no changes"
-                    };
-                    info!(
-                        sleep_toggle_previous_state =
-                            if was_sleeping { "sleeping" } else { "awake" },
-                        sleep_toggle_target_state = if target_awake { "awake" } else { "sleeping" },
-                        sleep_toggle_previous_override =
-                            previous_override.map(ManualOverride::as_str),
-                        sleep_toggle_new_override =
-                            result.override_state.map(ManualOverride::as_str),
-                        sleep_toggle_state_applied = result.applied,
-                        sleep_toggle_transition = result.transition.is_some(),
-                        sleep_toggle_action = toggle_action,
-                        sleep_toggle_forcing_sleep = forcing_sleep,
-                        sleep_toggle_forcing_wake = forcing_wake,
-                        sleep_toggle_releasing_override = releasing_override,
-                        "{}",
-                        toggle_message,
-                    );
-                    if !result.applied {
-                        debug!("sleep toggle matched existing state");
-                    }
-                    self.log_override_change(previous_override, result.override_state);
-                    self.handle_sleep_transition(result.transition);
-                }
-                ViewerCommand::GoToSleep(source) => {
-                    if let Some(ctrl) = self.sleep.as_mut() {
-                        let previous = ctrl.current_override();
-                        let result = ctrl.go_to_sleep(source);
-                        let forcing_sleep =
-                            matches!(result.override_state, Some(ManualOverride::ForcedSleep))
-                                || result
-                                    .transition
-                                    .as_ref()
-                                    .map(|event| !event.actual_awake)
-                                    .unwrap_or(false);
-                        let forcing_wake =
-                            matches!(result.override_state, Some(ManualOverride::ForcedAwake))
-                                || result
-                                    .transition
-                                    .as_ref()
-                                    .map(|event| event.actual_awake)
-                                    .unwrap_or(false);
-                        let releasing_override =
-                            previous.is_some() && result.override_state.is_none();
-                        let command_source = match source {
-                            SleepCommandSource::Manual => "manual",
-                            SleepCommandSource::Schedule => "schedule",
-                        };
-                        let message = match (forcing_sleep, releasing_override) {
-                            (true, true) => {
-                                format!(
-                                    "{command_source} sleep command forcing sleep and releasing manual override"
-                                )
-                            }
-                            (true, false) => {
-                                format!("{command_source} sleep command forcing sleep")
-                            }
-                            (false, true) => {
-                                format!(
-                                    "{command_source} sleep command releasing manual override (sleep already active)"
-                                )
-                            }
-                            (false, false) => {
-                                format!("{command_source} sleep command confirming sleep state")
-                            }
-                        };
-                        info!(
-                            sleep_command_source = command_source,
-                            sleep_command_target_state = "sleep",
-                            sleep_command_final_state =
-                                if ctrl.is_awake() { "awake" } else { "sleeping" },
-                            sleep_command_previous_override = previous.map(ManualOverride::as_str),
-                            sleep_command_new_override =
-                                result.override_state.map(ManualOverride::as_str),
-                            sleep_command_transition = result.transition.is_some(),
-                            sleep_command_state_applied = result.applied,
-                            sleep_command_forcing_sleep = forcing_sleep,
-                            sleep_command_forcing_wake = forcing_wake,
-                            sleep_command_releasing_override = releasing_override,
-                            "{}",
-                            message,
-                        );
-                        self.log_override_change(previous, result.override_state);
-                        if !result.applied {
-                            debug!("sleep command matched existing sleep state");
-                        } else if result.transition.is_none() {
-                            debug!(
-                                trigger = ?source,
-                                "sleep command updated overrides without changing sleep state"
-                            );
-                        }
-                        self.handle_sleep_transition(result.transition);
-                    } else {
-                        warn!("sleep mode go-to-sleep requested but configuration is absent");
-                    }
-                }
-                ViewerCommand::AwakeNow(source) => {
-                    if let Some(ctrl) = self.sleep.as_mut() {
-                        let previous = ctrl.current_override();
-                        let result = ctrl.wake_now(source);
-                        let forcing_sleep =
-                            matches!(result.override_state, Some(ManualOverride::ForcedSleep))
-                                || result
-                                    .transition
-                                    .as_ref()
-                                    .map(|event| !event.actual_awake)
-                                    .unwrap_or(false);
-                        let forcing_wake =
-                            matches!(result.override_state, Some(ManualOverride::ForcedAwake))
-                                || result
-                                    .transition
-                                    .as_ref()
-                                    .map(|event| event.actual_awake)
-                                    .unwrap_or(false);
-                        let releasing_override =
-                            previous.is_some() && result.override_state.is_none();
-                        let command_source = match source {
-                            SleepCommandSource::Manual => "manual",
-                            SleepCommandSource::Schedule => "schedule",
-                        };
-                        let message = match (forcing_wake, releasing_override) {
-                            (true, true) => {
-                                format!(
-                                    "{command_source} wake command forcing wake and releasing manual override"
-                                )
-                            }
-                            (true, false) => {
-                                format!("{command_source} wake command forcing wake")
-                            }
-                            (false, true) => {
-                                format!(
-                                    "{command_source} wake command releasing manual override (wake already active)"
-                                )
-                            }
-                            (false, false) => {
-                                format!("{command_source} wake command confirming wake state")
-                            }
-                        };
-                        info!(
-                            sleep_command_source = command_source,
-                            sleep_command_target_state = "wake",
-                            sleep_command_final_state =
-                                if ctrl.is_awake() { "awake" } else { "sleeping" },
-                            sleep_command_previous_override = previous.map(ManualOverride::as_str),
-                            sleep_command_new_override =
-                                result.override_state.map(ManualOverride::as_str),
-                            sleep_command_transition = result.transition.is_some(),
-                            sleep_command_state_applied = result.applied,
-                            sleep_command_forcing_sleep = forcing_sleep,
-                            sleep_command_forcing_wake = forcing_wake,
-                            sleep_command_releasing_override = releasing_override,
-                            "{}",
-                            message,
-                        );
-                        self.log_override_change(previous, result.override_state);
-                        if !result.applied {
-                            debug!("wake command matched existing awake state");
-                        } else if result.transition.is_none() {
-                            debug!(
-                                trigger = ?source,
-                                "wake command updated overrides without changing wake state"
-                            );
-                        }
-                        self.handle_sleep_transition(result.transition);
-                    } else {
-                        warn!("sleep mode awake-now requested but configuration is absent");
-                    }
+                    info!("viewer received ToggleSleep command");
                 }
             }
         }
@@ -1341,10 +670,7 @@ pub fn run_windowed(
 
             self.drain_mat_results();
 
-            match self.mode {
-                ViewerMode::Sleeping => self.tick_sleeping(),
-                ViewerMode::Awake => self.tick_awake(),
-            }
+            self.tick_awake();
 
             self.request_redraw();
         }
@@ -1358,10 +684,6 @@ pub fn run_windowed(
                 }
                 self.ready_results.push_back(result);
             }
-        }
-
-        fn tick_sleeping(&mut self) {
-            // During sleep we keep queued results available but avoid heavy work.
         }
 
         fn tick_awake(&mut self) {
@@ -1554,143 +876,12 @@ pub fn run_windowed(
             let Some(window) = self.window.as_ref() else {
                 return;
             };
-            let should_redraw = if self.mode.is_sleeping() {
-                self.pending_redraw
-            } else {
-                self.pending_redraw || self.transition_state.is_some()
-            };
+            let should_redraw = self.pending_redraw || self.transition_state.is_some();
             if should_redraw {
                 window.request_redraw();
                 self.pending_redraw = false;
             }
         }
-
-        fn handle_sleep_transition(&mut self, transition: Option<SleepTransitionEvent>) {
-            let Some(event) = transition else {
-                return;
-            };
-
-            let SleepTransitionEvent {
-                kind,
-                trigger,
-                snapshot,
-                actual_awake,
-                override_state,
-            } = event;
-
-            self.pending_redraw = true;
-
-            let schedule_source = describe_schedule_source(snapshot.active_source);
-            let next_info = snapshot.next_transition.as_ref().map(|boundary| {
-                (
-                    boundary.at_local.to_rfc3339(),
-                    boundary_state(boundary),
-                    describe_schedule_source(boundary.source).into_owned(),
-                    boundary.label.clone(),
-                )
-            });
-
-            let (next_time, next_state, next_source, next_label) = match next_info.as_ref() {
-                Some((time, state, source, label)) => (
-                    Some(time.as_str()),
-                    Some(*state),
-                    Some(source.as_str()),
-                    Some(label.as_str()),
-                ),
-                None => (None, None, None, None),
-            };
-
-            let override_label = override_state.map(|state| state.as_str());
-            let local_time = snapshot.now_local.to_rfc3339();
-            let utc_time = snapshot.now_utc.to_rfc3339();
-            let active_rule = snapshot.active_label.clone();
-
-            match kind {
-                SleepTransitionKind::EnteredSleep => {
-                    self.mode = ViewerMode::Sleeping;
-                    self.sleep_state.store(true, Ordering::Relaxed);
-                    info!(
-                        ?trigger,
-                        override_state = override_label,
-                        schedule_source = schedule_source.as_ref(),
-                        local_time = local_time.as_str(),
-                        utc_time = utc_time.as_str(),
-                        active_rule = active_rule.as_str(),
-                        timezone = snapshot.timezone.to_string(),
-                        next_transition = next_time,
-                        next_transition_state = next_state,
-                        next_transition_source = next_source,
-                        next_transition_label = next_label,
-                        "sleep mode entered"
-                    );
-
-                    self.transition_state = None;
-                    self.next = None;
-                    self.displayed_at = None;
-
-                    if let Some(controller) = self.display_power.as_ref() {
-                        let report = controller.sleep();
-                        self.log_power_report("sleep", &report);
-                        if !report.success() {
-                            warn!("display power sleep command failed; remaining in dim-only mode");
-                        }
-                    }
-                }
-                SleepTransitionKind::ExitedSleep => {
-                    self.mode = ViewerMode::Awake;
-                    self.sleep_state.store(false, Ordering::Relaxed);
-                    info!(
-                        ?trigger,
-                        override_state = override_label,
-                        schedule_source = schedule_source.as_ref(),
-                        local_time = local_time.as_str(),
-                        utc_time = utc_time.as_str(),
-                        active_rule = active_rule.as_str(),
-                        timezone = snapshot.timezone.to_string(),
-                        next_transition = next_time,
-                        next_transition_state = next_state,
-                        next_transition_source = next_source,
-                        next_transition_label = next_label,
-                        "sleep mode exited"
-                    );
-
-                    if let Some(controller) = self.display_power.as_ref() {
-                        let attempt_one = controller.wake();
-                        self.log_power_report("wake-attempt-1", &attempt_one);
-                        if !attempt_one.success() {
-                            warn!("display wake attempt 1 failed; retrying in 2 seconds");
-                            thread::sleep(Duration::from_secs(2));
-                            let attempt_two = controller.wake();
-                            self.log_power_report("wake-attempt-2", &attempt_two);
-                            if !attempt_two.success() {
-                                warn!(
-                                    "display wake commands failed after retry; keeping logical state awake"
-                                );
-                            }
-                        }
-                    }
-
-                    if actual_awake && self.current.is_some() {
-                        self.displayed_at = Some(Instant::now());
-                    }
-                }
-            }
-        }
-    }
-
-    fn describe_schedule_source(source: ScheduleSource) -> Cow<'static, str> {
-        match source {
-            ScheduleSource::Default => Cow::Borrowed("on-hours"),
-            ScheduleSource::WeekdayOverride => Cow::Borrowed("weekday-override"),
-            ScheduleSource::WeekendOverride => Cow::Borrowed("weekend-override"),
-            ScheduleSource::DayOverride(day) => {
-                Cow::Owned(format!("days.{}", day.to_string().to_ascii_lowercase()))
-            }
-        }
-    }
-
-    fn boundary_state(boundary: &ScheduleBoundary) -> &'static str {
-        if boundary.awake { "awake" } else { "sleeping" }
     }
 
     impl ApplicationHandler<ViewerEvent> for App {
@@ -1705,11 +896,6 @@ pub fn run_windowed(
             self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
             self.mat_inflight = 0;
             self.pending_redraw = true;
-            self.mode = if self.sleep.as_ref().is_some_and(|ctrl| !ctrl.is_awake()) {
-                ViewerMode::Sleeping
-            } else {
-                ViewerMode::Awake
-            };
             let attrs = Window::default_attributes().with_title("Photo Frame");
             let window = Arc::new(event_loop.create_window(attrs).unwrap());
             window.set_decorations(false);
@@ -1992,36 +1178,6 @@ pub fn run_windowed(
                                 label: Some("draw-encoder"),
                             });
 
-                    let sleeping = self.mode.is_sleeping();
-                    if sleeping {
-                        let dim_color = self
-                            .sleep
-                            .as_ref()
-                            .map(|ctrl| ctrl.dim_color())
-                            .unwrap_or(self.clear_color);
-                        {
-                            let _sleep_pass =
-                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                    label: Some("sleep-pass"),
-                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                        view: &view,
-                                        depth_slice: None,
-                                        resolve_target: None,
-                                        ops: wgpu::Operations {
-                                            load: wgpu::LoadOp::Clear(dim_color),
-                                            store: wgpu::StoreOp::Store,
-                                        },
-                                    })],
-                                    depth_stencil_attachment: None,
-                                    occlusion_query_set: None,
-                                    timestamp_writes: None,
-                                });
-                        }
-                        gpu.queue.submit(Some(encoder.finish()));
-                        frame.present();
-                        return;
-                    }
-
                     if self.current.is_none() && self.transition_state.is_none() {
                         gpu.greeting.render(&mut encoder, &view);
                         gpu.queue.submit(Some(encoder.finish()));
@@ -2211,32 +1367,6 @@ pub fn run_windowed(
             a: 1.0,
         })
         .unwrap_or(wgpu::Color::BLACK);
-    let sleep_runtime = cfg
-        .sleep_mode
-        .as_ref()
-        .and_then(|cfg| cfg.runtime().cloned());
-    let display_power = sleep_runtime
-        .as_ref()
-        .and_then(|runtime| runtime.display_power().cloned());
-    let mut sleep_controller = sleep_runtime.clone().map(SleepController::new);
-    let mut startup_transition = None;
-    if let Some(ctrl) = sleep_controller.as_mut() {
-        if !ctrl.is_awake() {
-            info!(
-                sleep_mode_startup_state = "sleeping",
-                "sleep mode active at startup"
-            );
-        }
-        startup_transition = ctrl.initialize_state();
-    }
-    let initial_mode = if sleep_controller
-        .as_ref()
-        .is_some_and(|ctrl| !ctrl.is_awake())
-    {
-        ViewerMode::Sleeping
-    } else {
-        ViewerMode::Awake
-    };
     let proxy: EventLoopProxy<ViewerEvent> = event_loop.create_proxy();
     let control_cancel = cancel.clone();
     let (command_tx, command_rx) = tokio::sync::mpsc::channel(64);
@@ -2250,22 +1380,7 @@ pub fn run_windowed(
             }
         })
     };
-    let sleep_state = Arc::new(AtomicBool::new(initial_mode.is_sleeping()));
-    let control_driver = tokio::spawn(drive_viewer_events(
-        command_rx,
-        control_cancel,
-        proxy,
-        sleep_state.clone(),
-    ));
-    let schedule_cancel = CancellationToken::new();
-    let schedule_driver = sleep_runtime.clone().map(|runtime| {
-        let cancel_global = cancel.clone();
-        let cancel_local = schedule_cancel.clone();
-        let tx = command_tx.clone();
-        std::thread::spawn(move || {
-            run_schedule_driver(runtime, cancel_global, cancel_local, tx);
-        })
-    });
+    let control_driver = tokio::spawn(drive_viewer_events(command_rx, control_cancel, proxy));
     let greeting_duration = cfg.greeting_screen.effective_duration();
     let mut app = App {
         from_loader,
@@ -2292,22 +1407,11 @@ pub fn run_windowed(
         clear_color,
         rng: rand::rng(),
         full_config: cfg.clone(),
-        sleep: sleep_controller.take(),
-        mode: initial_mode,
-        display_power,
         pending_redraw: false,
-        sleep_state: sleep_state.clone(),
     };
-    if let Some(event) = startup_transition {
-        app.handle_sleep_transition(Some(event));
-    }
     event_loop.run_app(&mut app)?;
 
     drop(command_tx);
-    schedule_cancel.cancel();
-    if let Some(handle) = schedule_driver {
-        let _ = handle.join();
-    }
     control_driver.abort();
     forward_handle.abort();
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -2318,63 +1422,6 @@ pub fn run_windowed(
     }
 
     Ok(())
-}
-
-fn run_schedule_driver(
-    runtime: SleepModeRuntime,
-    cancel_global: CancellationToken,
-    cancel_local: CancellationToken,
-    command_tx: Sender<ViewerCommand>,
-) {
-    let mut snapshot = runtime.schedule_snapshot(Utc::now());
-    loop {
-        if cancel_global.is_cancelled() || cancel_local.is_cancelled() {
-            break;
-        }
-
-        let Some(next) = snapshot.next_transition.clone() else {
-            if wait_for_schedule_tick(&cancel_global, &cancel_local, Duration::from_secs(60)) {
-                break;
-            }
-            snapshot = runtime.schedule_snapshot(Utc::now());
-            continue;
-        };
-
-        let now = Utc::now();
-        let wait_duration = if next.at_utc > now {
-            match (next.at_utc - now).to_std() {
-                Ok(dur) => dur,
-                Err(_) => Duration::ZERO,
-            }
-        } else {
-            Duration::ZERO
-        };
-
-        if wait_for_schedule_tick(&cancel_global, &cancel_local, wait_duration) {
-            break;
-        }
-        if cancel_global.is_cancelled() || cancel_local.is_cancelled() {
-            break;
-        }
-
-        let command = if next.awake {
-            ViewerCommand::AwakeNow(SleepCommandSource::Schedule)
-        } else {
-            ViewerCommand::GoToSleep(SleepCommandSource::Schedule)
-        };
-        debug!(
-            schedule_trigger_local = %next.at_local.to_rfc3339(),
-            schedule_trigger_state = if next.awake { "awake" } else { "sleep" },
-            schedule_trigger_label = next.label,
-            "sleep schedule driver dispatching command"
-        );
-        if command_tx.blocking_send(command).is_err() {
-            debug!("sleep schedule driver stopping: viewer command channel closed");
-            break;
-        }
-
-        snapshot = runtime.schedule_snapshot(Utc::now());
-    }
 }
 
 fn compute_padded_stride(bytes_per_row: u32) -> u32 {
@@ -2474,222 +1521,6 @@ fn center_crop_or_pad(mut img: RgbaImage, target_w: u32, target_h: u32) -> RgbaI
     } else {
         img
     }
-}
-
-#[cfg(test)]
-use crate::config::{DailyHoursSpec, SleepModeConfig};
-#[cfg(test)]
-use chrono::TimeZone;
-#[cfg(test)]
-use std::collections::BTreeMap;
-#[cfg(test)]
-use std::sync::Mutex;
-
-#[cfg(test)]
-type TestSleepController = SleepController;
-#[cfg(test)]
-type TestManualOverride = ManualOverride;
-#[cfg(test)]
-type TestSleepTransitionKind = SleepTransitionKind;
-
-#[cfg(test)]
-fn make_gradient(width: u32, height: u32) -> RgbaImage {
-    image::ImageBuffer::from_fn(width, height, |x, y| {
-        let r = ((x * 255) / width.max(1)).min(255) as u8;
-        let g = ((y * 255) / height.max(1)).min(255) as u8;
-        Rgba([r, g, 0, 255])
-    })
-}
-
-#[cfg(test)]
-fn sample_sleep_runtime() -> SleepModeRuntime {
-    let mut config = SleepModeConfig {
-        timezone: "UTC".to_string(),
-        on_hours: DailyHoursSpec {
-            start: "08:00".to_string(),
-            end: "20:00".to_string(),
-        },
-        weekday_override: None,
-        weekend_override: None,
-        days: BTreeMap::new(),
-        dim_brightness: 0.1,
-        display_power: None,
-        runtime: None,
-    };
-    config.prepare_runtime().unwrap();
-    config.runtime().cloned().unwrap()
-}
-
-#[cfg(test)]
-fn make_clock(
-    initial: DateTime<Utc>,
-) -> (
-    Arc<Mutex<DateTime<Utc>>>,
-    Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
-) {
-    let state = Arc::new(Mutex::new(initial));
-    let clock_state = Arc::clone(&state);
-    let clock: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync> =
-        Arc::new(move || *clock_state.lock().unwrap());
-    (state, clock)
-}
-
-#[cfg(test)]
-#[test]
-fn scale_cover_matches_canvas_dimensions() {
-    let src = make_gradient(400, 300);
-    let canvas = scale_image_to_cover_canvas(&src, 1920, 1080, 4096);
-    assert_eq!(canvas.dimensions(), (1920, 1080));
-    let center = canvas.get_pixel(960, 540);
-    assert_eq!(center[3], 255);
-}
-
-#[cfg(test)]
-#[test]
-fn scale_cover_respects_max_texture_limit() {
-    let src = make_gradient(1000, 400);
-    let canvas = scale_image_to_cover_canvas(&src, 1920, 1080, 2000);
-    assert_eq!(canvas.dimensions(), (1920, 1080));
-    let top_left = canvas.get_pixel(0, 0);
-    let bottom_right = canvas.get_pixel(1919, 1079);
-    assert!(top_left[3] == 255 && bottom_right[3] == 255);
-}
-
-#[cfg(test)]
-#[test]
-fn scale_cover_portrait_fills_width() {
-    let src = make_gradient(600, 4000);
-    let canvas = scale_image_to_cover_canvas(&src, 1920, 1080, 4096);
-    assert_eq!(canvas.dimensions(), (1920, 1080));
-
-    let left_bar = (0..1080).all(|y| *canvas.get_pixel(0, y) == Rgba([0, 0, 0, 255]));
-    let right_bar = (0..1080).all(|y| *canvas.get_pixel(1919, y) == Rgba([0, 0, 0, 255]));
-
-    assert!(
-        !(left_bar || right_bar),
-        "expected portrait background to cover full width without black bars"
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn schedule_sleep_forces_sleep_even_with_manual_awake_override() {
-    let runtime = sample_sleep_runtime();
-    let (_clock_state, clock) = make_clock(Utc.with_ymd_and_hms(2024, 1, 1, 21, 0, 0).unwrap());
-    let mut controller = TestSleepController::with_clock(runtime, Arc::clone(&clock));
-    assert!(!controller.is_awake());
-
-    let manual_wake = controller.toggle_manual();
-    assert_eq!(
-        manual_wake.override_state,
-        Some(TestManualOverride::ForcedAwake)
-    );
-    assert!(controller.is_awake());
-
-    let schedule = controller.go_to_sleep(SleepCommandSource::Schedule);
-    assert!(!controller.is_awake());
-    assert_eq!(schedule.override_state, None);
-    assert_eq!(
-        schedule.transition.as_ref().map(|t| t.kind),
-        Some(TestSleepTransitionKind::EnteredSleep)
-    );
-    assert!(schedule.applied);
-}
-
-#[cfg(test)]
-#[test]
-fn schedule_wake_forces_wake_even_with_manual_sleep_override() {
-    let runtime = sample_sleep_runtime();
-    let (_clock_state, clock) = make_clock(Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap());
-    let mut controller = TestSleepController::with_clock(runtime, Arc::clone(&clock));
-    assert!(controller.is_awake());
-
-    let manual_sleep = controller.toggle_manual();
-    assert_eq!(
-        manual_sleep.override_state,
-        Some(TestManualOverride::ForcedSleep)
-    );
-    assert!(!controller.is_awake());
-
-    let schedule = controller.wake_now(SleepCommandSource::Schedule);
-    assert!(controller.is_awake());
-    assert_eq!(schedule.override_state, None);
-    assert_eq!(
-        schedule.transition.as_ref().map(|t| t.kind),
-        Some(TestSleepTransitionKind::ExitedSleep)
-    );
-    assert!(schedule.applied);
-}
-
-#[cfg(test)]
-#[test]
-fn toggle_manual_release_returns_to_sleep_when_schedule_sleeping() {
-    let runtime = sample_sleep_runtime();
-    let (_clock_state, clock) = make_clock(Utc.with_ymd_and_hms(2024, 1, 1, 2, 0, 0).unwrap());
-    let mut controller = TestSleepController::with_clock(runtime, Arc::clone(&clock));
-    assert!(!controller.is_awake());
-
-    let engage = controller.toggle_manual();
-    assert_eq!(engage.override_state, Some(TestManualOverride::ForcedAwake));
-    assert_eq!(
-        engage.transition.as_ref().map(|t| t.kind),
-        Some(TestSleepTransitionKind::ExitedSleep)
-    );
-    assert!(controller.is_awake());
-
-    let release = controller.toggle_manual();
-    assert_eq!(release.override_state, None);
-    assert_eq!(
-        release.transition.as_ref().map(|t| t.kind),
-        Some(TestSleepTransitionKind::EnteredSleep)
-    );
-    assert!(!controller.is_awake());
-}
-
-#[cfg(test)]
-#[test]
-fn toggle_manual_release_returns_to_awake_when_schedule_active() {
-    let runtime = sample_sleep_runtime();
-    let (_clock_state, clock) = make_clock(Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap());
-    let mut controller = TestSleepController::with_clock(runtime, clock);
-    assert!(controller.is_awake());
-
-    let engage = controller.toggle_manual();
-    assert_eq!(engage.override_state, Some(TestManualOverride::ForcedSleep));
-    assert_eq!(
-        engage.transition.as_ref().map(|t| t.kind),
-        Some(TestSleepTransitionKind::EnteredSleep)
-    );
-    assert!(!controller.is_awake());
-
-    let release = controller.toggle_manual();
-    assert_eq!(release.override_state, None);
-    assert_eq!(
-        release.transition.as_ref().map(|t| t.kind),
-        Some(TestSleepTransitionKind::ExitedSleep)
-    );
-    assert!(controller.is_awake());
-}
-
-#[cfg(test)]
-#[test]
-fn toggle_manual_release_no_state_change_when_schedule_matches() {
-    let runtime = sample_sleep_runtime();
-    let (clock_state, clock) = make_clock(Utc.with_ymd_and_hms(2024, 1, 1, 2, 0, 0).unwrap());
-    let mut controller = TestSleepController::with_clock(runtime, Arc::clone(&clock));
-    assert!(!controller.is_awake());
-
-    let engage = controller.toggle_manual();
-    assert_eq!(engage.override_state, Some(TestManualOverride::ForcedAwake));
-    assert!(controller.is_awake());
-
-    *clock_state.lock().unwrap() = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
-
-    let release = controller.toggle_manual();
-    assert_eq!(release.override_state, None);
-    assert!(controller.is_awake());
-    assert!(release.transition.is_none());
-    assert!(!release.applied);
 }
 
 fn resize_to_fit_with_margin(
@@ -2989,4 +1820,44 @@ fn compute_wipe_span(normal: [f32; 2], screen_w: f32, screen_h: f32) -> (f32, f3
     }
     let span = (max_proj - min_proj).abs().max(1e-3);
     (min_proj, 1.0 / span)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgba, RgbaImage};
+
+    fn make_gradient(width: u32, height: u32) -> RgbaImage {
+        image::ImageBuffer::from_fn(width, height, |x, y| {
+            let r = ((x * 255) / width.max(1)).min(255) as u8;
+            let g = ((y * 255) / height.max(1)).min(255) as u8;
+            Rgba([r, g, 0, 255])
+        })
+    }
+
+    #[test]
+    fn scale_cover_matches_canvas_dimensions() {
+        let src = make_gradient(400, 300);
+        let canvas = scale_image_to_cover_canvas(&src, 1920, 1080, 4096);
+        assert_eq!(canvas.dimensions(), (1920, 1080));
+        let center = canvas.get_pixel(960, 540);
+        assert_eq!(center[3], 255);
+    }
+
+    #[test]
+    fn scale_cover_respects_max_texture_limit() {
+        let src = make_gradient(1000, 400);
+        let canvas = scale_image_to_cover_canvas(&src, 1920, 1080, 2000);
+        assert_eq!(canvas.dimensions(), (1920, 1080));
+        let top_left = canvas.get_pixel(0, 0);
+        let bottom_right = canvas.get_pixel(1919, 1079);
+        assert!(top_left[3] == 255 && bottom_right[3] == 255);
+    }
+
+    #[test]
+    fn resize_with_margin_respects_bounds() {
+        let (w, h) = resize_to_fit_with_margin(1920, 1080, 4000, 1000, 0.1, 1.5);
+        assert!(w <= 1920 && h <= 1080);
+        assert!(w > 0 && h > 0);
+    }
 }

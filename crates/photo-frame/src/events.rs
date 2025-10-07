@@ -40,15 +40,7 @@ pub struct InvalidPhoto(pub PathBuf);
 #[derive(Debug)]
 pub struct Displayed(pub PathBuf);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SleepCommandSource {
-    Manual,
-    Schedule,
-}
-
 #[derive(Debug, Clone)]
 pub enum ViewerCommand {
     ToggleSleep,
-    GoToSleep(SleepCommandSource),
-    AwakeNow(SleepCommandSource),
 }

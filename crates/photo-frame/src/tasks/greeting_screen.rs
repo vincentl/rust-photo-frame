@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use ab_glyph::FontArc;
 use bytemuck::{Pod, Zeroable};
 use fontdb::{Database, Family, Query};
-use lyon::math::{point, Box2D};
+use lyon::math::{Box2D, point};
 use lyon::path::builder::BorderRadii;
 use lyon::path::{Path, Winding};
 use lyon::tessellation::{
@@ -273,9 +273,11 @@ fn build_section(settings: &GreetingSettings, layout: TextLayout) -> Section<'_>
         layout: Layout::default_wrap()
             .h_align(HorizontalAlign::Center)
             .v_align(VerticalAlign::Center),
-        text: vec![Text::new(settings.message.as_str())
-            .with_scale(layout.font_size)
-            .with_color(settings.colors.font)],
+        text: vec![
+            Text::new(settings.message.as_str())
+                .with_scale(layout.font_size)
+                .with_color(settings.colors.font),
+        ],
         ..Section::default()
     }
 }

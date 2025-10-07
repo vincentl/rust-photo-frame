@@ -1,6 +1,5 @@
 mod config;
 mod events;
-mod platform;
 mod processing;
 mod tasks {
     pub mod files;
@@ -11,11 +10,9 @@ mod tasks {
     pub mod viewer;
 }
 
-use anyhow::{anyhow, bail, Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
+use anyhow::{Context, Result};
 use clap::Parser;
 use humantime::{format_rfc3339, parse_rfc3339};
-use std::borrow::Cow;
 use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -25,11 +22,9 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 #[cfg(unix)]
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 
 use events::{Displayed, InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded, ViewerCommand};
-use platform::display_power::PowerCommandReport;
-use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -50,12 +45,6 @@ struct Args {
     /// Deterministic RNG seed for playlist shuffling (applies to dry-run and live modes)
     #[arg(long = "playlist-seed", value_name = "SEED")]
     playlist_seed: Option<u64>,
-    /// Run the configured display-power sleep path for N seconds and exit
-    #[arg(long = "sleep-test", value_name = "SECONDS")]
-    sleep_test: Option<u64>,
-    /// Log the parsed sleep schedule and the next 24h of transitions at startup
-    #[arg(long = "verbose-sleep")]
-    verbose_sleep: bool,
 }
 
 #[tokio::main]
@@ -74,8 +63,6 @@ async fn main() -> Result<()> {
         playlist_now,
         playlist_dry_run,
         playlist_seed,
-        sleep_test,
-        verbose_sleep,
     } = Args::parse();
 
     let now_override = match playlist_now {
@@ -95,26 +82,6 @@ async fn main() -> Result<()> {
 
     if let Some(iterations) = playlist_dry_run {
         run_playlist_dry_run(&cfg, iterations, now_override, playlist_seed)?;
-        return Ok(());
-    }
-
-    if verbose_sleep {
-        if let Some(runtime) = cfg.sleep_mode.as_ref().and_then(|cfg| cfg.runtime()) {
-            log_sleep_timeline(runtime);
-        } else {
-            tracing::info!("--verbose-sleep requested but sleep-mode is not configured");
-        }
-    }
-
-    if let Some(seconds) = sleep_test {
-        let runtime = cfg
-            .sleep_mode
-            .as_ref()
-            .and_then(|cfg| cfg.runtime())
-            .ok_or_else(|| {
-                anyhow!("--sleep-test requires sleep-mode.display-power configuration")
-            })?;
-        run_sleep_test(runtime, seconds).await?;
         return Ok(());
     }
 
@@ -169,9 +136,9 @@ async fn main() -> Result<()> {
                             if received.is_none() {
                                 break;
                             }
-                            tracing::info!("SIGUSR1 received; toggling sleep mode");
+                            tracing::info!("SIGUSR1 received; forwarding ToggleSleep command");
                             if let Err(err) = control.send(ViewerCommand::ToggleSleep).await {
-                                tracing::warn!("failed to forward sleep toggle request: {err}");
+                                tracing::warn!("failed to forward ToggleSleep request: {err}");
                                 break;
                             }
                         }
@@ -324,142 +291,5 @@ fn run_playlist_dry_run(
         }
     }
 
-    Ok(())
-}
-
-fn describe_schedule_source_main(source: config::ScheduleSource) -> Cow<'static, str> {
-    match source {
-        config::ScheduleSource::Default => Cow::Borrowed("on-hours"),
-        config::ScheduleSource::WeekdayOverride => Cow::Borrowed("weekday-override"),
-        config::ScheduleSource::WeekendOverride => Cow::Borrowed("weekend-override"),
-        config::ScheduleSource::DayOverride(day) => {
-            Cow::Owned(format!("days.{}", day.to_string().to_ascii_lowercase()))
-        }
-    }
-}
-
-fn log_sleep_timeline(runtime: &config::SleepModeRuntime) {
-    let now = Utc::now();
-    let snapshot = runtime.schedule_snapshot(now);
-    let state = if snapshot.awake { "awake" } else { "sleeping" };
-    let source = describe_schedule_source_main(snapshot.active_source);
-    tracing::info!(
-        timezone = runtime.base_timezone().to_string(),
-        state,
-        schedule_source = source.as_ref(),
-        local_time = snapshot.now_local.to_rfc3339(),
-        "sleep schedule snapshot"
-    );
-
-    let transitions = runtime.upcoming_transitions(now, ChronoDuration::hours(24));
-    if transitions.is_empty() {
-        tracing::info!("no sleep transitions in the next 24h");
-    } else {
-        for boundary in transitions {
-            let state = if boundary.awake { "awake" } else { "sleeping" };
-            let source = describe_schedule_source_main(boundary.source);
-            tracing::info!(
-                transition_local = boundary.at_local.to_rfc3339(),
-                state,
-                source = source.as_ref(),
-                weekday = ?boundary.weekday,
-                "sleep transition planned"
-            );
-        }
-    }
-}
-
-fn log_power_report_main(attempt: &str, report: &PowerCommandReport) {
-    let output_name = report.output.as_ref().map(|sel| sel.name.as_str());
-    let output_source = report
-        .output
-        .as_ref()
-        .map(|sel| format!("{:?}", sel.source));
-    let stderr_messages: Vec<&str> = report
-        .commands
-        .iter()
-        .filter(|cmd| !cmd.stderr.trim().is_empty())
-        .map(|cmd| cmd.stderr.as_str())
-        .collect();
-    let stderr_combined = if stderr_messages.is_empty() {
-        None
-    } else {
-        Some(stderr_messages.join("; "))
-    };
-
-    if report.success() {
-        tracing::info!(
-            action = ?report.action,
-            attempt,
-            output = output_name,
-            output_source = output_source.as_deref(),
-            "display power action succeeded"
-        );
-    } else {
-        tracing::warn!(
-            action = ?report.action,
-            attempt,
-            output = output_name,
-            output_source = output_source.as_deref(),
-            stderr = stderr_combined.as_deref(),
-            "display power action failed"
-        );
-    }
-
-    for cmd in &report.commands {
-        tracing::debug!(
-            action = ?report.action,
-            attempt,
-            command = cmd.command,
-            success = cmd.success,
-            exit_code = cmd.exit_code,
-            stderr = cmd.stderr,
-            stdout = cmd.stdout,
-            "display power command detail"
-        );
-    }
-
-    for sysfs in &report.sysfs {
-        tracing::debug!(
-            action = ?report.action,
-            attempt,
-            path = %sysfs.path.display(),
-            value = sysfs.value,
-            success = sysfs.success,
-            error = ?sysfs.error,
-            "display power sysfs detail"
-        );
-    }
-}
-
-async fn run_sleep_test(runtime: &config::SleepModeRuntime, seconds: u64) -> Result<()> {
-    let controller = runtime
-        .display_power()
-        .cloned()
-        .ok_or_else(|| anyhow!("sleep-test requires sleep-mode.display-power configuration"))?;
-
-    tracing::info!(duration = seconds, "sleep-test: requesting sleep");
-    let sleep_report = controller.sleep();
-    log_power_report_main("sleep-test", &sleep_report);
-    if !sleep_report.success() {
-        bail!("sleep-test sleep command failed");
-    }
-
-    tokio_sleep(TokioDuration::from_secs(seconds)).await;
-
-    tracing::info!("sleep-test: requesting wake");
-    let wake_report = controller.wake();
-    log_power_report_main("wake-test-1", &wake_report);
-    if !wake_report.success() {
-        tracing::warn!("sleep-test wake attempt 1 failed; retrying");
-        tokio_sleep(TokioDuration::from_secs(2)).await;
-        let retry = controller.wake();
-        log_power_report_main("wake-test-2", &retry);
-        if !retry.success() {
-            bail!("sleep-test wake command failed after retry");
-        }
-    }
-
-    tracing::info!("sleep-test completed successfully");
     Ok(())
 }
