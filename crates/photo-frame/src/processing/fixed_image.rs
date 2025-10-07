@@ -7,7 +7,7 @@ use anyhow::anyhow;
 
 use anyhow::{Context, Result};
 use fast_image_resize as fir;
-use image::{imageops, ImageFormat, ImageReader, RgbaImage};
+use image::{ImageFormat, ImageReader, RgbaImage, imageops};
 use jpeg_decoder::{Decoder as JpegDecoder, PixelFormat};
 use tracing::debug;
 

@@ -1,4 +1,4 @@
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 use rust_photo_frame::config::{
     ColorSelection, Configuration, FixedImagePathSelection, MattingKind, MattingMode,
     MattingSelection, StudioMatColor, TransitionKind, TransitionSelection,
@@ -254,8 +254,8 @@ matting:
 
 #[test]
 fn parse_fixed_image_with_multiple_paths() {
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
     use std::fs;
 
     let png = STANDARD
@@ -327,8 +327,8 @@ matting:
 
 #[test]
 fn parse_fixed_image_with_single_string_path() {
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
     use std::fs;
 
     let png = STANDARD
@@ -405,9 +405,10 @@ matting:
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("matting.types entry fixed-color must match a key"));
+    assert!(
+        err.to_string()
+            .contains("matting.types entry fixed-color must match a key")
+    );
 }
 
 #[test]
@@ -422,9 +423,10 @@ matting:
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("matting.types entry studio must match a key"));
+    assert!(
+        err.to_string()
+            .contains("matting.types entry studio must match a key")
+    );
 }
 
 #[test]
@@ -439,9 +441,10 @@ matting:
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("matting.type is no longer supported"));
+    assert!(
+        err.to_string()
+            .contains("matting.type is no longer supported")
+    );
 }
 
 #[test]
@@ -586,9 +589,10 @@ transition:
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("transition.types entry fade must match a key"));
+    assert!(
+        err.to_string()
+            .contains("transition.types entry fade must match a key")
+    );
 }
 
 #[test]
@@ -603,9 +607,10 @@ transition:
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("transition.type is no longer supported"));
+    assert!(
+        err.to_string()
+            .contains("transition.type is no longer supported")
+    );
 }
 
 #[test]
@@ -642,9 +647,10 @@ transition:
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("requires angle-jitter-degrees >= 0"));
+    assert!(
+        err.to_string()
+            .contains("requires angle-jitter-degrees >= 0")
+    );
 }
 
 #[test]
@@ -657,9 +663,10 @@ transition:
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("requires angle-jitter-degrees >= 0"));
+    assert!(
+        err.to_string()
+            .contains("requires angle-jitter-degrees >= 0")
+    );
 }
 
 #[test]

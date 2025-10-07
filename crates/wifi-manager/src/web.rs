@@ -3,11 +3,11 @@ use crate::hotspot;
 use crate::nm;
 use crate::qr;
 use anyhow::{Context, Result};
+use axum::Router;
 use axum::extract::{Form, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::SocketAddr;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 
 #[derive(Clone)]
@@ -60,7 +60,7 @@ async fn shutdown_signal() {
     };
     #[cfg(unix)]
     let terminate = async {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         if let Ok(mut term) = signal(SignalKind::terminate()) {
             term.recv().await;
         }
@@ -240,17 +240,34 @@ fn read_last_attempt(state: &UiState) -> Result<AttemptRecord> {
 
 fn render_status_html(state: &UiState) -> String {
     match read_last_attempt(state) {
-        Ok(record) => format!("<!doctype html><html lang='en'><head><meta charset='utf-8'><meta http-equiv='refresh' content='5'><title>Connection Status</title><style>{}</style></head><body><main><section class='status'><h1>Connection Status</h1><p><strong>Status:</strong> {}</p><p>{}</p><p>Last network: {}</p><p class='back'><a href='/'>Return to setup</a></p></section></main></body></html>", styles(), record.status, record.message, record.ssid),
-        Err(_) => format!("<!doctype html><html lang='en'><head><meta charset='utf-8'><meta http-equiv='refresh' content='5'><title>No status</title><style>{}</style></head><body><main><section class='status'><h1>No status yet</h1><p>Submit credentials to see progress.</p><p class='back'><a href='/'>Return to setup</a></p></section></main></body></html>", styles()),
+        Ok(record) => format!(
+            "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta http-equiv='refresh' content='5'><title>Connection Status</title><style>{}</style></head><body><main><section class='status'><h1>Connection Status</h1><p><strong>Status:</strong> {}</p><p>{}</p><p>Last network: {}</p><p class='back'><a href='/'>Return to setup</a></p></section></main></body></html>",
+            styles(),
+            record.status,
+            record.message,
+            record.ssid
+        ),
+        Err(_) => format!(
+            "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta http-equiv='refresh' content='5'><title>No status</title><style>{}</style></head><body><main><section class='status'><h1>No status yet</h1><p>Submit credentials to see progress.</p><p class='back'><a href='/'>Return to setup</a></p></section></main></body></html>",
+            styles()
+        ),
     }
 }
 
 fn success_page(message: &str) -> String {
-    format!("<!doctype html><html lang='en'><head><meta charset='utf-8'><meta http-equiv='refresh' content='5;url=/status'><title>Connecting…</title><style>{}</style></head><body><main><section class='status'><h1>Connecting…</h1><p>{}</p><p>The frame is applying your credentials. This page will refresh with live status.</p></section></main></body></html>", styles(), message)
+    format!(
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta http-equiv='refresh' content='5;url=/status'><title>Connecting…</title><style>{}</style></head><body><main><section class='status'><h1>Connecting…</h1><p>{}</p><p>The frame is applying your credentials. This page will refresh with live status.</p></section></main></body></html>",
+        styles(),
+        message
+    )
 }
 
 fn error_page(message: &str) -> String {
-    format!("<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Submission error</title><style>{}</style></head><body><main><section class='status error'><h1>Check and try again</h1><p>{}</p><p class='back'><a href='/'>Back to form</a></p></section></main></body></html>", styles(), message)
+    format!(
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Submission error</title><style>{}</style></head><body><main><section class='status error'><h1>Check and try again</h1><p>{}</p><p class='back'><a href='/'>Back to form</a></p></section></main></body></html>",
+        styles(),
+        message
+    )
 }
 
 #[derive(Deserialize)]
