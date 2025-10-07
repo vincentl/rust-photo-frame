@@ -130,29 +130,29 @@ async fn main() -> Result<()> {
         });
     }
 
+    let mut tasks = JoinSet::new();
+
     #[cfg(unix)]
     {
         let cancel = cancel.clone();
         let control = viewer_control_tx.clone();
         let control_socket_path = cfg.control_socket_path.clone();
-        tokio::spawn(async move {
-            if let Err(err) = run_control_socket(cancel, control, control_socket_path).await {
-                tracing::warn!("control socket failed: {err}");
-            }
+        tasks.spawn(async move {
+            run_control_socket(cancel, control, control_socket_path)
+                .await
+                .context("control socket task failed")
         });
     }
 
     if let Some(schedule_cfg) = cfg.awake_schedule.clone() {
         let cancel = cancel.clone();
         let control = viewer_control_tx.clone();
-        tokio::spawn(async move {
-            if let Err(err) = schedule::run(schedule_cfg, cancel, control).await {
-                tracing::warn!("awake schedule task failed: {err:?}");
-            }
+        tasks.spawn(async move {
+            schedule::run(schedule_cfg, cancel, control)
+                .await
+                .context("awake schedule task failed")
         });
     }
-
-    let mut tasks = JoinSet::new();
 
     // PhotoFiles
     tasks.spawn({
