@@ -72,6 +72,21 @@ bootstrap_runtime() {
             run_sudo install -d -m 770 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${path}"
         fi
     done
+    local photo_root="${VAR_ROOT}/photos"
+    if [[ -d "${photo_root}" ]]; then
+        local photo_mode
+        photo_mode="$(run_sudo stat -c '%a' "${photo_root}")"
+        local library_subdir
+        for library_subdir in cloud local; do
+            local library_path="${photo_root}/${library_subdir}"
+            if [[ ! -d "${library_path}" ]]; then
+                run_sudo install -d -m "${photo_mode}" -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${library_path}"
+            else
+                run_sudo chown "${SERVICE_USER}:${SERVICE_GROUP}" "${library_path}"
+                run_sudo chmod "${photo_mode}" "${library_path}"
+            fi
+        done
+    fi
     if [[ -f "${STAGE_DIR}/etc/config.yaml" ]]; then
         if run_sudo test -f "${CONFIG_DEST}"; then
             log INFO "Preserving existing runtime config at ${CONFIG_DEST}"
