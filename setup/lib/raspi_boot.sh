@@ -51,8 +51,8 @@ update_initramfs_if_available() {
 }
 
 ensure_boot_config_4k() {
-    local module="raspi_boot:4k" dry_run="${DRY_RUN:-0}" enable_4k="${ENABLE_4K_BOOT:-1}" config_path="${1:-}" backup_taken=0
-    local changes_needed=0 backup_path=""
+    local module="raspi_boot:4k" enable_4k="${ENABLE_4K_BOOT:-1}" config_path="${1:-}"
+    local backup_taken=0 backup_path=""
 
     if [[ "${enable_4k}" != "1" ]]; then
         printf '[%s] INFO: 4K boot configuration disabled via ENABLE_4K_BOOT=%s. Skipping.\n' "${module}" "${enable_4k}"
@@ -89,23 +89,13 @@ ensure_boot_config_4k() {
             continue
         fi
 
-        changes_needed=1
-        if [[ "${dry_run}" == "1" ]]; then
-            if [[ -n "${current}" ]]; then
-                printf '[%s] INFO: DRY_RUN: would update %s=%s\n' "${module}" "${key}" "${value}"
-            else
-                printf '[%s] INFO: DRY_RUN: would append %s=%s\n' "${module}" "${key}" "${value}"
-            fi
-            continue
-        fi
-
         if [[ ${backup_taken} -eq 0 ]]; then
             backup_path="${config_path}.bak.$(date +%Y%m%d-%H%M%S)"
             sudo cp -a "${config_path}" "${backup_path}"
             printf '[%s] INFO: Backup written to %s\n' "${module}" "${backup_path}"
             backup_taken=1
         fi
-
+        
         if [[ -n "${current}" ]]; then
             sudo sed -i "s|^${key}=.*$|${key}=${value}|" "${config_path}"
         else
@@ -121,12 +111,6 @@ ensure_boot_config_4k() {
             continue
         fi
 
-        changes_needed=1
-        if [[ "${dry_run}" == "1" ]]; then
-            printf '[%s] INFO: DRY_RUN: would append %s\n' "${module}" "${overlay_line}"
-            continue
-        fi
-
         if [[ ${backup_taken} -eq 0 ]]; then
             backup_path="${config_path}.bak.$(date +%Y%m%d-%H%M%S)"
             sudo cp -a "${config_path}" "${backup_path}"
@@ -137,15 +121,6 @@ ensure_boot_config_4k() {
         printf '\n%s\n' "${overlay_line}" | sudo tee -a "${config_path}" >/dev/null
         printf '[%s] INFO: Added %s\n' "${module}" "${overlay_line}"
     done
-
-    if [[ "${dry_run}" == "1" ]]; then
-        if [[ ${changes_needed} -eq 0 ]]; then
-            printf '[%s] INFO: DRY_RUN: configuration already matches requirements\n' "${module}"
-        else
-            printf '[%s] INFO: DRY_RUN: configuration changes summarized above\n' "${module}"
-        fi
-        return 0
-    fi
 
     if [[ ${backup_taken} -eq 0 ]]; then
         printf '[%s] INFO: Boot configuration already satisfied\n' "${module}"
