@@ -214,18 +214,13 @@ impl SleepController {
                 }
             }
             SleepCommandSource::Schedule => {
-                if self.override_state.is_some() {
-                    return SleepCommandResult {
-                        transition: None,
-                        override_state: self.override_state,
-                        applied: false,
-                    };
-                }
+                let previous_override = self.override_state;
+                self.override_state = None;
                 let transition = self.apply_target(false, SleepCommandSource::Schedule);
-                let applied = transition.is_some();
+                let applied = transition.is_some() || previous_override.is_some();
                 SleepCommandResult {
                     transition,
-                    override_state: None,
+                    override_state: self.override_state,
                     applied,
                 }
             }
@@ -246,18 +241,13 @@ impl SleepController {
                 }
             }
             SleepCommandSource::Schedule => {
-                if self.override_state.is_some() {
-                    return SleepCommandResult {
-                        transition: None,
-                        override_state: self.override_state,
-                        applied: false,
-                    };
-                }
+                let previous_override = self.override_state;
+                self.override_state = None;
                 let transition = self.apply_target(true, SleepCommandSource::Schedule);
-                let applied = transition.is_some();
+                let applied = transition.is_some() || previous_override.is_some();
                 SleepCommandResult {
                     transition,
-                    override_state: None,
+                    override_state: self.override_state,
                     applied,
                 }
             }
@@ -1135,6 +1125,7 @@ pub fn run_windowed(
                         .as_ref()
                         .map(|event| event.actual_awake)
                         .unwrap_or_else(|| ctrl.is_awake());
+                    let actual_awake_after = target_awake;
                     let toggle_action = match (previous_override, result.override_state) {
                         (None, Some(ManualOverride::ForcedAwake)) => "manual-force-awake",
                         (None, Some(ManualOverride::ForcedSleep)) => "manual-force-sleep",
@@ -1142,6 +1133,35 @@ pub fn run_windowed(
                         (Some(prev), Some(next)) if prev != next => "manual-override-updated",
                         (Some(_), Some(_)) => "manual-override-retained",
                         (None, None) => "schedule",
+                    };
+                    let forcing_sleep =
+                        matches!(result.override_state, Some(ManualOverride::ForcedSleep))
+                            || result
+                                .transition
+                                .as_ref()
+                                .map(|event| !event.actual_awake)
+                                .unwrap_or(false);
+                    let forcing_wake =
+                        matches!(result.override_state, Some(ManualOverride::ForcedAwake))
+                            || result
+                                .transition
+                                .as_ref()
+                                .map(|event| event.actual_awake)
+                                .unwrap_or(false);
+                    let releasing_override =
+                        previous_override.is_some() && result.override_state.is_none();
+                    let toggle_message = if releasing_override {
+                        if actual_awake_after {
+                            "sleep toggle releasing manual override and returning to wake"
+                        } else {
+                            "sleep toggle releasing manual override and returning to sleep"
+                        }
+                    } else if forcing_sleep {
+                        "sleep toggle forcing sleep"
+                    } else if forcing_wake {
+                        "sleep toggle forcing wake"
+                    } else {
+                        "sleep toggle made no changes"
                     };
                     info!(
                         sleep_toggle_previous_state =
@@ -1154,7 +1174,11 @@ pub fn run_windowed(
                         sleep_toggle_state_applied = result.applied,
                         sleep_toggle_transition = result.transition.is_some(),
                         sleep_toggle_action = toggle_action,
-                        "sleep toggle command processed",
+                        sleep_toggle_forcing_sleep = forcing_sleep,
+                        sleep_toggle_forcing_wake = forcing_wake,
+                        sleep_toggle_releasing_override = releasing_override,
+                        "{}",
+                        toggle_message,
                     );
                     if !result.applied {
                         debug!("sleep toggle matched existing state");
@@ -1166,25 +1190,68 @@ pub fn run_windowed(
                     if let Some(ctrl) = self.sleep.as_mut() {
                         let previous = ctrl.current_override();
                         let result = ctrl.go_to_sleep(source);
-                        if matches!(source, SleepCommandSource::Manual) {
-                            self.log_override_change(previous, result.override_state);
-                            if !result.applied {
-                                debug!("manual sleep request matched existing sleep state");
+                        let forcing_sleep =
+                            matches!(result.override_state, Some(ManualOverride::ForcedSleep))
+                                || result
+                                    .transition
+                                    .as_ref()
+                                    .map(|event| !event.actual_awake)
+                                    .unwrap_or(false);
+                        let forcing_wake =
+                            matches!(result.override_state, Some(ManualOverride::ForcedAwake))
+                                || result
+                                    .transition
+                                    .as_ref()
+                                    .map(|event| event.actual_awake)
+                                    .unwrap_or(false);
+                        let releasing_override =
+                            previous.is_some() && result.override_state.is_none();
+                        let command_source = match source {
+                            SleepCommandSource::Manual => "manual",
+                            SleepCommandSource::Schedule => "schedule",
+                        };
+                        let message = match (forcing_sleep, releasing_override) {
+                            (true, true) => {
+                                format!(
+                                    "{command_source} sleep command forcing sleep and releasing manual override"
+                                )
                             }
-                        } else if !result.applied {
-                            if let Some(state) = result.override_state {
-                                info!(
-                                    sleep_mode_manual_override = state.as_str(),
-                                    "sleep schedule requested sleep but manual override is active"
-                                );
-                            } else {
-                                info!(
-                                    "sleep schedule requested sleep but no state change was necessary"
-                                );
+                            (true, false) => {
+                                format!("{command_source} sleep command forcing sleep")
                             }
-                        }
-                        if result.applied && result.transition.is_none() {
-                            debug!(trigger = ?source, "sleep command matched existing sleep state");
+                            (false, true) => {
+                                format!(
+                                    "{command_source} sleep command releasing manual override (sleep already active)"
+                                )
+                            }
+                            (false, false) => {
+                                format!("{command_source} sleep command confirming sleep state")
+                            }
+                        };
+                        info!(
+                            sleep_command_source = command_source,
+                            sleep_command_target_state = "sleep",
+                            sleep_command_final_state =
+                                if ctrl.is_awake() { "awake" } else { "sleeping" },
+                            sleep_command_previous_override = previous.map(ManualOverride::as_str),
+                            sleep_command_new_override =
+                                result.override_state.map(ManualOverride::as_str),
+                            sleep_command_transition = result.transition.is_some(),
+                            sleep_command_state_applied = result.applied,
+                            sleep_command_forcing_sleep = forcing_sleep,
+                            sleep_command_forcing_wake = forcing_wake,
+                            sleep_command_releasing_override = releasing_override,
+                            "{}",
+                            message,
+                        );
+                        self.log_override_change(previous, result.override_state);
+                        if !result.applied {
+                            debug!("sleep command matched existing sleep state");
+                        } else if result.transition.is_none() {
+                            debug!(
+                                trigger = ?source,
+                                "sleep command updated overrides without changing sleep state"
+                            );
                         }
                         self.handle_sleep_transition(result.transition);
                     } else {
@@ -1195,25 +1262,68 @@ pub fn run_windowed(
                     if let Some(ctrl) = self.sleep.as_mut() {
                         let previous = ctrl.current_override();
                         let result = ctrl.wake_now(source);
-                        if matches!(source, SleepCommandSource::Manual) {
-                            self.log_override_change(previous, result.override_state);
-                            if !result.applied {
-                                debug!("manual wake request matched existing awake state");
+                        let forcing_sleep =
+                            matches!(result.override_state, Some(ManualOverride::ForcedSleep))
+                                || result
+                                    .transition
+                                    .as_ref()
+                                    .map(|event| !event.actual_awake)
+                                    .unwrap_or(false);
+                        let forcing_wake =
+                            matches!(result.override_state, Some(ManualOverride::ForcedAwake))
+                                || result
+                                    .transition
+                                    .as_ref()
+                                    .map(|event| event.actual_awake)
+                                    .unwrap_or(false);
+                        let releasing_override =
+                            previous.is_some() && result.override_state.is_none();
+                        let command_source = match source {
+                            SleepCommandSource::Manual => "manual",
+                            SleepCommandSource::Schedule => "schedule",
+                        };
+                        let message = match (forcing_wake, releasing_override) {
+                            (true, true) => {
+                                format!(
+                                    "{command_source} wake command forcing wake and releasing manual override"
+                                )
                             }
-                        } else if !result.applied {
-                            if let Some(state) = result.override_state {
-                                info!(
-                                    sleep_mode_manual_override = state.as_str(),
-                                    "sleep schedule requested wake but manual override is active"
-                                );
-                            } else {
-                                info!(
-                                    "sleep schedule requested wake but no state change was necessary"
-                                );
+                            (true, false) => {
+                                format!("{command_source} wake command forcing wake")
                             }
-                        }
-                        if result.applied && result.transition.is_none() {
-                            debug!(trigger = ?source, "wake command matched existing awake state");
+                            (false, true) => {
+                                format!(
+                                    "{command_source} wake command releasing manual override (wake already active)"
+                                )
+                            }
+                            (false, false) => {
+                                format!("{command_source} wake command confirming wake state")
+                            }
+                        };
+                        info!(
+                            sleep_command_source = command_source,
+                            sleep_command_target_state = "wake",
+                            sleep_command_final_state =
+                                if ctrl.is_awake() { "awake" } else { "sleeping" },
+                            sleep_command_previous_override = previous.map(ManualOverride::as_str),
+                            sleep_command_new_override =
+                                result.override_state.map(ManualOverride::as_str),
+                            sleep_command_transition = result.transition.is_some(),
+                            sleep_command_state_applied = result.applied,
+                            sleep_command_forcing_sleep = forcing_sleep,
+                            sleep_command_forcing_wake = forcing_wake,
+                            sleep_command_releasing_override = releasing_override,
+                            "{}",
+                            message,
+                        );
+                        self.log_override_change(previous, result.override_state);
+                        if !result.applied {
+                            debug!("wake command matched existing awake state");
+                        } else if result.transition.is_none() {
+                            debug!(
+                                trigger = ?source,
+                                "wake command updated overrides without changing wake state"
+                            );
                         }
                         self.handle_sleep_transition(result.transition);
                     } else {
@@ -2459,6 +2569,56 @@ fn scale_cover_portrait_fills_width() {
         !(left_bar || right_bar),
         "expected portrait background to cover full width without black bars"
     );
+}
+
+#[cfg(test)]
+#[test]
+fn schedule_sleep_forces_sleep_even_with_manual_awake_override() {
+    let runtime = sample_sleep_runtime();
+    let (_clock_state, clock) = make_clock(Utc.with_ymd_and_hms(2024, 1, 1, 21, 0, 0).unwrap());
+    let mut controller = TestSleepController::with_clock(runtime, Arc::clone(&clock));
+    assert!(!controller.is_awake());
+
+    let manual_wake = controller.toggle_manual();
+    assert_eq!(
+        manual_wake.override_state,
+        Some(TestManualOverride::ForcedAwake)
+    );
+    assert!(controller.is_awake());
+
+    let schedule = controller.go_to_sleep(SleepCommandSource::Schedule);
+    assert!(!controller.is_awake());
+    assert_eq!(schedule.override_state, None);
+    assert_eq!(
+        schedule.transition.as_ref().map(|t| t.kind),
+        Some(TestSleepTransitionKind::EnteredSleep)
+    );
+    assert!(schedule.applied);
+}
+
+#[cfg(test)]
+#[test]
+fn schedule_wake_forces_wake_even_with_manual_sleep_override() {
+    let runtime = sample_sleep_runtime();
+    let (_clock_state, clock) = make_clock(Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap());
+    let mut controller = TestSleepController::with_clock(runtime, Arc::clone(&clock));
+    assert!(controller.is_awake());
+
+    let manual_sleep = controller.toggle_manual();
+    assert_eq!(
+        manual_sleep.override_state,
+        Some(TestManualOverride::ForcedSleep)
+    );
+    assert!(!controller.is_awake());
+
+    let schedule = controller.wake_now(SleepCommandSource::Schedule);
+    assert!(controller.is_awake());
+    assert_eq!(schedule.override_state, None);
+    assert_eq!(
+        schedule.transition.as_ref().map(|t| t.kind),
+        Some(TestSleepTransitionKind::ExitedSleep)
+    );
+    assert!(schedule.applied);
 }
 
 #[cfg(test)]
