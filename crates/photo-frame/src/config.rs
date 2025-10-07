@@ -6,6 +6,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, ensure};
+use chrono::{
+    DateTime, Datelike, Duration as ChronoDuration, LocalResult, NaiveDate, NaiveDateTime,
+    NaiveTime, TimeZone, Weekday,
+};
+use chrono_tz::Tz;
 use rand::Rng;
 use rand::seq::IteratorRandom;
 use serde::Deserialize;
@@ -166,6 +171,359 @@ impl Default for SleepScreenConfig {
         let mut screen = ScreenMessageConfig::default();
         screen.message = Some("Going to Sleep".to_string());
         Self { screen }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AwakeScheduleConfig {
+    pub timezone: Tz,
+    #[serde(rename = "awake-scheduled", default)]
+    schedule: AwakeScheduleRules,
+}
+
+impl AwakeScheduleConfig {
+    pub fn validate(&mut self) -> Result<()> {
+        self.schedule.validate()
+    }
+
+    pub fn timezone(&self) -> Tz {
+        self.timezone
+    }
+
+    pub fn is_awake_at(&self, instant: DateTime<Tz>) -> bool {
+        self.intervals_for_date(instant.date_naive())
+            .into_iter()
+            .any(|interval| interval.contains(instant))
+    }
+
+    pub fn next_transition_after(&self, from: DateTime<Tz>) -> Option<(DateTime<Tz>, bool)> {
+        let start_date = from.date_naive();
+        for offset in 0..=7 {
+            let offset_days = i64::try_from(offset).ok()?;
+            let date = start_date + ChronoDuration::days(offset_days);
+            for interval in self.intervals_for_date(date) {
+                if interval.start > from {
+                    return Some((interval.start, true));
+                }
+                if interval.end > from {
+                    return Some((interval.end, false));
+                }
+            }
+        }
+        None
+    }
+
+    fn intervals_for_date(&self, date: NaiveDate) -> Vec<ResolvedAwakeInterval> {
+        let mut intervals = Vec::new();
+        for range in self.schedule.resolved_ranges_for(date.weekday()) {
+            let start = resolve_local_datetime(self.timezone, date, range.start(), Boundary::Start);
+            let end = resolve_local_datetime(self.timezone, date, range.end(), Boundary::End);
+            if end > start {
+                intervals.push(ResolvedAwakeInterval { start, end });
+            }
+        }
+        intervals
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+struct AwakeScheduleRules {
+    #[serde(default)]
+    daily: Vec<AwakeTimeRange>,
+    weekdays: Option<Vec<AwakeTimeRange>>,
+    weekend: Option<Vec<AwakeTimeRange>>,
+    monday: Option<Vec<AwakeTimeRange>>,
+    tuesday: Option<Vec<AwakeTimeRange>>,
+    wednesday: Option<Vec<AwakeTimeRange>>,
+    thursday: Option<Vec<AwakeTimeRange>>,
+    friday: Option<Vec<AwakeTimeRange>>,
+    saturday: Option<Vec<AwakeTimeRange>>,
+    sunday: Option<Vec<AwakeTimeRange>>,
+}
+
+impl AwakeScheduleRules {
+    fn validate(&mut self) -> Result<()> {
+        Self::validate_ranges(&mut self.daily, "awake-schedule.awake-scheduled.daily")?;
+        if let Some(ranges) = self.weekdays.as_mut() {
+            Self::validate_ranges(ranges, "awake-schedule.awake-scheduled.weekdays")?;
+        }
+        if let Some(ranges) = self.weekend.as_mut() {
+            Self::validate_ranges(ranges, "awake-schedule.awake-scheduled.weekend")?;
+        }
+        for (label, ranges) in [
+            ("monday", &mut self.monday),
+            ("tuesday", &mut self.tuesday),
+            ("wednesday", &mut self.wednesday),
+            ("thursday", &mut self.thursday),
+            ("friday", &mut self.friday),
+            ("saturday", &mut self.saturday),
+            ("sunday", &mut self.sunday),
+        ] {
+            if let Some(ranges) = ranges {
+                Self::validate_ranges(ranges, &format!("awake-schedule.awake-scheduled.{label}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_ranges(ranges: &mut Vec<AwakeTimeRange>, label: &str) -> Result<()> {
+        ranges.sort_unstable_by_key(|range| range.start());
+        let mut previous_end: Option<NaiveTime> = None;
+        for range in ranges.iter() {
+            if let Some(prev) = previous_end {
+                ensure!(
+                    range.start() >= prev,
+                    "{} intervals must not overlap",
+                    label
+                );
+            }
+            previous_end = Some(range.end());
+        }
+        Ok(())
+    }
+
+    fn resolved_ranges_for(&self, weekday: Weekday) -> Vec<AwakeTimeRange> {
+        if let Some(overrides) = self.day_specific(weekday) {
+            return overrides.clone();
+        }
+        match weekday {
+            Weekday::Sat | Weekday::Sun => {
+                self.weekend.clone().unwrap_or_else(|| self.daily.clone())
+            }
+            _ => self.weekdays.clone().unwrap_or_else(|| self.daily.clone()),
+        }
+    }
+
+    fn day_specific(&self, weekday: Weekday) -> Option<&Vec<AwakeTimeRange>> {
+        match weekday {
+            Weekday::Mon => self.monday.as_ref(),
+            Weekday::Tue => self.tuesday.as_ref(),
+            Weekday::Wed => self.wednesday.as_ref(),
+            Weekday::Thu => self.thursday.as_ref(),
+            Weekday::Fri => self.friday.as_ref(),
+            Weekday::Sat => self.saturday.as_ref(),
+            Weekday::Sun => self.sunday.as_ref(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct AwakeTimeRange {
+    start: NaiveTime,
+    end: NaiveTime,
+}
+
+impl AwakeTimeRange {
+    fn start(&self) -> NaiveTime {
+        self.start
+    }
+
+    fn end(&self) -> NaiveTime {
+        self.end
+    }
+}
+
+impl<'de> Deserialize<'de> for AwakeTimeRange {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let (start_raw, end_raw): (String, String) = Deserialize::deserialize(deserializer)?;
+        let parse_time = |value: &str| -> Result<NaiveTime, D::Error> {
+            let trimmed = value.trim();
+            for format in ["%H:%M:%S", "%H:%M"] {
+                if let Ok(parsed) = NaiveTime::parse_from_str(trimmed, format) {
+                    return Ok(parsed);
+                }
+            }
+            Err(de::Error::custom(format!("invalid time literal '{value}'")))
+        };
+        let start = parse_time(&start_raw)?;
+        let end = parse_time(&end_raw)?;
+        if start >= end {
+            return Err(de::Error::custom(format!(
+                "awake interval must have start < end (start={start_raw}, end={end_raw})"
+            )));
+        }
+        Ok(Self { start, end })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedAwakeInterval {
+    start: DateTime<Tz>,
+    end: DateTime<Tz>,
+}
+
+impl ResolvedAwakeInterval {
+    fn contains(&self, instant: DateTime<Tz>) -> bool {
+        instant >= self.start && instant < self.end
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Boundary {
+    Start,
+    End,
+}
+
+fn resolve_local_datetime(
+    tz: Tz,
+    date: NaiveDate,
+    time: NaiveTime,
+    boundary: Boundary,
+) -> DateTime<Tz> {
+    let mut candidate = NaiveDateTime::new(date, time);
+    for _ in 0..=180 {
+        match tz.from_local_datetime(&candidate) {
+            LocalResult::Single(dt) => return dt,
+            LocalResult::Ambiguous(earliest, latest) => {
+                return match boundary {
+                    Boundary::Start => earliest,
+                    Boundary::End => latest,
+                };
+            }
+            LocalResult::None => {
+                candidate += ChronoDuration::minutes(1);
+            }
+        }
+    }
+    tz.from_local_datetime(&candidate)
+        .earliest()
+        .expect("failed to resolve local datetime after DST adjustment")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schedule_from_yaml(input: &str) -> AwakeScheduleConfig {
+        let mut schedule: AwakeScheduleConfig = serde_yaml::from_str(input).expect("valid yaml");
+        schedule.validate().expect("valid schedule");
+        schedule
+    }
+
+    #[test]
+    fn next_transition_from_daily_interval() {
+        let schedule = schedule_from_yaml(
+            r#"
+timezone: "UTC"
+awake-scheduled:
+  daily:
+    - ["07:00", "09:30"]
+"#,
+        );
+
+        let tz = schedule.timezone();
+        let before = tz.with_ymd_and_hms(2024, 1, 1, 6, 0, 0).single().unwrap();
+        let (start, awake) = schedule.next_transition_after(before).expect("transition");
+        assert!(awake);
+        assert_eq!(
+            start,
+            tz.with_ymd_and_hms(2024, 1, 1, 7, 0, 0).single().unwrap()
+        );
+
+        let during = tz.with_ymd_and_hms(2024, 1, 1, 8, 0, 0).single().unwrap();
+        assert!(schedule.is_awake_at(during));
+        let (end, awake) = schedule
+            .next_transition_after(during)
+            .expect("end transition");
+        assert!(!awake);
+        assert_eq!(
+            end,
+            tz.with_ymd_and_hms(2024, 1, 1, 9, 30, 0).single().unwrap()
+        );
+    }
+
+    #[test]
+    fn day_specific_overrides_weekdays() {
+        let schedule = schedule_from_yaml(
+            r#"
+timezone: "America/New_York"
+awake-scheduled:
+  daily:
+    - ["07:00", "21:00"]
+  weekdays:
+    - ["06:00", "22:00"]
+  friday: []
+  saturday:
+    - ["09:00", "12:00"]
+"#,
+        );
+
+        let tz = schedule.timezone();
+        let thursday = tz.with_ymd_and_hms(2024, 7, 18, 6, 30, 0).single().unwrap();
+        assert!(schedule.is_awake_at(thursday));
+
+        let friday = tz.with_ymd_and_hms(2024, 7, 19, 12, 0, 0).single().unwrap();
+        assert!(!schedule.is_awake_at(friday));
+
+        let saturday = tz
+            .with_ymd_and_hms(2024, 7, 20, 10, 30, 0)
+            .single()
+            .unwrap();
+        assert!(schedule.is_awake_at(saturday));
+    }
+
+    #[test]
+    fn dst_gap_shifts_to_next_valid_time() {
+        let schedule = schedule_from_yaml(
+            r#"
+timezone: "America/New_York"
+awake-scheduled:
+  sunday:
+    - ["02:00", "03:30"]
+"#,
+        );
+
+        let tz = schedule.timezone();
+        let before = tz.with_ymd_and_hms(2024, 3, 10, 1, 0, 0).single().unwrap();
+        let (start, awake) = schedule
+            .next_transition_after(before)
+            .expect("start transition");
+        assert!(awake);
+        assert_eq!(
+            start,
+            tz.with_ymd_and_hms(2024, 3, 10, 3, 0, 0).single().unwrap()
+        );
+
+        let (end, awake) = schedule
+            .next_transition_after(start)
+            .expect("end transition");
+        assert!(!awake);
+        assert_eq!(
+            end,
+            tz.with_ymd_and_hms(2024, 3, 10, 3, 30, 0).single().unwrap()
+        );
+    }
+
+    #[test]
+    fn dst_repeat_uses_latest_end() {
+        let schedule = schedule_from_yaml(
+            r#"
+timezone: "America/New_York"
+awake-scheduled:
+  sunday:
+    - ["01:00", "02:00"]
+"#,
+        );
+
+        let tz = schedule.timezone();
+        let base = tz.with_ymd_and_hms(2024, 11, 3, 0, 30, 0).single().unwrap();
+        let (start, awake) = schedule.next_transition_after(base).expect("start");
+        assert!(awake);
+        let expected_start = tz
+            .with_ymd_and_hms(2024, 11, 3, 1, 0, 0)
+            .earliest()
+            .unwrap();
+        assert_eq!(start, expected_start);
+
+        let (end, awake) = schedule.next_transition_after(start).expect("end");
+        assert!(!awake);
+        let expected_end = tz.with_ymd_and_hms(2024, 11, 3, 2, 0, 0).latest().unwrap();
+        assert_eq!(end, expected_end);
     }
 }
 
@@ -2924,6 +3282,8 @@ pub struct Configuration {
     pub greeting_screen: GreetingScreenConfig,
     /// Sleep screen shown when the frame enters sleep mode.
     pub sleep_screen: SleepScreenConfig,
+    /// Optional scheduled awake intervals that toggle viewer state automatically.
+    pub awake_schedule: Option<AwakeScheduleConfig>,
 }
 
 impl Configuration {
@@ -2960,6 +3320,11 @@ impl Configuration {
         self.sleep_screen
             .validate()
             .context("invalid sleep screen configuration")?;
+        if let Some(schedule) = self.awake_schedule.as_mut() {
+            schedule
+                .validate()
+                .context("invalid awake schedule configuration")?;
+        }
         Ok(self)
     }
 }
@@ -2979,6 +3344,7 @@ impl Default for Configuration {
             playlist: PlaylistOptions::default(),
             greeting_screen: GreetingScreenConfig::default(),
             sleep_screen: SleepScreenConfig::default(),
+            awake_schedule: None,
         }
     }
 }

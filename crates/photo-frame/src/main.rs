@@ -1,6 +1,7 @@
 mod config;
 mod events;
 mod processing;
+mod schedule;
 mod tasks {
     pub mod files;
     pub mod greeting_screen;
@@ -139,6 +140,16 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             if let Err(err) = run_control_socket(cancel, control).await {
                 tracing::warn!("control socket failed: {err}");
+            }
+        });
+    }
+
+    if let Some(schedule_cfg) = cfg.awake_schedule.clone() {
+        let cancel = cancel.clone();
+        let control = viewer_control_tx.clone();
+        tokio::spawn(async move {
+            if let Err(err) = schedule::run(schedule_cfg, cancel, control).await {
+                tracing::warn!("awake schedule task failed: {err:?}");
             }
         });
     }

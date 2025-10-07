@@ -62,6 +62,22 @@ sleep-screen:
     font: "#f8fafc"
     accent: "#38bdf8"
 
+# Optional awake schedule (viewer sleeps outside these intervals)
+awake-schedule:
+  timezone: "America/New_York"
+  awake-scheduled:
+    daily:
+      - ["07:15", "22:00"]
+    weekdays:
+      - ["06:45", "23:00"]
+    weekend:
+      - ["07:15", "12:00"]
+      - ["15:00", "23:30"]
+    friday: []
+    saturday:
+      - ["08:00", "12:00"]
+      - ["16:00", "23:00"]
+
 # Number of images to preload in the viewer (aligns with channel capacity)
 viewer-preload-count: 3
 
