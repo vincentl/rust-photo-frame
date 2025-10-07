@@ -18,9 +18,7 @@ use wgpu_glyph::{
 };
 use winit::dpi::PhysicalSize;
 
-use crate::config::GreetingScreenColorsConfig;
-
-type AppConfig = crate::config::Configuration;
+use crate::config::{GreetingScreenColorsConfig, ScreenMessageConfig};
 
 const MEASURE_BOUNDS_EXTENT: f32 = 100_000.0;
 const DRAW_BOUNDS_PADDING: f32 = 2.0;
@@ -107,9 +105,9 @@ impl GreetingScreen {
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
-        config: &AppConfig,
+        screen: &ScreenMessageConfig,
     ) -> Self {
-        let settings = GreetingSettings::from_config(config);
+        let settings = GreetingSettings::from_screen(screen);
         let glyph_font = load_font(&settings.font_name);
         let device_limits = device.limits();
         let glyph_texture_limit = device_limits.max_texture_dimension_2d.min(4096);
@@ -138,6 +136,13 @@ impl GreetingScreen {
             glyph_cache_side,
             glyph_texture_limit: glyph_texture_limit as f32,
         }
+    }
+
+    pub fn update_screen(&mut self, screen: &ScreenMessageConfig) {
+        self.settings = GreetingSettings::from_screen(screen);
+        self.loaded_font_request = None;
+        self.rebuild_geometry();
+        self.update_text_layout();
     }
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>, scale_factor: f64) {
@@ -201,6 +206,16 @@ impl GreetingScreen {
             warn!(error = %err, "greeting_screen_draw_failed");
         }
         self.staging_belt.finish();
+    }
+
+    pub fn screen_message(
+        &mut self,
+        screen: &ScreenMessageConfig,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+    ) {
+        self.update_screen(screen);
+        self.render(encoder, target_view);
     }
 
     fn ensure_font_loaded(&mut self) {
@@ -606,13 +621,12 @@ fn relative_luminance(color: [f32; 4]) -> f32 {
 }
 
 impl GreetingSettings {
-    fn from_config(config: &AppConfig) -> Self {
-        let source = &config.greeting_screen;
-        let message = source.message_or_default().into_owned();
-        let font_name = source.font.clone();
-        let stroke_width_dip = source.effective_stroke_width_dip();
-        let corner_radius_dip = source.effective_corner_radius_dip();
-        let colors = GreetingColors::from_config(&source.colors);
+    fn from_screen(screen: &ScreenMessageConfig) -> Self {
+        let message = screen.message_or_default().into_owned();
+        let font_name = screen.font.clone();
+        let stroke_width_dip = screen.effective_stroke_width_dip();
+        let corner_radius_dip = screen.effective_corner_radius_dip(stroke_width_dip);
+        let colors = GreetingColors::from_config(&screen.colors);
         Self {
             message,
             font_name,

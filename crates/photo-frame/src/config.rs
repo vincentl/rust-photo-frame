@@ -27,19 +27,39 @@ pub struct GreetingScreenColorsConfig {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "kebab-case", default)]
-pub struct GreetingScreenConfig {
+pub struct ScreenMessageConfig {
     pub message: Option<String>,
     pub font: Option<String>,
     pub stroke_width: Option<f32>,
     pub corner_radius: Option<f32>,
-    pub duration_seconds: Option<f32>,
     #[serde(default)]
     pub colors: GreetingScreenColorsConfig,
 }
 
-impl GreetingScreenConfig {
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct GreetingScreenConfig {
+    #[serde(flatten)]
+    pub screen: ScreenMessageConfig,
+    pub duration_seconds: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct SleepScreenConfig {
+    #[serde(flatten)]
+    pub screen: ScreenMessageConfig,
+}
+
+impl ScreenMessageConfig {
     const DEFAULT_STROKE_WIDTH_DIP: f32 = 16.0;
-    const DEFAULT_DURATION_SECONDS: f32 = 4.0;
+
+    pub fn message_or_default(&self) -> std::borrow::Cow<'_, str> {
+        match &self.message {
+            Some(msg) if !msg.trim().is_empty() => std::borrow::Cow::Borrowed(msg.as_str()),
+            _ => std::borrow::Cow::Borrowed("Initializing…"),
+        }
+    }
 
     pub fn effective_stroke_width_dip(&self) -> f32 {
         let width = self
@@ -49,54 +69,40 @@ impl GreetingScreenConfig {
         width.max(0.1)
     }
 
-    pub fn effective_corner_radius_dip(&self) -> f32 {
-        let base = self.effective_stroke_width_dip();
+    pub fn effective_corner_radius_dip(&self, default_stroke: f32) -> f32 {
         let radius = self
             .corner_radius
             .filter(|value| value.is_finite() && *value >= 0.0)
-            .unwrap_or(base * 0.75);
+            .unwrap_or_else(|| {
+                let base = self
+                    .stroke_width
+                    .filter(|value| value.is_finite() && *value > 0.0)
+                    .unwrap_or(default_stroke);
+                base * 0.75
+            });
         radius.max(0.0)
     }
 
-    pub fn effective_duration(&self) -> Duration {
-        let seconds = self
-            .duration_seconds
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .unwrap_or(Self::DEFAULT_DURATION_SECONDS)
-            .max(0.0);
-        Duration::from_secs_f32(seconds)
-    }
-
-    pub fn message_or_default(&self) -> std::borrow::Cow<'_, str> {
-        match &self.message {
-            Some(msg) if !msg.trim().is_empty() => std::borrow::Cow::Borrowed(msg.as_str()),
-            _ => std::borrow::Cow::Borrowed("Initializing…"),
-        }
-    }
-
-    pub fn validate(&self) -> Result<()> {
+    fn validate(&self, prefix: &str) -> Result<()> {
         if let Some(width) = self.stroke_width {
             ensure!(
                 width.is_finite() && width > 0.0,
-                "greeting-screen.stroke-width must be positive"
+                "{}.stroke-width must be positive",
+                prefix
             );
         }
         if let Some(radius) = self.corner_radius {
             ensure!(
                 radius.is_finite() && radius >= 0.0,
-                "greeting-screen.corner-radius must be non-negative"
-            );
-        }
-        if let Some(duration) = self.duration_seconds {
-            ensure!(
-                duration.is_finite() && duration >= 0.0,
-                "greeting-screen.duration-seconds must be non-negative"
+                "{}.corner-radius must be non-negative",
+                prefix
             );
         }
         if let Some(font_name) = &self.font {
             ensure!(
                 !font_name.trim().is_empty(),
-                "greeting-screen.font must not be blank when provided"
+                "{}.font must not be blank when provided",
+                prefix
             );
         }
         for (field, value) in [
@@ -107,11 +113,59 @@ impl GreetingScreenConfig {
             if let Some(color) = value {
                 ensure!(
                     !color.trim().is_empty(),
-                    "greeting-screen.colors.{field} must not be blank when provided"
+                    "{}.colors.{} must not be blank when provided",
+                    prefix,
+                    field
                 );
             }
         }
         Ok(())
+    }
+}
+
+impl GreetingScreenConfig {
+    const DEFAULT_DURATION_SECONDS: f32 = 4.0;
+
+    pub fn effective_duration(&self) -> Duration {
+        let seconds = self
+            .duration_seconds
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(Self::DEFAULT_DURATION_SECONDS)
+            .max(0.0);
+        Duration::from_secs_f32(seconds)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.screen.validate("greeting-screen")?;
+        if let Some(duration) = self.duration_seconds {
+            ensure!(
+                duration.is_finite() && duration >= 0.0,
+                "greeting-screen.duration-seconds must be non-negative"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn screen(&self) -> &ScreenMessageConfig {
+        &self.screen
+    }
+}
+
+impl SleepScreenConfig {
+    pub fn validate(&self) -> Result<()> {
+        self.screen.validate("sleep-screen")
+    }
+
+    pub fn screen(&self) -> &ScreenMessageConfig {
+        &self.screen
+    }
+}
+
+impl Default for SleepScreenConfig {
+    fn default() -> Self {
+        let mut screen = ScreenMessageConfig::default();
+        screen.message = Some("Going to Sleep".to_string());
+        Self { screen }
     }
 }
 
@@ -2868,6 +2922,8 @@ pub struct Configuration {
     pub playlist: PlaylistOptions,
     /// Greeting screen shown while the first assets are prepared.
     pub greeting_screen: GreetingScreenConfig,
+    /// Sleep screen shown when the frame enters sleep mode.
+    pub sleep_screen: SleepScreenConfig,
 }
 
 impl Configuration {
@@ -2901,6 +2957,9 @@ impl Configuration {
         self.greeting_screen
             .validate()
             .context("invalid greeting screen configuration")?;
+        self.sleep_screen
+            .validate()
+            .context("invalid sleep screen configuration")?;
         Ok(self)
     }
 }
@@ -2919,6 +2978,7 @@ impl Default for Configuration {
             matting: MattingConfig::default(),
             playlist: PlaylistOptions::default(),
             greeting_screen: GreetingScreenConfig::default(),
+            sleep_screen: SleepScreenConfig::default(),
         }
     }
 }

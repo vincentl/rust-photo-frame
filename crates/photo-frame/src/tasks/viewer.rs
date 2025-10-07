@@ -21,8 +21,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(4);
-const SLEEP_MESSAGE: &str = "Going to Sleep";
-
 fn wait_for_retry(cancel: &CancellationToken, mut remaining: Duration) -> bool {
     if remaining.is_zero() {
         return cancel.is_cancelled();
@@ -1212,7 +1210,12 @@ pub fn run_windowed(
 
             let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
 
-            let mut greeting = GreetingScreen::new(&device, &queue, format, &self.full_config);
+            let mut greeting = GreetingScreen::new(
+                &device,
+                &queue,
+                format,
+                self.full_config.greeting_screen.screen(),
+            );
             greeting.resize(size, window.scale_factor());
 
             self.window = Some(window);
@@ -1308,16 +1311,13 @@ pub fn run_windowed(
 
                     if self.power_state == PowerState::Sleeping {
                         if self.pending_sleep_banner {
-                            let mut sleep_cfg = self.full_config.clone();
-                            sleep_cfg.greeting_screen.message = Some(SLEEP_MESSAGE.to_string());
-                            let mut banner = GreetingScreen::new(
-                                &gpu.device,
-                                &gpu.queue,
-                                gpu.config.format,
-                                &sleep_cfg,
+                            gpu.greeting
+                                .resize(window.inner_size(), window.scale_factor());
+                            gpu.greeting.screen_message(
+                                self.full_config.sleep_screen.screen(),
+                                &mut encoder,
+                                &view,
                             );
-                            banner.resize(window.inner_size(), window.scale_factor());
-                            banner.render(&mut encoder, &view);
                             self.pending_sleep_banner = false;
                         }
                         gpu.queue.submit(Some(encoder.finish()));
@@ -1326,7 +1326,13 @@ pub fn run_windowed(
                     }
 
                     if self.current.is_none() && self.transition_state.is_none() {
-                        gpu.greeting.render(&mut encoder, &view);
+                        gpu.greeting
+                            .resize(window.inner_size(), window.scale_factor());
+                        gpu.greeting.screen_message(
+                            self.full_config.greeting_screen.screen(),
+                            &mut encoder,
+                            &view,
+                        );
                         gpu.queue.submit(Some(encoder.finish()));
                         frame.present();
                         return;
