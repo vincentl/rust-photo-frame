@@ -470,8 +470,7 @@ async fn handle_control_connection(
                         }
                     }
                     Some(command)
-                        if command.eq_ignore_ascii_case("toggleState")
-                            || command.eq_ignore_ascii_case("toggleSleep") =>
+                        if command.eq_ignore_ascii_case("toggleState") =>
                     {
                         tracing::warn!(payload = %payload_text, command, "malformed toggle command payload: {err}");
                     }

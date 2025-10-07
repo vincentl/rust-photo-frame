@@ -22,13 +22,13 @@ This guide focuses on powering down HDMI monitors from the Raspberry Pi 5 runnin
        sleep-command: "wlr-randr --output @OUTPUT@ --off || vcgencmd display_power 0"
        wake-command: "wlr-randr --output @OUTPUT@ --on  || vcgencmd display_power 1"
    ```
-4. Start the service. The frame wakes the moment `on-hours.start` arrives and sleeps when `on-hours.end` hits, even if a manual override was active. Writing `{ "command": "ToggleSleep" }` to `/run/photo-frame/control.sock` (or pressing a mapped GPIO button) still flips sleep ↔ wake immediately; the next boundary restores the scheduled state. Run a quick validation with `rust-photo-frame config.yaml --sleep-test 10`.
+4. Start the service. The frame wakes the moment `on-hours.start` arrives and sleeps when `on-hours.end` hits, even if a manual override was active. Writing `{ "command": "ToggleState" }` to `/run/photo-frame/control.sock` (or pressing a mapped GPIO button) still flips sleep ↔ wake immediately; the next boundary restores the scheduled state. Run a quick validation with `rust-photo-frame config.yaml --sleep-test 10`.
 
 ## Configuration essentials
 
 The `sleep-mode` block accepts wrap-past-midnight windows, per-day overrides, and optional display-power commands. Times are interpreted using the configured `timezone`; when a field omits a zone the top-level `sleep.timezone` applies. Day overrides take precedence over weekend/weekday overrides, which in turn override the default `on-hours` window.
 
-Manual overrides can be triggered by writing `{ "command": "ToggleSleep" }` to `/run/photo-frame/control.sock`. Each press flips the current state (wake ↔ sleep) immediately, regardless of the schedule. Upcoming boundaries still win: `on-hours.start` forces wake, `on-hours.end` forces sleep, and either transition clears any active override. Overrides can also be seeded at startup by setting `PHOTO_FRAME_SLEEP_OVERRIDE=sleep|wake` or pointing `PHOTO_FRAME_SLEEP_OVERRIDE_FILE` at a file containing `sleep` or `wake`.
+Manual overrides can be triggered by writing `{ "command": "ToggleState" }` to `/run/photo-frame/control.sock`. Each press flips the current state (wake ↔ sleep) immediately, regardless of the schedule. Upcoming boundaries still win: `on-hours.start` forces wake, `on-hours.end` forces sleep, and either transition clears any active override. Overrides can also be seeded at startup by setting `PHOTO_FRAME_SLEEP_OVERRIDE=sleep|wake` or pointing `PHOTO_FRAME_SLEEP_OVERRIDE_FILE` at a file containing `sleep` or `wake`.
 
 The default `display-power` commands issue Wayland DPMS requests via:
 ```

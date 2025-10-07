@@ -50,11 +50,11 @@ main() {
   fi
 
   section "Sleep toggle via control socket"
-  info "Sending ToggleSleep command via /run/photo-frame/control.sock"
-  run_cmd "Send ToggleSleep" python3 - <<'PY'
+  info "Sending ToggleState command via /run/photo-frame/control.sock"
+  run_cmd "Send ToggleState" python3 - <<'PY'
 import socket
 
-payload = b'{"command":"ToggleSleep"}'
+payload = b'{"command":"ToggleState"}'
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 try:
     sock.connect("/run/photo-frame/control.sock")
