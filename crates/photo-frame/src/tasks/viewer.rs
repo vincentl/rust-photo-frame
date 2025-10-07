@@ -654,6 +654,57 @@ pub fn run_windowed(
     }
 
     impl App {
+        fn reset_for_resume(&mut self) {
+            self.pending.clear();
+            self.ready_results.clear();
+            self.deferred_images.clear();
+            self.current = None;
+            self.next = None;
+            self.transition_state = None;
+            self.displayed_at = None;
+            self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
+            self.mat_inflight = 0;
+            self.pending_redraw = true;
+        }
+
+        fn ensure_window(&mut self, event_loop: &ActiveEventLoop) -> Option<Arc<Window>> {
+            if let Some(window) = self.window.as_ref() {
+                return Some(window.clone());
+            }
+
+            let attrs = Window::default_attributes().with_title("Photo Frame");
+            let window = match event_loop.create_window(attrs) {
+                Ok(window) => Arc::new(window),
+                Err(err) => {
+                    warn!(error = %err, "failed to create viewer window; exiting");
+                    event_loop.exit();
+                    return None;
+                }
+            };
+            window.set_decorations(false);
+            let fullscreen_monitor = window
+                .current_monitor()
+                .or_else(|| event_loop.primary_monitor());
+            window.set_fullscreen(Some(match fullscreen_monitor {
+                Some(m) => Fullscreen::Borderless(Some(m)),
+                None => Fullscreen::Borderless(None),
+            }));
+            window.set_cursor_visible(false);
+            self.window = Some(window.clone());
+            Some(window)
+        }
+
+        fn teardown_gpu(&mut self) {
+            self.pending.clear();
+            self.current = None;
+            self.next = None;
+            self.transition_state = None;
+            self.displayed_at = None;
+            self.greeting_deadline = None;
+            self.gpu = None;
+            self.pending_redraw = true;
+        }
+
         fn handle_control_command(&mut self, cmd: ViewerCommand) {
             match cmd {
                 ViewerCommand::ToggleSleep => {
@@ -886,47 +937,54 @@ pub fn run_windowed(
 
     impl ApplicationHandler<ViewerEvent> for App {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-            self.pending.clear();
-            self.ready_results.clear();
-            self.deferred_images.clear();
-            self.current = None;
-            self.next = None;
-            self.transition_state = None;
-            self.displayed_at = None;
-            self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
-            self.mat_inflight = 0;
-            self.pending_redraw = true;
-            let attrs = Window::default_attributes().with_title("Photo Frame");
-            let window = Arc::new(event_loop.create_window(attrs).unwrap());
-            window.set_decorations(false);
-            let fullscreen_monitor = window
-                .current_monitor()
-                .or_else(|| event_loop.primary_monitor());
-            window.set_fullscreen(Some(match fullscreen_monitor {
-                Some(m) => Fullscreen::Borderless(Some(m)),
-                None => Fullscreen::Borderless(None),
-            }));
-            window.set_cursor_visible(false);
+            self.reset_for_resume();
+
+            let Some(window) = self.ensure_window(event_loop) else {
+                return;
+            };
+
+            if self.gpu.is_some() {
+                return;
+            }
 
             let instance = wgpu::Instance::default();
-            let surface = instance.create_surface(window.clone()).unwrap();
+            let surface = match instance.create_surface(window.clone()) {
+                Ok(surface) => surface,
+                Err(err) => {
+                    warn!(error = %err, "failed to create surface; exiting viewer");
+                    event_loop.exit();
+                    return;
+                }
+            };
             let adapter =
-                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::HighPerformance,
                     compatible_surface: Some(&surface),
                     force_fallback_adapter: false,
-                }))
-                .unwrap();
+                })) {
+                    Some(adapter) => adapter,
+                    None => {
+                        warn!("failed to acquire GPU adapter; exiting viewer");
+                        event_loop.exit();
+                        return;
+                    }
+                };
             let limits = adapter.limits();
             let (device, queue) =
-                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                     label: Some("viewer-device"),
                     required_features: wgpu::Features::empty(),
                     required_limits: limits.clone(),
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::default(),
-                }))
-                .unwrap();
+                })) {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        warn!(error = %err, "failed to acquire GPU device; exiting viewer");
+                        event_loop.exit();
+                        return;
+                    }
+                };
             let caps = surface.get_capabilities(&adapter);
             let format = caps
                 .formats
@@ -1120,6 +1178,10 @@ pub fn run_windowed(
             self.current = None;
         }
 
+        fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+            self.teardown_gpu();
+        }
+
         fn window_event(
             &mut self,
             event_loop: &ActiveEventLoop,
@@ -1154,6 +1216,11 @@ pub fn run_windowed(
                     gpu.surface.configure(&gpu.device, &gpu.config);
                     gpu.greeting.resize(size, window.scale_factor());
                 }
+                WindowEvent::Occluded(false) => {
+                    self.pending_redraw = true;
+                    self.request_redraw();
+                }
+                WindowEvent::Occluded(true) => {}
                 WindowEvent::RedrawRequested => {
                     let frame = match gpu.surface.get_current_texture() {
                         Ok(frame) => frame,
@@ -1300,6 +1367,10 @@ pub fn run_windowed(
                 }
                 _ => {}
             }
+        }
+
+        fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+            self.request_redraw();
         }
 
         fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ViewerEvent) {
