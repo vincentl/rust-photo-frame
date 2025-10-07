@@ -134,7 +134,7 @@ Use the following environment variables to customize an installation:
 ### 3. Provision the kiosk session
 
 ```bash
-sudo ./setup/kiosk-trixie.sh
+sudo ./setup/kiosk/provision-trixie.sh
 ```
 
 Run the greetd installer with root privileges. The script:

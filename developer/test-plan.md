@@ -49,7 +49,7 @@ Exercise each axis at least once per release cycle.
   ```
 - [ ] Run the kiosk bootstrapper (installs greetd/cage, creates the kiosk user, installs helper units, and enables greetd on tty1):
   ```sh
-  sudo ./setup/kiosk-trixie.sh
+  sudo ./setup/kiosk/provision-trixie.sh
   ```
   Note: reconnect your SSH session afterwards so refreshed group memberships apply.
 - [ ] After reconnecting, rerun the repo checkout if necessary and execute the app deploy stage (build + install + systemd wiring). Expect 5–7 minutes for the release build on a Pi 5 with active cooling:

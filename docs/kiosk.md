@@ -7,7 +7,7 @@ The photo frame boots straight into the Wayland app using a greetd-managed sessi
 Run the kiosk installer on a fresh Debian 13 (or Raspberry Pi OS trixie) image:
 
 ```bash
-sudo ./setup/kiosk-trixie.sh
+sudo ./setup/kiosk/provision-trixie.sh
 ```
 
 The script performs the following actions:

@@ -1,4 +1,4 @@
-# Managed by setup/kiosk-trixie.sh
+# Managed by setup/kiosk/provision-trixie.sh
 [Unit]
 Description=Run Photo Frame Library Sync hourly
 
