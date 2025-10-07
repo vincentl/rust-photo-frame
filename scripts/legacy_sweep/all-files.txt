@@ -51,7 +51,6 @@ setup/files/bin/photo-safe-shutdown
 setup/files/bin/print-status.sh
 setup/files/etc/wifi-manager.yaml
 setup/files/wordlist.txt
-setup/lib/raspi_boot.sh
 setup/lib/systemd.sh
 setup/packages/install-apt-packages.sh
 setup/packages/install-rust.sh

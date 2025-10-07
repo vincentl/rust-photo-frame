@@ -4,9 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-# shellcheck source=setup/lib/raspi_boot.sh
-. "${SCRIPT_DIR}/../lib/raspi_boot.sh"
-
 log() {
     printf '[kiosk-setup] %s\n' "$*"
 }
@@ -43,6 +40,102 @@ require_commands() {
     done
     if (( ${#missing[@]} > 0 )); then
         die "Missing required commands: ${missing[*]}"
+    fi
+}
+
+backup_boot_config() {
+    local config_path="$1" backup_var="$2"
+    if [[ "${!backup_var}" -eq 0 ]]; then
+        local backup
+        backup="${config_path}.bak.$(date +%Y%m%d-%H%M%S)"
+        cp -a "${config_path}" "${backup}"
+        printf -v "${backup_var}" '%d' 1
+        log "Backup of ${config_path} written to ${backup}"
+    fi
+}
+
+ensure_boot_config_pi5() {
+    local module="pi5-boot-config" enable_4k="${ENABLE_4K_BOOT:-1}" config_path="${1:-}"
+    local backup_taken=0
+
+    if [[ "${enable_4k}" != "1" ]]; then
+        log "[${module}] 4K boot configuration disabled via ENABLE_4K_BOOT=${enable_4k}. Skipping."
+        return 0
+    fi
+
+    if [[ -z "${config_path}" ]]; then
+        if [[ -f /boot/firmware/config.txt ]]; then
+            config_path="/boot/firmware/config.txt"
+        elif [[ -f /boot/config.txt ]]; then
+            config_path="/boot/config.txt"
+        else
+            log "[${module}] WARN: Unable to locate config.txt (looked in /boot/firmware and /boot)."
+            return 0
+        fi
+    fi
+
+    log "[${module}] Using configuration file ${config_path}"
+
+    declare -A kv_settings=(
+        ["hdmi_force_hotplug:1"]="1"
+        ["hdmi_group:1"]="2"
+        ["hdmi_mode:1"]="97"
+        ["hdmi_drive:1"]="2"
+    )
+
+    declare -A dtparams=(
+        ["dtparam=fan_temp0"]="dtparam=fan_temp0=50000"
+        ["dtparam=fan_temp1"]="dtparam=fan_temp1=60000"
+        ["dtparam=fan_temp2"]="dtparam=fan_temp2=70000"
+        ["dtparam=fan_temp3"]="dtparam=fan_temp3=80000"
+    )
+
+    local key value line
+    for key in "${!kv_settings[@]}"; do
+        value="${kv_settings[${key}]}"
+        if grep -qx "${key}=${value}" "${config_path}" 2>/dev/null; then
+            log "[${module}] ${key} already set to ${value}"
+            continue
+        fi
+
+        if grep -q "^${key}=" "${config_path}" 2>/dev/null; then
+            backup_boot_config "${config_path}" backup_taken
+            sed -i "s|^${key}=.*$|${key}=${value}|" "${config_path}"
+        else
+            backup_boot_config "${config_path}" backup_taken
+            printf '\n%s=%s\n' "${key}" "${value}" >>"${config_path}"
+        fi
+        log "[${module}] Set ${key}=${value}"
+    done
+
+    for line in "${!dtparams[@]}"; do
+        value="${dtparams[${line}]}"
+        if grep -qxF "${value}" "${config_path}" 2>/dev/null; then
+            log "[${module}] ${value} already present"
+            continue
+        fi
+
+        if grep -q "^${line}=" "${config_path}" 2>/dev/null; then
+            backup_boot_config "${config_path}" backup_taken
+            sed -i "s|^${line}=.*$|${value}|" "${config_path}"
+        else
+            backup_boot_config "${config_path}" backup_taken
+            printf '\n%s\n' "${value}" >>"${config_path}"
+        fi
+        log "[${module}] Ensured ${value}"
+    done
+
+    if grep -q '^dtoverlay=pi5-fan' "${config_path}" 2>/dev/null; then
+        backup_boot_config "${config_path}" backup_taken
+        sed -i '/^dtoverlay=pi5-fan/d' "${config_path}"
+        log "[${module}] Removed deprecated dtoverlay=pi5-fan entry"
+    fi
+
+    if [[ ${backup_taken} -eq 0 ]]; then
+        log "[${module}] Boot configuration already satisfied"
+    else
+        sync
+        log "[${module}] Boot configuration updated"
     fi
 }
 
@@ -105,10 +198,37 @@ write_greetd_config() {
 vt = 1
 
 [default_session]
-command = "cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml"
+command = "cage -s -- /usr/local/bin/photoframe-session"
 user = "kiosk"
 CONFIG
     chmod 0644 "${config_file}"
+}
+
+install_session_wrapper() {
+    local wrapper="/usr/local/bin/photoframe-session"
+    log "Installing ${wrapper}"
+    install -d -m 0755 "$(dirname "${wrapper}")"
+    cat <<'WRAPPER' >"${wrapper}"
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() {
+    printf '[photoframe-session] %s\n' "$*" >&2
+}
+
+if command -v wlr-randr >/dev/null 2>&1; then
+    if ! wlr-randr --output HDMI-A-1 --mode 3840x2160@60; then
+        log "WARN: Failed to apply HDMI-A-1 3840x2160@60 mode via wlr-randr"
+    else
+        log "Applied HDMI-A-1 3840x2160@60 via wlr-randr"
+    fi
+else
+    log "WARN: wlr-randr not found; skipping output configuration"
+fi
+
+exec systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml
+WRAPPER
+    chmod 0755 "${wrapper}"
 }
 
 install_auxiliary_units() {
@@ -165,10 +285,11 @@ main() {
     require_trixie
     require_commands
 
-    ensure_boot_config_4k
+    ensure_boot_config_pi5
 
     ensure_packages
     ensure_kiosk_user
+    install_session_wrapper
     write_greetd_config
     install_auxiliary_units
     enable_systemd_units
