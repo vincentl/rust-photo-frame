@@ -448,6 +448,12 @@ async fn drive_viewer_events(
             cmd = control.recv() => {
                 match cmd {
                     Some(cmd) => {
+                        let queue_depth = control.len();
+                        info!(
+                            queue_depth,
+                            command = ?cmd,
+                            "forwarding viewer control command to event loop"
+                        );
                         if proxy.send_event(ViewerEvent::Command(cmd)).is_err() {
                             warn!("viewer event proxy rejected command event; stopping driver loop");
                             break;
@@ -1143,6 +1149,17 @@ pub fn run_windowed(
                         (Some(_), Some(_)) => "manual-override-retained",
                         (None, None) => "schedule",
                     };
+                    let transition_target_state = result.transition.as_ref().map(|event| {
+                        if event.actual_awake {
+                            "awake"
+                        } else {
+                            "sleeping"
+                        }
+                    });
+                    let transition_override = result
+                        .transition
+                        .as_ref()
+                        .and_then(|event| event.override_state.map(ManualOverride::as_str));
                     info!(
                         sleep_toggle_previous_state =
                             if was_sleeping { "sleeping" } else { "awake" },
@@ -1153,11 +1170,13 @@ pub fn run_windowed(
                             result.override_state.map(ManualOverride::as_str),
                         sleep_toggle_state_applied = result.applied,
                         sleep_toggle_transition = result.transition.is_some(),
+                        sleep_toggle_transition_target_state = transition_target_state,
+                        sleep_toggle_transition_override = transition_override,
                         sleep_toggle_action = toggle_action,
                         "sleep toggle command processed",
                     );
                     if !result.applied {
-                        debug!("sleep toggle matched existing state");
+                        warn!("sleep toggle matched existing state");
                     }
                     self.log_override_change(previous_override, result.override_state);
                     self.handle_sleep_transition(result.transition);

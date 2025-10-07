@@ -11,7 +11,7 @@ mod tasks {
     pub mod viewer;
 }
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{Duration as ChronoDuration, Utc};
 use clap::Parser;
 use humantime::{format_rfc3339, parse_rfc3339};
@@ -25,11 +25,11 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 #[cfg(unix)]
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 
 use events::{Displayed, InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded, ViewerCommand};
 use platform::display_power::PowerCommandReport;
-use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
+use tokio::time::{Duration as TokioDuration, sleep as tokio_sleep};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -170,9 +170,18 @@ async fn main() -> Result<()> {
                                 break;
                             }
                             tracing::info!("SIGUSR1 received; toggling sleep mode");
-                            if let Err(err) = control.send(ViewerCommand::ToggleSleep).await {
-                                tracing::warn!("failed to forward sleep toggle request: {err}");
-                                break;
+                            match control.send(ViewerCommand::ToggleSleep).await {
+                                Ok(()) => {
+                                    tracing::debug!(
+                                        "sleep toggle command forwarded to viewer control channel"
+                                    );
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        "failed to forward sleep toggle request: {err}"
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }
