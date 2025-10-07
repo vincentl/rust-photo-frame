@@ -184,7 +184,7 @@ Exercise each axis at least once per release cycle.
 - [ ] Cold boot to slideshow ready in ≤ 45 seconds after login prompt appears.
 - [ ] Display locked to desired mode (4K@60 preferred) with no sustained tearing.
 - [ ] Button behaviors (short press sleep toggle, double-click shutdown) reliable.
-- [ ] Sleep schedule respects configured windows and reacts to manual ToggleSleep command via control socket.
+- [ ] Sleep schedule respects configured windows and reacts to manual ToggleState command via control socket.
 - [ ] Wi-Fi provisioning, outage resilience, and watcher recovery all succeed without slideshow halt.
 - [ ] Library playback smooth for medium set (≤5% CPU spikes >150% overall, no OOM/IO errors).
 - [ ] Updates deploy cleanly and rollback path verified.

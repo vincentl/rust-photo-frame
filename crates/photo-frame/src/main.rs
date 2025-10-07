@@ -399,7 +399,7 @@ async fn handle_control_connection(
     tracing::info!(command = %request.command, "received control command");
 
     match request.command.as_str() {
-        "ToggleSleep" | "ToggleState" => control
+        "ToggleState" => control
             .send(ViewerCommand::ToggleState)
             .await
             .context("failed to forward toggle-state command")?,
