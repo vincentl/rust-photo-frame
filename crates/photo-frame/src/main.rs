@@ -31,7 +31,9 @@ use tokio::net::UnixListener;
 #[cfg(unix)]
 const CONTROL_SOCKET_PATH: &str = "/run/photo-frame/control.sock";
 
-use events::{Displayed, InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded, ViewerCommand};
+use events::{
+    Displayed, InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded, ViewerCommand, ViewerState,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -290,6 +292,8 @@ fn run_playlist_dry_run(
 #[derive(Debug, Deserialize)]
 struct ControlCommand {
     command: String,
+    #[serde(default)]
+    state: Option<String>,
 }
 
 #[cfg(unix)]
@@ -395,14 +399,39 @@ async fn handle_control_connection(
     tracing::info!(command = %request.command, "received control command");
 
     match request.command.as_str() {
-        "ToggleSleep" => control
-            .send(ViewerCommand::ToggleSleep)
+        "ToggleSleep" | "ToggleState" => control
+            .send(ViewerCommand::ToggleState)
             .await
-            .context("failed to forward ToggleSleep command")?,
+            .context("failed to forward toggle-state command")?,
+        "SetState" => {
+            let Some(raw_state) = request.state.as_deref() else {
+                tracing::warn!("missing state for SetState command");
+                return Ok(());
+            };
+            match parse_viewer_state(raw_state) {
+                Some(state) => control
+                    .send(ViewerCommand::SetState(state))
+                    .await
+                    .context("failed to forward set-state command")?,
+                None => {
+                    tracing::warn!(state = raw_state, "invalid viewer state supplied");
+                }
+            }
+        }
         other => {
             tracing::warn!(command = other, "unsupported control command");
         }
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn parse_viewer_state(input: &str) -> Option<ViewerState> {
+    let normalized = input.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "awake" | "wake" | "on" => Some(ViewerState::Awake),
+        "asleep" | "sleep" | "sleeping" | "off" => Some(ViewerState::Asleep),
+        _ => None,
+    }
 }
