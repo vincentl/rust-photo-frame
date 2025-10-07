@@ -62,6 +62,7 @@ The app stage compiles the workspace, stages binaries and documentation under `s
 - Inspect the running session: `sudo systemctl status greetd`
 - Restart helpers: `sudo systemctl restart photoframe-wifi-manager.service`
 - Tail kiosk logs: `sudo journalctl -u greetd -f`
-- Upload new media: copy into `/var/lib/photo-frame/photos`
+- Upload new media: copy manual additions into `/var/lib/photo-frame/photos/local`.
+- Configure sync tooling (e.g., rclone) to manage `/var/lib/photo-frame/photos/cloud` when mirroring from remote storage.
 
 The kiosk account is unprivileged; use the `frame` operator account (see `docs/configuration.md`) for maintenance commands.

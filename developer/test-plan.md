@@ -61,6 +61,8 @@ Exercise each axis at least once per release cycle.
 - [ ] Customize the writable config at `/var/lib/photo-frame/config.yaml`. Minimal example:
   ```yaml
   photo-library-path: /var/lib/photo-frame/photos
+  # ├── cloud/  # sync target (rclone, Nextcloud, etc.)
+  # └── local/  # manual USB/SSH drops kept outside sync
   greeting-screen:
     message: "Welcome home!"
     font: "Macondo"
@@ -73,7 +75,7 @@ Exercise each axis at least once per release cycle.
       sleep-command: "wlr-randr --output @OUTPUT@ --off || vcgencmd display_power 0"
       wake-command: "wlr-randr --output @OUTPUT@ --on  || vcgencmd display_power 1"
   ```
-- [ ] Populate `/var/lib/photo-frame/photos` (or configured library path) according to the test matrix scenario.
+- [ ] Populate `/var/lib/photo-frame/photos/cloud` via your sync pipeline for mirrored libraries and `/var/lib/photo-frame/photos/local` for ad-hoc media (or the equivalent subdirectories under the configured library path) according to the test matrix scenario.
 
 ## Phase 3 – Kiosk Autostart & Services
 - [ ] Confirm the setup script enabled expected units:

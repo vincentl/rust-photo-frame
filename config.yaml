@@ -1,7 +1,10 @@
 # Example configuration for rust-photo-frame
 # Adjust values to match your hardware, library layout, and visual preferences.
 
-# Root directory for images (scanned recursively)
+# Root directory for images. Keep media in the managed subdirectories to
+# separate synced libraries from ad-hoc drops:
+#   cloud/ — populated by rclone or other sync jobs; safe to wipe/reseed.
+#   local/ — manual imports (USB, scp) that should persist across syncs.
 photo-library-path: /var/lib/photo-frame/photos
 
 # Render/transition settings

@@ -8,6 +8,8 @@ The example below targets a Pi driving a 4K portrait display backed by a NAS-mou
 
 ```yaml
 photo-library-path: /var/lib/photo-frame/photos
+# ├── cloud/  # managed by sync jobs; safe to resync or replace wholesale
+# └── local/  # manual drops (USB, scp) that should survive sync resets
 
 # Render/transition settings
 transition:
@@ -45,7 +47,7 @@ matting:
       backend: neon
 ```
 
-If the frame launches to a black screen, double-check that `photo-library-path` points to a directory the runtime can read and that the user account has permission to access mounted network shares. You can validate a YAML edit quickly with `cargo run -p rust-photo-frame -- --playlist-dry-run 1`, which parses the config without opening the render window.
+If the frame launches to a black screen, double-check that `photo-library-path` points to a directory the runtime can read and that the user account has permission to access mounted network shares. The directory should contain `cloud` and `local` subdirectories—the runtime merges both so that cloud syncs can refresh `cloud/` while USB or ad-hoc transfers live under `local/`. You can validate a YAML edit quickly with `cargo run -p rust-photo-frame -- --playlist-dry-run 1`, which parses the config without opening the render window.
 
 ## Top-level keys
 
@@ -67,9 +69,9 @@ Use the quick reference below to locate the knobs you care about, then dive into
 
 - **Purpose:** Sets the root directory that will be scanned recursively for supported photo formats.
 - **Required?** Yes. Leave it unset and the application has no images to display.
-- **Accepted values & defaults:** Any absolute or relative filesystem path. The setup pipeline provisions `/var/lib/photo-frame/photos` and points the default configuration there so both the runtime and any cloud sync job start from a known location.
+- **Accepted values & defaults:** Any absolute or relative filesystem path. The setup pipeline provisions `/var/lib/photo-frame/photos` with `cloud/` and `local/` subdirectories and points the default configuration there so both the runtime and any cloud sync job start from a known location.
 - **Effect on behavior:** Switching the path changes the library the watcher monitors; the viewer reloads the playlist when the directory contents change.
-- **Notes:** After the installer seeds `/var/lib/photo-frame/config.yaml`, edit that writable copy to move the library elsewhere (for example, to an attached drive or network share) if you do not want to keep photos under `/var/lib/photo-frame/photos`.
+- **Notes:** Keep the `cloud/` and `local/` folders under the configured root so the runtime can merge them. Use `cloud/` for content that will be overwritten by sync jobs (e.g., rclone, Nextcloud), and reserve `local/` for manual imports you do not want the sync job to prune. After the installer seeds `/var/lib/photo-frame/config.yaml`, edit that writable copy to move the library elsewhere (for example, to an attached drive or network share) if you do not want to keep photos under `/var/lib/photo-frame/photos`.
 
 ### `transition`
 
