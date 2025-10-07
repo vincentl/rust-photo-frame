@@ -2,10 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # shellcheck source=setup/lib/raspi_boot.sh
-. "${SCRIPT_DIR}/lib/raspi_boot.sh"
+. "${SCRIPT_DIR}/../lib/raspi_boot.sh"
 
 log() {
     printf '[kiosk-setup] %s\n' "$*"

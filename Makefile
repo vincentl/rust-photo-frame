@@ -1,4 +1,6 @@
-.PHONY: diag-kiosk
+.PHONY: kiosk-diagnostics diag-kiosk
 
-diag-kiosk:
-	@./setup/diag-kiosk.sh
+kiosk-diagnostics:
+@./setup/kiosk/diagnostics.sh
+
+diag-kiosk: kiosk-diagnostics

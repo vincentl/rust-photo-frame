@@ -7,7 +7,7 @@ This directory houses idempotent provisioning scripts for Raspberry Pi photo fra
 Provision a Raspberry Pi OS Trixie kiosk with the greetd + cage workflow:
 
 ```bash
-sudo ./setup/kiosk-trixie.sh
+sudo ./setup/kiosk/provision-trixie.sh
 ```
 
 The script performs the following actions:
@@ -21,6 +21,16 @@ The script performs the following actions:
 - deploys and enables the supporting `photoframe-*` helper units.
 
 Re-run the script after OS updates to reapply package dependencies or repair systemd state; it is safe and idempotent.
+
+## Diagnose kiosk health
+
+Inspect the greetd session, kiosk user, and display-manager wiring:
+
+```bash
+sudo ./setup/kiosk/diagnostics.sh
+```
+
+Run this from the device when display login fails or the kiosk session will not start; it flags missing packages, disabled units, and other common misconfigurations.
 
 ## Replace the legacy swapfile with zram
 

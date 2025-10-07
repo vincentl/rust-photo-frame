@@ -8,20 +8,20 @@ fi
 FAIL=0
 
 title() {
-    printf '[diag-kiosk] %s\n' "$1"
+    printf '[kiosk-diagnostics] %s\n' "$1"
 }
 
 ok() {
-    printf '[diag-kiosk] OK: %s\n' "$1"
+    printf '[kiosk-diagnostics] OK: %s\n' "$1"
 }
 
 err() {
-    printf '[diag-kiosk] ERROR: %s\n' "$1" >&2
+    printf '[kiosk-diagnostics] ERROR: %s\n' "$1" >&2
     FAIL=1
 }
 
 warn() {
-    printf '[diag-kiosk] WARN: %s\n' "$1"
+    printf '[kiosk-diagnostics] WARN: %s\n' "$1"
 }
 
 check_greetd_unit() {
