@@ -22,7 +22,14 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 #[cfg(unix)]
-use tokio::signal::unix::{SignalKind, signal};
+use serde::Deserialize;
+#[cfg(unix)]
+use tokio::io::AsyncReadExt;
+#[cfg(unix)]
+use tokio::net::UnixListener;
+
+#[cfg(unix)]
+const CONTROL_SOCKET_PATH: &str = "/run/photo-frame/control.sock";
 
 use events::{Displayed, InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded, ViewerCommand};
 
@@ -128,23 +135,8 @@ async fn main() -> Result<()> {
         let cancel = cancel.clone();
         let control = viewer_control_tx.clone();
         tokio::spawn(async move {
-            match signal(SignalKind::user_defined1()) {
-                Ok(mut sigusr1) => loop {
-                    tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        received = sigusr1.recv() => {
-                            if received.is_none() {
-                                break;
-                            }
-                            tracing::info!("SIGUSR1 received; forwarding ToggleSleep command");
-                            if let Err(err) = control.send(ViewerCommand::ToggleSleep).await {
-                                tracing::warn!("failed to forward ToggleSleep request: {err}");
-                                break;
-                            }
-                        }
-                    }
-                },
-                Err(err) => tracing::warn!("failed to register SIGUSR1 handler: {err}"),
+            if let Err(err) = run_control_socket(cancel, control).await {
+                tracing::warn!("control socket failed: {err}");
             }
         });
     }
@@ -288,6 +280,127 @@ fn run_playlist_dry_run(
     } else {
         for (idx, path) in plan.iter().enumerate() {
             println!("  {:>4}: {}", idx + 1, path.display());
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Debug, Deserialize)]
+struct ControlCommand {
+    command: String,
+}
+
+#[cfg(unix)]
+struct SocketCleanup {
+    path: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for SocketCleanup {
+    fn drop(&mut self) {
+        if let Err(err) = std::fs::remove_file(&self.path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(path = %self.path.display(), ?err, "failed to remove control socket");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn run_control_socket(
+    cancel: CancellationToken,
+    control: mpsc::Sender<ViewerCommand>,
+) -> Result<()> {
+    let socket_path = std::path::PathBuf::from(CONTROL_SOCKET_PATH);
+
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create control socket directory {parent:?}"))?;
+    }
+
+    if socket_path.exists() {
+        match std::fs::remove_file(&socket_path) {
+            Ok(_) => tracing::warn!(path = %socket_path.display(), "removed stale control socket"),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to remove stale control socket at {}",
+                        socket_path.display()
+                    )
+                });
+            }
+        }
+    }
+
+    let listener = UnixListener::bind(&socket_path)
+        .with_context(|| format!("failed to bind control socket at {}", socket_path.display()))?;
+    let _cleanup = SocketCleanup {
+        path: socket_path.clone(),
+    };
+
+    tracing::info!(path = %socket_path.display(), "listening for control commands");
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::debug!("shutdown requested; closing control socket");
+                break;
+            }
+            accept_result = listener.accept() => {
+                match accept_result {
+                    Ok((stream, _addr)) => {
+                        let control = control.clone();
+                        tokio::spawn(async move {
+                            if let Err(err) = handle_control_connection(stream, control).await {
+                                tracing::warn!("control connection failed: {err}");
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        if err.kind() == std::io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        return Err(err).context("failed to accept control connection");
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn handle_control_connection(
+    mut stream: tokio::net::UnixStream,
+    control: mpsc::Sender<ViewerCommand>,
+) -> Result<()> {
+    let mut buf = Vec::with_capacity(128);
+    stream
+        .read_to_end(&mut buf)
+        .await
+        .context("failed to read control command")?;
+
+    if buf.is_empty() {
+        tracing::debug!("ignoring empty control payload");
+        return Ok(());
+    }
+
+    let request: ControlCommand = serde_json::from_slice(&buf)
+        .with_context(|| format!("invalid control payload: {}", String::from_utf8_lossy(&buf)))?;
+
+    tracing::info!(command = %request.command, "received control command");
+
+    match request.command.as_str() {
+        "ToggleSleep" => control
+            .send(ViewerCommand::ToggleSleep)
+            .await
+            .context("failed to forward ToggleSleep command")?,
+        other => {
+            tracing::warn!(command = other, "unsupported control command");
         }
     }
 
