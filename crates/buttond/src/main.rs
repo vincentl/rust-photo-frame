@@ -372,9 +372,9 @@ impl ButtonTracker {
 fn perform_action(action: Action, args: &Args) {
     match action {
         Action::Single => {
-            info!("single press → ToggleState command");
+            info!("single press → toggle-state command");
             if let Err(err) = trigger_single(args) {
-                error!(?err, "failed to send ToggleState command");
+                error!(?err, "failed to send toggle-state command");
             }
         }
         Action::Double => {
@@ -395,8 +395,8 @@ fn trigger_single(args: &Args) -> Result<()> {
     })?;
 
     stream
-        .write_all(br#"{"command":"ToggleState"}"#)
-        .context("failed to send ToggleState command")?;
+        .write_all(br#"{"command":"toggle-state"}"#)
+        .context("failed to send toggle-state command")?;
 
     Ok(())
 }
