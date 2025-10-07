@@ -14,9 +14,10 @@ The script performs the following actions:
 
 - verifies the OS is Raspberry Pi OS Trixie,
 - installs `greetd`, `cage`, `mesa-vulkan-drivers`, `vulkan-tools`, `wlr-randr`, and `wayland-protocols`,
-- programs the Raspberry Pi boot configuration for HDMI 4K60 output and enables the Pi 5 active cooling overlay (set `ENABLE_4K_BOOT=0` before running if you need different firmware settings),
+- programs the Raspberry Pi boot configuration for HDMI 4K60 output and configures the Pi 5 fan curve via `dtparam` entries (set `ENABLE_4K_BOOT=0` before running if you need different firmware settings),
+- installs a kiosk session wrapper that applies `wlr-randr --output HDMI-A-1 --mode 3840x2160@60` before launching the photo frame application,
 - ensures the `kiosk` user exists with `/usr/sbin/nologin` and belongs to the `render`, `video`, and `input` groups,
-- writes `/etc/greetd/config.toml` to launch `cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` on virtual terminal 1,
+- writes `/etc/greetd/config.toml` to launch `cage -s -- /usr/local/bin/photoframe-session` on virtual terminal 1,
 - disables conflicting display managers (`gdm3`, `sddm`, `lightdm`), enables `greetd.service` as the system `display-manager.service`, sets the default boot target to `graphical.target`, and masks `getty@tty1.service` to avoid VT races, and
 - deploys and enables the supporting `photoframe-*` helper units.
 
