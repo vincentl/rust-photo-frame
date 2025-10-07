@@ -141,6 +141,19 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Effect on behavior:** The renderer fits and centers the configured message inside a rounded double-line frame. `duration-seconds` guarantees the greeting remains on screen for at least that many seconds before the first photo appears, even when decoding finishes instantly.
 - **Notes:** Colors accept `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa` notation. Low-contrast combinations log a warning so you can tweak readability, and the viewer continues with sensible defaults if fonts or colors are omitted.
 
+### `sleep-screen`
+
+- **Purpose:** Styles the card shown as the frame transitions into sleep. Useful for confirming that the panel is intentionally dozing rather than frozen.
+- **Required?** Optional.
+- **Accepted values & defaults:** Mapping with optional keys
+  - `message` (string, default `Going to Sleep`),
+  - `font` (string font name; falls back to the bundled face when missing),
+  - `stroke-width` (float DIP, default `12.0`),
+  - `corner-radius` (float DIP, default `0.75 × stroke-width`),
+  - `colors.background`, `colors.font`, `colors.accent` (hex sRGB strings; default palette keeps high contrast).
+- **Effect on behavior:** Shares the same renderer as the greeting screen so your sleep banner uses identical sizing rules and readability checks. The message displays until the viewer fully enters sleep mode.
+- **Notes:** All fields mirror `greeting-screen` aside from the `duration-seconds` delay, which does not apply when sleeping.
+
 ### `sleep-mode`
 
 - **Purpose:** Defines when the frame should pause the slideshow, blank the screen to a dim level, and resume automatically.
