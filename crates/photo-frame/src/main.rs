@@ -29,9 +29,6 @@ use tokio::io::AsyncReadExt;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
-#[cfg(unix)]
-const CONTROL_SOCKET_PATH: &str = "/run/photo-frame/control.sock";
-
 use events::{
     Displayed, InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded, ViewerCommand, ViewerState,
 };
@@ -137,8 +134,9 @@ async fn main() -> Result<()> {
     {
         let cancel = cancel.clone();
         let control = viewer_control_tx.clone();
+        let control_socket_path = cfg.control_socket_path.clone();
         tokio::spawn(async move {
-            if let Err(err) = run_control_socket(cancel, control).await {
+            if let Err(err) = run_control_socket(cancel, control, control_socket_path).await {
                 tracing::warn!("control socket failed: {err}");
             }
         });
@@ -347,12 +345,20 @@ impl Drop for SocketCleanup {
 async fn run_control_socket(
     cancel: CancellationToken,
     control: mpsc::Sender<ViewerCommand>,
+    socket_path: PathBuf,
 ) -> Result<()> {
-    let socket_path = std::path::PathBuf::from(CONTROL_SOCKET_PATH);
-
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create control socket directory {parent:?}"))?;
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            if err.kind() == std::io::ErrorKind::PermissionDenied {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to create control socket directory {parent:?}; ensure the directory is writable or set control-socket-path"
+                    )
+                });
+            }
+            return Err(err)
+                .with_context(|| format!("failed to create control socket directory {parent:?}"));
+        }
     }
 
     if socket_path.exists() {

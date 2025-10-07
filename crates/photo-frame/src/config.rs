@@ -22,6 +22,8 @@ use serde_yaml::Value as YamlValue;
 
 use crate::processing::fixed_image::FixedImageBackground;
 
+pub const DEFAULT_CONTROL_SOCKET_PATH: &str = "/run/photo-frame/control.sock";
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct GreetingScreenColorsConfig {
@@ -3260,6 +3262,9 @@ fn apply_transition_inline_field<E: de::Error>(
 pub struct Configuration {
     /// Root directory to scan recursively for images.
     pub photo_library_path: PathBuf,
+    /// Unix domain socket accepting runtime control commands.
+    #[serde(default = "Configuration::default_control_socket_path")]
+    pub control_socket_path: PathBuf,
     /// GPU render oversample factor relative to screen size (1.0 = native).
     pub oversample: f32,
     /// Transition behavior between successive photos.
@@ -3304,6 +3309,14 @@ impl Configuration {
         );
         ensure!(self.oversample > 0.0, "oversample must be positive");
         ensure!(self.dwell_ms > 0, "dwell-ms must be greater than zero");
+        ensure!(
+            !self.control_socket_path.as_os_str().is_empty(),
+            "control-socket-path must not be empty"
+        );
+        ensure!(
+            self.control_socket_path.file_name().is_some(),
+            "control-socket-path must include a socket file name"
+        );
         self.transition
             .validate()
             .context("invalid transition configuration")?;
@@ -3333,6 +3346,7 @@ impl Default for Configuration {
     fn default() -> Self {
         Self {
             photo_library_path: PathBuf::new(),
+            control_socket_path: Self::default_control_socket_path(),
             oversample: 1.0,
             transition: TransitionConfig::default(),
             dwell_ms: 2000,
@@ -3346,6 +3360,12 @@ impl Default for Configuration {
             sleep_screen: SleepScreenConfig::default(),
             awake_schedule: None,
         }
+    }
+}
+
+impl Configuration {
+    fn default_control_socket_path() -> PathBuf {
+        PathBuf::from(DEFAULT_CONTROL_SOCKET_PATH)
     }
 }
 

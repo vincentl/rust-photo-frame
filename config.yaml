@@ -7,6 +7,9 @@
 #   local/ — manual imports (USB, scp) that should persist across syncs.
 photo-library-path: /var/lib/photo-frame/photos
 
+# Unix domain socket path for runtime control commands
+control-socket-path: /run/photo-frame/control.sock
+
 # Render/transition settings
 transition:
   # List one or more transition kinds to rotate between.
