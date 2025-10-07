@@ -2,7 +2,7 @@ use crate::config::{
     MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionKind, TransitionMode,
     TransitionOptions,
 };
-use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand};
+use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState};
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
@@ -715,7 +715,9 @@ pub fn run_windowed(
 
         fn handle_control_command(&mut self, cmd: ViewerCommand) {
             match cmd {
-                ViewerCommand::ToggleSleep => match self.power_state {
+                ViewerCommand::SetState(ViewerState::Awake) => self.exit_sleep(),
+                ViewerCommand::SetState(ViewerState::Asleep) => self.enter_sleep(),
+                ViewerCommand::ToggleState => match self.power_state {
                     PowerState::Awake => self.enter_sleep(),
                     PowerState::Sleeping => self.exit_sleep(),
                 },

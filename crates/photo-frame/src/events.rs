@@ -1,6 +1,12 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ViewerState {
+    Asleep,
+    Awake,
+}
+
 #[derive(Debug)]
 pub enum InventoryEvent {
     PhotoAdded(PhotoInfo),
@@ -40,7 +46,8 @@ pub struct InvalidPhoto(pub PathBuf);
 #[derive(Debug)]
 pub struct Displayed(pub PathBuf);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ViewerCommand {
-    ToggleSleep,
+    SetState(ViewerState),
+    ToggleState,
 }
