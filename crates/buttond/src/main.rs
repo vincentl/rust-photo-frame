@@ -1,6 +1,7 @@
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -9,8 +10,6 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use evdev::{Device, InputEventKind, Key};
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
-use nix::sys::signal::{Signal, kill};
-use nix::unistd::Pid;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -36,13 +35,9 @@ struct Args {
     #[arg(long, default_value_t = 20)]
     debounce_ms: u64,
 
-    /// PID file used to look up the running photo-frame process.
-    #[arg(long)]
-    pidfile: Option<PathBuf>,
-
-    /// Process name fallback when no PID file is available.
-    #[arg(long, default_value = "rust-photo-frame")]
-    procname: String,
+    /// Photo frame control socket.
+    #[arg(long, default_value = "/run/photo-frame/control.sock")]
+    control_socket: PathBuf,
 
     /// Shutdown helper to execute on a double press.
     #[arg(long, default_value = "/opt/photo-frame/bin/photo-safe-shutdown")]
@@ -377,9 +372,9 @@ impl ButtonTracker {
 fn perform_action(action: Action, args: &Args) {
     match action {
         Action::Single => {
-            info!("single press → SIGUSR1");
+            info!("single press → ToggleSleep command");
             if let Err(err) = trigger_single(args) {
-                error!(?err, "failed to deliver SIGUSR1");
+                error!(?err, "failed to send ToggleSleep command");
             }
         }
         Action::Double => {
@@ -392,30 +387,17 @@ fn perform_action(action: Action, args: &Args) {
 }
 
 fn trigger_single(args: &Args) -> Result<()> {
-    if let Some(pidfile) = &args.pidfile {
-        match read_pid(pidfile) {
-            Ok(pid) => match send_signal(pid, Signal::SIGUSR1) {
-                Ok(()) => return Ok(()),
-                Err(err) => {
-                    warn!(?err, pid, "failed to signal pid from pidfile");
-                }
-            },
-            Err(err) => {
-                warn!(?err, file = %pidfile.display(), "failed to read pidfile");
-            }
-        }
-    }
+    let mut stream = UnixStream::connect(&args.control_socket).with_context(|| {
+        format!(
+            "failed to connect to control socket at {}",
+            args.control_socket.display()
+        )
+    })?;
 
-    warn!(process = %args.procname, "falling back to pkill");
-    let status = std::process::Command::new("pkill")
-        .arg("-USR1")
-        .arg("-f")
-        .arg(&args.procname)
-        .status()
-        .context("failed to execute pkill")?;
-    if !status.success() {
-        bail!("pkill exited with status {status}");
-    }
+    stream
+        .write_all(br#"{"command":"ToggleSleep"}"#)
+        .context("failed to send ToggleSleep command")?;
+
     Ok(())
 }
 
@@ -427,21 +409,6 @@ fn trigger_shutdown(path: &Path) -> Result<()> {
         bail!("shutdown helper exited with status {status}");
     }
     Ok(())
-}
-
-fn read_pid(path: &Path) -> Result<i32> {
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("failed to read pidfile {}", path.display()))?;
-    let pid: i32 = contents
-        .trim()
-        .parse()
-        .with_context(|| format!("invalid pid in {}", path.display()))?;
-    Ok(pid)
-}
-
-fn send_signal(pid: i32, signal: Signal) -> Result<()> {
-    let pid = Pid::from_raw(pid);
-    kill(pid, signal).with_context(|| format!("failed to signal pid {pid}"))
 }
 
 #[cfg(test)]

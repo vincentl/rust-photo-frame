@@ -49,11 +49,19 @@ main() {
     journalctl -u "${photo_service}" -n 40 --no-pager || warn "Unable to read journal"
   fi
 
-  section "Sleep toggle via signal"
-  local pid
-  pid=$(pidof rust-photo-frame)
-  info "Sending SIGUSR1 to PID $pid"
-  run_cmd "Send SIGUSR1" kill -USR1 "$pid"
+  section "Sleep toggle via control socket"
+  info "Sending ToggleSleep command via /run/photo-frame/control.sock"
+  run_cmd "Send ToggleSleep" python3 - <<'PY'
+import socket
+
+payload = b'{"command":"ToggleSleep"}'
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    sock.connect("/run/photo-frame/control.sock")
+    sock.sendall(payload)
+finally:
+    sock.close()
+PY
   sleep 2
   info "Check journal for sleep toggle acknowledgement"
   journalctl -u "${photo_service}" -n 40 --no-pager || warn "Unable to read journal"
