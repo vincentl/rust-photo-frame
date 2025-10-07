@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(4);
+const SLEEP_MESSAGE: &str = "Going to Sleep";
 
 fn wait_for_retry(cancel: &CancellationToken, mut remaining: Duration) -> bool {
     if remaining.is_zero() {
@@ -625,6 +626,12 @@ pub fn run_windowed(
         Some(ImgTex { plane, path })
     }
 
+    #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+    enum PowerState {
+        Awake,
+        Sleeping,
+    }
+
     struct App {
         from_loader: Receiver<PhotoLoaded>,
         to_manager_displayed: Sender<Displayed>,
@@ -651,6 +658,8 @@ pub fn run_windowed(
         rng: rand::rngs::ThreadRng,
         full_config: crate::config::Configuration,
         pending_redraw: bool,
+        power_state: PowerState,
+        pending_sleep_banner: bool,
     }
 
     impl App {
@@ -664,7 +673,8 @@ pub fn run_windowed(
             self.displayed_at = None;
             self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
             self.mat_inflight = 0;
-            self.pending_redraw = true;
+            self.pending_redraw = matches!(self.power_state, PowerState::Awake);
+            self.pending_sleep_banner = matches!(self.power_state, PowerState::Sleeping);
         }
 
         fn ensure_window(&mut self, event_loop: &ActiveEventLoop) -> Option<Arc<Window>> {
@@ -707,9 +717,10 @@ pub fn run_windowed(
 
         fn handle_control_command(&mut self, cmd: ViewerCommand) {
             match cmd {
-                ViewerCommand::ToggleSleep => {
-                    info!("viewer received ToggleSleep command");
-                }
+                ViewerCommand::ToggleSleep => match self.power_state {
+                    PowerState::Awake => self.enter_sleep(),
+                    PowerState::Sleeping => self.exit_sleep(),
+                },
             }
         }
 
@@ -720,6 +731,13 @@ pub fn run_windowed(
             }
 
             self.drain_mat_results();
+
+            if self.power_state == PowerState::Sleeping {
+                if self.pending_sleep_banner {
+                    self.request_redraw();
+                }
+                return;
+            }
 
             self.tick_awake();
 
@@ -927,11 +945,48 @@ pub fn run_windowed(
             let Some(window) = self.window.as_ref() else {
                 return;
             };
-            let should_redraw = self.pending_redraw || self.transition_state.is_some();
-            if should_redraw {
-                window.request_redraw();
-                self.pending_redraw = false;
+            match self.power_state {
+                PowerState::Awake => {
+                    let should_redraw = self.pending_redraw || self.transition_state.is_some();
+                    if should_redraw {
+                        window.request_redraw();
+                        self.pending_redraw = false;
+                    }
+                }
+                PowerState::Sleeping => {
+                    if self.pending_sleep_banner {
+                        window.request_redraw();
+                    }
+                }
             }
+        }
+
+        fn enter_sleep(&mut self) {
+            if self.power_state == PowerState::Sleeping {
+                return;
+            }
+            info!("viewer: entering sleep");
+            self.power_state = PowerState::Sleeping;
+            self.pending_redraw = false;
+            self.pending_sleep_banner = true;
+            self.request_redraw();
+        }
+
+        fn exit_sleep(&mut self) {
+            if self.power_state == PowerState::Awake {
+                return;
+            }
+            info!("viewer: exiting sleep");
+            self.power_state = PowerState::Awake;
+            self.pending_sleep_banner = false;
+            if self.displayed_at.is_some() {
+                self.displayed_at = Some(Instant::now());
+            }
+            if self.greeting_deadline.is_some() {
+                self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
+            }
+            self.pending_redraw = true;
+            self.request_redraw();
         }
     }
 
@@ -1176,6 +1231,9 @@ pub fn run_windowed(
                 greeting,
             });
             self.current = None;
+            if self.power_state == PowerState::Sleeping {
+                self.request_redraw();
+            }
         }
 
         fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
@@ -1222,6 +1280,9 @@ pub fn run_windowed(
                 }
                 WindowEvent::Occluded(true) => {}
                 WindowEvent::RedrawRequested => {
+                    if self.power_state == PowerState::Sleeping && !self.pending_sleep_banner {
+                        return;
+                    }
                     let frame = match gpu.surface.get_current_texture() {
                         Ok(frame) => frame,
                         Err(err) => {
@@ -1244,6 +1305,25 @@ pub fn run_windowed(
                             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("draw-encoder"),
                             });
+
+                    if self.power_state == PowerState::Sleeping {
+                        if self.pending_sleep_banner {
+                            let mut sleep_cfg = self.full_config.clone();
+                            sleep_cfg.greeting_screen.message = Some(SLEEP_MESSAGE.to_string());
+                            let mut banner = GreetingScreen::new(
+                                &gpu.device,
+                                &gpu.queue,
+                                gpu.config.format,
+                                &sleep_cfg,
+                            );
+                            banner.resize(window.inner_size(), window.scale_factor());
+                            banner.render(&mut encoder, &view);
+                            self.pending_sleep_banner = false;
+                        }
+                        gpu.queue.submit(Some(encoder.finish()));
+                        frame.present();
+                        return;
+                    }
 
                     if self.current.is_none() && self.transition_state.is_none() {
                         gpu.greeting.render(&mut encoder, &view);
@@ -1370,6 +1450,9 @@ pub fn run_windowed(
         }
 
         fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+            if self.power_state == PowerState::Sleeping && !self.pending_sleep_banner {
+                return;
+            }
             self.request_redraw();
         }
 
@@ -1479,6 +1562,8 @@ pub fn run_windowed(
         rng: rand::rng(),
         full_config: cfg.clone(),
         pending_redraw: false,
+        power_state: PowerState::Awake,
+        pending_sleep_banner: false,
     };
     event_loop.run_app(&mut app)?;
 
