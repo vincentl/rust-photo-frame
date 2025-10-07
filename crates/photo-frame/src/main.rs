@@ -24,6 +24,8 @@ use tracing_subscriber::EnvFilter;
 #[cfg(unix)]
 use serde::Deserialize;
 #[cfg(unix)]
+use serde::de::{Error as _, Unexpected};
+#[cfg(unix)]
 use tokio::io::AsyncReadExt;
 #[cfg(unix)]
 use tokio::net::UnixListener;
@@ -289,11 +291,58 @@ fn run_playlist_dry_run(
 }
 
 #[cfg(unix)]
-#[derive(Debug, Deserialize)]
-struct ControlCommand {
-    command: String,
-    #[serde(default)]
-    state: Option<String>,
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "command", rename_all = "camelCase")]
+enum ControlCommand {
+    #[serde(alias = "ToggleState", alias = "ToggleSleep", alias = "toggleSleep")]
+    ToggleState,
+    #[serde(alias = "SetState")]
+    SetState { state: ControlState },
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlState {
+    Awake,
+    Asleep,
+}
+
+#[cfg(unix)]
+impl ControlState {
+    fn parse(input: &str) -> Option<Self> {
+        let normalized = input.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "awake" | "wake" | "on" => Some(Self::Awake),
+            "asleep" | "sleep" | "sleeping" | "off" => Some(Self::Asleep),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl<'de> Deserialize<'de> for ControlState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).ok_or_else(|| {
+            D::Error::invalid_value(
+                Unexpected::Str(&raw),
+                &"one of: awake, wake, on, asleep, sleep, sleeping, off",
+            )
+        })
+    }
+}
+
+#[cfg(unix)]
+impl From<ControlState> for ViewerState {
+    fn from(value: ControlState) -> Self {
+        match value {
+            ControlState::Awake => ViewerState::Awake,
+            ControlState::Asleep => ViewerState::Asleep,
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -393,33 +442,68 @@ async fn handle_control_connection(
         return Ok(());
     }
 
-    let request: ControlCommand = serde_json::from_slice(&buf)
-        .with_context(|| format!("invalid control payload: {}", String::from_utf8_lossy(&buf)))?;
+    let payload_text = String::from_utf8_lossy(&buf);
 
-    tracing::info!(command = %request.command, "received control command");
-
-    match request.command.as_str() {
-        "ToggleState" => control
-            .send(ViewerCommand::ToggleState)
-            .await
-            .context("failed to forward toggle-state command")?,
-        "SetState" => {
-            let Some(raw_state) = request.state.as_deref() else {
-                tracing::warn!("missing state for SetState command");
-                return Ok(());
-            };
-            match parse_viewer_state(raw_state) {
-                Some(state) => control
-                    .send(ViewerCommand::SetState(state))
-                    .await
-                    .context("failed to forward set-state command")?,
-                None => {
-                    tracing::warn!(state = raw_state, "invalid viewer state supplied");
+    let request: ControlCommand = match serde_json::from_slice(&buf) {
+        Ok(command) => command,
+        Err(err) => {
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&buf) {
+                match value.get("command").and_then(|c| c.as_str()) {
+                    None => {
+                        tracing::warn!(payload = %payload_text, "control payload missing `command`: {err}")
+                    }
+                    Some(command) if command.eq_ignore_ascii_case("setState") => {
+                        match value.get("state") {
+                            None => {
+                                tracing::warn!(payload = %payload_text, "setState command missing `state`: {err}")
+                            }
+                            Some(serde_json::Value::String(state)) => {
+                                if ControlState::parse(state).is_none() {
+                                    tracing::warn!(payload = %payload_text, state = %state, "unrecognized viewer state: {err}");
+                                } else {
+                                    tracing::warn!(payload = %payload_text, state = %state, "invalid setState payload: {err}");
+                                }
+                            }
+                            Some(_) => {
+                                tracing::warn!(payload = %payload_text, "setState command expects string `state`: {err}")
+                            }
+                        }
+                    }
+                    Some(command)
+                        if command.eq_ignore_ascii_case("toggleState") =>
+                    {
+                        tracing::warn!(payload = %payload_text, command, "malformed toggle command payload: {err}");
+                    }
+                    Some(command) => {
+                        tracing::warn!(payload = %payload_text, command, "unsupported control command");
+                    }
                 }
+            } else {
+                tracing::warn!(payload = %payload_text, "invalid control payload: {err}");
             }
+            return Ok(());
         }
-        other => {
-            tracing::warn!(command = other, "unsupported control command");
+    };
+
+    match request {
+        ControlCommand::ToggleState => {
+            tracing::info!(command = "toggleState", "received control command");
+            control
+                .send(ViewerCommand::ToggleState)
+                .await
+                .context("failed to forward toggle-state command")?;
+        }
+        ControlCommand::SetState { state } => {
+            let viewer_state: ViewerState = state.into();
+            tracing::info!(
+                command = "setState",
+                ?viewer_state,
+                "received control command"
+            );
+            control
+                .send(ViewerCommand::SetState(viewer_state))
+                .await
+                .context("failed to forward set-state command")?;
         }
     }
 
@@ -427,11 +511,56 @@ async fn handle_control_connection(
 }
 
 #[cfg(unix)]
-fn parse_viewer_state(input: &str) -> Option<ViewerState> {
-    let normalized = input.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "awake" | "wake" | "on" => Some(ViewerState::Awake),
-        "asleep" | "sleep" | "sleeping" | "off" => Some(ViewerState::Asleep),
-        _ => None,
+mod tests {
+    #[test]
+    fn deserialize_toggle_state_command() {
+        let cmd: super::ControlCommand =
+            serde_json::from_str(r#"{"command":"toggleState"}"#).expect("toggleState should parse");
+        assert_eq!(cmd, super::ControlCommand::ToggleState);
+    }
+
+    #[test]
+    fn deserialize_toggle_state_alias() {
+        let cmd: super::ControlCommand =
+            serde_json::from_str(r#"{"command":"ToggleSleep"}"#).expect("ToggleSleep should parse");
+        assert_eq!(cmd, super::ControlCommand::ToggleState);
+    }
+
+    #[test]
+    fn deserialize_set_state_awake() {
+        let cmd: super::ControlCommand =
+            serde_json::from_str(r#"{"command":"setState","state":"Awake"}"#)
+                .expect("setState should parse");
+
+        assert_eq!(
+            cmd,
+            super::ControlCommand::SetState {
+                state: super::ControlState::Awake
+            }
+        );
+    }
+
+    #[test]
+    fn deserialize_set_state_sleep_alias() {
+        let cmd: super::ControlCommand =
+            serde_json::from_str(r#"{"command":"setState","state":"sleep"}"#)
+                .expect("setState sleep alias should parse");
+
+        assert_eq!(
+            cmd,
+            super::ControlCommand::SetState {
+                state: super::ControlState::Asleep
+            }
+        );
+    }
+
+    #[test]
+    fn deserialize_set_state_rejects_unknown() {
+        let err = serde_json::from_str::<super::ControlCommand>(
+            r#"{"command":"setState","state":"invalid"}"#,
+        )
+        .expect_err("invalid state should fail");
+
+        assert!(err.to_string().contains("one of: awake"));
     }
 }
