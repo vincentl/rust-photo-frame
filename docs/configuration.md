@@ -61,6 +61,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 | **Deterministic runs** | `startup-shuffle-seed`                                                |
 | **Presentation**       | `photo-effect`, `matting`                                             |
 | **Greeting Screen**    | `greeting-screen`                                                     |
+| **Runtime control**    | `control-socket-path`                                                 |
 | **Power schedule**     | `sleep-mode`                                                          |
 
 ## Key reference
@@ -72,6 +73,14 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Accepted values & defaults:** Any absolute or relative filesystem path. The setup pipeline provisions `/var/lib/photo-frame/photos` with `cloud/` and `local/` subdirectories and points the default configuration there so both the runtime and any cloud sync job start from a known location.
 - **Effect on behavior:** Switching the path changes the library the watcher monitors; the viewer reloads the playlist when the directory contents change.
 - **Notes:** Keep the `cloud/` and `local/` folders under the configured root so the runtime can merge them. Use `cloud/` for content that will be overwritten by sync jobs (e.g., rclone, Nextcloud), and reserve `local/` for manual imports you do not want the sync job to prune. After the installer seeds `/var/lib/photo-frame/config.yaml`, edit that writable copy to move the library elsewhere (for example, to an attached drive or network share) if you do not want to keep photos under `/var/lib/photo-frame/photos`.
+
+### `control-socket-path`
+
+- **Purpose:** Selects where the application exposes its Unix domain control socket for runtime commands (sleep toggles, future remote controls).
+- **Required?** Optional; defaults to `/run/photo-frame/control.sock`.
+- **Accepted values & defaults:** Any filesystem path, typically under `/run`, `/run/user/<uid>`, or another writable runtime directory.
+- **Effect on behavior:** The path is created on startup (along with any missing parent directories) and removed on shutdown. External helpers such as `photo-buttond` connect to this socket to send JSON commands.
+- **Notes:** The default directory under `/run` usually requires elevated permissions; systems that launch the frame as an unprivileged account should point `control-socket-path` at a writable location like `/run/user/1000/photo-frame/control.sock` or `/var/lib/photo-frame/control.sock`. Permission errors during directory creation are reported with guidance to adjust the configuration.
 
 ### `transition`
 
@@ -170,7 +179,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
   - `backlight-path` plus the required `sleep-value`/`wake-value` strings to write to a backlight sysfs node (intended for DSI panels or laptop-class devices). HDMI monitors typically do **not** expose `/sys/class/backlight` entries.
   - `sleep-command` and/or `wake-command` shell snippets that run when the frame transitions into or out of sleep. The defaults issue Wayland DPMS requests via `wlr-randr --output @OUTPUT@ --off|--on` with a fallback to `vcgencmd display_power 0|1`. The `@OUTPUT@` placeholder is replaced at runtime with the first connected output reported by `wlr-randr`, or `HDMI-A-1` if auto-detection fails.
 - **Effect on behavior:** Outside the configured "on" window the viewer stops advancing slides, cancels any in-flight transitions, and clears the surface to the dim color. When the schedule says to wake up, the currently loaded image is shown again and normal dwell/transition pacing resumes. The schedule is evaluated using the configured timezone on a wall-clock basis; DST transitions do not cause drift.
-- **Manual override:** Writing a JSON command such as `{"command":"ToggleState"}` to the control socket (`/run/photo-frame/control.sock`) toggles the current state immediately—handy for a single-button GPIO input. Each press flips sleep ↔ wake regardless of the schedule. The next scheduled boundary still wins: hitting `on-hours.start` forces wake, `on-hours.end` forces sleep, and either transition clears any active manual override. Environment helpers `PHOTO_FRAME_SLEEP_OVERRIDE=sleep|wake` or `PHOTO_FRAME_SLEEP_OVERRIDE_FILE=/path/to/state` can seed the initial state at startup, but upcoming schedule boundaries will still apply. Overrides are logged with timestamps and the schedule timeline continues to update in the background.
+- **Manual override:** Writing a JSON command such as `{"command":"ToggleState"}` to the control socket (default `/run/photo-frame/control.sock`, override via `control-socket-path`) toggles the current state immediately—handy for a single-button GPIO input. Each press flips sleep ↔ wake regardless of the schedule. The next scheduled boundary still wins: hitting `on-hours.start` forces wake, `on-hours.end` forces sleep, and either transition clears any active manual override. Environment helpers `PHOTO_FRAME_SLEEP_OVERRIDE=sleep|wake` or `PHOTO_FRAME_SLEEP_OVERRIDE_FILE=/path/to/state` can seed the initial state at startup, but upcoming schedule boundaries will still apply. Overrides are logged with timestamps and the schedule timeline continues to update in the background.
 - **CLI helpers:**
   - `--verbose-sleep` logs the parsed schedule and the next 24 hours of transitions during startup.
   - `--sleep-test <SECONDS>` forces the configured display-power commands to sleep, waits `SECONDS`, wakes the panel (retrying once after two seconds), and exits.
