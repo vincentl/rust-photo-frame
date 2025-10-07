@@ -11,7 +11,7 @@
 #
 # Example
 #   find ~/photo-library-test -regex ".*\(jpeg\|png\)" \
-#   -exec bash -c 'tools/fake-btime.sh "$1" "/var/lib/photo-frame/photos/$(basename "$1")" "2020-01-01 12:00:00"' _ {} \;
+#   -exec bash -c 'tools/fake-btime.sh "$1" "/var/lib/photo-frame/photos/local/$(basename "$1")" "2020-01-01 12:00:00"' _ {} \;
 
 set -euo pipefail
 
