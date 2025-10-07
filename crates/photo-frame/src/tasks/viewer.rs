@@ -962,9 +962,9 @@ pub fn run_windowed(
                     compatible_surface: Some(&surface),
                     force_fallback_adapter: false,
                 })) {
-                    Some(adapter) => adapter,
-                    None => {
-                        warn!("failed to acquire GPU adapter; exiting viewer");
+                    Ok(adapter) => adapter,
+                    Err(err) => {
+                        warn!(error = %err, "failed to acquire GPU adapter; exiting viewer");
                         event_loop.exit();
                         return;
                     }
