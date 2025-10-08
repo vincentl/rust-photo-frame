@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=../lib/systemd.sh
+source "${SCRIPT_DIR}/../lib/systemd.sh"
 
 log() {
     printf '[kiosk-setup] %s\n' "$*"
@@ -272,41 +274,45 @@ install_polkit_rules() {
 
 enable_systemd_units() {
     log "Enabling kiosk services"
-    systemctl daemon-reload
+    if ! systemd_available; then
+        die "systemctl not available; cannot configure kiosk services"
+    fi
+
+    systemd_daemon_reload
 
     local dm
     for dm in gdm3.service sddm.service lightdm.service; do
-        if systemctl list-unit-files "${dm}" >/dev/null 2>&1; then
+        if systemd_unit_exists "${dm}"; then
             log "Disabling conflicting display manager ${dm}"
-            systemctl disable --now "${dm}" >/dev/null 2>&1 || true
+            systemd_disable_now_unit "${dm}" >/dev/null 2>&1 || true
         fi
     done
 
     log "Setting default boot target to graphical.target"
-    systemctl set-default graphical.target
+    systemd_set_default_target graphical.target
 
-    if systemctl list-unit-files getty@tty1.service >/dev/null 2>&1; then
+    if systemd_unit_exists getty@tty1.service; then
         log "Disabling and masking getty@tty1.service to avoid VT contention"
-        systemctl disable --now getty@tty1.service >/dev/null 2>&1 || true
-        systemctl mask getty@tty1.service >/dev/null 2>&1 || true
+        systemd_disable_now_unit getty@tty1.service >/dev/null 2>&1 || true
+        systemd_mask_unit getty@tty1.service >/dev/null 2>&1 || true
     fi
 
     log "Setting greetd as the system display manager"
-    systemctl enable --now greetd.service >/dev/null 2>&1 || true
+    systemd_enable_now_unit greetd.service >/dev/null 2>&1 || true
 
     log "Verifying display-manager alias"
-    systemctl status display-manager.service --no-pager || true
+    systemd_status display-manager.service || true
 
     local unit
     for unit in photoframe-wifi-manager.service photoframe-buttond.service; do
-        if systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
-            systemctl enable --now "${unit}"
+        if systemd_unit_exists "${unit}"; then
+            systemd_enable_now_unit "${unit}" || true
         fi
     done
 
-    if systemctl list-unit-files photoframe-sync.timer >/dev/null 2>&1; then
-        systemctl enable photoframe-sync.timer
-        systemctl start photoframe-sync.timer || true
+    if systemd_unit_exists photoframe-sync.timer; then
+        systemd_enable_unit photoframe-sync.timer
+        systemd_start_unit photoframe-sync.timer || true
     fi
 }
 
@@ -343,7 +349,7 @@ ensure_persistent_journald() {
     fi
 
     log "[${module}] Restarting systemd-journald to apply configuration"
-    systemctl restart systemd-journald
+    systemd_restart_unit systemd-journald
 }
 
 main() {

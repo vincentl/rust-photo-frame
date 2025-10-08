@@ -10,8 +10,19 @@ if [[ -z "${SYSTEMDCTL:-}" ]]; then
 fi
 SYSTEMD_DIR=${SYSTEMD_DIR:-/etc/systemd/system}
 
+systemd_available() {
+    if [[ -x "${SYSTEMDCTL}" ]]; then
+        return 0
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        SYSTEMDCTL="$(command -v systemctl)"
+        return 0
+    fi
+    return 1
+}
+
 _systemd_require() {
-    if [[ ! -x "${SYSTEMDCTL}" ]]; then
+    if ! systemd_available; then
         echo "systemctl not found at ${SYSTEMDCTL}" >&2
         exit 1
     fi
@@ -54,6 +65,60 @@ systemd_start_unit() {
     _systemd_require
     local unit="$1"
     "${SYSTEMDCTL}" start "${unit}"
+}
+
+systemd_enable_now_unit() {
+    _systemd_require
+    local unit="$1"
+    "${SYSTEMDCTL}" enable --now "${unit}"
+}
+
+systemd_disable_now_unit() {
+    _systemd_require
+    local unit="$1"
+    "${SYSTEMDCTL}" disable --now "${unit}"
+}
+
+systemd_is_active() {
+    _systemd_require
+    local unit="$1"
+    "${SYSTEMDCTL}" is-active --quiet "${unit}"
+}
+
+systemd_is_enabled() {
+    _systemd_require
+    local unit="$1"
+    "${SYSTEMDCTL}" is-enabled --quiet "${unit}"
+}
+
+systemd_status() {
+    _systemd_require
+    local unit="$1"
+    "${SYSTEMDCTL}" status "${unit}" --no-pager
+}
+
+systemd_set_default_target() {
+    _systemd_require
+    local target="$1"
+    "${SYSTEMDCTL}" set-default "${target}"
+}
+
+systemd_mask_unit() {
+    _systemd_require
+    local unit="$1"
+    "${SYSTEMDCTL}" mask "${unit}"
+}
+
+systemd_unmask_unit() {
+    _systemd_require
+    local unit="$1"
+    "${SYSTEMDCTL}" unmask "${unit}"
+}
+
+systemd_unit_property() {
+    _systemd_require
+    local unit="$1" property="$2"
+    "${SYSTEMDCTL}" show -p "${property}" --value "${unit}"
 }
 
 systemd_unit_exists() {

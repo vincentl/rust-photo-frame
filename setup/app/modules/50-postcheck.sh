@@ -13,6 +13,9 @@ KIOSK_SERVICE="${KIOSK_SERVICE:-greetd.service}"
 WIFI_SERVICE="${WIFI_SERVICE:-photoframe-wifi-manager.service}"
 SYNC_TIMER="${SYNC_TIMER:-photoframe-sync.timer}"
 BUTTON_SERVICE="${BUTTON_SERVICE:-photoframe-buttond.service}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../../lib/systemd.sh
+source "${SCRIPT_DIR}/../../lib/systemd.sh"
 
 log() {
     local level="$1"; shift
@@ -72,12 +75,7 @@ if ! run_sudo -u "${SERVICE_USER}" test -f "${VAR_CONFIG}"; then
     log WARN "Runtime config missing at ${VAR_CONFIG}; copy ${CONFIG_TEMPLATE} or rerun ./setup/app/run.sh"
 fi
 
-if command -v systemctl >/dev/null 2>&1; then
-    systemd_unit_exists() {
-        local unit="$1"
-        systemctl cat "${unit}" >/dev/null 2>&1
-    }
-
+if systemd_available; then
     check_service() {
         local service="$1"
         local level_on_fail="$2"
@@ -93,11 +91,11 @@ if command -v systemctl >/dev/null 2>&1; then
             return 0
         fi
 
-        if systemctl is-active --quiet "${service}"; then
+        if systemd_is_active "${service}"; then
             return 0
         fi
 
-        systemctl status "${service}" --no-pager || true
+        systemd_status "${service}" || true
 
         if [[ "${level_on_fail}" == "ERROR" ]]; then
             log ERROR "${message}"
@@ -120,7 +118,7 @@ if command -v systemctl >/dev/null 2>&1; then
             return
         fi
 
-        if ! systemctl is-enabled --quiet "${service}"; then
+        if ! systemd_is_enabled "${service}"; then
             log WARN "${service} is not enabled"
         fi
     }
@@ -142,11 +140,11 @@ fi
 rustc_version=$(rustc --version 2>/dev/null || echo "rustc unavailable")
 cargo_version=$(cargo --version 2>/dev/null || echo "cargo unavailable")
 
-if command -v systemctl >/dev/null 2>&1; then
-    service_status=$(systemctl show -p ActiveState --value "${KIOSK_SERVICE}" 2>/dev/null || echo "not-found")
-    wifi_service_status=$(systemctl show -p ActiveState --value "${WIFI_SERVICE}" 2>/dev/null || echo "not-found")
-    button_status=$(systemctl show -p ActiveState --value "${BUTTON_SERVICE}" 2>/dev/null || echo "not-found")
-    sync_status=$(systemctl show -p ActiveState --value "${SYNC_TIMER}" 2>/dev/null || echo "not-found")
+if systemd_available; then
+    service_status=$(systemd_unit_property "${KIOSK_SERVICE}" ActiveState 2>/dev/null || echo "not-found")
+    wifi_service_status=$(systemd_unit_property "${WIFI_SERVICE}" ActiveState 2>/dev/null || echo "not-found")
+    button_status=$(systemd_unit_property "${BUTTON_SERVICE}" ActiveState 2>/dev/null || echo "not-found")
+    sync_status=$(systemd_unit_property "${SYNC_TIMER}" ActiveState 2>/dev/null || echo "not-found")
 else
     service_status="not checked (systemctl unavailable)"
     wifi_service_status="not checked (systemctl unavailable)"
