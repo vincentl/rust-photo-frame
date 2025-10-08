@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/systemd.sh
+source "${SCRIPT_DIR}/../lib/systemd.sh"
+
 if [[ ${EUID} -ne 0 ]]; then
     exec sudo -- "$0" "$@"
 fi
@@ -26,20 +30,25 @@ warn() {
 
 check_greetd_unit() {
     title 'Checking greetd.service'
-    if systemctl list-unit-files greetd.service >/dev/null 2>&1; then
+    if ! systemd_available; then
+        warn 'systemctl not available; skipping greetd.service checks'
+        return
+    fi
+
+    if systemd_unit_exists greetd.service; then
         ok 'greetd.service unit installed'
     else
         err 'greetd.service unit not found'
         return
     fi
 
-    if systemctl is-enabled --quiet greetd.service; then
+    if systemd_is_enabled greetd.service; then
         ok 'greetd.service enabled'
     else
         err 'greetd.service not enabled'
     fi
 
-    if systemctl is-active --quiet greetd.service; then
+    if systemd_is_active greetd.service; then
         ok 'greetd.service active'
     else
         warn 'greetd.service not running; inspect journalctl -u greetd'
