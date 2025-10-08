@@ -5,7 +5,6 @@ use crate::config::{
 use crate::events::{
     Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
 };
-use crate::gpu::debug_overlay;
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
@@ -1507,6 +1506,23 @@ pub fn run_windowed(
                     {
                         return;
                     }
+                    if matches!(
+                        self.viewer_state,
+                        ViewerState::Greeting | ViewerState::Sleep
+                    ) {
+                        let size = window.inner_size();
+                        gpu.greeting.resize(size, window.scale_factor());
+                        if !gpu.greeting.ensure_layout_ready() {
+                            debug!(
+                                viewer_state = ?self.viewer_state,
+                                width = size.width,
+                                height = size.height,
+                                "viewer_overlay_waiting_for_layout"
+                            );
+                            return;
+                        }
+                    }
+
                     let mut frame = None;
                     for attempt in 0..2 {
                         match gpu.surface.get_current_texture() {
@@ -1560,25 +1576,19 @@ pub fn run_windowed(
 
                     match self.viewer_state {
                         ViewerState::Sleep => {
-                            encoder.push_debug_group("sleep-overlay");
-                            debug_overlay::render(
-                                &mut encoder,
-                                &view,
-                                "sleep-solid-clear",
-                                self.clear_color,
-                                Option::<fn(&mut wgpu::RenderPass<'_>)>::None,
-                            );
-                            encoder.pop_debug_group();
-
                             encoder.push_debug_group("sleep-banner");
-                            gpu.greeting
-                                .resize(window.inner_size(), window.scale_factor());
-                            gpu.greeting.screen_message(
+                            let rendered = gpu.greeting.screen_message(
                                 self.full_config.sleep_screen.screen(),
                                 &mut encoder,
                                 &view,
                             );
                             encoder.pop_debug_group();
+
+                            if !rendered {
+                                debug!("sleep_banner_render_deferred");
+                                self.overlay_frame_pending = true;
+                                return;
+                            }
 
                             gpu.queue.submit(Some(encoder.finish()));
                             frame.present();
@@ -1587,25 +1597,19 @@ pub fn run_windowed(
                             return;
                         }
                         ViewerState::Greeting => {
-                            encoder.push_debug_group("greeting-overlay");
-                            debug_overlay::render(
-                                &mut encoder,
-                                &view,
-                                "greeting-solid-clear",
-                                self.clear_color,
-                                Option::<fn(&mut wgpu::RenderPass<'_>)>::None,
-                            );
-                            encoder.pop_debug_group();
-
                             encoder.push_debug_group("greeting-banner");
-                            gpu.greeting
-                                .resize(window.inner_size(), window.scale_factor());
-                            gpu.greeting.screen_message(
+                            let rendered = gpu.greeting.screen_message(
                                 self.full_config.greeting_screen.screen(),
                                 &mut encoder,
                                 &view,
                             );
                             encoder.pop_debug_group();
+
+                            if !rendered {
+                                debug!("greeting_banner_render_deferred");
+                                self.overlay_frame_pending = true;
+                                return;
+                            }
 
                             gpu.queue.submit(Some(encoder.finish()));
                             frame.present();

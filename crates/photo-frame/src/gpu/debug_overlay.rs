@@ -1,5 +1,6 @@
 //! Minimal overlay helpers for isolating clear/draw paths during debugging.
 
+#[allow(dead_code)]
 /// Clears the target view with `clear_color` and optionally executes `draw_fn`
 /// inside the render pass. The helper makes it easy to rule out pipeline state
 /// issues by swapping the closure for a no-op draw.
