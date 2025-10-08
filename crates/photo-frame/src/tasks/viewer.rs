@@ -697,10 +697,57 @@ pub fn run_windowed(
                 self.enter_greeting();
             }
             self.mat_inflight = 0;
+            self.log_event_loop_state("reset_for_resume");
+        }
+
+        fn log_event_loop_state(&self, context: &str) {
+            let now = Instant::now();
+            let current_path = self
+                .current
+                .as_ref()
+                .map(|img| img.path.display().to_string());
+            let next_path = self.next.as_ref().map(|img| img.path.display().to_string());
+            let greeting_deadline_remaining_ms = self.greeting_deadline.and_then(|deadline| {
+                deadline
+                    .checked_duration_since(now)
+                    .map(|duration| duration.as_millis() as u64)
+            });
+            let displayed_elapsed_ms = self
+                .displayed_at
+                .map(|instant| now.saturating_duration_since(instant).as_millis() as u64);
+            let transition_kind = self.transition_state.as_ref().map(|state| state.kind);
+            let transition_progress = self
+                .transition_state
+                .as_ref()
+                .map(TransitionState::progress);
+
+            debug!(
+                context = context,
+                viewer_state = ?self.viewer_state,
+                has_window = self.window.is_some(),
+                has_gpu = self.gpu.is_some(),
+                pending_queue_len = self.pending.len(),
+                ready_results_len = self.ready_results.len(),
+                deferred_queue_len = self.deferred_images.len(),
+                mat_inflight = self.mat_inflight,
+                preload_target = self.preload_count,
+                pending_redraw = self.pending_redraw,
+                overlay_frame_pending = self.overlay_frame_pending,
+                greeting_deadline_remaining_ms,
+                displayed_elapsed_ms,
+                current_path = current_path.as_deref(),
+                next_path = next_path.as_deref(),
+                transition_kind = ?transition_kind,
+                transition_progress,
+                has_next_stage = self.next.is_some(),
+                has_current_stage = self.current.is_some(),
+                "viewer_event_loop_state"
+            );
         }
 
         fn ensure_window(&mut self, event_loop: &ActiveEventLoop) -> Option<Arc<Window>> {
             if let Some(window) = self.window.as_ref() {
+                self.log_event_loop_state("ensure_window_cached");
                 return Some(window.clone());
             }
 
@@ -723,6 +770,7 @@ pub fn run_windowed(
             }));
             window.set_cursor_visible(false);
             self.window = Some(window.clone());
+            self.log_event_loop_state("ensure_window_created");
             Some(window)
         }
 
@@ -739,9 +787,11 @@ pub fn run_windowed(
                 self.viewer_state,
                 ViewerState::Greeting | ViewerState::Sleep
             );
+            self.log_event_loop_state("teardown_gpu");
         }
 
         fn handle_control_command(&mut self, cmd: ViewerCommand) {
+            debug!(command = ?cmd, "viewer_control_command");
             match cmd {
                 ViewerCommand::SetState(ControlViewerState::Awake) => self.enter_wake(),
                 ViewerCommand::SetState(ControlViewerState::Asleep) => self.enter_sleep(),
@@ -753,6 +803,7 @@ pub fn run_windowed(
         }
 
         fn process_tick(&mut self, event_loop: &ActiveEventLoop) {
+            self.log_event_loop_state("process_tick_start");
             if self.cancel.is_cancelled() {
                 event_loop.exit();
                 return;
@@ -779,6 +830,7 @@ pub fn run_windowed(
                     self.request_redraw();
                 }
             }
+            self.log_event_loop_state("process_tick_end");
         }
 
         fn drain_mat_results(&mut self) {
@@ -989,12 +1041,22 @@ pub fn run_windowed(
                 ViewerState::Wake => {
                     let should_redraw = self.pending_redraw || self.transition_state.is_some();
                     if should_redraw {
+                        debug!(
+                            pending_redraw = self.pending_redraw,
+                            has_transition = self.transition_state.is_some(),
+                            "viewer_request_redraw_wake"
+                        );
                         window.request_redraw();
                         self.pending_redraw = false;
                     }
                 }
                 ViewerState::Greeting | ViewerState::Sleep => {
                     if self.overlay_frame_pending {
+                        debug!(
+                            viewer_state = ?self.viewer_state,
+                            overlay_frame_pending = self.overlay_frame_pending,
+                            "viewer_request_redraw_overlay"
+                        );
                         window.request_redraw();
                     }
                 }
@@ -1011,6 +1073,7 @@ pub fn run_windowed(
             self.overlay_frame_pending = true;
             self.refresh_greeting_layout();
             self.request_redraw();
+            self.log_event_loop_state("enter_sleep");
         }
 
         fn enter_wake(&mut self) {
@@ -1026,6 +1089,7 @@ pub fn run_windowed(
             self.greeting_deadline = None;
             self.pending_redraw = true;
             self.request_redraw();
+            self.log_event_loop_state("enter_wake");
         }
 
         fn enter_greeting(&mut self) {
@@ -1038,6 +1102,7 @@ pub fn run_windowed(
             self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
             self.refresh_greeting_layout();
             self.request_redraw();
+            self.log_event_loop_state("enter_greeting");
         }
 
         fn refresh_greeting_layout(&mut self) {
@@ -1050,19 +1115,28 @@ pub fn run_windowed(
 
     impl ApplicationHandler<ViewerEvent> for App {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            debug!("viewer_app_resumed");
             self.reset_for_resume();
+            self.log_event_loop_state("resumed_post_reset");
 
             let Some(window) = self.ensure_window(event_loop) else {
+                debug!("viewer_app_resumed_no_window");
                 return;
             };
+            self.log_event_loop_state("resumed_window_ready");
 
             if self.gpu.is_some() {
+                debug!("viewer_app_resumed_gpu_already_initialized");
                 return;
             }
 
             let instance = wgpu::Instance::default();
+            debug!("viewer_app_resumed_instance_ready");
             let surface = match instance.create_surface(window.clone()) {
-                Ok(surface) => surface,
+                Ok(surface) => {
+                    debug!("viewer_app_resumed_surface_created");
+                    surface
+                }
                 Err(err) => {
                     warn!(error = %err, "failed to create surface; exiting viewer");
                     event_loop.exit();
@@ -1075,7 +1149,11 @@ pub fn run_windowed(
                     compatible_surface: Some(&surface),
                     force_fallback_adapter: false,
                 })) {
-                    Ok(adapter) => adapter,
+                    Ok(adapter) => {
+                        let info = adapter.get_info();
+                        debug!(?info, "viewer_app_resumed_adapter_acquired");
+                        adapter
+                    }
                     Err(err) => {
                         warn!(error = %err, "failed to acquire GPU adapter; exiting viewer");
                         event_loop.exit();
@@ -1083,6 +1161,11 @@ pub fn run_windowed(
                     }
                 };
             let limits = adapter.limits();
+            debug!(
+                max_texture_dimension_2d = limits.max_texture_dimension_2d,
+                max_buffer_size = limits.max_buffer_size,
+                "viewer_app_resumed_limits"
+            );
             let (device, queue) =
                 match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                     label: Some("viewer-device"),
@@ -1091,7 +1174,10 @@ pub fn run_windowed(
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::default(),
                 })) {
-                    Ok(pair) => pair,
+                    Ok(pair) => {
+                        debug!("viewer_app_resumed_device_ready");
+                        pair
+                    }
                     Err(err) => {
                         warn!(error = %err, "failed to acquire GPU device; exiting viewer");
                         event_loop.exit();
@@ -1106,6 +1192,13 @@ pub fn run_windowed(
                 .find(|f| f.is_srgb())
                 .unwrap_or(caps.formats[0]);
             let size = window.inner_size();
+            debug!(
+                surface_width = size.width,
+                surface_height = size.height,
+                format = ?format,
+                present_modes = ?caps.present_modes,
+                "viewer_app_resumed_surface_caps"
+            );
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format,
@@ -1117,6 +1210,12 @@ pub fn run_windowed(
                 desired_maximum_frame_latency: 2,
             };
             surface.configure(&device, &config);
+            debug!(
+                width = config.width,
+                height = config.height,
+                present_mode = ?config.present_mode,
+                "viewer_app_resumed_surface_configured"
+            );
             // Resources for quad
             let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("viewer-uniforms"),
@@ -1300,9 +1399,11 @@ pub fn run_windowed(
                 self.overlay_frame_pending = true;
             }
             self.request_redraw();
+            self.log_event_loop_state("resumed_gpu_ready");
         }
 
         fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+            debug!("viewer_app_suspended");
             self.teardown_gpu();
         }
 
@@ -1318,12 +1419,24 @@ pub fn run_windowed(
             if window.id() != window_id {
                 return;
             }
+            if self.gpu.is_none() {
+                return;
+            }
+            self.log_event_loop_state("window_event_pre");
             let Some(gpu) = self.gpu.as_mut() else {
                 return;
             };
             match event {
-                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::CloseRequested => {
+                    debug!("viewer_window_close_requested");
+                    event_loop.exit();
+                }
                 WindowEvent::Resized(new_size) => {
+                    debug!(
+                        width = new_size.width,
+                        height = new_size.height,
+                        "viewer_window_resized"
+                    );
                     gpu.config.width = new_size.width.max(1);
                     gpu.config.height = new_size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
@@ -1342,7 +1455,14 @@ pub fn run_windowed(
                     mut inner_size_writer,
                     ..
                 } => {
+                    let scale_factor = window.scale_factor();
                     let size = window.inner_size();
+                    debug!(
+                        scale_factor = scale_factor,
+                        width = size.width,
+                        height = size.height,
+                        "viewer_window_scale_factor_changed"
+                    );
                     let _ = inner_size_writer.request_inner_size(size);
                     gpu.config.width = size.width.max(1);
                     gpu.config.height = size.height.max(1);
@@ -1357,6 +1477,7 @@ pub fn run_windowed(
                     self.request_redraw();
                 }
                 WindowEvent::Occluded(false) => {
+                    debug!("viewer_window_occluded_false");
                     match self.viewer_state {
                         ViewerState::Wake => self.pending_redraw = true,
                         ViewerState::Greeting | ViewerState::Sleep => {
@@ -1365,8 +1486,20 @@ pub fn run_windowed(
                     }
                     self.request_redraw();
                 }
-                WindowEvent::Occluded(true) => {}
+                WindowEvent::Occluded(true) => {
+                    debug!("viewer_window_occluded_true");
+                }
                 WindowEvent::RedrawRequested => {
+                    debug!(
+                        viewer_state = ?self.viewer_state,
+                        overlay_frame_pending = self.overlay_frame_pending,
+                        pending_redraw = self.pending_redraw,
+                        queue_depth = self.pending.len(),
+                        ready_results = self.ready_results.len(),
+                        mat_inflight = self.mat_inflight,
+                        has_transition = self.transition_state.is_some(),
+                        "viewer_window_redraw_requested"
+                    );
                     if matches!(
                         self.viewer_state,
                         ViewerState::Greeting | ViewerState::Sleep
@@ -1606,11 +1739,15 @@ pub fn run_windowed(
                         }
                     }
                 }
-                _ => {}
+                other => {
+                    debug!(event = ?other, "viewer_window_event_other");
+                }
             }
         }
 
         fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+            self.log_event_loop_state("about_to_wait");
+            debug!(viewer_state = ?self.viewer_state, "viewer_about_to_wait");
             if self.viewer_state == ViewerState::Wake {
                 self.request_redraw();
             }
@@ -1618,12 +1755,19 @@ pub fn run_windowed(
 
         fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ViewerEvent) {
             match event {
-                ViewerEvent::Tick => self.process_tick(event_loop),
+                ViewerEvent::Tick => {
+                    debug!("viewer_user_event_tick");
+                    self.process_tick(event_loop);
+                }
                 ViewerEvent::Command(cmd) => {
+                    debug!(command = ?cmd, "viewer_user_event_command");
                     self.handle_control_command(cmd);
                     self.process_tick(event_loop);
                 }
-                ViewerEvent::Cancelled => event_loop.exit(),
+                ViewerEvent::Cancelled => {
+                    debug!("viewer_user_event_cancelled");
+                    event_loop.exit();
+                }
             }
         }
     }
