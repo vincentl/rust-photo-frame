@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use ab_glyph::FontArc;
+use ab_glyph::{Font, FontArc, GlyphId, PxScaleFont, ScaleFont};
 use bytemuck::{Pod, Zeroable};
 use fontdb::{Database, Family, Query};
 use lyon::math::{Box2D, point};
@@ -11,16 +11,13 @@ use lyon::tessellation::{
 };
 use tracing::warn;
 use wgpu::util::{DeviceExt, StagingBelt};
-use wgpu_glyph::GlyphCruncher;
 use wgpu_glyph::{
-    BuiltInLineBreaker, GlyphBrush, GlyphBrushBuilder, HorizontalAlign, Layout, Section, Text,
-    VerticalAlign,
+    GlyphBrush, GlyphBrushBuilder, HorizontalAlign, Layout, Section, Text, VerticalAlign,
 };
 use winit::dpi::PhysicalSize;
 
 use crate::config::{GreetingScreenColorsConfig, ScreenMessageConfig};
 
-const MEASURE_BOUNDS_EXTENT: f32 = 100_000.0;
 const DRAW_BOUNDS_PADDING: f32 = 2.0;
 
 const FRAME_SHADER: &str = r#"
@@ -96,6 +93,7 @@ pub struct GreetingScreen {
     scale_factor: f64,
     settings: GreetingSettings,
     loaded_font_request: Option<String>,
+    font: FontArc,
     glyph_cache_side: u32,
     glyph_texture_limit: f32,
 }
@@ -115,7 +113,7 @@ impl GreetingScreen {
             .min(2048)
             .max(256)
             .min(glyph_texture_limit);
-        let glyph_brush = build_glyph_brush(glyph_font, device, format, glyph_cache_side);
+        let glyph_brush = build_glyph_brush(glyph_font.clone(), device, format, glyph_cache_side);
         let frame_pipeline = build_frame_pipeline(device, format);
         if contrast_ratio(settings.colors.font, settings.colors.background) < 4.5 {
             warn!("greeting_screen_low_contrast");
@@ -133,6 +131,7 @@ impl GreetingScreen {
             scale_factor: 1.0,
             settings,
             loaded_font_request: font_request,
+            font: glyph_font,
             glyph_cache_side,
             glyph_texture_limit: glyph_texture_limit as f32,
         }
@@ -225,9 +224,14 @@ impl GreetingScreen {
             return;
         }
         let font = load_font(&self.settings.font_name);
-        self.glyph_brush =
-            build_glyph_brush(font, &self.device, self.format, self.glyph_cache_side);
+        self.glyph_brush = build_glyph_brush(
+            font.clone(),
+            &self.device,
+            self.format,
+            self.glyph_cache_side,
+        );
         self.loaded_font_request = self.settings.font_name.clone();
+        self.font = font;
     }
 
     fn rebuild_geometry(&mut self) {
@@ -250,7 +254,7 @@ impl GreetingScreen {
         let min_px = 8.0;
         let max_px = bounds_side.max(8.0);
         let font_size = best_fit_font_px(
-            &mut self.glyph_brush,
+            &self.font,
             &self.settings.message,
             box_size,
             min_px,
@@ -290,7 +294,7 @@ fn build_section(settings: &GreetingSettings, layout: TextLayout) -> Section<'_>
 }
 
 pub fn best_fit_font_px(
-    brush: &mut GlyphBrush<()>,
+    font: &FontArc,
     text: &str,
     box_px: (f32, f32),
     min_px: f32,
@@ -300,18 +304,14 @@ pub fn best_fit_font_px(
     if text.trim().is_empty() {
         return min_px.max(1.0);
     }
-    let glyph_count = text.chars().filter(|c| !c.is_control()).count().max(1) as f32;
-    let texture_limit_px = texture_limit_px.max(1.0);
-    let texture_cap = (texture_limit_px * texture_limit_px / glyph_count).sqrt() * 0.9;
     let mut low = min_px.max(1.0);
-    let mut high = max_px.min(texture_cap.max(low)).max(low);
+    let mut high = max_px.max(low);
+    let texture_cap = texture_limit_px.max(1.0);
+    high = high.min(texture_cap.max(low));
     let mut best = low;
-    let layout = measurement_layout();
     for _ in 0..18 {
         let mid = (low + high) * 0.5;
-        let fits = measure_text_extent(brush, text, mid, layout)
-            .map(|(width, height)| width <= box_px.0 + 0.5 && height <= box_px.1 + 0.5)
-            .unwrap_or(false);
+        let fits = text_fits(font, text, mid, box_px);
         if fits {
             best = mid;
             low = mid;
@@ -325,33 +325,66 @@ pub fn best_fit_font_px(
     best
 }
 
-fn measurement_layout() -> Layout<BuiltInLineBreaker> {
-    Layout::default_wrap()
-        .h_align(HorizontalAlign::Left)
-        .v_align(VerticalAlign::Top)
+fn text_fits(font: &FontArc, text: &str, font_size: f32, bounds: (f32, f32)) -> bool {
+    let (width, height) = measure_wrapped_text(font, text, font_size, bounds.0);
+    width <= bounds.0 + 0.5 && height <= bounds.1 + 0.5
 }
 
-fn measure_text_extent(
-    brush: &mut GlyphBrush<()>,
-    text: &str,
-    font_size: f32,
-    layout: Layout<BuiltInLineBreaker>,
-) -> Option<(f32, f32)> {
-    if text.trim().is_empty() {
-        return Some((0.0, 0.0));
-    }
-    let bounds = (MEASURE_BOUNDS_EXTENT, MEASURE_BOUNDS_EXTENT);
-    let section_layout = layout;
-    let section = Section {
-        screen_position: (0.0, 0.0),
-        bounds,
-        layout: section_layout,
-        text: vec![Text::new(text).with_scale(font_size)],
-        ..Section::default()
+fn measure_wrapped_text(font: &FontArc, text: &str, font_size: f32, max_width: f32) -> (f32, f32) {
+    let scaled = font.as_scaled(font_size);
+    let line_height = (scaled.ascent() - scaled.descent() + scaled.line_gap()).max(1.0);
+    let max_width = max_width.max(1.0);
+    let raw_space = scaled.h_advance(scaled.glyph_id(' '));
+    let space_advance = if raw_space > 0.0 {
+        raw_space
+    } else {
+        scaled.height() * 0.5
     };
-    brush
-        .glyph_bounds_custom_layout(section, &section_layout)
-        .map(|rect| (rect.max.x - rect.min.x, rect.max.y - rect.min.y))
+    let mut max_line_width: f32 = 0.0;
+    let mut total_lines = 0usize;
+
+    for paragraph in text.split('\n') {
+        let mut line_width: f32 = 0.0;
+        let mut first_word = true;
+        for word in paragraph.split_whitespace() {
+            let word_width = word_advance(&scaled, word);
+            let candidate = if first_word {
+                word_width
+            } else {
+                line_width + space_advance + word_width
+            };
+            if !first_word && candidate > max_width && line_width > 0.0 {
+                max_line_width = max_line_width.max(line_width);
+                total_lines += 1;
+                line_width = word_width;
+            } else {
+                line_width = candidate;
+            }
+            first_word = false;
+        }
+        max_line_width = max_line_width.max(line_width);
+        total_lines += 1;
+    }
+
+    if total_lines == 0 {
+        total_lines = 1;
+    }
+    let height = line_height * total_lines as f32;
+    (max_line_width, height)
+}
+
+fn word_advance(scaled: &PxScaleFont<&FontArc>, word: &str) -> f32 {
+    let mut width = 0.0;
+    let mut prev: Option<GlyphId> = None;
+    for ch in word.chars().filter(|c| !c.is_control()) {
+        let glyph = scaled.glyph_id(ch);
+        if let Some(prev_id) = prev {
+            width += scaled.kern(prev_id, glyph);
+        }
+        width += scaled.h_advance(glyph);
+        prev = Some(glyph);
+    }
+    width
 }
 
 fn build_glyph_brush(
