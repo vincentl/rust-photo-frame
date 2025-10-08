@@ -8,6 +8,7 @@ if [[ $(id -u) -ne 0 ]]; then
 fi
 
 PACKAGES=(
+    at
     cage
     libinput10
     libwayland-client0
