@@ -42,6 +42,24 @@ Build and install release artifacts from an unprivileged shell:
 
 The app stage compiles the workspace, stages binaries and documentation under `setup/app/build/stage`, ensures the kiosk service user exists, and installs the artifacts into `/opt/photo-frame`.
 
+## systemd helper library
+
+Provisioning and diagnostics scripts reuse a shared wrapper library at `setup/lib/systemd.sh`. Source it from modules using the canonical pattern:
+
+```bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/systemd.sh
+source "${SCRIPT_DIR}/../lib/systemd.sh"
+```
+
+The library exposes helpers to keep systemd orchestration consistent:
+
+- `systemd_available` – detect whether `systemctl` can be used without aborting the caller.
+- `systemd_daemon_reload`, `systemd_enable_unit`, `systemd_start_unit`, `systemd_restart_unit`, `systemd_stop_unit` – manage unit lifecycle.
+- `systemd_enable_now_unit`, `systemd_disable_unit`, `systemd_disable_now_unit`, `systemd_mask_unit`, `systemd_unmask_unit`, `systemd_set_default_target` – configure unit state and boot targets.
+- `systemd_unit_exists`, `systemd_is_active`, `systemd_is_enabled`, `systemd_status`, `systemd_unit_property` – inspect unit presence and health.
+- `systemd_install_unit_file`, `systemd_install_dropin`, `systemd_remove_dropins` – install or prune unit definitions and drop-ins.
+
 ## Operator quick reference
 
 - Inspect the running session: `sudo systemctl status greetd`

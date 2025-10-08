@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODULE="bootstrap:40-kiosk-user"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=../lib/systemd.sh
+source "${SCRIPT_DIR}/../lib/systemd.sh"
 
 log() {
     printf '[%s] %s\n' "${MODULE}" "$*"
@@ -210,12 +213,104 @@ install_polkit_rules() {
     done
 }
 
-require_trixie
-ensure_boot_config_pi5
-ensure_kiosk_packages
-ensure_kiosk_user
-ensure_runtime_dirs
-install_polkit_rules
+enable_systemd_units() {
+    log "Enabling kiosk services"
+    if ! systemd_available; then
+        die "systemctl not available; cannot configure kiosk services"
+    fi
 
-log "Kiosk base provisioning complete"
+    systemd_daemon_reload
 
+    local dm
+    for dm in gdm3.service sddm.service lightdm.service; do
+        if systemd_unit_exists "${dm}"; then
+            log "Disabling conflicting display manager ${dm}"
+            systemd_disable_now_unit "${dm}" >/dev/null 2>&1 || true
+        fi
+    done
+
+    log "Setting default boot target to graphical.target"
+    systemd_set_default_target graphical.target
+
+    if systemd_unit_exists getty@tty1.service; then
+        log "Disabling and masking getty@tty1.service to avoid VT contention"
+        systemd_disable_now_unit getty@tty1.service >/dev/null 2>&1 || true
+        systemd_mask_unit getty@tty1.service >/dev/null 2>&1 || true
+    fi
+
+    log "Setting greetd as the system display manager"
+    systemd_enable_now_unit greetd.service >/dev/null 2>&1 || true
+
+    log "Verifying display-manager alias"
+    systemd_status display-manager.service || true
+
+    local unit
+    for unit in photoframe-wifi-manager.service photoframe-buttond.service; do
+        if systemd_unit_exists "${unit}"; then
+            systemd_enable_now_unit "${unit}" || true
+        fi
+    done
+
+    if systemd_unit_exists photoframe-sync.timer; then
+        systemd_enable_unit photoframe-sync.timer
+        systemd_start_unit photoframe-sync.timer || true
+    fi
+}
+
+ensure_persistent_journald() {
+    local module="journald"
+    local config="/etc/systemd/journald.conf"
+    local journal_dir="/var/log/journal"
+
+    log "[${module}] Enabling persistent systemd-journald storage"
+    install -d -m 2755 -o root -g systemd-journal "${journal_dir}"
+
+    if [[ ! -f "${config}" ]]; then
+        die "[${module}] ${config} not found"
+    fi
+
+    if grep -Eq '^[#[:space:]]*Storage=persistent' "${config}"; then
+        log "[${module}] Storage already set to persistent"
+    elif grep -Eq '^[#[:space:]]*Storage=' "${config}"; then
+        sed -i 's/^[#[:space:]]*Storage=.*/Storage=persistent/' "${config}"
+        log "[${module}] Set Storage=persistent"
+    else
+        printf '\nStorage=persistent\n' >>"${config}"
+        log "[${module}] Appended Storage=persistent"
+    fi
+
+    if grep -Eq '^[#[:space:]]*SystemMaxUse=200M' "${config}"; then
+        log "[${module}] SystemMaxUse already set to 200M"
+    elif grep -Eq '^[#[:space:]]*SystemMaxUse=' "${config}"; then
+        sed -i 's/^[#[:space:]]*SystemMaxUse=.*/SystemMaxUse=200M/' "${config}"
+        log "[${module}] Set SystemMaxUse=200M"
+    else
+        printf 'SystemMaxUse=200M\n' >>"${config}"
+        log "[${module}] Appended SystemMaxUse=200M"
+    fi
+
+    log "[${module}] Restarting systemd-journald to apply configuration"
+    systemd_restart_unit systemd-journald
+}
+
+main() {
+    require_root "$@"
+    require_trixie
+    require_commands
+
+    ensure_boot_config_pi5
+
+    ensure_packages
+    ensure_kiosk_user
+    ensure_runtime_dirs
+    install_session_wrapper
+    write_greetd_config
+    install_auxiliary_units
+    install_polkit_rules
+    ensure_persistent_journald
+    enable_systemd_units
+
+    log "Kiosk provisioning complete. greetd will launch cage on tty1 as kiosk."
+}
+
+main "$@"
