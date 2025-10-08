@@ -62,7 +62,7 @@ async fn run_with_effects(
                 };
 
                 if let Some(option) = config.choose_option(&mut rng) {
-                    if let Some(mut image) = reconstruct_image(&prepared) {
+                    if let Some(mut image) = reconstruct_image(&mut prepared) {
                         apply_effect(&mut image, &option);
                         prepared.pixels = image.into_raw();
                     } else {
@@ -89,14 +89,17 @@ async fn run_with_effects(
     Ok(())
 }
 
-fn reconstruct_image(prepared: &crate::events::PreparedImageCpu) -> Option<RgbaImage> {
+fn reconstruct_image(prepared: &mut crate::events::PreparedImageCpu) -> Option<RgbaImage> {
     let width = prepared.width;
     let height = prepared.height;
-    let pixels = prepared.pixels.clone();
-    let expected_len = width as usize * height as usize * 4;
-    if pixels.len() != expected_len || width == 0 || height == 0 {
+    if width == 0 || height == 0 {
         return None;
     }
+    let expected_len = width as usize * height as usize * 4;
+    if prepared.pixels.len() != expected_len {
+        return None;
+    }
+    let pixels = std::mem::take(&mut prepared.pixels);
     RgbaImage::from_raw(width, height, pixels)
 }
 
@@ -113,6 +116,8 @@ fn apply_effect(image: &mut RgbaImage, option: &PhotoEffectOptions) {
 mod tests {
     use super::*;
     use crate::events::PreparedImageCpu;
+    use image::RgbaImage;
+    use rand::{SeedableRng, rngs::StdRng};
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
@@ -157,6 +162,13 @@ options:
 "#;
         let config: PhotoEffectConfig = serde_yaml::from_str(yaml).unwrap();
 
+        let mut expected_image =
+            RgbaImage::from_raw(2, 1, vec![10, 20, 30, 255, 200, 150, 100, 255]).unwrap();
+        let mut rng = StdRng::seed_from_u64(42);
+        let option = config.choose_option(&mut rng).unwrap();
+        apply_effect(&mut expected_image, &option);
+        let expected_pixels = expected_image.into_raw();
+
         let (tx_in, rx_in) = mpsc::channel(1);
         let (tx_out, mut rx_out) = mpsc::channel(1);
         let cancel = CancellationToken::new();
@@ -178,7 +190,7 @@ options:
         run(rx_in, tx_out, cancel, config).await.unwrap();
 
         let PhotoLoaded { prepared, priority } = rx_out.try_recv().unwrap();
-        assert_ne!(prepared.pixels, vec![10, 20, 30, 255, 200, 150, 100, 255]);
+        assert_eq!(prepared.pixels, expected_pixels);
         assert!(!priority);
     }
 }
