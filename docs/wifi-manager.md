@@ -15,12 +15,12 @@ The `wifi-manager` crate is the frame's single entry point for Wi-Fi monitoring,
 
 The release build installs to `/opt/photo-frame/bin/wifi-manager` and exposes the following subcommands:
 
-| Subcommand | Purpose |
-| ---------- | ------- |
-| `watch`    | Default daemon mode. Monitors connectivity, raises the hotspot/UI when offline, and reconnects when provisioning succeeds. |
+| Subcommand | Purpose                                                                                                                                        |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `watch`    | Default daemon mode. Monitors connectivity, raises the hotspot/UI when offline, and reconnects when provisioning succeeds.                     |
 | `ui`       | Runs only the HTTP UI server. This is spawned automatically by `watch` when the hotspot is active but can be used independently for debugging. |
-| `qr`       | Generates `/var/lib/photo-frame/wifi-qr.png`, a QR code pointing to the configured UI URL. |
-| `nm`       | Thin wrapper around `nmcli` operations (`add`, `modify`, `connect`) used internally. Safe to run manually for diagnostics. |
+| `qr`       | Generates `/var/lib/photo-frame/wifi-qr.png`, a QR code pointing to the configured UI URL.                                                     |
+| `nm`       | Thin wrapper around `nmcli` operations (`add`, `modify`, `connect`) used internally. Safe to run manually for diagnostics.                     |
 
 Running the binary with `--help` or `--version` is permitted as root; all other modes refuse to start if `UID==0` to honour the project's "never run cargo as root" policy.
 
@@ -50,21 +50,21 @@ display:
   wifi-manager-service: wifi-manager.service
 ```
 
-| Key | Description |
-| --- | ----------- |
-| `interface` | Wireless device monitored for connectivity (default `wlan0`). |
-| `check-interval-sec` | Base delay between connectivity probes. A small jitter is added internally. |
-| `offline-grace-sec` | Seconds the frame must remain offline before the hotspot is activated. |
-| `wordlist-path` | Source file for the random three-word hotspot passphrase. Installed via setup. |
-| `var-dir` | Directory for runtime artifacts (password file, QR PNG, status JSON, temp sockets). |
-| `hotspot.connection-id` | NetworkManager profile name used for the AP. The manager will create or update it automatically. |
-| `hotspot.ssid` | Broadcast SSID for the recovery hotspot. |
-| `hotspot.ipv4-addr` | Address assigned to the hotspot interface and advertised via DHCP. |
-| `ui.bind-address` | Bind address for the HTTP UI. Normally `0.0.0.0`. |
-| `ui.port` | HTTP UI port (default `8080`). |
-| `display.photo-frame-service` | Systemd unit that owns the primary photo frame session. |
-| `display.wifi-manager-service` | Systemd unit that presents the Wi-Fi recovery UI in Cage. |
-| `display.systemctl-path` | Override path to `systemctl` if not `/usr/bin/systemctl`. |
+| Key                            | Description                                                                                      |
+| ------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `interface`                    | Wireless device monitored for connectivity (default `wlan0`).                                    |
+| `check-interval-sec`           | Base delay between connectivity probes. A small jitter is added internally.                      |
+| `offline-grace-sec`            | Seconds the frame must remain offline before the hotspot is activated.                           |
+| `wordlist-path`                | Source file for the random three-word hotspot passphrase. Installed via setup.                   |
+| `var-dir`                      | Directory for runtime artifacts (password file, QR PNG, status JSON, temp sockets).              |
+| `hotspot.connection-id`        | NetworkManager profile name used for the AP. The manager will create or update it automatically. |
+| `hotspot.ssid`                 | Broadcast SSID for the recovery hotspot.                                                         |
+| `hotspot.ipv4-addr`            | Address assigned to the hotspot interface and advertised via DHCP.                               |
+| `ui.bind-address`              | Bind address for the HTTP UI. Normally `0.0.0.0`.                                                |
+| `ui.port`                      | HTTP UI port (default `8080`).                                                                   |
+| `display.photo-frame-service`  | Systemd unit that owns the primary photo frame session.                                          |
+| `display.wifi-manager-service` | Systemd unit that presents the Wi-Fi recovery UI in Cage.                                        |
+| `display.systemctl-path`       | Override path to `systemctl` if not `/usr/bin/systemctl`.                                        |
 
 Whenever you change the config, run `sudo systemctl restart wifi-manager` for the daemon to pick up the new settings.
 
@@ -124,7 +124,7 @@ sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid "HomeWiFi" --psk "
 sudo nmcli connection up pf-hotspot
 
 # Simulate a bad PSK without losing your SSH session
-sudo nohup bash scripts/test-bad-psk.sh wlan0 >/tmp/wifi-test.log 2>&1 & disown
+sudo nohup bash developer/test-bad-psk.sh wlan0 >/tmp/wifi-test.log 2>&1 & disown
 ```
 
 The helper script stashes the active profile's keyfile, swaps in a Wi-Fi

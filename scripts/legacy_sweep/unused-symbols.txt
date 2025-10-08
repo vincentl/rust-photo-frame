@@ -1,5 +1,0 @@
-make-src-archive.sh - no references in repo; superseded by current release packaging flow
-setup-AUDIT-RESULTS.md - historical audit document for deleted setup/system scripts
-docs/setup-audit.md - describes removed setup/system tooling; not linked by current docs
-docs/images/.gitkeep - empty placeholder directory unused by documentation
-tools/fake-btime.sh - standalone helper unused by code, docs, or tests
