@@ -255,19 +255,9 @@ impl GreetingScreen {
             max_px,
             self.glyph_texture_limit,
         );
-        let measure_layout = measurement_layout();
-        let (measured_width, measured_height) = measure_text_extent(
-            &mut self.glyph_brush,
-            &self.settings.message,
-            font_size,
-            measure_layout,
-        )
-        .unwrap_or((0.0, 0.0));
-        let clamped_width = measured_width.min(box_size.0);
-        let clamped_height = measured_height.min(box_size.1);
         let padded_bounds = (
-            (clamped_width + DRAW_BOUNDS_PADDING).max(1.0),
-            (clamped_height + DRAW_BOUNDS_PADDING).max(1.0),
+            (box_size.0 + DRAW_BOUNDS_PADDING).max(1.0),
+            (box_size.1 + DRAW_BOUNDS_PADDING).max(1.0),
         );
         let screen_center = (
             (self.size.width as f32) * 0.5,
