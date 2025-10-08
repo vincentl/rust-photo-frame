@@ -122,7 +122,17 @@ sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid "HomeWiFi" --psk "
 
 # Force the recovery hotspot for testing
 sudo nmcli connection up pf-hotspot
+
+# Simulate a bad PSK without losing your SSH session
+sudo nohup bash scripts/test-bad-psk.sh wlan0 >/tmp/wifi-test.log 2>&1 & disown
 ```
+
+The helper script stashes the active profile's keyfile, swaps in a Wi-Fi
+connection with a deliberately wrong PSK, and tries to activate it. Run it
+from a terminal multiplexer or with `nohup` as shown so the process
+survives your SSH session dropping when the interface goes offline. Once
+NetworkManager rejects the credentials you can tail the service logs and
+watch for the `ONLINE → OFFLINE → HOTSPOT` transition.
 
 The systemd unit is defined in `assets/systemd/photoframe-wifi-manager.service` and runs under the `kiosk` user with `Restart=on-failure`. It depends on `network-online.target` so that the first connectivity check happens after boot networking is ready.
 
