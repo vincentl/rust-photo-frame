@@ -4,6 +4,7 @@ use anyhow::Result;
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::select;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -52,7 +53,7 @@ pub async fn run(
                 async move {
                     if let Some(p) = next {
                         let load = LoadPhoto {
-                            path: p.path.clone(),
+                            path: (*p.path).clone(),
                             priority: p.priority,
                         };
                         to_loader.send(load).await.map(|_| p).map_err(|_| ())
@@ -122,7 +123,7 @@ struct PlaylistState {
 
 #[derive(Clone)]
 struct ScheduledPhoto {
-    path: PathBuf,
+    path: Arc<PathBuf>,
     priority: bool,
 }
 
@@ -159,38 +160,45 @@ impl PlaylistState {
 
         let now = self.now_override.unwrap_or_else(SystemTime::now);
         let prioritized = std::mem::take(&mut self.prioritized);
-        let prioritized_set: HashSet<PathBuf> = prioritized.iter().cloned().collect();
         let mut front: Vec<ScheduledPhoto> = Vec::new();
         let mut rest: Vec<ScheduledPhoto> = Vec::new();
-        let mut multiplicities: Vec<(PathBuf, usize)> = Vec::new();
+        let mut multiplicities: Vec<(&Path, usize)> = Vec::new();
+        let prioritized_len;
 
         let mut infos: Vec<&PhotoInfo> = self.known.values().collect();
         infos.sort_by(|a, b| a.path.cmp(&b.path));
 
-        for info in infos {
-            let multiplicity = self.options.multiplicity_for(info.created_at, now);
-            if multiplicity == 0 {
-                continue;
-            }
-            let path = info.path.clone();
-            multiplicities.push((path.clone(), multiplicity));
-            if prioritized_set.contains(&path) {
-                front.push(ScheduledPhoto {
-                    path: path.clone(),
-                    priority: true,
-                });
-                for _ in 1..multiplicity {
-                    rest.push(ScheduledPhoto {
-                        path: path.clone(),
-                        priority: false,
-                    });
+        {
+            let prioritized_set: HashSet<&Path> =
+                prioritized.iter().map(PathBuf::as_path).collect();
+            prioritized_len = prioritized_set.len();
+
+            for info in infos {
+                let multiplicity = self.options.multiplicity_for(info.created_at, now);
+                if multiplicity == 0 {
+                    continue;
                 }
-            } else {
-                for _ in 0..multiplicity {
-                    rest.push(ScheduledPhoto {
-                        path: path.clone(),
-                        priority: false,
+                let info_path = info.path.as_path();
+                multiplicities.push((info_path, multiplicity));
+                let shared_path = Arc::new(info.path.clone());
+                if prioritized_set.contains(info_path) {
+                    front.push(ScheduledPhoto {
+                        path: Arc::clone(&shared_path),
+                        priority: true,
                     });
+                    for _ in 1..multiplicity {
+                        rest.push(ScheduledPhoto {
+                            path: Arc::clone(&shared_path),
+                            priority: false,
+                        });
+                    }
+                } else {
+                    for _ in 0..multiplicity {
+                        rest.push(ScheduledPhoto {
+                            path: Arc::clone(&shared_path),
+                            priority: false,
+                        });
+                    }
                 }
             }
         }
@@ -199,7 +207,10 @@ impl PlaylistState {
 
         let mut queue = VecDeque::new();
         for path in prioritized {
-            if let Some(idx) = front.iter().position(|p| p.path == path) {
+            if let Some(idx) = front
+                .iter()
+                .position(|p| p.path.as_path() == path.as_path())
+            {
                 queue.push_back(front.remove(idx));
             }
         }
@@ -225,7 +236,7 @@ impl PlaylistState {
             RebuildReason::InventoryChange => info!(
                 photos = multiplicities.len(),
                 scheduled = self.queue.len(),
-                prioritized = prioritized_set.len(),
+                prioritized = prioritized_len,
                 now = ?now,
                 reason = ?reason,
                 "playlist rebuilt"
@@ -233,7 +244,7 @@ impl PlaylistState {
             RebuildReason::CycleExhausted => debug!(
                 photos = multiplicities.len(),
                 scheduled = self.queue.len(),
-                prioritized = prioritized_set.len(),
+                prioritized = prioritized_len,
                 now = ?now,
                 reason = ?reason,
                 "playlist rebuilt"
@@ -273,7 +284,7 @@ impl PlaylistState {
     fn record_remove(&mut self, path: &Path) {
         if self.known.remove(path).is_some() {
             self.prioritized.retain(|p| p != path);
-            self.queue.retain(|p| p.path != path);
+            self.queue.retain(|p| p.path.as_path() != path);
             self.dirty = true;
         }
     }
@@ -309,7 +320,7 @@ where
     for _ in 0..iterations {
         playlist.ensure_ready();
         if let Some(next) = playlist.peek().cloned() {
-            plan.push(next.path.clone());
+            plan.push((*next.path).clone());
             playlist.mark_sent(&next);
         } else {
             break;
