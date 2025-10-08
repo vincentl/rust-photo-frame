@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
-IFS=$'\n\t'
 
-if [[ $(id -u) -ne 0 ]]; then
-    echo "install-rust.sh must be run as root" >&2
-    exit 1
-fi
+MODULE="bootstrap:20-rust"
+
+log() {
+    printf '[%s] %s\n' "${MODULE}" "$*"
+}
 
 RUSTUP_HOME="/usr/local/rustup"
 CARGO_HOME="/usr/local/cargo"
 RUSTUP_BIN="${CARGO_HOME}/bin/rustup"
 
 if [[ -x "${RUSTUP_BIN}" ]]; then
-    echo "Rust toolchain already installed at ${CARGO_HOME}. Updating toolchain instead."
+    log "Rust toolchain already installed at ${CARGO_HOME}. Updating toolchain."
     env RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" \
         "${RUSTUP_BIN}" update stable
 else
     temp_dir=$(mktemp -d)
     trap 'rm -rf "${temp_dir}"' EXIT
 
-    echo "Downloading rustup-init"
+    log "Downloading rustup-init"
     curl -fsSL https://sh.rustup.rs -o "${temp_dir}/rustup-init.sh"
     chmod +x "${temp_dir}/rustup-init.sh"
 
-    echo "Installing Rust toolchain to ${CARGO_HOME}"
+    log "Installing Rust toolchain to ${CARGO_HOME}"
     env RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" \
         "${temp_dir}/rustup-init.sh" -y --no-modify-path --profile minimal --default-toolchain stable \
         --component clippy --component rustfmt
@@ -34,7 +34,7 @@ fi
 env RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" \
     "${RUSTUP_BIN}" component add rustfmt clippy
 
-echo "Ensuring PATH export for system-wide cargo bin directory"
+log "Ensuring PATH export for system-wide cargo bin directory"
 cat <<'PROFILE' >/etc/profile.d/cargo-bin.sh
 SYSTEM_CARGO_BIN="/usr/local/cargo/bin"
 
@@ -56,4 +56,5 @@ PROFILE
 
 chmod 0644 /etc/profile.d/cargo-bin.sh
 
-echo "Rust toolchain installation complete"
+log "Rust toolchain installation complete"
+

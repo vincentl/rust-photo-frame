@@ -1,4 +1,4 @@
-# Managed by setup/kiosk/provision-trixie.sh
+# Managed by setup/bootstrap/modules/60-systemd.sh
 [Unit]
 Description=Photo Frame Power Button Monitor
 After=multi-user.target

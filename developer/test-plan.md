@@ -47,17 +47,17 @@ Exercise each axis at least once per release cycle.
   git clone https://github.com/<org>/rust-photo-frame.git
   cd rust-photo-frame
   ```
-- [ ] Run the kiosk bootstrapper (installs greetd/cage, creates the kiosk user, installs helper units, and enables greetd on tty1):
+- [ ] Run the bootstrap pipeline (installs dependencies, greetd/cage, creates the kiosk user, configures zram, and stages helper units):
   ```sh
-  sudo ./setup/kiosk/provision-trixie.sh
+  sudo ./setup/bootstrap/run.sh
   ```
-  Note: reconnect your SSH session afterwards so refreshed group memberships apply.
+  Note: reconnect your SSH session afterwards so refreshed group memberships apply. Re-run the script after the application install so the kiosk services start once binaries are in place.
 - [ ] After reconnecting, rerun the repo checkout if necessary and execute the app deploy stage (build + install + systemd wiring). Expect 5–7 minutes for the release build on a Pi 5 with active cooling:
   ```sh
   cd ~/rust-photo-frame
   ./setup/app/run.sh
   ```
-  This stage copies binaries into `/opt/photo-frame`, installs the Google “Macondo” font system-wide, and enables `photoframe-wifi-manager.service` plus any optional sync units. The system stage installs and enables `greetd.service`, which launches the compositor and app on boot.
+  This stage copies binaries into `/opt/photo-frame`, installs the Google “Macondo” font system-wide, and prepares documentation/config templates. Re-run `sudo ./setup/bootstrap/run.sh` afterwards (or start the services manually) so the kiosk helpers and greetd pick up the freshly installed binaries.
 - [ ] Customize the writable config at `/var/lib/photo-frame/config.yaml`. Minimal example:
   ```yaml
   photo-library-path: /var/lib/photo-frame/photos

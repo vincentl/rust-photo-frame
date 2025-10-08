@@ -94,12 +94,14 @@ All mutable state lives under `/var/lib/photo-frame` and is owned by the `photo-
 
 The Wi-Fi manager is wired into the refreshed setup pipeline:
 
-- `setup/kiosk/provision-trixie.sh` provisions the kiosk user, installs the Cage session units, enables seat management, and copies the polkit rule that unlocks NetworkManager access for `kiosk`.
-- `setup/packages/install-apt-packages.sh` pulls in NetworkManager, Cage, GPU drivers, and build prerequisites.
+- `setup/bootstrap/modules/10-apt-packages.sh` pulls in NetworkManager, Cage, GPU drivers, and build prerequisites.
+- `setup/bootstrap/modules/20-rust.sh` installs the system-wide Rust toolchain used to build the binaries under `/opt/photo-frame`.
+- `setup/bootstrap/modules/40-kiosk-user.sh` provisions the kiosk user, runtime directories, and polkit rule that unlocks NetworkManager access for `kiosk`.
+- `setup/bootstrap/modules/50-greetd.sh` installs the Cage session wrapper greetd launches on tty1.
+- `setup/bootstrap/modules/60-systemd.sh` installs and enables `/etc/systemd/system/photoframe-wifi-manager.service` alongside the other kiosk units once the binaries exist.
 - `setup/app/modules/10-build.sh` compiles `wifi-manager` in release mode as the invoking user (never root).
 - `setup/app/modules/20-stage.sh` stages the binary, config template, wordlist, and docs.
 - `setup/app/modules/30-install.sh` installs artifacts into `/opt/photo-frame` and seeds `/var/lib/photo-frame/config/config.yaml` if missing.
-- `setup/kiosk/provision-trixie.sh` installs and enables `/etc/systemd/system/photoframe-wifi-manager.service` alongside the other kiosk units.
 
 Re-running the scripts is idempotent: binaries are replaced in place, configs are preserved, ACLs stay intact, and systemd units reload cleanly.
 

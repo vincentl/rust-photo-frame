@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-IFS=$'\n\t'
 
-if [[ $(id -u) -ne 0 ]]; then
-    echo "install-packages.sh must be run as root" >&2
-    exit 1
-fi
+MODULE="bootstrap:10-apt-packages"
+
+log() {
+    printf '[%s] %s\n' "${MODULE}" "$*"
+}
 
 PACKAGES=(
     at
@@ -35,14 +35,15 @@ PACKAGES=(
     kmscube
 )
 
-echo "Updating apt package index"
+log "Updating apt package index"
 apt-get update
 
-echo "Installing required packages: ${PACKAGES[*]}"
+log "Installing required packages: ${PACKAGES[*]}"
 DEBIAN_FRONTEND=noninteractive apt-get -y --no-install-recommends install "${PACKAGES[@]}"
 
-echo "Removing unused packages"
+log "Removing unused packages"
 apt-get -y autoremove
 apt-get -y autoclean
 
-echo "Package installation complete"
+log "Package installation complete"
+

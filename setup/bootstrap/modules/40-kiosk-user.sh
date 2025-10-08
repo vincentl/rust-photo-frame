@@ -7,18 +7,12 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${SCRIPT_DIR}/../lib/systemd.sh"
 
 log() {
-    printf '[kiosk-setup] %s\n' "$*"
+    printf '[%s] %s\n' "${MODULE}" "$*"
 }
 
 die() {
-    printf '[kiosk-setup] ERROR: %s\n' "$*" >&2
+    printf '[%s] ERROR: %s\n' "${MODULE}" "$*" >&2
     exit 1
-}
-
-require_root() {
-    if [[ ${EUID} -ne 0 ]]; then
-        exec sudo -- "$0" "$@"
-    fi
 }
 
 require_trixie() {
@@ -29,19 +23,6 @@ require_trixie() {
     . /etc/os-release
     if [[ "${VERSION_CODENAME:-}" != "trixie" ]]; then
         die "Debian 13 (trixie) is required"
-    fi
-}
-
-require_commands() {
-    local missing=()
-    local cmd
-    for cmd in apt-get install getent groupadd id install mkdir systemctl useradd usermod; do
-        if ! command -v "${cmd}" >/dev/null 2>&1; then
-            missing+=("${cmd}")
-        fi
-    done
-    if (( ${#missing[@]} > 0 )); then
-        die "Missing required commands: ${missing[*]}"
     fi
 }
 
@@ -136,7 +117,7 @@ ensure_boot_config_pi5() {
     fi
 }
 
-ensure_packages() {
+ensure_kiosk_packages() {
     local packages=(
         cage
         greetd
@@ -146,10 +127,22 @@ ensure_packages() {
         wlr-randr
         socat
     )
-    log "Installing packages: ${packages[*]}"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y --no-install-recommends "${packages[@]}"
+    local missing=()
+    local pkg
+    for pkg in "${packages[@]}"; do
+        if ! dpkg-query -W -f='${Status}' "${pkg}" 2>/dev/null | grep -q 'install ok installed'; then
+            missing+=("${pkg}")
+        fi
+    done
+
+    if (( ${#missing[@]} > 0 )); then
+        log "Installing packages: ${missing[*]}"
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends "${missing[@]}"
+    else
+        log "Kiosk-specific packages already installed"
+    fi
 }
 
 ensure_kiosk_user() {
@@ -186,49 +179,6 @@ ensure_kiosk_user() {
     fi
 }
 
-write_greetd_config() {
-    local config_dir="/etc/greetd"
-    local config_file="${config_dir}/config.toml"
-    log "Writing ${config_file}"
-    install -d -m 0755 "${config_dir}"
-    cat <<'CONFIG' >"${config_file}"
-[terminal]
-vt = 1
-
-[default_session]
-command = "cage -s -- /usr/local/bin/photoframe-session"
-user = "kiosk"
-CONFIG
-    chmod 0644 "${config_file}"
-}
-
-install_session_wrapper() {
-    local wrapper="/usr/local/bin/photoframe-session"
-    log "Installing ${wrapper}"
-    install -d -m 0755 "$(dirname "${wrapper}")"
-    cat <<'WRAPPER' >"${wrapper}"
-#!/usr/bin/env bash
-set -euo pipefail
-
-log() {
-    printf '[photoframe-session] %s\n' "$*" >&2
-}
-
-if command -v wlr-randr >/dev/null 2>&1; then
-    if ! wlr-randr --output HDMI-A-1 --mode 3840x2160@60; then
-        log "WARN: Failed to apply HDMI-A-1 3840x2160@60 mode via wlr-randr"
-    else
-        log "Applied HDMI-A-1 3840x2160@60 via wlr-randr"
-    fi
-else
-    log "WARN: wlr-randr not found; skipping output configuration"
-fi
-
-exec systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml
-WRAPPER
-    chmod 0755 "${wrapper}"
-}
-
 ensure_runtime_dirs() {
     local runtime_dir="/run/photo-frame"
     local tmpfiles_conf="/etc/tmpfiles.d/photo-frame.conf"
@@ -242,15 +192,6 @@ ensure_runtime_dirs() {
 # photo-frame runtime directories
 d /run/photo-frame 0770 kiosk kiosk -
 TMPFILES
-}
-
-install_auxiliary_units() {
-    log "Installing photoframe systemd units"
-    local unit
-    for unit in "${REPO_ROOT}"/assets/systemd/photoframe-*; do
-        [ -f "${unit}" ] || continue
-        install -D -m 0644 "${unit}" "/etc/systemd/system/$(basename "${unit}")"
-    done
 }
 
 install_polkit_rules() {
