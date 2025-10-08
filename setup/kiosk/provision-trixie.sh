@@ -76,12 +76,7 @@ ensure_boot_config_pi5() {
 
     log "[${module}] Using configuration file ${config_path}"
 
-    declare -A kv_settings=(
-        ["hdmi_force_hotplug:1"]="1"
-        ["hdmi_group:1"]="2"
-        ["hdmi_mode:1"]="97"
-        ["hdmi_drive:1"]="2"
-    )
+    declare -A kv_settings=()
 
     declare -A dtparams=(
         ["dtparam=fan_temp0"]="dtparam=fan_temp0=50000"
