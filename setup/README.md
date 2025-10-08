@@ -20,7 +20,8 @@ The script performs the following actions:
 - creates `/run/photo-frame` with mode `0770`, ownership `kiosk:kiosk`, and drops an `/etc/tmpfiles.d/photo-frame.conf` entry so the control socket directory is recreated on boot,
 - writes `/etc/greetd/config.toml` to launch `cage -s -- /usr/local/bin/photoframe-session` on virtual terminal 1,
 - disables conflicting display managers (`gdm3`, `sddm`, `lightdm`), enables `greetd.service` as the system `display-manager.service`, sets the default boot target to `graphical.target`, and masks `getty@tty1.service` to avoid VT races, and
-- deploys and enables the supporting `photoframe-*` helper units.
+- deploys and enables the supporting `photoframe-*` helper units, and
+- enables persistent systemd journaling with a 200 MB cap for `/var/log/journal` to preserve kiosk diagnostics across reboots.
 
 Re-run the script after OS updates to reapply package dependencies or repair systemd state; it is safe and idempotent.
 
