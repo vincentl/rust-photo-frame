@@ -1,6 +1,6 @@
 .PHONY: kiosk-diagnostics diag-kiosk
 
 kiosk-diagnostics:
-@./setup/kiosk/diagnostics.sh
+@./setup/bootstrap/tools/diagnostics.sh
 
 diag-kiosk: kiosk-diagnostics

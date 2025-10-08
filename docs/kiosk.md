@@ -4,24 +4,24 @@ The photo frame boots straight into the Wayland app using a greetd-managed sessi
 
 ## Provisioning workflow
 
-Run the kiosk installer on a fresh Debian 13 (or Raspberry Pi OS trixie) image:
+Run the bootstrap pipeline on a fresh Debian 13 (or Raspberry Pi OS trixie) image:
 
 ```bash
-sudo ./setup/kiosk/provision-trixie.sh
+sudo ./setup/bootstrap/run.sh
 ```
 
 The script performs the following actions:
 
-- verifies `/etc/os-release` reports `VERSION_CODENAME=trixie`;
-- installs the Wayland stack required for kiosk mode (`greetd`, `cage`, `mesa-vulkan-drivers`, `vulkan-tools`, `wlr-randr`, `wayland-protocols`, and `socat` for control-socket tooling);
-- creates the `kiosk` account with a locked shell and ensures it belongs to the `video`, `render`, and `input` groups;
-- provisions `/run/photo-frame` (owned by `kiosk:kiosk`, mode `0770`) and drops an `/etc/tmpfiles.d/photo-frame.conf` entry so the control socket directory exists on every boot;
-- writes `/etc/greetd/config.toml` so virtual terminal 1 runs `cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` as the `kiosk` user;
-- disables other display managers (`gdm3`, `sddm`, `lightdm`), enables `greetd.service` as the system `display-manager.service`, sets `graphical.target` as the default boot target, and masks `getty@tty1.service` to keep greetd in control of tty1;
-- deploys the `photoframe-*` helper units (wifi manager, sync timer, button daemon); and
-- enables `greetd.service`, `photoframe-wifi-manager.service`, `photoframe-buttond.service`, and `photoframe-sync.timer`.
+- verifies `/etc/os-release` reports `VERSION_CODENAME=trixie` and applies Raspberry Pi 5 boot tweaks (set `ENABLE_4K_BOOT=0` to skip the 4K60 profile),
+- installs the Wayland stack required for kiosk mode (`greetd`, `cage`, `mesa-vulkan-drivers`, `vulkan-tools`, `wlr-randr`, `wayland-protocols`, and `socat` for control-socket tooling) alongside general dependencies,
+- creates the `kiosk` account with a locked shell and ensures it belongs to the `video`, `render`, and `input` groups,
+- provisions `/run/photo-frame` (owned by `kiosk:kiosk`, mode `0770`) and drops an `/etc/tmpfiles.d/photo-frame.conf` entry so the control socket directory exists on every boot,
+- installs `/usr/local/bin/photoframe-session` and writes `/etc/greetd/config.toml` so virtual terminal 1 runs `cage -s -- /usr/local/bin/photoframe-session` as the `kiosk` user,
+- disables other display managers (`gdm3`, `sddm`, `lightdm`), enables `greetd.service` as the system `display-manager.service`, sets `graphical.target` as the default boot target, and masks `getty@tty1.service` to keep greetd in control of tty1,
+- deploys the `photoframe-*` helper units (wifi manager, sync timer, button daemon), and
+- enables the kiosk units, starting them automatically once the corresponding binaries exist in `/opt/photo-frame`.
 
-Re-run the script after OS updates to reapply package dependencies or to repair systemd units; it is idempotent.
+Re-run the script after OS or application updates to reapply package dependencies or repair systemd units; it is idempotent.
 
 ## Resulting configuration
 
@@ -32,7 +32,7 @@ Re-run the script after OS updates to reapply package dependencies or to repair 
 vt = 1
 
 [default_session]
-command = "cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml"
+command = "cage -s -- /usr/local/bin/photoframe-session"
 user = "kiosk"
 ```
 
@@ -45,7 +45,7 @@ systemctl status display-manager
 journalctl -u greetd -b
 ```
 
-`systemctl status greetd` should show the unit as `active (running)` with `/usr/bin/cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` in the command line. The journal contains both greetd session logs and the photo frame application output.
+`systemctl status greetd` should show the unit as `active (running)` with `/usr/bin/cage -s -- /usr/local/bin/photoframe-session` in the command line. The journal contains both greetd session logs and the photo frame application output.
 
 ## Operations quick reference
 

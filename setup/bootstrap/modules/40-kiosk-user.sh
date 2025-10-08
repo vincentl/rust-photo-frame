@@ -1,22 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+MODULE="bootstrap:40-kiosk-user"
 
 log() {
-    printf '[kiosk-setup] %s\n' "$*"
+    printf '[%s] %s\n' "${MODULE}" "$*"
 }
 
 die() {
-    printf '[kiosk-setup] ERROR: %s\n' "$*" >&2
+    printf '[%s] ERROR: %s\n' "${MODULE}" "$*" >&2
     exit 1
-}
-
-require_root() {
-    if [[ ${EUID} -ne 0 ]]; then
-        exec sudo -- "$0" "$@"
-    fi
 }
 
 require_trixie() {
@@ -27,19 +20,6 @@ require_trixie() {
     . /etc/os-release
     if [[ "${VERSION_CODENAME:-}" != "trixie" ]]; then
         die "Debian 13 (trixie) is required"
-    fi
-}
-
-require_commands() {
-    local missing=()
-    local cmd
-    for cmd in apt-get install getent groupadd id install mkdir systemctl useradd usermod; do
-        if ! command -v "${cmd}" >/dev/null 2>&1; then
-            missing+=("${cmd}")
-        fi
-    done
-    if (( ${#missing[@]} > 0 )); then
-        die "Missing required commands: ${missing[*]}"
     fi
 }
 
@@ -134,7 +114,7 @@ ensure_boot_config_pi5() {
     fi
 }
 
-ensure_packages() {
+ensure_kiosk_packages() {
     local packages=(
         cage
         greetd
@@ -144,10 +124,22 @@ ensure_packages() {
         wlr-randr
         socat
     )
-    log "Installing packages: ${packages[*]}"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y --no-install-recommends "${packages[@]}"
+    local missing=()
+    local pkg
+    for pkg in "${packages[@]}"; do
+        if ! dpkg-query -W -f='${Status}' "${pkg}" 2>/dev/null | grep -q 'install ok installed'; then
+            missing+=("${pkg}")
+        fi
+    done
+
+    if (( ${#missing[@]} > 0 )); then
+        log "Installing packages: ${missing[*]}"
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends "${missing[@]}"
+    else
+        log "Kiosk-specific packages already installed"
+    fi
 }
 
 ensure_kiosk_user() {
@@ -184,49 +176,6 @@ ensure_kiosk_user() {
     fi
 }
 
-write_greetd_config() {
-    local config_dir="/etc/greetd"
-    local config_file="${config_dir}/config.toml"
-    log "Writing ${config_file}"
-    install -d -m 0755 "${config_dir}"
-    cat <<'CONFIG' >"${config_file}"
-[terminal]
-vt = 1
-
-[default_session]
-command = "cage -s -- /usr/local/bin/photoframe-session"
-user = "kiosk"
-CONFIG
-    chmod 0644 "${config_file}"
-}
-
-install_session_wrapper() {
-    local wrapper="/usr/local/bin/photoframe-session"
-    log "Installing ${wrapper}"
-    install -d -m 0755 "$(dirname "${wrapper}")"
-    cat <<'WRAPPER' >"${wrapper}"
-#!/usr/bin/env bash
-set -euo pipefail
-
-log() {
-    printf '[photoframe-session] %s\n' "$*" >&2
-}
-
-if command -v wlr-randr >/dev/null 2>&1; then
-    if ! wlr-randr --output HDMI-A-1 --mode 3840x2160@60; then
-        log "WARN: Failed to apply HDMI-A-1 3840x2160@60 mode via wlr-randr"
-    else
-        log "Applied HDMI-A-1 3840x2160@60 via wlr-randr"
-    fi
-else
-    log "WARN: wlr-randr not found; skipping output configuration"
-fi
-
-exec systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml
-WRAPPER
-    chmod 0755 "${wrapper}"
-}
-
 ensure_runtime_dirs() {
     local runtime_dir="/run/photo-frame"
     local tmpfiles_conf="/etc/tmpfiles.d/photo-frame.conf"
@@ -240,15 +189,6 @@ ensure_runtime_dirs() {
 # photo-frame runtime directories
 d /run/photo-frame 0770 kiosk kiosk -
 TMPFILES
-}
-
-install_auxiliary_units() {
-    log "Installing photoframe systemd units"
-    local unit
-    for unit in "${REPO_ROOT}"/assets/systemd/photoframe-*; do
-        [ -f "${unit}" ] || continue
-        install -D -m 0644 "${unit}" "/etc/systemd/system/$(basename "${unit}")"
-    done
 }
 
 install_polkit_rules() {
@@ -270,100 +210,12 @@ install_polkit_rules() {
     done
 }
 
-enable_systemd_units() {
-    log "Enabling kiosk services"
-    systemctl daemon-reload
+require_trixie
+ensure_boot_config_pi5
+ensure_kiosk_packages
+ensure_kiosk_user
+ensure_runtime_dirs
+install_polkit_rules
 
-    local dm
-    for dm in gdm3.service sddm.service lightdm.service; do
-        if systemctl list-unit-files "${dm}" >/dev/null 2>&1; then
-            log "Disabling conflicting display manager ${dm}"
-            systemctl disable --now "${dm}" >/dev/null 2>&1 || true
-        fi
-    done
+log "Kiosk base provisioning complete"
 
-    log "Setting default boot target to graphical.target"
-    systemctl set-default graphical.target
-
-    if systemctl list-unit-files getty@tty1.service >/dev/null 2>&1; then
-        log "Disabling and masking getty@tty1.service to avoid VT contention"
-        systemctl disable --now getty@tty1.service >/dev/null 2>&1 || true
-        systemctl mask getty@tty1.service >/dev/null 2>&1 || true
-    fi
-
-    log "Setting greetd as the system display manager"
-    systemctl enable --now greetd.service >/dev/null 2>&1 || true
-
-    log "Verifying display-manager alias"
-    systemctl status display-manager.service --no-pager || true
-
-    local unit
-    for unit in photoframe-wifi-manager.service photoframe-buttond.service; do
-        if systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
-            systemctl enable --now "${unit}"
-        fi
-    done
-
-    if systemctl list-unit-files photoframe-sync.timer >/dev/null 2>&1; then
-        systemctl enable photoframe-sync.timer
-        systemctl start photoframe-sync.timer || true
-    fi
-}
-
-ensure_persistent_journald() {
-    local module="journald"
-    local config="/etc/systemd/journald.conf"
-    local journal_dir="/var/log/journal"
-
-    log "[${module}] Enabling persistent systemd-journald storage"
-    install -d -m 2755 -o root -g systemd-journal "${journal_dir}"
-
-    if [[ ! -f "${config}" ]]; then
-        die "[${module}] ${config} not found"
-    fi
-
-    if grep -Eq '^[#[:space:]]*Storage=persistent' "${config}"; then
-        log "[${module}] Storage already set to persistent"
-    elif grep -Eq '^[#[:space:]]*Storage=' "${config}"; then
-        sed -i 's/^[#[:space:]]*Storage=.*/Storage=persistent/' "${config}"
-        log "[${module}] Set Storage=persistent"
-    else
-        printf '\nStorage=persistent\n' >>"${config}"
-        log "[${module}] Appended Storage=persistent"
-    fi
-
-    if grep -Eq '^[#[:space:]]*SystemMaxUse=200M' "${config}"; then
-        log "[${module}] SystemMaxUse already set to 200M"
-    elif grep -Eq '^[#[:space:]]*SystemMaxUse=' "${config}"; then
-        sed -i 's/^[#[:space:]]*SystemMaxUse=.*/SystemMaxUse=200M/' "${config}"
-        log "[${module}] Set SystemMaxUse=200M"
-    else
-        printf 'SystemMaxUse=200M\n' >>"${config}"
-        log "[${module}] Appended SystemMaxUse=200M"
-    fi
-
-    log "[${module}] Restarting systemd-journald to apply configuration"
-    systemctl restart systemd-journald
-}
-
-main() {
-    require_root "$@"
-    require_trixie
-    require_commands
-
-    ensure_boot_config_pi5
-
-    ensure_packages
-    ensure_kiosk_user
-    ensure_runtime_dirs
-    install_session_wrapper
-    write_greetd_config
-    install_auxiliary_units
-    install_polkit_rules
-    ensure_persistent_journald
-    enable_systemd_units
-
-    log "Kiosk provisioning complete. greetd will launch cage on tty1 as kiosk."
-}
-
-main "$@"

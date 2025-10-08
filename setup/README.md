@@ -2,63 +2,35 @@
 
 This directory houses idempotent provisioning scripts for Raspberry Pi photo frame deployments. Each script can be re-run safely after OS updates or image refreshes.
 
-## One-command kiosk bootstrap (Trixie)
+## Bootstrap the operating system (Trixie)
 
-Provision a Raspberry Pi OS Trixie kiosk with the greetd + cage workflow:
+Provision a Raspberry Pi OS Trixie kiosk and install shared dependencies with:
 
 ```bash
-sudo ./setup/kiosk/provision-trixie.sh
+sudo ./setup/bootstrap/run.sh
 ```
 
-The script performs the following actions:
+The bootstrap pipeline is ordered via numbered modules and performs the following actions:
 
-- verifies the OS is Raspberry Pi OS Trixie,
-- installs `greetd`, `cage`, `mesa-vulkan-drivers`, `vulkan-tools`, `wlr-randr`, `wayland-protocols`, and `socat`,
-- programs the Raspberry Pi boot configuration for HDMI 4K60 output and configures the Pi 5 fan curve via `dtparam` entries (set `ENABLE_4K_BOOT=0` before running if you need different firmware settings),
-- installs a kiosk session wrapper that applies `wlr-randr --output HDMI-A-1 --mode 3840x2160@60` before launching the photo frame application,
-- ensures the `kiosk` user exists with `/usr/sbin/nologin` and belongs to the `render`, `video`, and `input` groups,
-- creates `/run/photo-frame` with mode `0770`, ownership `kiosk:kiosk`, and drops an `/etc/tmpfiles.d/photo-frame.conf` entry so the control socket directory is recreated on boot,
-- writes `/etc/greetd/config.toml` to launch `cage -s -- /usr/local/bin/photoframe-session` on virtual terminal 1,
-- disables conflicting display managers (`gdm3`, `sddm`, `lightdm`), enables `greetd.service` as the system `display-manager.service`, sets the default boot target to `graphical.target`, and masks `getty@tty1.service` to avoid VT races, and
-- deploys and enables the supporting `photoframe-*` helper units, and
-- enables persistent systemd journaling with a 200 MB cap for `/var/log/journal` to preserve kiosk diagnostics across reboots.
+- installs base apt packages (graphics stack, build tools, networking utilities),
+- installs or updates the system-wide Rust toolchain under `/usr/local/cargo`,
+- replaces the legacy swapfile with `systemd-zram-generator` configured for a half-RAM zram device,
+- verifies the host is running Debian 13 (Trixie) and applies Raspberry Pi 5 boot firmware tweaks (set `ENABLE_4K_BOOT=0` before running if you need to skip the HDMI 4K60 profile),
+- ensures the locked `kiosk` user exists with membership in the `render`, `video`, and `input` groups and provisions runtime directories and polkit policy,
+- installs the greetd configuration and kiosk session wrapper at `/usr/local/bin/photoframe-session`, and
+- deploys the `photoframe-*` systemd units, enabling them and starting them when the corresponding binaries are present in `/opt/photo-frame`.
 
-Re-run the script after OS updates to reapply package dependencies or repair systemd state; it is safe and idempotent.
+Run the script before building the application so the toolchain and dependencies are ready. Re-run it after `./setup/app/run.sh` completes to let the kiosk services start once the binaries are installed. The modules are idempotent, so repeated invocations are safe.
 
 ## Diagnose kiosk health
 
 Inspect the greetd session, kiosk user, and display-manager wiring:
 
 ```bash
-sudo ./setup/kiosk/diagnostics.sh
+sudo ./setup/bootstrap/tools/diagnostics.sh
 ```
 
 Run this from the device when display login fails or the kiosk session will not start; it flags missing packages, disabled units, and other common misconfigurations.
-
-## Replace the legacy swapfile with zram
-
-Raspberry Pi OS ships with a disk-backed swapfile that can wear out SD cards
-and competes with the photo frame's IO needs. Replace it with compressed
-in-memory swap backed by zram during provisioning:
-
-```bash
-sudo ./setup/install-zram.sh
-```
-
-The helper script disables and removes the default `dphys-swapfile` service,
-installs `systemd-zram-generator`, writes `/etc/systemd/zram-generator.conf.d/photoframe.conf`
-to size the zram swap device to half of physical RAM (capped at 2 GiB), and
-restarts the generated `systemd-zram-setup@zram0.service` unit.
-
-## Package provisioning helpers
-
-For development images you may still want the extended toolchain provided by `setup/packages/run.sh`:
-
-```bash
-sudo ./setup/packages/run.sh
-```
-
-This installs the Rust toolchain under `/usr/local/cargo` and pulls additional utilities (e.g., `rclone`, `kmscube`) useful during development.
 
 ## Application deployment
 

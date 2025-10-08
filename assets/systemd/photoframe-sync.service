@@ -1,4 +1,4 @@
-# Managed by setup/kiosk/provision-trixie.sh
+# Managed by setup/bootstrap/modules/60-systemd.sh
 [Unit]
 Description=Photo Frame Library Sync
 After=network-online.target
