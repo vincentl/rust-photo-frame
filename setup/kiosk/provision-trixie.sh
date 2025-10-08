@@ -147,6 +147,7 @@ ensure_packages() {
         vulkan-tools
         wayland-protocols
         wlr-randr
+        socat
     )
     log "Installing packages: ${packages[*]}"
     export DEBIAN_FRONTEND=noninteractive
@@ -231,6 +232,21 @@ WRAPPER
     chmod 0755 "${wrapper}"
 }
 
+ensure_runtime_dirs() {
+    local runtime_dir="/run/photo-frame"
+    local tmpfiles_conf="/etc/tmpfiles.d/photo-frame.conf"
+
+    log "Ensuring runtime control socket directory ${runtime_dir}"
+    install -d -m 0770 -o kiosk -g kiosk "${runtime_dir}"
+
+    log "Writing tmpfiles.d entry ${tmpfiles_conf}"
+    install -d -m 0755 "$(dirname "${tmpfiles_conf}")"
+    cat <<'TMPFILES' >"${tmpfiles_conf}"
+# photo-frame runtime directories
+d /run/photo-frame 0770 kiosk kiosk -
+TMPFILES
+}
+
 install_auxiliary_units() {
     log "Installing photoframe systemd units"
     local unit
@@ -289,6 +305,7 @@ main() {
 
     ensure_packages
     ensure_kiosk_user
+    ensure_runtime_dirs
     install_session_wrapper
     write_greetd_config
     install_auxiliary_units
