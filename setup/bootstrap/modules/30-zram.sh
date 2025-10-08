@@ -1,22 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_NAME="$(basename "$0")"
+MODULE="bootstrap:30-zram"
 
 log() {
-    printf '[%s] %s\n' "${SCRIPT_NAME}" "$*"
+    printf '[%s] %s\n' "${MODULE}" "$*"
 }
 
 die() {
-    printf '[%s] ERROR: %s\n' "${SCRIPT_NAME}" "$*" >&2
+    printf '[%s] ERROR: %s\n' "${MODULE}" "$*" >&2
     exit 1
-}
-
-require_root() {
-    if [[ ${EUID} -ne 0 ]]; then
-        exec sudo -- "$0" "$@"
-    fi
 }
 
 require_commands() {
@@ -89,7 +82,7 @@ configure_zram_generator() {
     log "Configuring systemd zram generator"
     install -d -m 0755 "${config_dir}"
     cat <<'CONF' >"${config_file}"
-# Managed by setup/install-zram.sh
+# Managed by setup/bootstrap/modules/30-zram.sh
 # Configure a compressed swap device sized to half of physical memory (up to 2 GiB).
 # Higher priority ensures the kernel prefers zram swap over any other device if reintroduced.
 [zram0]
@@ -118,17 +111,13 @@ activate_zram() {
     swapon --show
 }
 
-main() {
-    require_root "$@"
-    require_commands
+require_commands
 
-    disable_default_swap
-    ensure_zram_packages
-    configure_zram_generator
-    systemctl daemon-reload
-    activate_zram
+disable_default_swap
+ensure_zram_packages
+configure_zram_generator
+systemctl daemon-reload
+activate_zram
 
-    log "zram swap provisioning complete."
-}
+log "zram swap provisioning complete."
 
-main "$@"

@@ -11,21 +11,23 @@ fi
 
 FAIL=0
 
+PREFIX="kiosk-diagnostics"
+
 title() {
-    printf '[kiosk-diagnostics] %s\n' "$1"
+    printf '[%s] %s\n' "${PREFIX}" "$1"
 }
 
 ok() {
-    printf '[kiosk-diagnostics] OK: %s\n' "$1"
+    printf '[%s] OK: %s\n' "${PREFIX}" "$1"
 }
 
 err() {
-    printf '[kiosk-diagnostics] ERROR: %s\n' "$1" >&2
+    printf '[%s] ERROR: %s\n' "${PREFIX}" "$1" >&2
     FAIL=1
 }
 
 warn() {
-    printf '[kiosk-diagnostics] WARN: %s\n' "$1"
+    printf '[%s] WARN: %s\n' "${PREFIX}" "$1"
 }
 
 check_greetd_unit() {
@@ -71,10 +73,10 @@ check_greetd_config() {
         err 'config missing "vt = 1"'
     fi
 
-    if grep -Fxq 'command = "cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml"' "${config}"; then
-        ok 'command matches cage launch'
+    if grep -Fxq 'command = "cage -s -- /usr/local/bin/photoframe-session"' "${config}"; then
+        ok 'config launches photoframe session wrapper'
     else
-        err 'config missing cage command'
+        err 'config missing cage session wrapper command'
     fi
 
     if grep -Fxq 'user = "kiosk"' "${config}"; then
@@ -113,3 +115,4 @@ check_greetd_config
 check_kiosk_user
 
 exit ${FAIL}
+

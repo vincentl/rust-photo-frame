@@ -95,15 +95,15 @@ This workflow prepares a Raspberry Pi OS (Trixie, 64-bit) image that boots direc
 
 ## Run the automated setup
 
-Run the automation in three stages. Each script is idempotent, so you can safely re-run it if the connection drops or you need to retry after a reboot.
+Run the automation in two passes. Each script is idempotent, so you can safely re-run it if the connection drops or you need to retry after a reboot.
 
-### 1. Provision OS packages and the Rust toolchain
+### 1. Bootstrap the operating system
 
 ```bash
-sudo ./setup/packages/run.sh
+sudo ./setup/bootstrap/run.sh
 ```
 
-   This script installs the apt dependencies and a system-wide Rust toolchain under `/usr/local/cargo`. Log out and back in (or reconnect your SSH session) afterwards so your shell picks up the updated `PATH`.
+   This pipeline installs the apt dependencies, configures zram swap, and installs a system-wide Rust toolchain under `/usr/local/cargo`. It also provisions the kiosk user, greetd configuration, and supporting systemd units. Run it before building so toolchains and packages are ready; re-run it after the application install so the kiosk services start once the binaries exist in `/opt/photo-frame`.
 
 ### 2. Build and stage the application
 
@@ -120,7 +120,7 @@ sudo ./setup/packages/run.sh
 >
 > Keeping code and mutable state separate allows updates to replace the staged artifacts in `/opt` without disturbing operator-managed data in `/var/lib/photo-frame`.
 
-   The postcheck defers systemd validation until the kiosk environment is provisioned. Expect warnings about `greetd.service` and related helper units until you run the kiosk installer in the next step.
+   The postcheck defers systemd validation until the kiosk environment is provisioned. Expect warnings about `greetd.service` and related helper units until you rerun the bootstrap pipeline after the application install.
 
 Use the following environment variables to customize an installation:
 
@@ -130,23 +130,6 @@ Use the following environment variables to customize an installation:
 | `SERVICE_USER`  | `kiosk`            | The systemd account that owns `/var/lib/photo-frame`. The app stage creates it on demand before installing artifacts. |
 | `SERVICE_GROUP` | `kiosk` (or the primary group for `SERVICE_USER`) | Group that owns `/var/lib/photo-frame` alongside `SERVICE_USER`. |
 | `CARGO_PROFILE` | `release`          | Cargo profile passed to `cargo build`. |
-
-### 3. Provision the kiosk session
-
-```bash
-sudo ./setup/kiosk/provision-trixie.sh
-```
-
-Run the greetd installer with root privileges. The script:
-
-- Installs `greetd`, `cage`, `mesa-vulkan-drivers`, `vulkan-tools`, `wlr-randr`, and `wayland-protocols`.
-- Creates the locked `kiosk` user.
-- Writes `/etc/greetd/config.toml` and disables other display managers in favor of the `greetd`-provided `display-manager.service`.
-- Sets the default boot target to `graphical.target`.
-- Masks `getty@tty1.service`.
-- Enables `greetd` alongside the `photoframe-*` helpers.
-
-   When the script finishes, reconnect your SSH session so new group memberships take effect.
 
 ## Validate the kiosk stack
 
@@ -158,13 +141,13 @@ systemctl status display-manager
 journalctl -u greetd -b
 ```
 
-`systemctl status` should report `active (running)` and show `cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` in the command line. The journal should contain the photo frame application logs for the current boot. Once these checks pass, reboot the device to land directly in the fullscreen photo frame experience.
+`systemctl status` should report `active (running)` and show `cage -s -- /usr/local/bin/photoframe-session` in the command line. The journal should contain the photo frame application logs for the current boot. Once these checks pass, reboot the device to land directly in the fullscreen photo frame experience.
 
 ## Kiosk session reference
 
 When both setup stages complete successfully the Raspberry Pi is ready to boot directly into a kiosk session:
 
-- `/etc/greetd/config.toml` binds greetd to virtual terminal 1 and runs `cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` as the `kiosk` user. greetd creates the login session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` while `/var/lib/photo-frame` remains writable by the kiosk account.
+- `/etc/greetd/config.toml` binds greetd to virtual terminal 1 and runs `cage -s -- /usr/local/bin/photoframe-session` as the `kiosk` user. The wrapper applies the HDMI 4K60 layout via `wlr-randr` before launching the photo frame binary through `systemd-cat` so logs land in the journal. greetd creates the login session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` while `/var/lib/photo-frame` remains writable by the kiosk account.
 - Device access comes from the `kiosk` user belonging to the `render`, `video`, and `input` groups. The setup stage wires this up so Vulkan/GL stacks can open `/dev/dri/renderD128` without any extra udev hacks.
 - The kiosk stack relies on `greetd` + `cage`; no display-manager compatibility targets or tty autologin services are installed.
 

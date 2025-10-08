@@ -123,7 +123,7 @@ if systemd_available; then
         fi
     }
 
-    kiosk_hint="run setup/kiosk/provision-trixie.sh to provision kiosk services"
+    kiosk_hint="run 'sudo ./setup/bootstrap/run.sh' to provision kiosk services"
 
     check_service "${KIOSK_SERVICE}" "ERROR" "${kiosk_hint}"
     check_enabled "${KIOSK_SERVICE}" "${kiosk_hint}"
