@@ -315,6 +315,42 @@ enable_systemd_units() {
     fi
 }
 
+ensure_persistent_journald() {
+    local module="journald"
+    local config="/etc/systemd/journald.conf"
+    local journal_dir="/var/log/journal"
+
+    log "[${module}] Enabling persistent systemd-journald storage"
+    install -d -m 2755 -o root -g systemd-journal "${journal_dir}"
+
+    if [[ ! -f "${config}" ]]; then
+        die "[${module}] ${config} not found"
+    fi
+
+    if grep -Eq '^[#[:space:]]*Storage=persistent' "${config}"; then
+        log "[${module}] Storage already set to persistent"
+    elif grep -Eq '^[#[:space:]]*Storage=' "${config}"; then
+        sed -i 's/^[#[:space:]]*Storage=.*/Storage=persistent/' "${config}"
+        log "[${module}] Set Storage=persistent"
+    else
+        printf '\nStorage=persistent\n' >>"${config}"
+        log "[${module}] Appended Storage=persistent"
+    fi
+
+    if grep -Eq '^[#[:space:]]*SystemMaxUse=200M' "${config}"; then
+        log "[${module}] SystemMaxUse already set to 200M"
+    elif grep -Eq '^[#[:space:]]*SystemMaxUse=' "${config}"; then
+        sed -i 's/^[#[:space:]]*SystemMaxUse=.*/SystemMaxUse=200M/' "${config}"
+        log "[${module}] Set SystemMaxUse=200M"
+    else
+        printf 'SystemMaxUse=200M\n' >>"${config}"
+        log "[${module}] Appended SystemMaxUse=200M"
+    fi
+
+    log "[${module}] Restarting systemd-journald to apply configuration"
+    systemctl restart systemd-journald
+}
+
 main() {
     require_root "$@"
     require_trixie
@@ -329,6 +365,7 @@ main() {
     write_greetd_config
     install_auxiliary_units
     install_polkit_rules
+    ensure_persistent_journald
     enable_systemd_units
 
     log "Kiosk provisioning complete. greetd will launch cage on tty1 as kiosk."
