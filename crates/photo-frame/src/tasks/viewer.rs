@@ -2,7 +2,10 @@ use crate::config::{
     MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionKind, TransitionMode,
     TransitionOptions,
 };
-use crate::events::{Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState};
+use crate::events::{
+    Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
+};
+use crate::gpu::debug_overlay;
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
@@ -19,6 +22,22 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+//
+// Viewer state machine overview
+// -----------------------------
+//  - `ViewerState::Greeting` shows the greeting overlay once after resume and
+//    stays idle until the first photo is ready.
+//  - `ViewerState::Wake` drives the continuous photo slideshow, requesting
+//    redraws while transitions or new frames are pending.
+//  - `ViewerState::Sleep` renders a single "Going to Sleep" banner and then
+//    idles until the power state changes again.
+//
+// Redraw policy
+//  - Greeting/Sleep request exactly one redraw on entry and after resizes.
+//  - Wake continuously requests redraws via `about_to_wait` while work is
+//    pending. Each state transition recreates the greeting resources to keep
+//    scale/format in sync.
 
 const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(4);
 fn wait_for_retry(cancel: &CancellationToken, mut remaining: Duration) -> bool {
@@ -625,9 +644,10 @@ pub fn run_windowed(
     }
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-    enum PowerState {
-        Awake,
-        Sleeping,
+    enum ViewerState {
+        Greeting,
+        Wake,
+        Sleep,
     }
 
     struct App {
@@ -656,8 +676,8 @@ pub fn run_windowed(
         rng: rand::rngs::ThreadRng,
         full_config: crate::config::Configuration,
         pending_redraw: bool,
-        power_state: PowerState,
-        pending_sleep_banner: bool,
+        viewer_state: ViewerState,
+        overlay_frame_pending: bool,
     }
 
     impl App {
@@ -669,10 +689,14 @@ pub fn run_windowed(
             self.next = None;
             self.transition_state = None;
             self.displayed_at = None;
-            self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
+            if self.viewer_state == ViewerState::Sleep {
+                self.greeting_deadline = None;
+                self.overlay_frame_pending = true;
+                self.pending_redraw = false;
+            } else {
+                self.enter_greeting();
+            }
             self.mat_inflight = 0;
-            self.pending_redraw = matches!(self.power_state, PowerState::Awake);
-            self.pending_sleep_banner = matches!(self.power_state, PowerState::Sleeping);
         }
 
         fn ensure_window(&mut self, event_loop: &ActiveEventLoop) -> Option<Arc<Window>> {
@@ -710,16 +734,20 @@ pub fn run_windowed(
             self.displayed_at = None;
             self.greeting_deadline = None;
             self.gpu = None;
-            self.pending_redraw = true;
+            self.pending_redraw = matches!(self.viewer_state, ViewerState::Wake);
+            self.overlay_frame_pending = matches!(
+                self.viewer_state,
+                ViewerState::Greeting | ViewerState::Sleep
+            );
         }
 
         fn handle_control_command(&mut self, cmd: ViewerCommand) {
             match cmd {
-                ViewerCommand::SetState(ViewerState::Awake) => self.exit_sleep(),
-                ViewerCommand::SetState(ViewerState::Asleep) => self.enter_sleep(),
-                ViewerCommand::ToggleState => match self.power_state {
-                    PowerState::Awake => self.enter_sleep(),
-                    PowerState::Sleeping => self.exit_sleep(),
+                ViewerCommand::SetState(ControlViewerState::Awake) => self.enter_wake(),
+                ViewerCommand::SetState(ControlViewerState::Asleep) => self.enter_sleep(),
+                ViewerCommand::ToggleState => match self.viewer_state {
+                    ViewerState::Sleep => self.enter_wake(),
+                    ViewerState::Greeting | ViewerState::Wake => self.enter_sleep(),
                 },
             }
         }
@@ -732,16 +760,25 @@ pub fn run_windowed(
 
             self.drain_mat_results();
 
-            if self.power_state == PowerState::Sleeping {
-                if self.pending_sleep_banner {
+            match self.viewer_state {
+                ViewerState::Sleep => {
+                    if self.overlay_frame_pending {
+                        self.request_redraw();
+                    }
+                }
+                ViewerState::Greeting => {
+                    self.upload_ready_results();
+                    self.queue_mat_tasks();
+                    self.ensure_current_image();
+                    if self.overlay_frame_pending {
+                        self.request_redraw();
+                    }
+                }
+                ViewerState::Wake => {
+                    self.tick_awake();
                     self.request_redraw();
                 }
-                return;
             }
-
-            self.tick_awake();
-
-            self.request_redraw();
         }
 
         fn drain_mat_results(&mut self) {
@@ -876,6 +913,9 @@ pub fn run_windowed(
                         .to_manager_displayed
                         .try_send(Displayed(cur.path.clone()));
                 }
+                if self.viewer_state != ViewerState::Wake {
+                    self.enter_wake();
+                }
             }
         }
 
@@ -945,16 +985,16 @@ pub fn run_windowed(
             let Some(window) = self.window.as_ref() else {
                 return;
             };
-            match self.power_state {
-                PowerState::Awake => {
+            match self.viewer_state {
+                ViewerState::Wake => {
                     let should_redraw = self.pending_redraw || self.transition_state.is_some();
                     if should_redraw {
                         window.request_redraw();
                         self.pending_redraw = false;
                     }
                 }
-                PowerState::Sleeping => {
-                    if self.pending_sleep_banner {
+                ViewerState::Greeting | ViewerState::Sleep => {
+                    if self.overlay_frame_pending {
                         window.request_redraw();
                     }
                 }
@@ -962,31 +1002,49 @@ pub fn run_windowed(
         }
 
         fn enter_sleep(&mut self) {
-            if self.power_state == PowerState::Sleeping {
+            if self.viewer_state == ViewerState::Sleep {
                 return;
             }
             info!("viewer: entering sleep");
-            self.power_state = PowerState::Sleeping;
+            self.viewer_state = ViewerState::Sleep;
             self.pending_redraw = false;
-            self.pending_sleep_banner = true;
+            self.overlay_frame_pending = true;
+            self.refresh_greeting_layout();
             self.request_redraw();
         }
 
-        fn exit_sleep(&mut self) {
-            if self.power_state == PowerState::Awake {
+        fn enter_wake(&mut self) {
+            if self.viewer_state == ViewerState::Wake {
                 return;
             }
-            info!("viewer: exiting sleep");
-            self.power_state = PowerState::Awake;
-            self.pending_sleep_banner = false;
+            info!("viewer: entering wake");
+            self.viewer_state = ViewerState::Wake;
+            self.overlay_frame_pending = false;
             if self.displayed_at.is_some() {
                 self.displayed_at = Some(Instant::now());
             }
-            if self.greeting_deadline.is_some() {
-                self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
-            }
+            self.greeting_deadline = None;
             self.pending_redraw = true;
             self.request_redraw();
+        }
+
+        fn enter_greeting(&mut self) {
+            if self.viewer_state != ViewerState::Greeting {
+                info!("viewer: entering greeting");
+            }
+            self.viewer_state = ViewerState::Greeting;
+            self.pending_redraw = false;
+            self.overlay_frame_pending = true;
+            self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
+            self.refresh_greeting_layout();
+            self.request_redraw();
+        }
+
+        fn refresh_greeting_layout(&mut self) {
+            if let (Some(window), Some(gpu)) = (self.window.as_ref(), self.gpu.as_mut()) {
+                let size = window.inner_size();
+                gpu.greeting.resize(size, window.scale_factor());
+            }
         }
     }
 
@@ -1236,9 +1294,12 @@ pub fn run_windowed(
                 greeting,
             });
             self.current = None;
-            if self.power_state == PowerState::Sleeping {
-                self.request_redraw();
+            if self.viewer_state == ViewerState::Wake {
+                self.pending_redraw = true;
+            } else {
+                self.overlay_frame_pending = true;
             }
+            self.request_redraw();
         }
 
         fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
@@ -1267,6 +1328,15 @@ pub fn run_windowed(
                     gpu.config.height = new_size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
                     gpu.greeting.resize(new_size, window.scale_factor());
+                    match self.viewer_state {
+                        ViewerState::Wake => {
+                            self.pending_redraw = true;
+                        }
+                        ViewerState::Greeting | ViewerState::Sleep => {
+                            self.overlay_frame_pending = true;
+                        }
+                    }
+                    self.request_redraw();
                 }
                 WindowEvent::ScaleFactorChanged {
                     mut inner_size_writer,
@@ -1278,29 +1348,73 @@ pub fn run_windowed(
                     gpu.config.height = size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
                     gpu.greeting.resize(size, window.scale_factor());
+                    match self.viewer_state {
+                        ViewerState::Wake => self.pending_redraw = true,
+                        ViewerState::Greeting | ViewerState::Sleep => {
+                            self.overlay_frame_pending = true;
+                        }
+                    }
+                    self.request_redraw();
                 }
                 WindowEvent::Occluded(false) => {
-                    self.pending_redraw = true;
+                    match self.viewer_state {
+                        ViewerState::Wake => self.pending_redraw = true,
+                        ViewerState::Greeting | ViewerState::Sleep => {
+                            self.overlay_frame_pending = true;
+                        }
+                    }
                     self.request_redraw();
                 }
                 WindowEvent::Occluded(true) => {}
                 WindowEvent::RedrawRequested => {
-                    if self.power_state == PowerState::Sleeping && !self.pending_sleep_banner {
+                    if matches!(
+                        self.viewer_state,
+                        ViewerState::Greeting | ViewerState::Sleep
+                    ) && !self.overlay_frame_pending
+                    {
                         return;
                     }
-                    let frame = match gpu.surface.get_current_texture() {
-                        Ok(frame) => frame,
-                        Err(err) => {
-                            match err {
-                                wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
-                                    gpu.surface.configure(&gpu.device, &gpu.config);
-                                }
-                                wgpu::SurfaceError::Timeout => {}
-                                wgpu::SurfaceError::OutOfMemory => event_loop.exit(),
-                                wgpu::SurfaceError::Other => {}
+                    let mut frame = None;
+                    for attempt in 0..2 {
+                        match gpu.surface.get_current_texture() {
+                            Ok(current) => {
+                                frame = Some(current);
+                                break;
                             }
-                            return;
+                            Err(err) => {
+                                match err {
+                                    wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+                                        warn!(
+                                            attempt = attempt,
+                                            error = ?err,
+                                            "viewer_surface_reconfigure"
+                                        );
+                                        gpu.surface.configure(&gpu.device, &gpu.config);
+                                    }
+                                    wgpu::SurfaceError::Timeout => {
+                                        warn!("viewer_surface_timeout");
+                                        return;
+                                    }
+                                    wgpu::SurfaceError::OutOfMemory => {
+                                        warn!("viewer_surface_out_of_memory");
+                                        event_loop.exit();
+                                        return;
+                                    }
+                                    wgpu::SurfaceError::Other => {
+                                        warn!(?err, "viewer_surface_error");
+                                        return;
+                                    }
+                                }
+                                if attempt == 0 {
+                                    continue;
+                                } else {
+                                    return;
+                                }
+                            }
                         }
+                    }
+                    let Some(frame) = frame else {
+                        return;
                     };
                     let view = frame
                         .texture
@@ -1311,8 +1425,19 @@ pub fn run_windowed(
                                 label: Some("draw-encoder"),
                             });
 
-                    if self.power_state == PowerState::Sleeping {
-                        if self.pending_sleep_banner {
+                    match self.viewer_state {
+                        ViewerState::Sleep => {
+                            encoder.push_debug_group("sleep-overlay");
+                            debug_overlay::render(
+                                &mut encoder,
+                                &view,
+                                "sleep-solid-clear",
+                                self.clear_color,
+                                Option::<fn(&mut wgpu::RenderPass<'_>)>::None,
+                            );
+                            encoder.pop_debug_group();
+
+                            encoder.push_debug_group("sleep-banner");
                             gpu.greeting
                                 .resize(window.inner_size(), window.scale_factor());
                             gpu.greeting.screen_message(
@@ -1320,150 +1445,175 @@ pub fn run_windowed(
                                 &mut encoder,
                                 &view,
                             );
-                            self.pending_sleep_banner = false;
+                            encoder.pop_debug_group();
+
+                            gpu.queue.submit(Some(encoder.finish()));
+                            frame.present();
+                            gpu.greeting.after_submit();
+                            self.overlay_frame_pending = false;
+                            return;
                         }
-                        gpu.queue.submit(Some(encoder.finish()));
-                        frame.present();
-                        gpu.greeting.after_submit();
-                        return;
-                    }
-
-                    if self.current.is_none() && self.transition_state.is_none() {
-                        gpu.greeting
-                            .resize(window.inner_size(), window.scale_factor());
-                        gpu.greeting.screen_message(
-                            self.full_config.greeting_screen.screen(),
-                            &mut encoder,
-                            &view,
-                        );
-                        gpu.queue.submit(Some(encoder.finish()));
-                        frame.present();
-                        gpu.greeting.after_submit();
-                        return;
-                    }
-                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("draw-pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
-                            depth_slice: None,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(self.clear_color),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        occlusion_query_set: None,
-                        timestamp_writes: None,
-                    });
-                    rpass.set_pipeline(&gpu.pipeline);
-                    let screen_w = gpu.config.width as f32;
-                    let screen_h = gpu.config.height as f32;
-                    let mut uniforms = TransitionUniforms {
-                        screen_size: [screen_w, screen_h],
-                        progress: 0.0,
-                        kind: 0,
-                        current_dest: [0.0; 4],
-                        next_dest: [0.0; 4],
-                        params0: [0.0; 4],
-                        params1: [0.0; 4],
-                    };
-                    let mut current_bind = &gpu.blank_plane.bind;
-                    let mut next_bind = &gpu.blank_plane.bind;
-                    let mut have_draw = false;
-
-                    if let Some(state) = &self.transition_state {
-                        if let Some(cur) = &self.current {
-                            let rect = compute_cover_rect(
-                                cur.plane.w,
-                                cur.plane.h,
-                                gpu.config.width,
-                                gpu.config.height,
+                        ViewerState::Greeting => {
+                            encoder.push_debug_group("greeting-overlay");
+                            debug_overlay::render(
+                                &mut encoder,
+                                &view,
+                                "greeting-solid-clear",
+                                self.clear_color,
+                                Option::<fn(&mut wgpu::RenderPass<'_>)>::None,
                             );
-                            uniforms.current_dest = rect_to_uniform(rect);
-                            current_bind = &cur.plane.bind;
-                            have_draw = true;
-                        }
-                        if let Some(next) = &self.next {
-                            let rect = compute_cover_rect(
-                                next.plane.w,
-                                next.plane.h,
-                                gpu.config.width,
-                                gpu.config.height,
-                            );
-                            uniforms.next_dest = rect_to_uniform(rect);
-                            next_bind = &next.plane.bind;
-                            have_draw = true;
-                        }
-                        let mut progress = state.progress();
-                        progress = progress * progress * (3.0 - 2.0 * progress);
-                        uniforms.progress = progress;
-                        uniforms.kind = state.kind.as_index();
-                        match &state.variant {
-                            ActiveTransition::Fade { through_black } => {
-                                uniforms.params0[0] = if *through_black { 1.0 } else { 0.0 };
-                            }
-                            ActiveTransition::Wipe { normal, softness } => {
-                                let (min_proj, inv_span) =
-                                    compute_wipe_span(*normal, screen_w, screen_h);
-                                uniforms.params0 = [normal[0], normal[1], min_proj, inv_span];
-                                uniforms.params1[0] = *softness;
-                            }
-                            ActiveTransition::Push { direction } => {
-                                let diag = (screen_w * screen_w + screen_h * screen_h).sqrt();
-                                uniforms.params0[0] = direction[0] * diag;
-                                uniforms.params0[1] = direction[1] * diag;
-                            }
-                            ActiveTransition::EInk {
-                                flash_count,
-                                reveal_portion,
-                                stripe_count,
-                                flash_color,
-                                noise_seed,
-                            } => {
-                                uniforms.params0[0] = (*flash_count).min(6) as f32;
-                                uniforms.params0[1] = *reveal_portion;
-                                uniforms.params0[2] = (*stripe_count).max(1) as f32;
-                                uniforms.params0[3] = noise_seed[0];
-                                uniforms.params1[0] = noise_seed[1];
-                                uniforms.params1[1] = flash_color[0].clamp(0.0, 1.0);
-                                uniforms.params1[2] = flash_color[1].clamp(0.0, 1.0);
-                                uniforms.params1[3] = flash_color[2].clamp(0.0, 1.0);
-                            }
-                        }
-                    } else if let Some(cur) = &self.current {
-                        let rect = compute_cover_rect(
-                            cur.plane.w,
-                            cur.plane.h,
-                            gpu.config.width,
-                            gpu.config.height,
-                        );
-                        uniforms.current_dest = rect_to_uniform(rect);
-                        current_bind = &cur.plane.bind;
-                        have_draw = true;
-                    }
-                    if have_draw {
-                        gpu.queue
-                            .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
-                        rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                        rpass.set_bind_group(1, current_bind, &[]);
-                        rpass.set_bind_group(2, next_bind, &[]);
-                        rpass.draw(0..6, 0..1);
-                    }
-                    drop(rpass);
+                            encoder.pop_debug_group();
 
-                    gpu.queue.submit(Some(encoder.finish()));
-                    frame.present();
+                            encoder.push_debug_group("greeting-banner");
+                            gpu.greeting
+                                .resize(window.inner_size(), window.scale_factor());
+                            gpu.greeting.screen_message(
+                                self.full_config.greeting_screen.screen(),
+                                &mut encoder,
+                                &view,
+                            );
+                            encoder.pop_debug_group();
+
+                            gpu.queue.submit(Some(encoder.finish()));
+                            frame.present();
+                            gpu.greeting.after_submit();
+                            self.overlay_frame_pending = false;
+                            return;
+                        }
+                        ViewerState::Wake => {
+                            encoder.push_debug_group("wake-draw");
+                            let mut rpass =
+                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: Some("draw-pass"),
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                        view: &view,
+                                        depth_slice: None,
+                                        resolve_target: None,
+                                        ops: wgpu::Operations {
+                                            load: wgpu::LoadOp::Clear(self.clear_color),
+                                            store: wgpu::StoreOp::Store,
+                                        },
+                                    })],
+                                    depth_stencil_attachment: None,
+                                    occlusion_query_set: None,
+                                    timestamp_writes: None,
+                                });
+                            rpass.set_pipeline(&gpu.pipeline);
+                            let screen_w = gpu.config.width as f32;
+                            let screen_h = gpu.config.height as f32;
+                            let mut uniforms = TransitionUniforms {
+                                screen_size: [screen_w, screen_h],
+                                progress: 0.0,
+                                kind: 0,
+                                current_dest: [0.0; 4],
+                                next_dest: [0.0; 4],
+                                params0: [0.0; 4],
+                                params1: [0.0; 4],
+                            };
+                            let mut current_bind = &gpu.blank_plane.bind;
+                            let mut next_bind = &gpu.blank_plane.bind;
+                            let mut have_draw = false;
+
+                            if let Some(state) = &self.transition_state {
+                                if let Some(cur) = &self.current {
+                                    let rect = compute_cover_rect(
+                                        cur.plane.w,
+                                        cur.plane.h,
+                                        gpu.config.width,
+                                        gpu.config.height,
+                                    );
+                                    uniforms.current_dest = rect_to_uniform(rect);
+                                    current_bind = &cur.plane.bind;
+                                    have_draw = true;
+                                }
+                                if let Some(next) = &self.next {
+                                    let rect = compute_cover_rect(
+                                        next.plane.w,
+                                        next.plane.h,
+                                        gpu.config.width,
+                                        gpu.config.height,
+                                    );
+                                    uniforms.next_dest = rect_to_uniform(rect);
+                                    next_bind = &next.plane.bind;
+                                    have_draw = true;
+                                }
+                                let mut progress = state.progress();
+                                progress = progress * progress * (3.0 - 2.0 * progress);
+                                uniforms.progress = progress;
+                                uniforms.kind = state.kind.as_index();
+                                match &state.variant {
+                                    ActiveTransition::Fade { through_black } => {
+                                        uniforms.params0[0] =
+                                            if *through_black { 1.0 } else { 0.0 };
+                                    }
+                                    ActiveTransition::Wipe { normal, softness } => {
+                                        let (min_proj, inv_span) =
+                                            compute_wipe_span(*normal, screen_w, screen_h);
+                                        uniforms.params0 =
+                                            [normal[0], normal[1], min_proj, inv_span];
+                                        uniforms.params1[0] = *softness;
+                                    }
+                                    ActiveTransition::Push { direction } => {
+                                        let diag =
+                                            (screen_w * screen_w + screen_h * screen_h).sqrt();
+                                        uniforms.params0[0] = direction[0] * diag;
+                                        uniforms.params0[1] = direction[1] * diag;
+                                    }
+                                    ActiveTransition::EInk {
+                                        flash_count,
+                                        reveal_portion,
+                                        stripe_count,
+                                        flash_color,
+                                        noise_seed,
+                                    } => {
+                                        uniforms.params0[0] = (*flash_count).min(6) as f32;
+                                        uniforms.params0[1] = *reveal_portion;
+                                        uniforms.params0[2] = (*stripe_count).max(1) as f32;
+                                        uniforms.params0[3] = noise_seed[0];
+                                        uniforms.params1[0] = noise_seed[1];
+                                        uniforms.params1[1] = flash_color[0].clamp(0.0, 1.0);
+                                        uniforms.params1[2] = flash_color[1].clamp(0.0, 1.0);
+                                        uniforms.params1[3] = flash_color[2].clamp(0.0, 1.0);
+                                    }
+                                }
+                            } else if let Some(cur) = &self.current {
+                                let rect = compute_cover_rect(
+                                    cur.plane.w,
+                                    cur.plane.h,
+                                    gpu.config.width,
+                                    gpu.config.height,
+                                );
+                                uniforms.current_dest = rect_to_uniform(rect);
+                                current_bind = &cur.plane.bind;
+                                have_draw = true;
+                            }
+                            if have_draw {
+                                gpu.queue.write_buffer(
+                                    &gpu.uniform_buf,
+                                    0,
+                                    bytemuck::bytes_of(&uniforms),
+                                );
+                                rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                                rpass.set_bind_group(1, current_bind, &[]);
+                                rpass.set_bind_group(2, next_bind, &[]);
+                                rpass.draw(0..6, 0..1);
+                            }
+                            drop(rpass);
+                            encoder.pop_debug_group();
+
+                            gpu.queue.submit(Some(encoder.finish()));
+                            frame.present();
+                        }
+                    }
                 }
                 _ => {}
             }
         }
 
         fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-            if self.power_state == PowerState::Sleeping && !self.pending_sleep_banner {
-                return;
+            if self.viewer_state == ViewerState::Wake {
+                self.request_redraw();
             }
-            self.request_redraw();
         }
 
         fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ViewerEvent) {
@@ -1572,9 +1722,11 @@ pub fn run_windowed(
         rng: rand::rng(),
         full_config: cfg.clone(),
         pending_redraw: false,
-        power_state: PowerState::Awake,
-        pending_sleep_banner: false,
+        viewer_state: ViewerState::Greeting,
+        overlay_frame_pending: true,
     };
+    app.greeting_deadline = None;
+    app.enter_greeting();
     event_loop.run_app(&mut app)?;
 
     drop(command_tx);
