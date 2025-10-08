@@ -13,8 +13,9 @@ sudo ./setup/kiosk/provision-trixie.sh
 The script performs the following actions:
 
 - verifies `/etc/os-release` reports `VERSION_CODENAME=trixie`;
-- installs the Wayland stack required for kiosk mode (`greetd`, `cage`, `mesa-vulkan-drivers`, `vulkan-tools`, `wlr-randr`, and `wayland-protocols`);
+- installs the Wayland stack required for kiosk mode (`greetd`, `cage`, `mesa-vulkan-drivers`, `vulkan-tools`, `wlr-randr`, `wayland-protocols`, and `socat` for control-socket tooling);
 - creates the `kiosk` account with a locked shell and ensures it belongs to the `video`, `render`, and `input` groups;
+- provisions `/run/photo-frame` (owned by `kiosk:kiosk`, mode `0770`) and drops an `/etc/tmpfiles.d/photo-frame.conf` entry so the control socket directory exists on every boot;
 - writes `/etc/greetd/config.toml` so virtual terminal 1 runs `cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=info /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml` as the `kiosk` user;
 - disables other display managers (`gdm3`, `sddm`, `lightdm`), enables `greetd.service` as the system `display-manager.service`, sets `graphical.target` as the default boot target, and masks `getty@tty1.service` to keep greetd in control of tty1;
 - deploys the `photoframe-*` helper units (wifi manager, sync timer, button daemon); and
@@ -52,6 +53,13 @@ journalctl -u greetd -b
 - Tail runtime logs: `sudo journalctl -u greetd -f`.
 - Pause the slideshow: `sudo systemctl stop greetd` (resume with `start`).
 - Inspect display state: `wlr-randr` (installed by the kiosk setup script).
+- Send runtime commands to the app (requires the default control socket path):
+
+  ```bash
+  echo '{"command": "toggle-state"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photo-frame/control.sock
+  echo '{"command": "set-state", "state": "asleep"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photo-frame/control.sock
+  echo '{"command": "set-state", "state": "awake"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photo-frame/control.sock
+  ```
 
 `systemctl restart greetd` tends to relaunch the unit before logind releases tty1 and the DRM devices from the previous kiosk sess
 ion. Stopping, waiting a beat, and then starting avoids that race.

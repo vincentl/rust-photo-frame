@@ -79,8 +79,8 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Purpose:** Selects where the application exposes its Unix domain control socket for runtime commands (sleep toggles, future remote controls).
 - **Required?** Optional; defaults to `/run/photo-frame/control.sock`.
 - **Accepted values & defaults:** Any filesystem path, typically under `/run`, `/run/user/<uid>`, or another writable runtime directory.
-- **Effect on behavior:** The path is created on startup (along with any missing parent directories) and removed on shutdown. External helpers such as `photo-buttond` connect to this socket to send JSON commands.
-- **Notes:** The default directory under `/run` usually requires elevated permissions; systems that launch the frame as an unprivileged account should point `control-socket-path` at a writable location like `/run/user/1000/photo-frame/control.sock` or `/var/lib/photo-frame/control.sock`. Permission errors during directory creation are reported with guidance to adjust the configuration.
+- **Effect on behavior:** The path is created on startup and removed on shutdown, but the parent directory must already exist with permissions that allow the kiosk user to create the socket. External helpers such as `photo-buttond` connect to this socket to send JSON commands.
+- **Notes:** The kiosk provisioning script creates `/run/photo-frame` (mode `0770`, owned by `kiosk:kiosk`) and installs an `/etc/tmpfiles.d/photo-frame.conf` entry so the directory exists after every boot. If you override the setting, make sure to pre-create the directory portion of the path with matching ownership, e.g. `sudo install -d -m 0770 -o kiosk -g kiosk /var/lib/photo-frame/runtime`. Systems running the frame under a different user should adjust the ownership in that command accordingly. Permission errors during startup mean the process could not create the socket—double-check the directory permissions or point `control-socket-path` at a writable location like `/run/user/1000/photo-frame/control.sock`.
 
 ### `transition`
 
