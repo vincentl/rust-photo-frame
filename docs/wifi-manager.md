@@ -124,7 +124,7 @@ sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid "HomeWiFi" --psk "
 sudo nmcli connection up pf-hotspot
 
 # Simulate a bad PSK without losing your SSH session
-sudo nohup bash developer/test-bad-psk.sh wlan0 >/tmp/wifi-test.log 2>&1 & disown
+sudo nohup bash developer/suspend-wifi.sh wlan0 >/tmp/wifi-test.log 2>&1 & disown
 ```
 
 The helper script stashes the active profile's keyfile, swaps in a Wi-Fi
