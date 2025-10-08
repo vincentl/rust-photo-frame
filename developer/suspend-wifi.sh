@@ -36,8 +36,9 @@ fi
 
 SSID=$(nmcli -g 802-11-wireless.ssid connection show "$ACTIVE_CONN")
 sudo nmcli connection delete "$BAD_NAME" >/dev/null 2>&1 || true
-sudo nmcli connection add type wifi ifname "$IFACE" con-name "$BAD_NAME" ssid "$SSID" \
-  wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$BAD_PSK" >/dev/null
+sudo nmcli connection add type wifi ifname "$IFACE" con-name "$BAD_NAME" ssid "$SSID" >/dev/null
+sudo nmcli connection modify "$BAD_NAME" wifi-sec.key-mgmt wpa-psk
+sudo nmcli connection modify "$BAD_NAME" wifi-sec.psk "$BAD_PSK"
 echo "Created '$BAD_NAME' for SSID '$SSID' with bad PSK"
 
 sudo nmcli connection down "$ACTIVE_CONN" || true
