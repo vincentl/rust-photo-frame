@@ -1,5 +1,6 @@
 mod config;
 mod events;
+mod gpu;
 mod processing;
 mod schedule;
 mod tasks {
