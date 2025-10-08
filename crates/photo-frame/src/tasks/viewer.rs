@@ -1324,6 +1324,7 @@ pub fn run_windowed(
                         }
                         gpu.queue.submit(Some(encoder.finish()));
                         frame.present();
+                        gpu.greeting.after_submit();
                         return;
                     }
 
@@ -1337,6 +1338,7 @@ pub fn run_windowed(
                         );
                         gpu.queue.submit(Some(encoder.finish()));
                         frame.present();
+                        gpu.greeting.after_submit();
                         return;
                     }
                     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

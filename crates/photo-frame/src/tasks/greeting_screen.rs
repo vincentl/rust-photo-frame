@@ -168,8 +168,6 @@ impl GreetingScreen {
                 }
             }
         };
-        self.staging_belt.recall();
-
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("greeting-frame"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -206,6 +204,10 @@ impl GreetingScreen {
             warn!(error = %err, "greeting_screen_draw_failed");
         }
         self.staging_belt.finish();
+    }
+
+    pub fn after_submit(&mut self) {
+        self.staging_belt.recall();
     }
 
     pub fn screen_message(
