@@ -144,7 +144,16 @@ impl GreetingScreen {
         self.update_text_layout();
     }
 
+    /// Updates cached geometry to match the onscreen window size.
+    ///
+    /// Some compositors (notably Wayland) briefly report zero-sized windows when
+    /// outputs power down or a surface is being reconfigured. Treat those as
+    /// transient and keep the existing layout so the overlay can still render
+    /// when we immediately redraw (for example during manual sleep toggles).
     pub fn resize(&mut self, new_size: PhysicalSize<u32>, scale_factor: f64) {
+        if new_size.width == 0 || new_size.height == 0 {
+            return;
+        }
         if self.size != new_size || (self.scale_factor - scale_factor).abs() > f64::EPSILON {
             self.size = new_size;
             self.scale_factor = scale_factor;
