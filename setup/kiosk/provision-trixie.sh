@@ -256,6 +256,25 @@ install_auxiliary_units() {
     done
 }
 
+install_polkit_rules() {
+    local src_dir="${REPO_ROOT}/setup/files/etc/polkit-1/rules.d"
+    local dest_dir="/etc/polkit-1/rules.d"
+
+    if [[ ! -d "${src_dir}" ]]; then
+        log "No polkit rules to install"
+        return
+    fi
+
+    log "Installing polkit rules for NetworkManager access"
+    install -d -m 0755 "${dest_dir}"
+
+    local rule
+    for rule in "${src_dir}"/*.rules; do
+        [ -f "${rule}" ] || continue
+        install -m 0644 "${rule}" "${dest_dir}/$(basename "${rule}")"
+    done
+}
+
 enable_systemd_units() {
     log "Enabling kiosk services"
     systemctl daemon-reload
@@ -309,6 +328,7 @@ main() {
     install_session_wrapper
     write_greetd_config
     install_auxiliary_units
+    install_polkit_rules
     enable_systemd_units
 
     log "Kiosk provisioning complete. greetd will launch cage on tty1 as kiosk."
