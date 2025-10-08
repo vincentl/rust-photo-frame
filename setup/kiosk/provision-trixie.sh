@@ -252,7 +252,7 @@ install_auxiliary_units() {
 }
 
 install_polkit_rules() {
-    local src_dir="${REPO_ROOT}/setup/files/etc/polkit-1/rules.d"
+    local src_dir="${REPO_ROOT}/setup/assets/kiosk/polkit-1/rules.d"
     local dest_dir="/etc/polkit-1/rules.d"
 
     if [[ ! -d "${src_dir}" ]]; then
