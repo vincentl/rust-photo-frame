@@ -30,7 +30,7 @@ Running the binary with `--help` or `--version` is permitted as root; all other 
 
 ## Configuration reference
 
-The template lives at `/opt/photo-frame/etc/wifi-manager.yaml` and is staged from `setup/files/etc/wifi-manager.yaml`. All keys use kebab-case to match the repository conventions.
+The template lives at `/opt/photo-frame/etc/wifi-manager.yaml` and is staged from `setup/assets/app/etc/wifi-manager.yaml`. All keys use kebab-case to match the repository conventions.
 
 ```yaml
 interface: wlan0

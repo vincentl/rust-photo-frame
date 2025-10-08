@@ -8,7 +8,7 @@ REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 STAGE_ROOT="${STAGE_ROOT:-${SCRIPT_DIR}/../build}"
 STAGE_DIR="${STAGE_ROOT}/stage"
 
-FILES_ROOT="${REPO_ROOT}/setup/files"
+ASSETS_APP_ROOT="${REPO_ROOT}/setup/assets/app"
 SYSTEM_UNITS_DIR="${REPO_ROOT}/assets/systemd"
 
 log() {
@@ -68,12 +68,12 @@ else
     log WARN "photo-buttond binary not built; button service will not be installed"
 fi
 
-copy_tree "${FILES_ROOT}/bin" "${STAGE_DIR}/bin" 755
-copy_tree "${FILES_ROOT}/etc" "${STAGE_DIR}/etc" 644
-copy_tree "${FILES_ROOT}/share" "${STAGE_DIR}/share" 644
+copy_tree "${ASSETS_APP_ROOT}/bin" "${STAGE_DIR}/bin" 755
+copy_tree "${ASSETS_APP_ROOT}/etc" "${STAGE_DIR}/etc" 644
+copy_tree "${ASSETS_APP_ROOT}/share" "${STAGE_DIR}/share" 644
 
-if [[ -f "${FILES_ROOT}/wordlist.txt" ]]; then
-    install -Dm644 "${FILES_ROOT}/wordlist.txt" "${STAGE_DIR}/share/wordlist.txt"
+if [[ -f "${ASSETS_APP_ROOT}/share/wordlist.txt" ]]; then
+    install -Dm644 "${ASSETS_APP_ROOT}/share/wordlist.txt" "${STAGE_DIR}/share/wordlist.txt"
 fi
 
 if [[ -f "${REPO_ROOT}/config.yaml" ]]; then
