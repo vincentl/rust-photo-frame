@@ -55,6 +55,12 @@ impl ViewerSM {
     }
 
     pub fn on_command(&mut self, cmd: &ViewerCommand, now: Instant) -> Option<ViewerStateChange> {
+        if self.state == ViewerState::Greeting
+            && now.duration_since(self.entered_at) < self.greeting_duration
+        {
+            debug!(?cmd, "viewer_sm_command_ignored_in_greeting");
+            return None;
+        }
         match *cmd {
             ViewerCommand::ToggleState => match self.state {
                 ViewerState::Awake => self.goto(ViewerState::Asleep, now),
