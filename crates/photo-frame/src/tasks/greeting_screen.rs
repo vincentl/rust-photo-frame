@@ -153,9 +153,13 @@ impl GreetingScreen {
         }
     }
 
-    pub fn render(&mut self, encoder: &mut wgpu::CommandEncoder, target_view: &wgpu::TextureView) {
+    pub fn render(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+    ) -> bool {
         if self.size.width == 0 || self.size.height == 0 {
-            return;
+            return false;
         }
         let layout = match self.layout {
             Some(layout) => layout,
@@ -163,7 +167,7 @@ impl GreetingScreen {
                 self.update_text_layout();
                 match self.layout {
                     Some(layout) => layout,
-                    None => return,
+                    None => return false,
                 }
             }
         };
@@ -203,6 +207,7 @@ impl GreetingScreen {
             warn!(error = %err, "greeting_screen_draw_failed");
         }
         self.staging_belt.finish();
+        true
     }
 
     pub fn after_submit(&mut self) {
@@ -214,9 +219,20 @@ impl GreetingScreen {
         screen: &ScreenMessageConfig,
         encoder: &mut wgpu::CommandEncoder,
         target_view: &wgpu::TextureView,
-    ) {
+    ) -> bool {
         self.update_screen(screen);
-        self.render(encoder, target_view);
+        self.render(encoder, target_view)
+    }
+
+    /// Ensure layout information is available for the current window size.
+    pub fn ensure_layout_ready(&mut self) -> bool {
+        if self.size.width == 0 || self.size.height == 0 {
+            return false;
+        }
+        if self.layout.is_none() {
+            self.update_text_layout();
+        }
+        self.layout.is_some()
     }
 
     fn ensure_font_loaded(&mut self) {
