@@ -1,128 +1,28 @@
 use std::path::PathBuf;
 
-use ab_glyph::{Font, FontArc, GlyphId, PxScaleFont, ScaleFont};
-use bytemuck::{Pod, Zeroable};
+use ab_glyph::FontArc;
 use fontdb::{Database, Family, Query};
-use lyon::math::{Box2D, point};
-use lyon::path::builder::BorderRadii;
-use lyon::path::{Path, Winding};
-use lyon::tessellation::{
-    BuffersBuilder, StrokeOptions, StrokeTessellator, StrokeVertex, VertexBuffers,
-};
 use tracing::warn;
-use wgpu::util::{DeviceExt, StagingBelt};
+use wgpu::util::StagingBelt;
 use wgpu_glyph::{
     GlyphBrush, GlyphBrushBuilder, HorizontalAlign, Layout, Section, Text, VerticalAlign,
 };
 use winit::dpi::PhysicalSize;
 
-use crate::config::{GreetingScreenColorsConfig, ScreenMessageConfig};
+use crate::config::ScreenMessageConfig;
 
-const DRAW_BOUNDS_PADDING: f32 = 2.0;
-
-const FRAME_SHADER: &str = r#"
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-};
-
-@vertex
-fn vs_main(@location(0) in_pos: vec2<f32>, @location(1) in_color: vec4<f32>) -> VertexOutput {
-    var out: VertexOutput;
-    out.position = vec4<f32>(in_pos, 0.0, 1.0);
-    out.color = in_color;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
-}
-"#;
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct FrameVertex {
-    position: [f32; 2],
-    color: [f32; 4],
-}
-
-struct FrameMesh {
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    index_count: u32,
-}
-
-#[derive(Clone, Debug)]
-struct GreetingColors {
-    background: wgpu::Color,
-    font: [f32; 4],
-    accent: [f32; 4],
-}
-
-#[derive(Clone, Debug)]
-struct GreetingSettings {
-    message: String,
-    font_name: Option<String>,
-    stroke_width_dip: f32,
-    corner_radius_dip: f32,
-    colors: GreetingColors,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct FrameParams {
-    size: PhysicalSize<u32>,
-    scale_factor: f64,
-    stroke_width_dip: f32,
-    corner_radius_dip: f32,
-}
-
-impl FrameParams {
-    fn from(screen: &GreetingScreen) -> Self {
-        Self {
-            size: screen.size,
-            scale_factor: screen.scale_factor,
-            stroke_width_dip: screen.settings.stroke_width_dip,
-            corner_radius_dip: screen.settings.corner_radius_dip,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LayoutStatus {
-    Ready,
-    WaitingForSize,
-    WaitingForFont,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct TextLayout {
-    font_size: f32,
-    bounds: (f32, f32),
-    screen_position: (f32, f32),
-}
-
-/// GPU-backed renderer for the configurable greeting screen.
-///
-/// The component owns the glyph brush, frame pipeline, and cached layout so
-/// callers only need to notify it about resizes or configuration changes before
-/// issuing a `render` call.
+/// Lightweight greeting/sleep screen renderer: clears the surface to the
+/// configured background colour and renders centred text using `wgpu_glyph`.
 pub struct GreetingScreen {
     device: wgpu::Device,
     format: wgpu::TextureFormat,
     glyph_brush: GlyphBrush<()>,
     staging_belt: StagingBelt,
-    frame_pipeline: wgpu::RenderPipeline,
-    frame_mesh: Option<FrameMesh>,
-    frame_params: Option<FrameParams>,
-    layout: Option<TextLayout>,
-    size: PhysicalSize<u32>,
-    scale_factor: f64,
-    settings: GreetingSettings,
-    loaded_font_request: Option<String>,
     font: FontArc,
-    glyph_cache_side: u32,
-    glyph_texture_limit: f32,
+    message: String,
+    background: wgpu::Color,
+    font_colour: [f32; 4],
+    size: PhysicalSize<u32>,
 }
 
 impl GreetingScreen {
@@ -132,53 +32,41 @@ impl GreetingScreen {
         format: wgpu::TextureFormat,
         screen: &ScreenMessageConfig,
     ) -> Self {
-        let settings = GreetingSettings::from_screen(screen);
-        let glyph_font = load_font(&settings.font_name);
-        let device_limits = device.limits();
-        let glyph_texture_limit = device_limits.max_texture_dimension_2d.min(4096);
-        let glyph_cache_side = glyph_texture_limit
-            .min(2048)
-            .max(256)
-            .min(glyph_texture_limit);
-        let glyph_brush = build_glyph_brush(glyph_font.clone(), device, format, glyph_cache_side);
-        let frame_pipeline = build_frame_pipeline(device, format);
-        if contrast_ratio(settings.colors.font, settings.colors.background) < 4.5 {
-            warn!("greeting_screen_low_contrast");
-        }
-        let font_request = settings.font_name.clone();
-        Self {
+        let font = load_font(&screen.font);
+        let glyph_brush = GlyphBrushBuilder::using_font(font.clone()).build(device, format);
+        let staging_belt = StagingBelt::new(1024);
+        let mut instance = GreetingScreen {
             device: device.clone(),
             format,
             glyph_brush,
-            staging_belt: StagingBelt::new(1024),
-            frame_pipeline,
-            frame_mesh: None,
-            frame_params: None,
-            layout: None,
+            staging_belt,
+            font,
+            message: String::new(),
+            background: default_background(),
+            font_colour: default_font_colour(),
             size: PhysicalSize::new(0, 0),
-            scale_factor: 1.0,
-            settings,
-            loaded_font_request: font_request,
-            font: glyph_font,
-            glyph_cache_side,
-            glyph_texture_limit: glyph_texture_limit as f32,
-        }
+        };
+        instance.update_screen(screen);
+        instance
     }
 
     pub fn update_screen(&mut self, screen: &ScreenMessageConfig) {
-        self.settings = GreetingSettings::from_screen(screen);
-        self.loaded_font_request = None;
-        self.rebuild_geometry();
-        self.update_text_layout();
+        self.message = screen.message_or_default().into_owned();
+        self.background = resolve_background_colour(&screen.colors.background);
+        self.font_colour = resolve_font_colour(&screen.colors.font);
+        if let Some(font_name) = screen.font.as_ref() {
+            if let Some(new_font) = load_named_font(font_name.trim()) {
+                self.glyph_brush = GlyphBrushBuilder::using_font(new_font.clone())
+                    .build(&self.device, self.format);
+                self.font = new_font;
+            } else {
+                warn!(font = %font_name, "greeting_screen_font_missing");
+            }
+        }
     }
 
-    pub fn resize(&mut self, new_size: PhysicalSize<u32>, scale_factor: f64) {
-        if self.size != new_size || (self.scale_factor - scale_factor).abs() > f64::EPSILON {
-            self.size = new_size;
-            self.scale_factor = scale_factor;
-            self.rebuild_geometry();
-            self.update_text_layout();
-        }
+    pub fn resize(&mut self, new_size: PhysicalSize<u32>, _scale_factor: f64) {
+        self.size = new_size;
     }
 
     pub fn render(
@@ -189,51 +77,58 @@ impl GreetingScreen {
         if self.size.width == 0 || self.size.height == 0 {
             return false;
         }
-        let layout = match self.layout {
-            Some(layout) => layout,
-            None => {
-                self.update_text_layout();
-                match self.layout {
-                    Some(layout) => layout,
-                    None => return false,
-                }
-            }
-        };
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("greeting-frame"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(self.settings.colors.background),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            occlusion_query_set: None,
-            timestamp_writes: None,
-        });
-        if let Some(mesh) = self.frame_mesh.as_ref() {
-            pass.set_pipeline(&self.frame_pipeline);
-            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-            pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-        }
-        drop(pass);
 
-        let section = build_section(&self.settings, layout);
-        self.glyph_brush.queue(section);
-        if let Err(err) = self.glyph_brush.draw_queued(
-            &self.device,
-            &mut self.staging_belt,
-            encoder,
-            target_view,
-            self.size.width,
-            self.size.height,
-        ) {
-            warn!(error = %err, "greeting_screen_draw_failed");
+        // Clear to background colour.
+        {
+            let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("greeting-background"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.background),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
         }
+
+        // Queue the text section.
+        if !self.message.trim().is_empty() {
+            let font_size = compute_font_size(&self.font, &self.message, self.size);
+            let section = Section {
+                screen_position: (
+                    (self.size.width as f32) * 0.5,
+                    (self.size.height as f32) * 0.5,
+                ),
+                bounds: (self.size.width as f32, self.size.height as f32),
+                layout: Layout::default_wrap()
+                    .h_align(HorizontalAlign::Center)
+                    .v_align(VerticalAlign::Center),
+                text: vec![
+                    Text::new(&self.message)
+                        .with_scale(font_size)
+                        .with_color(self.font_colour),
+                ],
+                ..Section::default()
+            };
+            self.glyph_brush.queue(section);
+            if let Err(err) = self.glyph_brush.draw_queued(
+                &self.device,
+                &mut self.staging_belt,
+                encoder,
+                target_view,
+                self.size.width,
+                self.size.height,
+            ) {
+                warn!(error = %err, "greeting_screen_draw_failed");
+            }
+        }
+
         self.staging_belt.finish();
         true
     }
@@ -241,6 +136,10 @@ impl GreetingScreen {
     pub fn after_submit(&mut self) {
         self.staging_belt.recall();
         let _ = self.device.poll(wgpu::PollType::Wait);
+    }
+
+    pub fn ensure_layout_ready(&mut self) -> bool {
+        self.size.width > 0 && self.size.height > 0
     }
 
     pub fn screen_message(
@@ -252,521 +151,45 @@ impl GreetingScreen {
         self.update_screen(screen);
         self.render(encoder, target_view)
     }
-
-    /// Ensure layout information is available for the current window size.
-    pub fn ensure_layout_ready(&mut self) -> LayoutStatus {
-        if self.size.width == 0 || self.size.height == 0 {
-            self.layout = None;
-            return LayoutStatus::WaitingForSize;
-        }
-        if self.layout.is_none() {
-            self.update_text_layout();
-            if self.layout.is_none() {
-                return LayoutStatus::WaitingForFont;
-            }
-        }
-        LayoutStatus::Ready
-    }
-
-    fn ensure_font_loaded(&mut self) {
-        if self.loaded_font_request == self.settings.font_name {
-            return;
-        }
-        let font = load_font(&self.settings.font_name);
-        self.glyph_brush = build_glyph_brush(
-            font.clone(),
-            &self.device,
-            self.format,
-            self.glyph_cache_side,
-        );
-        self.loaded_font_request = self.settings.font_name.clone();
-        self.font = font;
-    }
-
-    fn rebuild_geometry(&mut self) {
-        if self.size.width == 0 || self.size.height == 0 {
-            self.frame_mesh = None;
-            self.frame_params = None;
-            return;
-        }
-
-        let params = FrameParams::from(self);
-        if self.frame_params == Some(params) {
-            return;
-        }
-
-        self.frame_mesh =
-            build_frame_mesh(&self.device, &self.settings, self.size, self.scale_factor);
-        self.frame_params = Some(params);
-    }
-
-    fn update_text_layout(&mut self) {
-        if self.size.width == 0 || self.size.height == 0 {
-            self.layout = None;
-            return;
-        }
-        self.ensure_font_loaded();
-        let bounds_side = (self.size.width.min(self.size.height) as f32) * (2.0 / 3.0);
-        if bounds_side <= 0.0 {
-            self.layout = None;
-            return;
-        }
-        let box_size = (bounds_side, bounds_side);
-        let min_px = 8.0;
-        let max_px = bounds_side.max(8.0);
-        let font_size = best_fit_font_px(
-            &self.font,
-            &self.settings.message,
-            box_size,
-            min_px,
-            max_px,
-            self.glyph_texture_limit,
-        );
-        let padded_bounds = (
-            (box_size.0 + DRAW_BOUNDS_PADDING).max(1.0),
-            (box_size.1 + DRAW_BOUNDS_PADDING).max(1.0),
-        );
-        let screen_center = (
-            (self.size.width as f32) * 0.5,
-            (self.size.height as f32) * 0.5,
-        );
-        let top_left = (
-            (screen_center.0 - padded_bounds.0 * 0.5).max(0.0),
-            (screen_center.1 - padded_bounds.1 * 0.5).max(0.0),
-        );
-        self.layout = Some(TextLayout {
-            font_size,
-            bounds: padded_bounds,
-            screen_position: top_left,
-        });
-    }
 }
 
-fn build_section(settings: &GreetingSettings, layout: TextLayout) -> Section<'_> {
-    Section {
-        screen_position: layout.screen_position,
-        bounds: (layout.bounds.0, layout.bounds.1),
-        layout: Layout::default_wrap()
-            .h_align(HorizontalAlign::Center)
-            .v_align(VerticalAlign::Center),
-        text: vec![
-            Text::new(settings.message.as_str())
-                .with_scale(layout.font_size)
-                .with_color(settings.colors.font),
-        ],
-        ..Section::default()
+fn compute_font_size(_font: &FontArc, message: &str, size: PhysicalSize<u32>) -> f32 {
+    if message.trim().is_empty() {
+        return 16.0;
     }
+    let min_dim = size.width.min(size.height) as f32;
+    let mut scale = min_dim * 0.12; // start with 12% of the smaller side
+    if scale < 24.0 {
+        scale = 24.0;
+    }
+    if scale > 360.0 {
+        scale = 360.0;
+    }
+
+    // If the message is very long, reduce the scale heuristically.
+    let chars = message.chars().count().max(1);
+    let adjustment = ((chars as f32) / 24.0).sqrt();
+    (scale / adjustment).clamp(24.0, 360.0)
 }
 
-pub fn best_fit_font_px(
-    font: &FontArc,
-    text: &str,
-    box_px: (f32, f32),
-    min_px: f32,
-    max_px: f32,
-    texture_limit_px: f32,
-) -> f32 {
-    if text.trim().is_empty() {
-        return min_px.max(1.0);
-    }
-    let mut low = min_px.max(1.0);
-    let mut high = max_px.max(low);
-    let texture_cap = texture_limit_px.max(1.0);
-    high = high.min(texture_cap.max(low));
-    let mut best = low;
-    for _ in 0..18 {
-        let mid = (low + high) * 0.5;
-        let fits = text_fits(font, text, mid, box_px);
-        if fits {
-            best = mid;
-            low = mid;
-        } else {
-            high = mid;
-        }
-        if (high - low).abs() < 0.5 {
-            break;
-        }
-    }
-    best
+fn resolve_background_colour(source: &Option<String>) -> wgpu::Color {
+    source
+        .as_ref()
+        .and_then(|value| parse_hex_color(value).ok())
+        .map(to_wgpu_color)
+        .unwrap_or_else(default_background)
 }
 
-fn text_fits(font: &FontArc, text: &str, font_size: f32, bounds: (f32, f32)) -> bool {
-    let (width, height) = measure_wrapped_text(font, text, font_size, bounds.0);
-    width <= bounds.0 + 0.5 && height <= bounds.1 + 0.5
-}
-
-fn measure_wrapped_text(font: &FontArc, text: &str, font_size: f32, max_width: f32) -> (f32, f32) {
-    let scaled = font.as_scaled(font_size);
-    let line_height = (scaled.ascent() - scaled.descent() + scaled.line_gap()).max(1.0);
-    let max_width = max_width.max(1.0);
-    let raw_space = scaled.h_advance(scaled.glyph_id(' '));
-    let space_advance = if raw_space > 0.0 {
-        raw_space
-    } else {
-        scaled.height() * 0.5
-    };
-    let mut max_line_width: f32 = 0.0;
-    let mut total_lines = 0usize;
-
-    for paragraph in text.split('\n') {
-        let mut line_width: f32 = 0.0;
-        let mut first_word = true;
-        for word in paragraph.split_whitespace() {
-            let word_width = word_advance(&scaled, word);
-            let candidate = if first_word {
-                word_width
-            } else {
-                line_width + space_advance + word_width
-            };
-            if !first_word && candidate > max_width && line_width > 0.0 {
-                max_line_width = max_line_width.max(line_width);
-                total_lines += 1;
-                line_width = word_width;
-            } else {
-                line_width = candidate;
-            }
-            first_word = false;
-        }
-        max_line_width = max_line_width.max(line_width);
-        total_lines += 1;
-    }
-
-    if total_lines == 0 {
-        total_lines = 1;
-    }
-    let height = line_height * total_lines as f32;
-    (max_line_width, height)
-}
-
-fn word_advance(scaled: &PxScaleFont<&FontArc>, word: &str) -> f32 {
-    let mut width = 0.0;
-    let mut prev: Option<GlyphId> = None;
-    for ch in word.chars().filter(|c| !c.is_control()) {
-        let glyph = scaled.glyph_id(ch);
-        if let Some(prev_id) = prev {
-            width += scaled.kern(prev_id, glyph);
-        }
-        width += scaled.h_advance(glyph);
-        prev = Some(glyph);
-    }
-    width
-}
-
-fn build_glyph_brush(
-    font: FontArc,
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-    cache_side: u32,
-) -> GlyphBrush<()> {
-    let side = cache_side.max(1);
-    GlyphBrushBuilder::using_font(font)
-        .initial_cache_size((side, side))
-        .build(device, format)
-}
-
-fn build_frame_pipeline(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("greeting-frame-shader"),
-        source: wgpu::ShaderSource::Wgsl(FRAME_SHADER.into()),
-    });
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("greeting-frame-layout"),
-        bind_group_layouts: &[],
-        push_constant_ranges: &[],
-    });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("greeting-frame-pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<FrameVertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
-                        offset: 0,
-                        shader_location: 0,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x4,
-                        offset: 8,
-                        shader_location: 1,
-                    },
-                ],
-            }],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            unclipped_depth: false,
-            polygon_mode: wgpu::PolygonMode::Fill,
-            conservative: false,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        multiview: None,
-        cache: None,
-    })
-}
-
-fn build_frame_mesh(
-    device: &wgpu::Device,
-    settings: &GreetingSettings,
-    size: PhysicalSize<u32>,
-    scale_factor: f64,
-) -> Option<FrameMesh> {
-    if size.width == 0 || size.height == 0 {
-        return None;
-    }
-    let width_px = size.width as f32;
-    let height_px = size.height as f32;
-    let scale = scale_factor as f32;
-    let stroke = (settings.stroke_width_dip * scale).max(0.5);
-    let outer_margin = stroke * 2.0;
-    let outer_line_width = stroke;
-    let gap = stroke * 0.825;
-    let inner_line_width = stroke * 0.375;
-    let corner_radius = (settings.corner_radius_dip * scale).max(0.0);
-
-    let outer_center_margin = outer_margin + outer_line_width * 0.5;
-    let inner_center_margin = outer_margin + outer_line_width + gap + inner_line_width * 0.5;
-    if outer_center_margin * 2.0 >= width_px
-        || outer_center_margin * 2.0 >= height_px
-        || inner_center_margin * 2.0 >= width_px
-        || inner_center_margin * 2.0 >= height_px
-    {
-        return None;
-    }
-
-    let outer_path = rounded_rect(outer_center_margin, corner_radius, width_px, height_px)?;
-    let inner_radius_offset = outer_line_width * 0.5 + gap + inner_line_width * 0.5;
-    let inner_radius = (corner_radius - inner_radius_offset).max(inner_line_width * 0.5);
-    let inner_path = rounded_rect(inner_center_margin, inner_radius, width_px, height_px)?;
-
-    let mut geometry: VertexBuffers<[f32; 2], u16> = VertexBuffers::new();
-    let mut tess = StrokeTessellator::new();
-    let mut options = StrokeOptions::default();
-    options.line_width = outer_line_width;
-    options.tolerance = 0.1;
-    options.start_cap = lyon::tessellation::LineCap::Round;
-    options.end_cap = lyon::tessellation::LineCap::Round;
-    options.line_join = lyon::tessellation::LineJoin::Round;
-    if tess
-        .tessellate_path(
-            outer_path.as_slice(),
-            &options,
-            &mut BuffersBuilder::new(&mut geometry, |vertex: StrokeVertex| {
-                vertex.position().to_array()
-            }),
-        )
-        .is_err()
-    {
-        return None;
-    }
-    options.line_width = inner_line_width;
-    if tess
-        .tessellate_path(
-            inner_path.as_slice(),
-            &options,
-            &mut BuffersBuilder::new(&mut geometry, |vertex: StrokeVertex| {
-                vertex.position().to_array()
-            }),
-        )
-        .is_err()
-    {
-        return None;
-    }
-
-    let mut vertices = Vec::with_capacity(geometry.vertices.len());
-    for position in geometry.vertices.iter().copied() {
-        let nx = (position[0] / width_px) * 2.0 - 1.0;
-        let ny = 1.0 - (position[1] / height_px) * 2.0;
-        vertices.push(FrameVertex {
-            position: [nx, ny],
-            color: settings.colors.accent,
-        });
-    }
-    let indices = geometry.indices;
-    if indices.is_empty() || vertices.is_empty() {
-        return None;
-    }
-    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("greeting-frame-vertices"),
-        contents: bytemuck::cast_slice(&vertices),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("greeting-frame-indices"),
-        contents: bytemuck::cast_slice(&indices),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-    Some(FrameMesh {
-        vertex_buffer,
-        index_buffer,
-        index_count: indices.len() as u32,
-    })
-}
-
-fn rounded_rect(
-    center_margin: f32,
-    radius: f32,
-    width: f32,
-    height: f32,
-) -> Option<lyon::path::Path> {
-    let min_x = snap_to_half(center_margin);
-    let min_y = snap_to_half(center_margin);
-    let max_x = snap_to_half(width - center_margin);
-    let max_y = snap_to_half(height - center_margin);
-    if max_x <= min_x || max_y <= min_y {
-        return None;
-    }
-    let rect = Box2D::new(point(min_x, min_y), point(max_x, max_y));
-    let width = (max_x - min_x).max(0.0);
-    let height = (max_y - min_y).max(0.0);
-    let max_radius = 0.5 * width.min(height);
-    let radius = radius.clamp(0.0, max_radius);
-    let mut builder = Path::builder();
-    let radii = BorderRadii::new(radius);
-    builder.add_rounded_rectangle(&rect, &radii, Winding::Positive);
-    Some(builder.build())
-}
-
-fn snap_to_half(value: f32) -> f32 {
-    (value * 2.0).round() * 0.5
-}
-
-fn load_font(request: &Option<String>) -> FontArc {
-    if let Some(name) = request.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        if let Some(font) = load_named_font(name) {
-            return font;
-        }
-        warn!(font = %name, "greeting_screen_font_missing");
-    }
-
-    // reasonable default: DejaVu Sans
-    load_named_font("DejaVu Sans")
-        .unwrap_or_else(|| panic!("Default system font (DejaVu Sans) not found"))
-}
-
-fn load_named_font(name: &str) -> Option<FontArc> {
-    let mut db = Database::new();
-    db.load_system_fonts();
-    let bundled_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/fonts");
-    if bundled_path.exists() {
-        db.load_fonts_dir(&bundled_path);
-    }
-    let query = Query {
-        families: &[Family::Name(name)],
-        ..Default::default()
-    };
-    db.query(&query).and_then(|id| {
-        let face = db.face(id)?;
-        match &face.source {
-            fontdb::Source::Binary(data) => {
-                let bytes = data.as_ref().as_ref();
-                FontArc::try_from_vec(bytes.to_vec()).ok()
-            }
-            fontdb::Source::File(path) => std::fs::read(path)
-                .ok()
-                .and_then(|bytes| FontArc::try_from_vec(bytes).ok()),
-            fontdb::Source::SharedFile(_, data) => {
-                let bytes = data.as_ref().as_ref();
-                FontArc::try_from_vec(bytes.to_vec()).ok()
-            }
-        }
-    })
-}
-
-fn contrast_ratio(foreground: [f32; 4], background: wgpu::Color) -> f32 {
-    let bg = [
-        background.r as f32,
-        background.g as f32,
-        background.b as f32,
-        background.a as f32,
-    ];
-    let l1 = relative_luminance(foreground);
-    let l2 = relative_luminance(bg);
-    let (light, dark) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
-    (light + 0.05) / (dark + 0.05)
-}
-
-fn relative_luminance(color: [f32; 4]) -> f32 {
-    0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
-}
-
-impl GreetingSettings {
-    fn from_screen(screen: &ScreenMessageConfig) -> Self {
-        let message = screen.message_or_default().into_owned();
-        let font_name = screen.font.clone();
-        let stroke_width_dip = screen.effective_stroke_width_dip();
-        let corner_radius_dip = screen.effective_corner_radius_dip(stroke_width_dip);
-        let colors = GreetingColors::from_config(&screen.colors);
-        Self {
-            message,
-            font_name,
-            stroke_width_dip,
-            corner_radius_dip,
-            colors,
-        }
-    }
-}
-
-impl GreetingColors {
-    fn from_config(colors: &GreetingScreenColorsConfig) -> Self {
-        let background = resolve_color(&colors.background, default_background_srgb());
-        let font = resolve_color(&colors.font, default_font_srgb());
-        let accent = resolve_color(&colors.accent, default_accent_srgb());
-        Self {
-            background: to_wgpu_color(background),
-            font,
-            accent,
-        }
-    }
-}
-
-fn resolve_color(source: &Option<String>, default: [f32; 4]) -> [f32; 4] {
-    if let Some(raw) = source.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        match parse_hex_color(raw) {
-            Ok(color) => return color,
-            Err(err) => warn!(value = raw, error = %err, "greeting_screen_color_parse_failed"),
-        }
-    }
-    default
+fn resolve_font_colour(source: &Option<String>) -> [f32; 4] {
+    source
+        .as_ref()
+        .and_then(|value| parse_hex_color(value).ok())
+        .unwrap_or_else(default_font_colour)
 }
 
 fn parse_hex_color(input: &str) -> Result<[f32; 4], String> {
     let trimmed = input.trim().trim_start_matches('#');
     let (r, g, b, a) = match trimmed.len() {
-        3 => (
-            expand_hex_digit(trimmed.as_bytes()[0])?,
-            expand_hex_digit(trimmed.as_bytes()[1])?,
-            expand_hex_digit(trimmed.as_bytes()[2])?,
-            255,
-        ),
-        4 => (
-            expand_hex_digit(trimmed.as_bytes()[0])?,
-            expand_hex_digit(trimmed.as_bytes()[1])?,
-            expand_hex_digit(trimmed.as_bytes()[2])?,
-            expand_hex_digit(trimmed.as_bytes()[3])?,
-        ),
         6 => (
             parse_hex_pair(&trimmed[0..2])?,
             parse_hex_pair(&trimmed[2..4])?,
@@ -779,7 +202,7 @@ fn parse_hex_color(input: &str) -> Result<[f32; 4], String> {
             parse_hex_pair(&trimmed[4..6])?,
             parse_hex_pair(&trimmed[6..8])?,
         ),
-        _ => return Err("unsupported color length".into()),
+        _ => return Err("unsupported colour length".into()),
     };
     Ok([
         srgb_to_linear(r),
@@ -787,11 +210,6 @@ fn parse_hex_color(input: &str) -> Result<[f32; 4], String> {
         srgb_to_linear(b),
         (a as f32) / 255.0,
     ])
-}
-
-fn expand_hex_digit(byte: u8) -> Result<u8, String> {
-    let value = hex_value(byte)?;
-    Ok((value << 4) | value)
 }
 
 fn parse_hex_pair(slice: &str) -> Result<u8, String> {
@@ -831,23 +249,49 @@ fn to_wgpu_color(color: [f32; 4]) -> wgpu::Color {
     }
 }
 
-fn default_background_srgb() -> [f32; 4] {
-    srgb_tuple_to_linear(0x11, 0x18, 0x27, 0xFF)
+fn default_background() -> wgpu::Color {
+    to_wgpu_color(parse_hex_color("#111827").unwrap())
 }
 
-fn default_font_srgb() -> [f32; 4] {
-    srgb_tuple_to_linear(0xF8, 0xFA, 0xFC, 0xFF)
+fn default_font_colour() -> [f32; 4] {
+    parse_hex_color("#F8FAFC").unwrap()
 }
 
-fn default_accent_srgb() -> [f32; 4] {
-    srgb_tuple_to_linear(0x38, 0xBD, 0xF8, 0xFF)
+fn load_font(request: &Option<String>) -> FontArc {
+    if let Some(name) = request.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Some(font) = load_named_font(name) {
+            return font;
+        }
+        warn!(font = %name, "greeting_screen_font_missing");
+    }
+    load_named_font("DejaVu Sans").unwrap_or_else(|| panic!("Default system font not found"))
 }
 
-fn srgb_tuple_to_linear(r: u8, g: u8, b: u8, a: u8) -> [f32; 4] {
-    [
-        srgb_to_linear(r),
-        srgb_to_linear(g),
-        srgb_to_linear(b),
-        (a as f32) / 255.0,
-    ]
+fn load_named_font(name: &str) -> Option<FontArc> {
+    let mut db = Database::new();
+    db.load_system_fonts();
+    let bundled_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/fonts");
+    if bundled_path.exists() {
+        db.load_fonts_dir(&bundled_path);
+    }
+    let query = Query {
+        families: &[Family::Name(name)],
+        ..Default::default()
+    };
+    db.query(&query).and_then(|id| {
+        let face = db.face(id)?;
+        match &face.source {
+            fontdb::Source::Binary(data) => {
+                let bytes = data.as_ref().as_ref();
+                FontArc::try_from_vec(bytes.to_vec()).ok()
+            }
+            fontdb::Source::File(path) => std::fs::read(path)
+                .ok()
+                .and_then(|bytes| FontArc::try_from_vec(bytes).ok()),
+            fontdb::Source::SharedFile(_, data) => {
+                let bytes = data.as_ref().as_ref();
+                FontArc::try_from_vec(bytes.to_vec()).ok()
+            }
+        }
+    })
 }
