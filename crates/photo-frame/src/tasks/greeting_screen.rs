@@ -240,6 +240,7 @@ impl GreetingScreen {
 
     pub fn after_submit(&mut self) {
         self.staging_belt.recall();
+        let _ = self.device.poll(wgpu::PollType::Wait);
     }
 
     pub fn screen_message(
@@ -329,10 +330,14 @@ impl GreetingScreen {
             (self.size.width as f32) * 0.5,
             (self.size.height as f32) * 0.5,
         );
+        let top_left = (
+            (screen_center.0 - padded_bounds.0 * 0.5).max(0.0),
+            (screen_center.1 - padded_bounds.1 * 0.5).max(0.0),
+        );
         self.layout = Some(TextLayout {
             font_size,
             bounds: padded_bounds,
-            screen_position: screen_center,
+            screen_position: top_left,
         });
     }
 }
