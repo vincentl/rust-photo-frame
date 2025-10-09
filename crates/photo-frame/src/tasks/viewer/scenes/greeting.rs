@@ -32,7 +32,11 @@ impl GreetingScene {
 impl Scene for GreetingScene {
     fn on_enter(&mut self, ctx: &SceneContext) {
         self.resize(ctx.surface_size(), ctx.window.scale_factor());
-        let _ = self.screen.ensure_layout_ready();
+        if self.screen.ensure_layout_ready() {
+            tracing::debug!(size = ?ctx.surface_size(), "greeting_scene_layout_ready");
+        } else {
+            tracing::debug!(size = ?ctx.surface_size(), "greeting_scene_layout_pending");
+        }
     }
 
     fn handle_resize(
@@ -46,8 +50,13 @@ impl Scene for GreetingScene {
 
     fn render(&mut self, ctx: &mut RenderCtx<'_, '_>) -> RenderResult {
         if self.needs_redraw {
-            let _ = self.screen.render(ctx.encoder, ctx.target_view);
-            self.needs_redraw = false;
+            let drew = self.screen.render(ctx.encoder, ctx.target_view);
+            self.needs_redraw = !drew;
+            if !drew {
+                tracing::debug!("greeting_scene_render_pending");
+                return RenderResult::NeedsRedraw;
+            }
+            tracing::debug!("greeting_scene_render_complete");
         }
         RenderResult::Idle
     }

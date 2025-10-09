@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use tracing::debug;
+
 use crate::events::{ViewerCommand, ViewerState as ControlViewerState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,8 +42,13 @@ impl ViewerSM {
             && now.duration_since(self.entered_at) >= self.greeting_duration
         {
             if self.photos_ready {
+                debug!(from = ?self.state, to = ?ViewerState::Awake, "viewer_sm_tick_transition");
                 return self.goto(ViewerState::Awake, now);
             }
+            debug!(
+                elapsed_ms = now.saturating_duration_since(self.entered_at).as_millis(),
+                "viewer_sm_tick_waiting_for_photo"
+            );
             // Stay in Greeting until we have content ready.
         }
         None
@@ -67,8 +74,10 @@ impl ViewerSM {
         if self.state == ViewerState::Greeting {
             self.photos_ready = true;
             if now.duration_since(self.entered_at) >= self.greeting_duration {
+                debug!("viewer_sm_photo_ready_after_duration");
                 return self.goto(ViewerState::Awake, now);
             }
+            debug!("viewer_sm_photo_ready_waiting_for_duration");
         }
         None
     }
@@ -81,6 +90,7 @@ impl ViewerSM {
             from: self.state,
             to,
         };
+        debug!(from = ?self.state, to = ?to, "viewer_sm_state_change");
         self.state = to;
         self.entered_at = now;
         if to != ViewerState::Greeting {
@@ -139,12 +149,18 @@ mod tests {
         assert_eq!(sm.current(), ViewerState::Greeting);
 
         // Photo arrives well before the duration has elapsed.
-        assert!(sm.on_photo_ready(start + Duration::from_millis(10)).is_none());
+        assert!(
+            sm.on_photo_ready(start + Duration::from_millis(10))
+                .is_none()
+        );
         assert_eq!(sm.current(), ViewerState::Greeting);
 
         // Duration elapses, so the next tick should transition to Awake.
         let change = sm.on_tick(start + Duration::from_millis(100)).unwrap();
-        assert_eq!((change.from, change.to), (ViewerState::Greeting, ViewerState::Awake));
+        assert_eq!(
+            (change.from, change.to),
+            (ViewerState::Greeting, ViewerState::Awake)
+        );
         assert_eq!(sm.current(), ViewerState::Awake);
     }
 
@@ -162,7 +178,10 @@ mod tests {
         let change = sm
             .on_photo_ready(start + Duration::from_millis(120))
             .unwrap();
-        assert_eq!((change.from, change.to), (ViewerState::Greeting, ViewerState::Awake));
+        assert_eq!(
+            (change.from, change.to),
+            (ViewerState::Greeting, ViewerState::Awake)
+        );
         assert_eq!(sm.current(), ViewerState::Awake);
     }
 }

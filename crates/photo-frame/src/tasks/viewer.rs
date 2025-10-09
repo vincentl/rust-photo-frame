@@ -15,7 +15,7 @@ use scenes::{
 use state::{ViewerSM, ViewerState, ViewerStateChange};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use wgpu::{self, SurfaceError};
 use winit::{
     application::ApplicationHandler,
@@ -75,6 +75,10 @@ impl ViewerApp {
     ) -> Self {
         let now = Instant::now();
         let sm = ViewerSM::new(cfg.greeting_screen.effective_duration(), now);
+        info!(
+            greeting_duration_ms = cfg.greeting_screen.effective_duration().as_millis(),
+            "viewer_app_created"
+        );
         let state = sm.current();
         Self {
             cfg,
@@ -188,6 +192,7 @@ impl ViewerApp {
                     surface_config: &gpu.config,
                     window,
                 };
+                info!("viewer_enter_greeting");
                 gpu.scenes.greeting.on_enter(&ctx);
             }
             ViewerState::Awake => {
@@ -197,6 +202,7 @@ impl ViewerApp {
                     surface_config: &gpu.config,
                     window,
                 };
+                info!("viewer_enter_awake");
                 gpu.scenes.awake.on_enter(&ctx);
                 self.advance_photo_queue();
             }
@@ -207,6 +213,7 @@ impl ViewerApp {
                     surface_config: &gpu.config,
                     window,
                 };
+                info!("viewer_enter_asleep");
                 gpu.scenes.asleep.on_enter(&ctx);
             }
         }
@@ -221,6 +228,11 @@ impl ViewerApp {
         gpu.config.width = new_size.width.max(1);
         gpu.config.height = new_size.height.max(1);
         gpu.surface.configure(&gpu.device, &gpu.config);
+        debug!(
+            width = gpu.config.width,
+            height = gpu.config.height,
+            "viewer_surface_configured"
+        );
         let scale_factor = window.scale_factor();
         {
             let ctx = SceneContext {
@@ -360,6 +372,8 @@ impl ViewerApp {
             (event, needs_redraw)
         };
 
+        debug!(state = ?self.state, needs_redraw, has_event = pending_event.is_some(), "viewer_draw_complete");
+
         if needs_redraw {
             self.request_redraw();
         }
@@ -370,7 +384,10 @@ impl ViewerApp {
 
     fn handle_scene_event(&mut self, event: ScenePresentEvent) {
         match event {
-            ScenePresentEvent::PhotoDisplayed(path) => self.notify_displayed(path),
+            ScenePresentEvent::PhotoDisplayed(path) => {
+                debug!(path = %path.display(), "viewer_photo_displayed_event");
+                self.notify_displayed(path)
+            }
         }
     }
 
@@ -422,14 +439,18 @@ impl ViewerApp {
             return;
         }
         if let Some(photo) = self.pending_photos.pop_front() {
+            debug!(path = %photo.prepared.path.display(), "advance_photo_queue_displaying");
             if let Some(gpu) = self.gpu.as_mut() {
                 gpu.scenes.awake.queue_photo(photo);
             }
             self.request_redraw();
+        } else {
+            debug!("advance_photo_queue_empty");
         }
     }
 
     fn on_photo_loaded(&mut self, photo: PhotoLoaded, now: Instant) {
+        debug!(path = %photo.prepared.path.display(), priority = photo.priority, "viewer_photo_loaded");
         self.pending_photos.push_back(photo);
         if let Some(change) = self.sm.on_photo_ready(now) {
             self.apply_state_change(change);
@@ -439,12 +460,14 @@ impl ViewerApp {
     }
 
     fn on_command(&mut self, command: ViewerCommand, now: Instant) {
+        debug!(?command, "viewer_command_received");
         if let Some(change) = self.sm.on_command(&command, now) {
             self.apply_state_change(change);
         }
     }
 
     fn on_tick(&mut self, now: Instant) {
+        debug!(state = ?self.state, "viewer_tick");
         if let Some(change) = self.sm.on_tick(now) {
             self.apply_state_change(change);
         }
@@ -543,6 +566,7 @@ pub fn run_windowed(
         .build()
         .context("failed to build viewer event loop")?;
     let proxy = event_loop.create_proxy();
+    info!("viewer_event_loop_started");
 
     let cancel_task = {
         let cancel = cancel.clone();

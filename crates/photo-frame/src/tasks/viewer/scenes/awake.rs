@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use super::{RenderCtx, RenderResult, Scene, SceneContext, ScenePresentEvent};
 use crate::events::PhotoLoaded;
+use tracing::debug;
 
 pub struct AwakeScene {
     current: Option<PhotoLoaded>,
@@ -23,6 +24,7 @@ impl AwakeScene {
     }
 
     pub fn queue_photo(&mut self, photo: PhotoLoaded) {
+        debug!(path = %photo.prepared.path.display(), "awake_scene_queue_photo");
         self.display_color = color_from_path(&photo.prepared.path);
         self.pending_display_report = Some(photo.prepared.path.clone());
         self.needs_redraw = true;
