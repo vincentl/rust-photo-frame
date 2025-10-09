@@ -19,6 +19,7 @@ pub struct ViewerSM {
     state: ViewerState,
     entered_at: Instant,
     greeting_duration: Duration,
+    photos_ready: bool,
 }
 
 impl ViewerSM {
@@ -27,6 +28,7 @@ impl ViewerSM {
             state: ViewerState::Greeting,
             entered_at: now,
             greeting_duration,
+            photos_ready: false,
         }
     }
     pub fn current(&self) -> ViewerState {
@@ -37,7 +39,10 @@ impl ViewerSM {
         if self.state == ViewerState::Greeting
             && now.duration_since(self.entered_at) >= self.greeting_duration
         {
-            return self.goto(ViewerState::Awake, now);
+            if self.photos_ready {
+                return self.goto(ViewerState::Awake, now);
+            }
+            // Stay in Greeting until we have content ready.
         }
         None
     }
@@ -60,7 +65,10 @@ impl ViewerSM {
 
     pub fn on_photo_ready(&mut self, now: Instant) -> Option<ViewerStateChange> {
         if self.state == ViewerState::Greeting {
-            return self.goto(ViewerState::Awake, now);
+            self.photos_ready = true;
+            if now.duration_since(self.entered_at) >= self.greeting_duration {
+                return self.goto(ViewerState::Awake, now);
+            }
         }
         None
     }
@@ -75,6 +83,9 @@ impl ViewerSM {
         };
         self.state = to;
         self.entered_at = now;
+        if to != ViewerState::Greeting {
+            self.photos_ready = false;
+        }
         Some(ch)
     }
 }
@@ -118,6 +129,40 @@ mod tests {
         assert_eq!(sm.current(), ViewerState::Asleep);
         sm.on_command(&ViewerCommand::SetState(ControlViewerState::Awake), start)
             .unwrap();
+        assert_eq!(sm.current(), ViewerState::Awake);
+    }
+
+    #[test]
+    fn waits_full_duration_before_leaving_greeting() {
+        let start = Instant::now();
+        let mut sm = ViewerSM::new(Duration::from_millis(100), start);
+        assert_eq!(sm.current(), ViewerState::Greeting);
+
+        // Photo arrives well before the duration has elapsed.
+        assert!(sm.on_photo_ready(start + Duration::from_millis(10)).is_none());
+        assert_eq!(sm.current(), ViewerState::Greeting);
+
+        // Duration elapses, so the next tick should transition to Awake.
+        let change = sm.on_tick(start + Duration::from_millis(100)).unwrap();
+        assert_eq!((change.from, change.to), (ViewerState::Greeting, ViewerState::Awake));
+        assert_eq!(sm.current(), ViewerState::Awake);
+    }
+
+    #[test]
+    fn photo_after_duration_transitions_immediately() {
+        let start = Instant::now();
+        let mut sm = ViewerSM::new(Duration::from_millis(100), start);
+        assert_eq!(sm.current(), ViewerState::Greeting);
+
+        // Duration passes with no photo ready yet.
+        assert!(sm.on_tick(start + Duration::from_millis(100)).is_none());
+        assert_eq!(sm.current(), ViewerState::Greeting);
+
+        // First photo arrives after the duration and should trigger the transition.
+        let change = sm
+            .on_photo_ready(start + Duration::from_millis(120))
+            .unwrap();
+        assert_eq!((change.from, change.to), (ViewerState::Greeting, ViewerState::Awake));
         assert_eq!(sm.current(), ViewerState::Awake);
     }
 }
