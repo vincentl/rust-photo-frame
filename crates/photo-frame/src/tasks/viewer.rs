@@ -1,13 +1,21 @@
 mod scenes;
 mod state;
 
-use std::sync::Arc;
+use std::{
+    collections::VecDeque,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
-use scenes::{RenderCtx, RenderResult, Scene, SceneContext, greeting::GreetingScene};
+use scenes::{
+    RenderCtx, RenderResult, Scene, SceneContext, ScenePresentEvent, asleep::AsleepScene,
+    awake::AwakeScene, greeting::GreetingScene,
+};
+use state::{ViewerSM, ViewerState, ViewerStateChange};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use wgpu::{self, SurfaceError};
 use winit::{
     application::ApplicationHandler,
@@ -24,48 +32,60 @@ use crate::{
 #[derive(Debug)]
 enum ViewerEvent {
     Cancelled,
+    Tick(Instant),
+    Command(ViewerCommand),
+    Photo(PhotoLoaded),
 }
 
 type PhotoReceiver = mpsc::Receiver<PhotoLoaded>;
 type DisplayedSender = mpsc::Sender<Displayed>;
 type CommandReceiver = mpsc::Receiver<ViewerCommand>;
 
+struct Scenes {
+    greeting: GreetingScene,
+    awake: AwakeScene,
+    asleep: AsleepScene,
+}
+
+struct GpuCtx {
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    scenes: Scenes,
+}
+
 struct ViewerApp {
     cfg: Configuration,
     cancel: CancellationToken,
     window: Option<Arc<Window>>,
-    surface: Option<wgpu::Surface<'static>>,
-    surface_config: Option<wgpu::SurfaceConfiguration>,
-    device: Option<wgpu::Device>,
-    queue: Option<wgpu::Queue>,
-    greeting_scene: Option<GreetingScene>,
+    gpu: Option<GpuCtx>,
+    state: ViewerState,
+    sm: ViewerSM,
     pending_redraw: bool,
-    _from_loader: PhotoReceiver,
-    _to_manager_displayed: DisplayedSender,
-    _control: CommandReceiver,
+    pending_photos: VecDeque<PhotoLoaded>,
+    to_manager_displayed: DisplayedSender,
 }
 
 impl ViewerApp {
     fn new(
         cfg: Configuration,
         cancel: CancellationToken,
-        from_loader: PhotoReceiver,
         to_manager_displayed: DisplayedSender,
-        control: CommandReceiver,
     ) -> Self {
+        let now = Instant::now();
+        let sm = ViewerSM::new(cfg.greeting_screen.effective_duration(), now);
+        let state = sm.current();
         Self {
             cfg,
             cancel,
             window: None,
-            surface: None,
-            surface_config: None,
-            device: None,
-            queue: None,
-            greeting_scene: None,
+            gpu: None,
+            state,
+            sm,
             pending_redraw: false,
-            _from_loader: from_loader,
-            _to_manager_displayed: to_manager_displayed,
-            _control: control,
+            pending_photos: VecDeque::new(),
+            to_manager_displayed,
         }
     }
 
@@ -73,7 +93,6 @@ impl ViewerApp {
         if let Some(window) = self.window.as_ref() {
             return Some(window.clone());
         }
-
         let attrs = WindowAttributes::default().with_title("Rust Photo Frame");
         match event_loop.create_window(attrs) {
             Ok(window) => {
@@ -137,157 +156,289 @@ impl ViewerApp {
             "viewer surface configured",
         );
 
-        let greeting = GreetingScene::new(&device, &queue, format, &self.cfg.greeting_screen);
+        let scenes = Scenes {
+            greeting: GreetingScene::new(&device, &queue, format, &self.cfg.greeting_screen),
+            awake: AwakeScene::new(),
+            asleep: AsleepScene::new(&device, &queue, format, &self.cfg.sleep_screen),
+        };
 
-        self.surface = Some(surface);
-        self.surface_config = Some(config);
-        self.device = Some(device);
-        self.queue = Some(queue);
-        self.greeting_scene = Some(greeting);
+        self.gpu = Some(GpuCtx {
+            surface,
+            device,
+            queue,
+            config,
+            scenes,
+        });
         self.pending_redraw = true;
 
-        if let (Some(window), Some(scene)) = (self.window.as_ref(), self.greeting_scene.as_mut()) {
-            if let (Some(device), Some(queue), Some(config)) = (
-                self.device.as_ref(),
-                self.queue.as_ref(),
-                self.surface_config.as_ref(),
-            ) {
-                let ctx = SceneContext {
-                    device,
-                    queue,
-                    surface_config: config,
-                    window: window.as_ref(),
-                };
-                scene.on_enter(&ctx);
-            }
-        }
-
+        self.enter_current_state();
         Ok(())
     }
 
-    fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        let surface = match self.surface.as_ref() {
-            Some(surface) => surface,
-            None => return,
+    fn enter_current_state(&mut self) {
+        let (gpu, window) = match (self.gpu.as_mut(), self.window.as_ref()) {
+            (Some(gpu), Some(window)) => (gpu, window.as_ref()),
+            _ => return,
         };
-        let device = match self.device.as_ref() {
-            Some(device) => device,
-            None => return,
+        let ctx = SceneContext {
+            device: &gpu.device,
+            queue: &gpu.queue,
+            surface_config: &gpu.config,
+            window,
         };
-        let queue = match self.queue.as_ref() {
-            Some(queue) => queue,
-            None => return,
-        };
-        let window = match self.window.as_ref() {
-            Some(window) => window.as_ref(),
-            None => return,
-        };
-        let config = match self.surface_config.as_mut() {
-            Some(config) => config,
-            None => return,
-        };
-
-        config.width = new_size.width.max(1);
-        config.height = new_size.height.max(1);
-        surface.configure(device, config);
-        debug!(
-            width = config.width,
-            height = config.height,
-            "viewer surface resized",
-        );
-
-        if let Some(scene) = self.greeting_scene.as_mut() {
-            let ctx = SceneContext {
-                device,
-                queue,
-                surface_config: config,
-                window,
-            };
-            scene.handle_resize(&ctx, new_size, window.scale_factor());
+        match self.state {
+            ViewerState::Greeting => gpu.scenes.greeting.on_enter(&ctx),
+            ViewerState::Awake => {
+                gpu.scenes.awake.on_enter(&ctx);
+                self.advance_photo_queue();
+            }
+            ViewerState::Asleep => gpu.scenes.asleep.on_enter(&ctx),
         }
+    }
+
+    fn handle_resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        let (gpu, window) = match (self.gpu.as_mut(), self.window.as_ref()) {
+            (Some(gpu), Some(window)) => (gpu, window.as_ref()),
+            _ => return,
+        };
+
+        gpu.config.width = new_size.width.max(1);
+        gpu.config.height = new_size.height.max(1);
+        gpu.surface.configure(&gpu.device, &gpu.config);
+        let ctx = SceneContext {
+            device: &gpu.device,
+            queue: &gpu.queue,
+            surface_config: &gpu.config,
+            window,
+        };
+        let scale_factor = window.scale_factor();
+        gpu.scenes
+            .greeting
+            .handle_resize(&ctx, new_size, scale_factor);
+        gpu.scenes.awake.handle_resize(&ctx, new_size, scale_factor);
+        gpu.scenes
+            .asleep
+            .handle_resize(&ctx, new_size, scale_factor);
 
         self.request_redraw();
     }
 
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
-        let surface = match self.surface.as_ref() {
-            Some(surface) => surface,
-            None => return,
-        };
-        let device = match self.device.as_ref() {
-            Some(device) => device,
-            None => return,
-        };
-        let queue = match self.queue.as_ref() {
-            Some(queue) => queue,
-            None => return,
-        };
-        let config = match self.surface_config.as_ref() {
-            Some(config) => config,
-            None => return,
-        };
-        let window = match self.window.as_ref() {
-            Some(window) => window.as_ref(),
-            None => return,
-        };
-
-        let frame = match surface.get_current_texture() {
-            Ok(frame) => frame,
-            Err(SurfaceError::Outdated) | Err(SurfaceError::Lost) => {
-                info!("viewer surface lost; reconfiguring");
-                self.handle_resize(window.inner_size());
-                return;
-            }
-            Err(SurfaceError::OutOfMemory) => {
-                error!("viewer surface out of memory; exiting event loop");
-                event_loop.exit();
-                return;
-            }
-            Err(SurfaceError::Timeout) => {
-                warn!("viewer surface acquisition timed out");
-                return;
-            }
-            Err(SurfaceError::Other) => {
-                warn!("viewer surface reported an unknown error; retrying");
-                self.handle_resize(window.inner_size());
-                return;
-            }
-        };
-
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("viewer-encoder"),
-        });
-
         self.pending_redraw = false;
 
-        if let Some(scene) = self.greeting_scene.as_mut() {
-            let ctx = SceneContext {
-                device,
-                queue,
-                surface_config: config,
-                window,
+        let (pending_event, needs_redraw) = {
+            let (gpu, window) = match (self.gpu.as_mut(), self.window.as_ref()) {
+                (Some(gpu), Some(window)) => (gpu, window.as_ref()),
+                _ => return,
             };
-            let mut render_ctx = RenderCtx {
-                scene: ctx,
-                encoder: &mut encoder,
-                target_view: &view,
-            };
-            if matches!(scene.render(&mut render_ctx), RenderResult::NeedsRedraw) {
-                self.pending_redraw = true;
-            }
-        }
 
-        queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
+            let frame = match gpu.surface.get_current_texture() {
+                Ok(frame) => frame,
+                Err(SurfaceError::Outdated) | Err(SurfaceError::Lost) => {
+                    info!("viewer surface lost; reconfiguring");
+                    self.handle_resize(window.inner_size());
+                    return;
+                }
+                Err(SurfaceError::OutOfMemory) => {
+                    error!("viewer surface out of memory; exiting event loop");
+                    event_loop.exit();
+                    return;
+                }
+                Err(SurfaceError::Timeout) => {
+                    warn!("viewer surface acquisition timed out");
+                    return;
+                }
+                Err(SurfaceError::Other) => {
+                    warn!("viewer surface reported an unknown error; retrying");
+                    self.handle_resize(window.inner_size());
+                    return;
+                }
+            };
+
+            let view = frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("viewer-encoder"),
+                });
+
+            let mut local_event: Option<ScenePresentEvent> = None;
+
+            let render_result = match self.state {
+                ViewerState::Greeting => {
+                    let scene_ctx = SceneContext {
+                        device: &gpu.device,
+                        queue: &gpu.queue,
+                        surface_config: &gpu.config,
+                        window,
+                    };
+                    let mut render_ctx = RenderCtx {
+                        scene: scene_ctx,
+                        encoder: &mut encoder,
+                        target_view: &view,
+                    };
+                    let result = gpu.scenes.greeting.render(&mut render_ctx);
+                    drop(render_ctx);
+                    let scene_ctx = SceneContext {
+                        device: &gpu.device,
+                        queue: &gpu.queue,
+                        surface_config: &gpu.config,
+                        window,
+                    };
+                    if let Some(event) = gpu.scenes.greeting.after_present(&scene_ctx) {
+                        local_event = Some(event);
+                    }
+                    result
+                }
+                ViewerState::Awake => {
+                    let scene_ctx = SceneContext {
+                        device: &gpu.device,
+                        queue: &gpu.queue,
+                        surface_config: &gpu.config,
+                        window,
+                    };
+                    let mut render_ctx = RenderCtx {
+                        scene: scene_ctx,
+                        encoder: &mut encoder,
+                        target_view: &view,
+                    };
+                    let result = gpu.scenes.awake.render(&mut render_ctx);
+                    drop(render_ctx);
+                    let scene_ctx = SceneContext {
+                        device: &gpu.device,
+                        queue: &gpu.queue,
+                        surface_config: &gpu.config,
+                        window,
+                    };
+                    if let Some(event) = gpu.scenes.awake.after_present(&scene_ctx) {
+                        local_event = Some(event);
+                    }
+                    result
+                }
+                ViewerState::Asleep => {
+                    let scene_ctx = SceneContext {
+                        device: &gpu.device,
+                        queue: &gpu.queue,
+                        surface_config: &gpu.config,
+                        window,
+                    };
+                    let mut render_ctx = RenderCtx {
+                        scene: scene_ctx,
+                        encoder: &mut encoder,
+                        target_view: &view,
+                    };
+                    let result = gpu.scenes.asleep.render(&mut render_ctx);
+                    drop(render_ctx);
+                    let scene_ctx = SceneContext {
+                        device: &gpu.device,
+                        queue: &gpu.queue,
+                        surface_config: &gpu.config,
+                        window,
+                    };
+                    if let Some(event) = gpu.scenes.asleep.after_present(&scene_ctx) {
+                        local_event = Some(event);
+                    }
+                    result
+                }
+            };
+
+            let needs_redraw = matches!(render_result, RenderResult::NeedsRedraw);
+
+            gpu.queue.submit(std::iter::once(encoder.finish()));
+            frame.present();
+
+            (local_event, needs_redraw)
+        };
+
+        if needs_redraw {
+            self.request_redraw();
+        }
+        if let Some(event) = pending_event {
+            self.handle_scene_event(event);
+        }
+    }
+
+    fn handle_scene_event(&mut self, event: ScenePresentEvent) {
+        match event {
+            ScenePresentEvent::PhotoDisplayed(path) => self.notify_displayed(path),
+        }
+    }
+
+    fn notify_displayed(&mut self, path: std::path::PathBuf) {
+        if let Err(err) = self.to_manager_displayed.try_send(Displayed(path.clone())) {
+            warn!(error = %err, photo = %path.display(), "failed to forward displayed notification");
+        }
     }
 
     fn request_redraw(&mut self) {
         self.pending_redraw = true;
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
+        }
+    }
+
+    fn apply_state_change(&mut self, change: ViewerStateChange) {
+        let previous = self.state;
+        self.state = change.to;
+        info!(from = ?change.from, to = ?change.to, "viewer state transition");
+
+        if let (Some(gpu), Some(window)) = (self.gpu.as_mut(), self.window.as_ref()) {
+            let ctx = SceneContext {
+                device: &gpu.device,
+                queue: &gpu.queue,
+                surface_config: &gpu.config,
+                window: window.as_ref(),
+            };
+            match previous {
+                ViewerState::Greeting => gpu.scenes.greeting.on_exit(&ctx),
+                ViewerState::Awake => gpu.scenes.awake.on_exit(&ctx),
+                ViewerState::Asleep => gpu.scenes.asleep.on_exit(&ctx),
+            }
+            match self.state {
+                ViewerState::Greeting => gpu.scenes.greeting.on_enter(&ctx),
+                ViewerState::Awake => {
+                    gpu.scenes.awake.on_enter(&ctx);
+                    self.advance_photo_queue();
+                }
+                ViewerState::Asleep => gpu.scenes.asleep.on_enter(&ctx),
+            }
+        }
+
+        self.request_redraw();
+    }
+
+    fn advance_photo_queue(&mut self) {
+        if !matches!(self.state, ViewerState::Awake) {
+            return;
+        }
+        if let Some(photo) = self.pending_photos.pop_front() {
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.scenes.awake.queue_photo(photo);
+            }
+            self.request_redraw();
+        }
+    }
+
+    fn on_photo_loaded(&mut self, photo: PhotoLoaded, now: Instant) {
+        self.pending_photos.push_back(photo);
+        if let Some(change) = self.sm.on_photo_ready(now) {
+            self.apply_state_change(change);
+        } else if matches!(self.state, ViewerState::Awake) {
+            self.advance_photo_queue();
+        }
+    }
+
+    fn on_command(&mut self, command: ViewerCommand, now: Instant) {
+        if let Some(change) = self.sm.on_command(&command, now) {
+            self.apply_state_change(change);
+        }
+    }
+
+    fn on_tick(&mut self, now: Instant) {
+        if let Some(change) = self.sm.on_tick(now) {
+            self.apply_state_change(change);
         }
     }
 }
@@ -304,7 +455,7 @@ impl ApplicationHandler<ViewerEvent> for ViewerApp {
             return;
         };
 
-        if self.device.is_none() {
+        if self.gpu.is_none() {
             if let Err(err) = self.init_gpu(window) {
                 error!(error = ?err, "failed to initialize GPU state");
                 event_loop.exit();
@@ -365,17 +516,20 @@ impl ApplicationHandler<ViewerEvent> for ViewerApp {
                 info!("viewer received cancellation event");
                 event_loop.exit();
             }
+            ViewerEvent::Tick(now) => self.on_tick(now),
+            ViewerEvent::Command(cmd) => self.on_command(cmd, Instant::now()),
+            ViewerEvent::Photo(photo) => self.on_photo_loaded(photo, Instant::now()),
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_windowed(
-    from_loader: PhotoReceiver,
+    mut from_loader: PhotoReceiver,
     to_manager_displayed: DisplayedSender,
     cancel: CancellationToken,
     cfg: Configuration,
-    control: CommandReceiver,
+    mut control: CommandReceiver,
 ) -> Result<()> {
     let event_loop = EventLoop::<ViewerEvent>::with_user_event()
         .build()
@@ -384,15 +538,55 @@ pub fn run_windowed(
 
     let cancel_task = {
         let cancel = cancel.clone();
+        let proxy = proxy.clone();
         tokio::spawn(async move {
             cancel.cancelled().await;
             let _ = proxy.send_event(ViewerEvent::Cancelled);
         })
     };
 
-    let mut app = ViewerApp::new(cfg, cancel, from_loader, to_manager_displayed, control);
+    let loader_task = {
+        let proxy = proxy.clone();
+        tokio::spawn(async move {
+            while let Some(photo) = from_loader.recv().await {
+                if proxy.send_event(ViewerEvent::Photo(photo)).is_err() {
+                    break;
+                }
+            }
+        })
+    };
+
+    let command_task = {
+        let proxy = proxy.clone();
+        tokio::spawn(async move {
+            while let Some(cmd) = control.recv().await {
+                if proxy.send_event(ViewerEvent::Command(cmd)).is_err() {
+                    break;
+                }
+            }
+        })
+    };
+
+    let tick_task = {
+        let proxy = proxy.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_millis(33));
+            loop {
+                ticker.tick().await;
+                if proxy.send_event(ViewerEvent::Tick(Instant::now())).is_err() {
+                    break;
+                }
+            }
+        })
+    };
+
+    let mut app = ViewerApp::new(cfg, cancel, to_manager_displayed);
     let run_result = event_loop.run_app(&mut app);
+
     cancel_task.abort();
+    loader_task.abort();
+    command_task.abort();
+    tick_task.abort();
 
     run_result.context("viewer event loop failed")
 }

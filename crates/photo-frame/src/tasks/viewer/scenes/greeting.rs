@@ -1,12 +1,11 @@
 use winit::dpi::PhysicalSize;
 
-use super::{RenderCtx, RenderResult, Scene, SceneContext};
+use super::{RenderCtx, RenderResult, Scene, SceneContext, ScenePresentEvent};
 use crate::config::GreetingScreenConfig;
 use crate::tasks::greeting_screen::GreetingScreen;
 
 pub struct GreetingScene {
     screen: GreetingScreen,
-    config: GreetingScreenConfig,
     needs_redraw: bool,
 }
 
@@ -20,15 +19,8 @@ impl GreetingScene {
         let screen = GreetingScreen::new(device, queue, format, config.screen());
         Self {
             screen,
-            config: config.clone(),
             needs_redraw: true,
         }
-    }
-
-    pub fn update_config(&mut self, config: &GreetingScreenConfig) {
-        self.config = config.clone();
-        self.screen.update_screen(self.config.screen());
-        self.needs_redraw = true;
     }
 
     fn resize(&mut self, new_size: PhysicalSize<u32>, scale_factor: f64) {
@@ -40,6 +32,7 @@ impl GreetingScene {
 impl Scene for GreetingScene {
     fn on_enter(&mut self, ctx: &SceneContext) {
         self.resize(ctx.surface_size(), ctx.window.scale_factor());
+        let _ = self.screen.ensure_layout_ready();
     }
 
     fn handle_resize(
@@ -57,5 +50,10 @@ impl Scene for GreetingScene {
             self.needs_redraw = false;
         }
         RenderResult::Idle
+    }
+
+    fn after_present(&mut self, _ctx: &SceneContext) -> Option<ScenePresentEvent> {
+        self.screen.after_submit();
+        None
     }
 }

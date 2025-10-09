@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use crate::events::{ViewerCommand, ViewerState as ControlViewerState};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewerState {
     Greeting,
@@ -41,14 +43,26 @@ impl ViewerSM {
     }
 
     pub fn on_command(&mut self, cmd: &ViewerCommand, now: Instant) -> Option<ViewerStateChange> {
-        match cmd {
-            ViewerCommand::ToggleSleep => match self.state {
+        match *cmd {
+            ViewerCommand::ToggleState => match self.state {
                 ViewerState::Awake => self.goto(ViewerState::Asleep, now),
                 ViewerState::Asleep => self.goto(ViewerState::Awake, now),
                 ViewerState::Greeting => self.goto(ViewerState::Asleep, now),
             },
-            _ => None,
+            ViewerCommand::SetState(ControlViewerState::Awake) => {
+                self.goto(ViewerState::Awake, now)
+            }
+            ViewerCommand::SetState(ControlViewerState::Asleep) => {
+                self.goto(ViewerState::Asleep, now)
+            }
         }
+    }
+
+    pub fn on_photo_ready(&mut self, now: Instant) -> Option<ViewerStateChange> {
+        if self.state == ViewerState::Greeting {
+            return self.goto(ViewerState::Awake, now);
+        }
+        None
     }
 
     fn goto(&mut self, to: ViewerState, now: Instant) -> Option<ViewerStateChange> {
@@ -65,15 +79,10 @@ impl ViewerSM {
     }
 }
 
-// NOTE: import the real ViewerCommand from your crate.
-#[allow(dead_code)]
-pub enum ViewerCommand {
-    ToggleSleep, /* ...existing... */
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::{ViewerCommand, ViewerState as ControlViewerState};
     #[test]
     fn greeting_to_awake_by_time() {
         let start = Instant::now();
@@ -93,9 +102,22 @@ mod tests {
         sm.on_tick(t0); // Greeting → Awake immediately
         sm.on_tick(t0 + Duration::from_millis(1));
         assert_eq!(sm.current(), ViewerState::Awake);
-        sm.on_command(&ViewerCommand::ToggleSleep, t0).unwrap();
+        sm.on_command(&ViewerCommand::ToggleState, t0).unwrap();
         assert_eq!(sm.current(), ViewerState::Asleep);
-        sm.on_command(&ViewerCommand::ToggleSleep, t0).unwrap();
+        sm.on_command(&ViewerCommand::ToggleState, t0).unwrap();
+        assert_eq!(sm.current(), ViewerState::Awake);
+    }
+
+    #[test]
+    fn command_set_state() {
+        let start = Instant::now();
+        let mut sm = ViewerSM::new(Duration::from_millis(10), start);
+        sm.on_photo_ready(start);
+        sm.on_command(&ViewerCommand::SetState(ControlViewerState::Asleep), start)
+            .unwrap();
+        assert_eq!(sm.current(), ViewerState::Asleep);
+        sm.on_command(&ViewerCommand::SetState(ControlViewerState::Awake), start)
+            .unwrap();
         assert_eq!(sm.current(), ViewerState::Awake);
     }
 }

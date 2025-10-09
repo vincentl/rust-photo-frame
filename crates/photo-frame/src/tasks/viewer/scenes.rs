@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use winit::{dpi::PhysicalSize, window::Window};
 
 pub mod asleep;
@@ -32,6 +34,10 @@ pub enum RenderResult {
     NeedsRedraw,
 }
 
+pub enum ScenePresentEvent {
+    PhotoDisplayed(PathBuf),
+}
+
 pub trait Scene {
     fn on_enter(&mut self, _ctx: &SceneContext) {}
     fn on_exit(&mut self, _ctx: &SceneContext) {}
@@ -43,4 +49,7 @@ pub trait Scene {
     ) {
     }
     fn render(&mut self, ctx: &mut RenderCtx<'_, '_>) -> RenderResult;
+    fn after_present(&mut self, _ctx: &SceneContext) -> Option<ScenePresentEvent> {
+        None
+    }
 }
