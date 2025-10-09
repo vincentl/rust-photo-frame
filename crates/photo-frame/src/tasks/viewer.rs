@@ -180,19 +180,35 @@ impl ViewerApp {
             (Some(gpu), Some(window)) => (gpu, window.as_ref()),
             _ => return,
         };
-        let ctx = SceneContext {
-            device: &gpu.device,
-            queue: &gpu.queue,
-            surface_config: &gpu.config,
-            window,
-        };
         match self.state {
-            ViewerState::Greeting => gpu.scenes.greeting.on_enter(&ctx),
+            ViewerState::Greeting => {
+                let ctx = SceneContext {
+                    device: &gpu.device,
+                    queue: &gpu.queue,
+                    surface_config: &gpu.config,
+                    window,
+                };
+                gpu.scenes.greeting.on_enter(&ctx);
+            }
             ViewerState::Awake => {
+                let ctx = SceneContext {
+                    device: &gpu.device,
+                    queue: &gpu.queue,
+                    surface_config: &gpu.config,
+                    window,
+                };
                 gpu.scenes.awake.on_enter(&ctx);
                 self.advance_photo_queue();
             }
-            ViewerState::Asleep => gpu.scenes.asleep.on_enter(&ctx),
+            ViewerState::Asleep => {
+                let ctx = SceneContext {
+                    device: &gpu.device,
+                    queue: &gpu.queue,
+                    surface_config: &gpu.config,
+                    window,
+                };
+                gpu.scenes.asleep.on_enter(&ctx);
+            }
         }
     }
 
@@ -205,20 +221,38 @@ impl ViewerApp {
         gpu.config.width = new_size.width.max(1);
         gpu.config.height = new_size.height.max(1);
         gpu.surface.configure(&gpu.device, &gpu.config);
-        let ctx = SceneContext {
-            device: &gpu.device,
-            queue: &gpu.queue,
-            surface_config: &gpu.config,
-            window,
-        };
         let scale_factor = window.scale_factor();
-        gpu.scenes
-            .greeting
-            .handle_resize(&ctx, new_size, scale_factor);
-        gpu.scenes.awake.handle_resize(&ctx, new_size, scale_factor);
-        gpu.scenes
-            .asleep
-            .handle_resize(&ctx, new_size, scale_factor);
+        {
+            let ctx = SceneContext {
+                device: &gpu.device,
+                queue: &gpu.queue,
+                surface_config: &gpu.config,
+                window,
+            };
+            gpu.scenes
+                .greeting
+                .handle_resize(&ctx, new_size, scale_factor);
+        }
+        {
+            let ctx = SceneContext {
+                device: &gpu.device,
+                queue: &gpu.queue,
+                surface_config: &gpu.config,
+                window,
+            };
+            gpu.scenes.awake.handle_resize(&ctx, new_size, scale_factor);
+        }
+        {
+            let ctx = SceneContext {
+                device: &gpu.device,
+                queue: &gpu.queue,
+                surface_config: &gpu.config,
+                window,
+            };
+            gpu.scenes
+                .asleep
+                .handle_resize(&ctx, new_size, scale_factor);
+        }
 
         self.request_redraw();
     }
@@ -264,83 +298,45 @@ impl ViewerApp {
                     label: Some("viewer-encoder"),
                 });
 
-            let mut local_event: Option<ScenePresentEvent> = None;
-
             let render_result = match self.state {
                 ViewerState::Greeting => {
-                    let scene_ctx = SceneContext {
-                        device: &gpu.device,
-                        queue: &gpu.queue,
-                        surface_config: &gpu.config,
-                        window,
-                    };
                     let mut render_ctx = RenderCtx {
-                        scene: scene_ctx,
+                        scene: SceneContext {
+                            device: &gpu.device,
+                            queue: &gpu.queue,
+                            surface_config: &gpu.config,
+                            window,
+                        },
                         encoder: &mut encoder,
                         target_view: &view,
                     };
-                    let result = gpu.scenes.greeting.render(&mut render_ctx);
-                    drop(render_ctx);
-                    let scene_ctx = SceneContext {
-                        device: &gpu.device,
-                        queue: &gpu.queue,
-                        surface_config: &gpu.config,
-                        window,
-                    };
-                    if let Some(event) = gpu.scenes.greeting.after_present(&scene_ctx) {
-                        local_event = Some(event);
-                    }
-                    result
+                    gpu.scenes.greeting.render(&mut render_ctx)
                 }
                 ViewerState::Awake => {
-                    let scene_ctx = SceneContext {
-                        device: &gpu.device,
-                        queue: &gpu.queue,
-                        surface_config: &gpu.config,
-                        window,
-                    };
                     let mut render_ctx = RenderCtx {
-                        scene: scene_ctx,
+                        scene: SceneContext {
+                            device: &gpu.device,
+                            queue: &gpu.queue,
+                            surface_config: &gpu.config,
+                            window,
+                        },
                         encoder: &mut encoder,
                         target_view: &view,
                     };
-                    let result = gpu.scenes.awake.render(&mut render_ctx);
-                    drop(render_ctx);
-                    let scene_ctx = SceneContext {
-                        device: &gpu.device,
-                        queue: &gpu.queue,
-                        surface_config: &gpu.config,
-                        window,
-                    };
-                    if let Some(event) = gpu.scenes.awake.after_present(&scene_ctx) {
-                        local_event = Some(event);
-                    }
-                    result
+                    gpu.scenes.awake.render(&mut render_ctx)
                 }
                 ViewerState::Asleep => {
-                    let scene_ctx = SceneContext {
-                        device: &gpu.device,
-                        queue: &gpu.queue,
-                        surface_config: &gpu.config,
-                        window,
-                    };
                     let mut render_ctx = RenderCtx {
-                        scene: scene_ctx,
+                        scene: SceneContext {
+                            device: &gpu.device,
+                            queue: &gpu.queue,
+                            surface_config: &gpu.config,
+                            window,
+                        },
                         encoder: &mut encoder,
                         target_view: &view,
                     };
-                    let result = gpu.scenes.asleep.render(&mut render_ctx);
-                    drop(render_ctx);
-                    let scene_ctx = SceneContext {
-                        device: &gpu.device,
-                        queue: &gpu.queue,
-                        surface_config: &gpu.config,
-                        window,
-                    };
-                    if let Some(event) = gpu.scenes.asleep.after_present(&scene_ctx) {
-                        local_event = Some(event);
-                    }
-                    result
+                    gpu.scenes.asleep.render(&mut render_ctx)
                 }
             };
 
@@ -349,7 +345,19 @@ impl ViewerApp {
             gpu.queue.submit(std::iter::once(encoder.finish()));
             frame.present();
 
-            (local_event, needs_redraw)
+            let scene_ctx = SceneContext {
+                device: &gpu.device,
+                queue: &gpu.queue,
+                surface_config: &gpu.config,
+                window,
+            };
+            let event = match self.state {
+                ViewerState::Greeting => gpu.scenes.greeting.after_present(&scene_ctx),
+                ViewerState::Awake => gpu.scenes.awake.after_present(&scene_ctx),
+                ViewerState::Asleep => gpu.scenes.asleep.after_present(&scene_ctx),
+            };
+
+            (event, needs_redraw)
         };
 
         if needs_redraw {
