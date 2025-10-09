@@ -22,6 +22,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use winit::dpi::PhysicalSize;
 
 //
 // Viewer state machine overview
@@ -745,6 +746,23 @@ pub fn run_windowed(
             );
         }
 
+        fn overlay_size_for(
+            window: &Window,
+            preferred: PhysicalSize<u32>,
+            config: &wgpu::SurfaceConfiguration,
+        ) -> PhysicalSize<u32> {
+            if preferred.width > 0 && preferred.height > 0 {
+                return preferred;
+            }
+            if let Some(monitor) = window.current_monitor() {
+                let monitor_size = monitor.size();
+                if monitor_size.width > 0 && monitor_size.height > 0 {
+                    return monitor_size;
+                }
+            }
+            PhysicalSize::new(config.width.max(1), config.height.max(1))
+        }
+
         fn ensure_window(&mut self, event_loop: &ActiveEventLoop) -> Option<Arc<Window>> {
             if let Some(window) = self.window.as_ref() {
                 self.log_event_loop_state("ensure_window_cached");
@@ -1107,7 +1125,7 @@ pub fn run_windowed(
 
         fn refresh_greeting_layout(&mut self) {
             if let (Some(window), Some(gpu)) = (self.window.as_ref(), self.gpu.as_mut()) {
-                let size = window.inner_size();
+                let size = Self::overlay_size_for(window, window.inner_size(), &gpu.config);
                 gpu.greeting.resize(size, window.scale_factor());
             }
         }
@@ -1375,7 +1393,8 @@ pub fn run_windowed(
                 format,
                 self.full_config.greeting_screen.screen(),
             );
-            greeting.resize(size, window.scale_factor());
+            let greeting_size = Self::overlay_size_for(&window, size, &config);
+            greeting.resize(greeting_size, window.scale_factor());
 
             self.window = Some(window);
             self.gpu = Some(GpuCtx {
@@ -1437,10 +1456,24 @@ pub fn run_windowed(
                         height = new_size.height,
                         "viewer_window_resized"
                     );
-                    gpu.config.width = new_size.width.max(1);
-                    gpu.config.height = new_size.height.max(1);
-                    gpu.surface.configure(&gpu.device, &gpu.config);
-                    gpu.greeting.resize(new_size, window.scale_factor());
+                    let previous_config_size =
+                        PhysicalSize::new(gpu.config.width, gpu.config.height);
+                    if new_size.width > 0 && new_size.height > 0 {
+                        gpu.config.width = new_size.width;
+                        gpu.config.height = new_size.height;
+                        gpu.surface.configure(&gpu.device, &gpu.config);
+                    }
+                    let effective_size = Self::overlay_size_for(&window, new_size, &gpu.config);
+                    if new_size.width == 0 || new_size.height == 0 {
+                        debug!(
+                            fallback_width = effective_size.width,
+                            fallback_height = effective_size.height,
+                            previous_width = previous_config_size.width,
+                            previous_height = previous_config_size.height,
+                            "viewer_window_resized_zero_dimensions"
+                        );
+                    }
+                    gpu.greeting.resize(effective_size, window.scale_factor());
                     match self.viewer_state {
                         ViewerState::Wake => {
                             self.pending_redraw = true;
@@ -1464,10 +1497,13 @@ pub fn run_windowed(
                         "viewer_window_scale_factor_changed"
                     );
                     let _ = inner_size_writer.request_inner_size(size);
-                    gpu.config.width = size.width.max(1);
-                    gpu.config.height = size.height.max(1);
-                    gpu.surface.configure(&gpu.device, &gpu.config);
-                    gpu.greeting.resize(size, window.scale_factor());
+                    if size.width > 0 && size.height > 0 {
+                        gpu.config.width = size.width;
+                        gpu.config.height = size.height;
+                        gpu.surface.configure(&gpu.device, &gpu.config);
+                    }
+                    let effective_size = Self::overlay_size_for(&window, size, &gpu.config);
+                    gpu.greeting.resize(effective_size, window.scale_factor());
                     match self.viewer_state {
                         ViewerState::Wake => self.pending_redraw = true,
                         ViewerState::Greeting | ViewerState::Sleep => {
@@ -1571,8 +1607,9 @@ pub fn run_windowed(
                             encoder.pop_debug_group();
 
                             encoder.push_debug_group("sleep-banner");
-                            gpu.greeting
-                                .resize(window.inner_size(), window.scale_factor());
+                            let effective_size =
+                                Self::overlay_size_for(window, window.inner_size(), &gpu.config);
+                            gpu.greeting.resize(effective_size, window.scale_factor());
                             gpu.greeting.screen_message(
                                 self.full_config.sleep_screen.screen(),
                                 &mut encoder,
@@ -1598,8 +1635,9 @@ pub fn run_windowed(
                             encoder.pop_debug_group();
 
                             encoder.push_debug_group("greeting-banner");
-                            gpu.greeting
-                                .resize(window.inner_size(), window.scale_factor());
+                            let effective_size =
+                                Self::overlay_size_for(window, window.inner_size(), &gpu.config);
+                            gpu.greeting.resize(effective_size, window.scale_factor());
                             gpu.greeting.screen_message(
                                 self.full_config.greeting_screen.screen(),
                                 &mut encoder,
