@@ -625,13 +625,15 @@ fn load_named_font(name: &str) -> Option<FontArc> {
         let face = db.face(id)?;
         match &face.source {
             fontdb::Source::Binary(data) => {
-                FontArc::try_from_vec(data.as_ref().as_ref().to_vec()).ok()
+                let bytes = data.as_ref().as_ref();
+                FontArc::try_from_vec(bytes.to_vec()).ok()
             }
             fontdb::Source::File(path) => std::fs::read(path)
                 .ok()
                 .and_then(|bytes| FontArc::try_from_vec(bytes).ok()),
             fontdb::Source::SharedFile(_, data) => {
-                FontArc::try_from_vec(data.as_ref().as_ref().to_vec()).ok()
+                let bytes = data.as_ref().as_ref();
+                FontArc::try_from_vec(bytes.to_vec()).ok()
             }
         }
     })

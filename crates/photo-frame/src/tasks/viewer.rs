@@ -702,6 +702,9 @@ pub fn run_windowed(
         }
 
         fn log_event_loop_state(&self, context: &str) {
+            if !tracing::level_enabled!(Level::DEBUG) {
+                return;
+            }
             let now = Instant::now();
             let current_path = self
                 .current
