@@ -270,7 +270,11 @@ impl ViewerApp {
     }
 
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
-        self.pending_redraw = false;
+        let should_draw = std::mem::take(&mut self.pending_redraw);
+        if !should_draw {
+            debug!("viewer_draw_skipped");
+            return;
+        }
 
         let (pending_event, needs_redraw) = {
             let (gpu, window) = match (self.gpu.as_mut(), self.window.as_ref()) {
