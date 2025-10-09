@@ -2,7 +2,7 @@ use winit::dpi::PhysicalSize;
 
 use super::{RenderCtx, RenderResult, Scene, SceneContext, ScenePresentEvent};
 use crate::config::GreetingScreenConfig;
-use crate::tasks::greeting_screen::GreetingScreen;
+use crate::tasks::greeting_screen::{GreetingScreen, LayoutStatus};
 
 pub struct GreetingScene {
     screen: GreetingScreen,
@@ -32,10 +32,12 @@ impl GreetingScene {
 impl Scene for GreetingScene {
     fn on_enter(&mut self, ctx: &SceneContext) {
         self.resize(ctx.surface_size(), ctx.window.scale_factor());
-        if self.screen.ensure_layout_ready() {
-            tracing::debug!(size = ?ctx.surface_size(), "greeting_scene_layout_ready");
-        } else {
-            tracing::debug!(size = ?ctx.surface_size(), "greeting_scene_layout_pending");
+        match self.screen.ensure_layout_ready() {
+            LayoutStatus::Ready => {
+                tracing::debug!(size = ?ctx.surface_size(), "greeting_scene_layout_ready")
+            }
+            LayoutStatus::WaitingForSize => tracing::debug!("greeting_scene_waiting_for_size"),
+            LayoutStatus::WaitingForFont => tracing::debug!("greeting_scene_waiting_for_font"),
         }
     }
 

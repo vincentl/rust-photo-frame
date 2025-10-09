@@ -69,6 +69,32 @@ struct GreetingSettings {
     colors: GreetingColors,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FrameParams {
+    size: PhysicalSize<u32>,
+    scale_factor: f64,
+    stroke_width_dip: f32,
+    corner_radius_dip: f32,
+}
+
+impl FrameParams {
+    fn from(screen: &GreetingScreen) -> Self {
+        Self {
+            size: screen.size,
+            scale_factor: screen.scale_factor,
+            stroke_width_dip: screen.settings.stroke_width_dip,
+            corner_radius_dip: screen.settings.corner_radius_dip,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutStatus {
+    Ready,
+    WaitingForSize,
+    WaitingForFont,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct TextLayout {
     font_size: f32,
@@ -88,6 +114,7 @@ pub struct GreetingScreen {
     staging_belt: StagingBelt,
     frame_pipeline: wgpu::RenderPipeline,
     frame_mesh: Option<FrameMesh>,
+    frame_params: Option<FrameParams>,
     layout: Option<TextLayout>,
     size: PhysicalSize<u32>,
     scale_factor: f64,
@@ -126,6 +153,7 @@ impl GreetingScreen {
             staging_belt: StagingBelt::new(1024),
             frame_pipeline,
             frame_mesh: None,
+            frame_params: None,
             layout: None,
             size: PhysicalSize::new(0, 0),
             scale_factor: 1.0,
@@ -225,14 +253,18 @@ impl GreetingScreen {
     }
 
     /// Ensure layout information is available for the current window size.
-    pub fn ensure_layout_ready(&mut self) -> bool {
+    pub fn ensure_layout_ready(&mut self) -> LayoutStatus {
         if self.size.width == 0 || self.size.height == 0 {
-            return false;
+            self.layout = None;
+            return LayoutStatus::WaitingForSize;
         }
         if self.layout.is_none() {
             self.update_text_layout();
+            if self.layout.is_none() {
+                return LayoutStatus::WaitingForFont;
+            }
         }
-        self.layout.is_some()
+        LayoutStatus::Ready
     }
 
     fn ensure_font_loaded(&mut self) {
@@ -251,8 +283,20 @@ impl GreetingScreen {
     }
 
     fn rebuild_geometry(&mut self) {
+        if self.size.width == 0 || self.size.height == 0 {
+            self.frame_mesh = None;
+            self.frame_params = None;
+            return;
+        }
+
+        let params = FrameParams::from(self);
+        if self.frame_params == Some(params) {
+            return;
+        }
+
         self.frame_mesh =
             build_frame_mesh(&self.device, &self.settings, self.size, self.scale_factor);
+        self.frame_params = Some(params);
     }
 
     fn update_text_layout(&mut self) {
