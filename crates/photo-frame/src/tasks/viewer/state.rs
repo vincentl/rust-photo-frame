@@ -38,18 +38,22 @@ impl ViewerSM {
     }
 
     pub fn on_tick(&mut self, now: Instant) -> Option<ViewerStateChange> {
-        if self.state == ViewerState::Greeting
-            && now.duration_since(self.entered_at) >= self.greeting_duration
-        {
-            if self.photos_ready {
-                debug!(from = ?self.state, to = ?ViewerState::Awake, "viewer_sm_tick_transition");
-                return self.goto(ViewerState::Awake, now);
+        if self.state == ViewerState::Greeting {
+            let elapsed = now.duration_since(self.entered_at);
+            if self.greeting_duration.is_zero() {
+                self.photos_ready = true;
             }
-            debug!(
-                elapsed_ms = now.saturating_duration_since(self.entered_at).as_millis(),
-                "viewer_sm_tick_waiting_for_photo"
-            );
-            // Stay in Greeting until we have content ready.
+            if elapsed >= self.greeting_duration {
+                if self.photos_ready {
+                    debug!(from = ?self.state, to = ?ViewerState::Awake, "viewer_sm_tick_transition");
+                    return self.goto(ViewerState::Awake, now);
+                }
+                debug!(
+                    elapsed_ms = now.saturating_duration_since(self.entered_at).as_millis(),
+                    "viewer_sm_tick_waiting_for_photo"
+                );
+                // Stay in Greeting until we have content ready.
+            }
         }
         None
     }
@@ -57,6 +61,7 @@ impl ViewerSM {
     pub fn on_command(&mut self, cmd: &ViewerCommand, now: Instant) -> Option<ViewerStateChange> {
         if self.state == ViewerState::Greeting
             && now.duration_since(self.entered_at) < self.greeting_duration
+            && !self.photos_ready
         {
             debug!(?cmd, "viewer_sm_command_ignored_in_greeting");
             return None;
@@ -116,6 +121,7 @@ mod tests {
         let mut sm = ViewerSM::new(Duration::from_millis(100), start);
         assert_eq!(sm.current(), ViewerState::Greeting);
         assert!(sm.on_tick(start + Duration::from_millis(50)).is_none());
+        sm.on_photo_ready(start + Duration::from_millis(60));
         let ch = sm.on_tick(start + Duration::from_millis(100)).unwrap();
         assert_eq!(
             (ch.from, ch.to),

@@ -27,11 +27,10 @@ tokio-util = "0.7.16"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
 walkdir = "2.5.0"
-wgpu = { version = "26.0.1", features = ["wgsl"] }
+wgpu = { version = "25.0.2", features = ["wgsl"] }
 winit = "0.30.12"
-wgpu_glyph = "0.26.0"
-ab_glyph = "0.2.29"
-fontdb = "0.23.0"
+glyphon = "0.9.0"
+fontdb = "0.16.2"
 lyon = "1.0.1"
 
 [dev-dependencies]
