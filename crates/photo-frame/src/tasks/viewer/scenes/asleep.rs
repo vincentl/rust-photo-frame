@@ -32,7 +32,7 @@ impl AsleepScene {
 impl Scene for AsleepScene {
     fn on_enter(&mut self, ctx: &SceneContext) {
         self.resize(ctx.surface_size(), ctx.window.scale_factor());
-        let _ = self.screen.ensure_layout_ready();
+        let _ = self.screen.update_layout();
     }
 
     fn handle_resize(

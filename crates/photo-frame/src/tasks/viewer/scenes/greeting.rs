@@ -32,7 +32,7 @@ impl GreetingScene {
 impl Scene for GreetingScene {
     fn on_enter(&mut self, ctx: &SceneContext) {
         self.resize(ctx.surface_size(), ctx.window.scale_factor());
-        if self.screen.ensure_layout_ready() {
+        if self.screen.update_layout() {
             tracing::debug!(size = ?ctx.surface_size(), "greeting_scene_layout_ready");
         }
     }

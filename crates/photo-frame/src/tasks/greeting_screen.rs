@@ -31,7 +31,6 @@ pub struct GreetingScreen {
     background: LinSrgba<f32>,
     font_colour: LinSrgba<f32>,
     size: PhysicalSize<u32>,
-    layout_dirty: bool,
     text_origin: (f32, f32),
 }
 
@@ -76,17 +75,13 @@ impl GreetingScreen {
             background,
             font_colour,
             size: PhysicalSize::new(0, 0),
-            layout_dirty: true,
             text_origin: (0.0, 0.0),
         };
         instance
     }
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>, _scale_factor: f64) {
-        if self.size != new_size {
-            self.size = new_size;
-            self.layout_dirty = true;
-        }
+        self.size = new_size;
     }
 
     pub fn render(
@@ -97,14 +92,6 @@ impl GreetingScreen {
         if self.size.width == 0 || self.size.height == 0 {
             return false;
         }
-
-        let has_text = !self.message.trim().is_empty();
-        let mut text_ready = true;
-        if has_text {
-            text_ready = self.update_layout_if_needed();
-        }
-
-        if has_text && text_ready {
             self.viewport.update(
                 &self.queue,
                 Resolution {
@@ -138,7 +125,6 @@ impl GreetingScreen {
             ) {
                 warn!(error = %err, "greeting_screen_prepare_failed");
             }
-        }
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -156,38 +142,23 @@ impl GreetingScreen {
                 timestamp_writes: None,
             });
 
-            if has_text && text_ready {
                 if let Err(err) = self
                     .text_renderer
                     .render(&self.atlas, &self.viewport, &mut pass)
                 {
                     warn!(error = %err, "greeting_screen_draw_failed");
                 }
-            }
         }
 
-        if has_text && text_ready {
             self.atlas.trim();
-        }
-
-        if has_text { text_ready } else { true }
+            true
     }
 
     pub fn after_submit(&mut self) {
         let _ = self.device.poll(wgpu::PollType::Wait);
     }
 
-    pub fn ensure_layout_ready(&mut self) -> bool {
-        if self.size.width == 0 || self.size.height == 0 {
-            return false;
-        }
-        self.update_layout_if_needed()
-    }
-
-    fn update_layout_if_needed(&mut self) -> bool {
-        if !self.layout_dirty {
-            return true;
-        }
+    pub fn update_layout(&mut self) -> bool {
         if self.size.width == 0 || self.size.height == 0 {
             return false;
         }
@@ -213,7 +184,6 @@ impl GreetingScreen {
             .shape_until_scroll(&mut self.font_system, false);
 
         self.text_origin = compute_text_origin(&self.text_buffer, self.size);
-        self.layout_dirty = false;
         true
     }
 }
