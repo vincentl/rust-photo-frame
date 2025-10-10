@@ -17,6 +17,7 @@ impl GreetingScene {
         config: &GreetingScreenConfig,
     ) -> Self {
         let screen = GreetingScreen::new(device, queue, format, config.screen());
+        tracing::debug!("greeting_screen_new completed {config:?}");
         Self {
             screen,
             needs_redraw: true,
@@ -25,6 +26,7 @@ impl GreetingScene {
 
     fn resize(&mut self, new_size: PhysicalSize<u32>, scale_factor: f64) {
         self.screen.resize(new_size, scale_factor);
+        tracing::debug!("greeting_screen_resize {new_size:?} {scale_factor:?}"); 
         self.needs_redraw = true;
     }
 }
@@ -32,6 +34,7 @@ impl GreetingScene {
 impl Scene for GreetingScene {
     fn on_enter(&mut self, ctx: &SceneContext) {
         self.resize(ctx.surface_size(), ctx.window.scale_factor());
+       tracing::debug!("greeting_screen about to call update layout");
         if self.screen.update_layout() {
             tracing::debug!(size = ?ctx.surface_size(), "greeting_scene_layout_ready");
         }
@@ -47,6 +50,8 @@ impl Scene for GreetingScene {
     }
 
     fn render(&mut self, ctx: &mut RenderCtx<'_, '_>) -> RenderResult {
+        
+       tracing::debug!(self.needs_redraw, "greeting_screen render");
         if self.needs_redraw {
             let drew = self.screen.render(ctx.encoder, ctx.target_view);
             self.needs_redraw = !drew;
