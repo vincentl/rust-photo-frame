@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use fontdb::{Database, Family, Query};
 use glyphon::cosmic_text::Align;
@@ -6,6 +7,7 @@ use glyphon::{
     Attrs, Buffer, Cache, Color, FamilyOwned, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
 };
+use palette::{LinSrgba, Srgb, Srgba};
 use tracing::warn;
 use winit::dpi::PhysicalSize;
 
@@ -26,8 +28,8 @@ pub struct GreetingScreen {
     swash_cache: SwashCache,
     font_family: FamilyOwned,
     message: String,
-    background: wgpu::Color,
-    font_colour: [f32; 4],
+    background: LinSrgba<f32>,
+    font_colour: LinSrgba<f32>,
     size: PhysicalSize<u32>,
     layout_dirty: bool,
     text_origin: (f32, f32),
@@ -54,7 +56,11 @@ impl GreetingScreen {
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         let swash_cache = SwashCache::new();
 
-        let mut instance = GreetingScreen {
+        let message = screen.message_or_default().into_owned();
+        let background = resolve_background_colour(screen.colors.background.as_deref());
+        let font_colour = resolve_font_colour(screen.colors.font.as_deref());
+
+        let instance = GreetingScreen {
             device: device.clone(),
             queue: queue.clone(),
             format,
@@ -66,24 +72,14 @@ impl GreetingScreen {
             font_system,
             swash_cache,
             font_family,
-            message: String::new(),
-            background: default_background(),
-            font_colour: default_font_colour(),
+            message,
+            background,
+            font_colour,
             size: PhysicalSize::new(0, 0),
             layout_dirty: true,
             text_origin: (0.0, 0.0),
         };
-        instance.update_screen(screen);
         instance
-    }
-
-    pub fn update_screen(&mut self, screen: &ScreenMessageConfig) {
-        self.message = screen.message_or_default().into_owned();
-        self.background = resolve_background_colour(&screen.colors.background);
-        self.font_colour = resolve_font_colour(&screen.colors.font);
-        self.font_family =
-            resolve_font_family(&self.font_system, screen.font.as_ref().map(|s| s.as_str()));
-        self.layout_dirty = true;
     }
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>, _scale_factor: f64) {
@@ -151,7 +147,7 @@ impl GreetingScreen {
                     view: target_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.background),
+                        load: wgpu::LoadOp::Clear(to_wgpu_color(self.background)),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -186,16 +182,6 @@ impl GreetingScreen {
             return false;
         }
         self.update_layout_if_needed()
-    }
-
-    pub fn screen_message(
-        &mut self,
-        screen: &ScreenMessageConfig,
-        encoder: &mut wgpu::CommandEncoder,
-        target_view: &wgpu::TextureView,
-    ) -> bool {
-        self.update_screen(screen);
-        self.render(encoder, target_view)
     }
 
     fn update_layout_if_needed(&mut self) -> bool {
@@ -251,18 +237,15 @@ fn compute_font_size(message: &str, size: PhysicalSize<u32>) -> f32 {
     (scale / adjustment).clamp(24.0, 360.0)
 }
 
-fn resolve_background_colour(source: &Option<String>) -> wgpu::Color {
+fn resolve_background_colour(source: Option<&str>) -> LinSrgba<f32> {
     source
-        .as_ref()
-        .and_then(|value| parse_hex_color(value).ok())
-        .map(to_wgpu_color)
+        .and_then(parse_hex_color)
         .unwrap_or_else(default_background)
 }
 
-fn resolve_font_colour(source: &Option<String>) -> [f32; 4] {
+fn resolve_font_colour(source: Option<&str>) -> LinSrgba<f32> {
     source
-        .as_ref()
-        .and_then(|value| parse_hex_color(value).ok())
+        .and_then(parse_hex_color)
         .unwrap_or_else(default_font_colour)
 }
 
@@ -329,91 +312,42 @@ fn compute_text_origin(buffer: &Buffer, size: PhysicalSize<u32>) -> (f32, f32) {
     (0.0, top_offset.max(0.0))
 }
 
-fn to_text_color(color: [f32; 4]) -> Color {
-    Color::rgba(
-        linear_to_srgb(color[0]),
-        linear_to_srgb(color[1]),
-        linear_to_srgb(color[2]),
-        (color[3] * 255.0).clamp(0.0, 255.0) as u8,
-    )
+fn to_text_color(color: LinSrgba<f32>) -> Color {
+    let srgb: Srgba<f32> = Srgba::from_linear(color);
+    let srgb_u8: Srgba<u8> = srgb.into_format();
+    Color::rgba(srgb_u8.red, srgb_u8.green, srgb_u8.blue, srgb_u8.alpha)
 }
 
-fn linear_to_srgb(component: f32) -> u8 {
-    let linear = component.clamp(0.0, 1.0);
-    let srgb = if linear <= 0.0031308 {
-        linear * 12.92
-    } else {
-        1.055 * linear.powf(1.0 / 2.4) - 0.055
-    };
-    (srgb * 255.0).round().clamp(0.0, 255.0) as u8
-}
-
-fn parse_hex_color(input: &str) -> Result<[f32; 4], String> {
-    let trimmed = input.trim().trim_start_matches('#');
-    let (r, g, b, a) = match trimmed.len() {
-        6 => (
-            parse_hex_pair(&trimmed[0..2])?,
-            parse_hex_pair(&trimmed[2..4])?,
-            parse_hex_pair(&trimmed[4..6])?,
-            255,
-        ),
-        8 => (
-            parse_hex_pair(&trimmed[0..2])?,
-            parse_hex_pair(&trimmed[2..4])?,
-            parse_hex_pair(&trimmed[4..6])?,
-            parse_hex_pair(&trimmed[6..8])?,
-        ),
-        _ => return Err("unsupported colour length".into()),
-    };
-    Ok([
-        srgb_to_linear(r),
-        srgb_to_linear(g),
-        srgb_to_linear(b),
-        (a as f32) / 255.0,
-    ])
-}
-
-fn parse_hex_pair(slice: &str) -> Result<u8, String> {
-    let bytes = slice.as_bytes();
-    if bytes.len() != 2 {
-        return Err("invalid pair".into());
+fn parse_hex_color(input: &str) -> Option<LinSrgba<f32>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    let hi = hex_value(bytes[0])?;
-    let lo = hex_value(bytes[1])?;
-    Ok((hi << 4) | lo)
-}
 
-fn hex_value(byte: u8) -> Result<u8, String> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err("invalid hex digit".into()),
+    if let Ok(rgba) = Srgba::<u8>::from_str(trimmed) {
+        let rgba_f32: Srgba<f32> = rgba.into_format();
+        return Some(rgba_f32.into_linear());
     }
+
+    let rgb = Srgb::<u8>::from_str(trimmed).ok()?;
+    let rgba = Srgba::new(rgb.red, rgb.green, rgb.blue, 255);
+    let rgba_f32: Srgba<f32> = rgba.into_format();
+    Some(rgba_f32.into_linear())
 }
 
-fn srgb_to_linear(component: u8) -> f32 {
-    let srgb = component as f32 / 255.0;
-    if srgb <= 0.04045 {
-        srgb / 12.92
-    } else {
-        ((srgb + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-fn to_wgpu_color(color: [f32; 4]) -> wgpu::Color {
+fn to_wgpu_color(color: LinSrgba<f32>) -> wgpu::Color {
     wgpu::Color {
-        r: color[0] as f64,
-        g: color[1] as f64,
-        b: color[2] as f64,
-        a: color[3] as f64,
+        r: color.red as f64,
+        g: color.green as f64,
+        b: color.blue as f64,
+        a: color.alpha as f64,
     }
 }
 
-fn default_background() -> wgpu::Color {
-    to_wgpu_color(parse_hex_color("#111827").unwrap())
+fn default_background() -> LinSrgba<f32> {
+    parse_hex_color("#111827").unwrap()
 }
 
-fn default_font_colour() -> [f32; 4] {
+fn default_font_colour() -> LinSrgba<f32> {
     parse_hex_color("#F8FAFC").unwrap()
 }
