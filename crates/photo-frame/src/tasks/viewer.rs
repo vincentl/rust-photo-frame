@@ -100,6 +100,7 @@ impl ViewerApp {
         let attrs = WindowAttributes::default().with_title("Rust Photo Frame");
         match event_loop.create_window(attrs) {
             Ok(window) => {
+                window.set_cursor_visible(false);
                 let window = Arc::new(window);
                 self.window = Some(window.clone());
                 Some(window)
