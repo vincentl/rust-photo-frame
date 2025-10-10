@@ -40,7 +40,7 @@ impl ViewerSM {
     pub fn on_tick(&mut self, now: Instant) -> Option<ViewerStateChange> {
         if self.state == ViewerState::Greeting {
             let elapsed = now.duration_since(self.entered_at);
-            if elapsed < self.greeting_duration || self.greeting_duration.is_zero() {
+            if self.greeting_duration.is_zero() {
                 self.photos_ready = true;
             }
             if elapsed >= self.greeting_duration {
@@ -121,6 +121,7 @@ mod tests {
         let mut sm = ViewerSM::new(Duration::from_millis(100), start);
         assert_eq!(sm.current(), ViewerState::Greeting);
         assert!(sm.on_tick(start + Duration::from_millis(50)).is_none());
+        sm.on_photo_ready(start + Duration::from_millis(60));
         let ch = sm.on_tick(start + Duration::from_millis(100)).unwrap();
         assert_eq!(
             (ch.from, ch.to),
