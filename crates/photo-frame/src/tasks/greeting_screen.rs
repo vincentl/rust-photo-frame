@@ -103,11 +103,12 @@ impl GreetingScreen {
         }
 
         let has_text = !self.message.trim().is_empty();
-        if has_text && !self.update_layout_if_needed() {
-            return false;
+        let mut text_ready = true;
+        if has_text {
+            text_ready = self.update_layout_if_needed();
         }
 
-        if has_text {
+        if has_text && text_ready {
             self.viewport.update(
                 &self.queue,
                 Resolution {
@@ -159,7 +160,7 @@ impl GreetingScreen {
                 timestamp_writes: None,
             });
 
-            if has_text {
+            if has_text && text_ready {
                 if let Err(err) = self
                     .text_renderer
                     .render(&self.atlas, &self.viewport, &mut pass)
@@ -169,11 +170,11 @@ impl GreetingScreen {
             }
         }
 
-        if has_text {
+        if has_text && text_ready {
             self.atlas.trim();
         }
 
-        true
+        if has_text { text_ready } else { true }
     }
 
     pub fn after_submit(&mut self) {
