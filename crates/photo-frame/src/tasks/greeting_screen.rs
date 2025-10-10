@@ -97,36 +97,35 @@ impl GreetingScreen {
             });
         }
 
-        // Queue the text section.
-        if !self.message.trim().is_empty() {
-            let font_size = compute_font_size(&self.font, &self.message, self.size);
-            let section = Section {
-                screen_position: (
-                    (self.size.width as f32) * 0.5,
-                    (self.size.height as f32) * 0.5,
-                ),
-                bounds: (self.size.width as f32, self.size.height as f32),
-                layout: Layout::default_wrap()
-                    .h_align(HorizontalAlign::Center)
-                    .v_align(VerticalAlign::Center),
-                text: vec![
-                    Text::new(&self.message)
-                        .with_scale(font_size)
-                        .with_color(self.font_colour),
-                ],
-                ..Section::default()
-            };
-            self.glyph_brush.queue(section);
-            if let Err(err) = self.glyph_brush.draw_queued(
-                &self.device,
-                &mut self.staging_belt,
-                encoder,
-                target_view,
-                self.size.width,
-                self.size.height,
-            ) {
-                warn!(error = %err, "greeting_screen_draw_failed");
-            }
+        // Queue a simple debug glyph so we can inspect rendering behaviour without
+        // pulling configuration data. Drawing a bold "X" makes it obvious whether
+        // the greeting scene reaches the screen and the glyph brush is working.
+        let section = Section {
+            screen_position: (
+                (self.size.width as f32) * 0.5,
+                (self.size.height as f32) * 0.5,
+            ),
+            bounds: (self.size.width as f32, self.size.height as f32),
+            layout: Layout::default_wrap()
+                .h_align(HorizontalAlign::Center)
+                .v_align(VerticalAlign::Center),
+            text: vec![
+                Text::new("X")
+                    .with_scale(120.0)
+                    .with_color([1.0, 0.0, 0.0, 1.0]),
+            ],
+            ..Section::default()
+        };
+        self.glyph_brush.queue(section);
+        if let Err(err) = self.glyph_brush.draw_queued(
+            &self.device,
+            &mut self.staging_belt,
+            encoder,
+            target_view,
+            self.size.width,
+            self.size.height,
+        ) {
+            warn!(error = %err, "greeting_screen_draw_failed");
         }
 
         self.staging_belt.finish();
@@ -151,25 +150,6 @@ impl GreetingScreen {
         self.update_screen(screen);
         self.render(encoder, target_view)
     }
-}
-
-fn compute_font_size(_font: &FontArc, message: &str, size: PhysicalSize<u32>) -> f32 {
-    if message.trim().is_empty() {
-        return 16.0;
-    }
-    let min_dim = size.width.min(size.height) as f32;
-    let mut scale = min_dim * 0.12; // start with 12% of the smaller side
-    if scale < 24.0 {
-        scale = 24.0;
-    }
-    if scale > 360.0 {
-        scale = 360.0;
-    }
-
-    // If the message is very long, reduce the scale heuristically.
-    let chars = message.chars().count().max(1);
-    let adjustment = ((chars as f32) / 24.0).sqrt();
-    (scale / adjustment).clamp(24.0, 360.0)
 }
 
 fn resolve_background_colour(source: &Option<String>) -> wgpu::Color {
