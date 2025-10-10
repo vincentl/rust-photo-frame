@@ -33,7 +33,9 @@ impl GreetingScreen {
         screen: &ScreenMessageConfig,
     ) -> Self {
         let font = load_font(&screen.font);
-        let glyph_brush = GlyphBrushBuilder::using_font(font.clone()).build(device, format);
+        let glyph_brush = GlyphBrushBuilder::using_font(font.clone())
+            .initial_cache_size((512, 512))
+            .build(device, format);
         let staging_belt = StagingBelt::new(1024);
         let mut instance = GreetingScreen {
             device: device.clone(),
@@ -57,6 +59,7 @@ impl GreetingScreen {
         if let Some(font_name) = screen.font.as_ref() {
             if let Some(new_font) = load_named_font(font_name.trim()) {
                 self.glyph_brush = GlyphBrushBuilder::using_font(new_font.clone())
+                    .initial_cache_size((512, 512))
                     .build(&self.device, self.format);
                 self.font = new_font;
             } else {
@@ -77,6 +80,11 @@ impl GreetingScreen {
         if self.size.width == 0 || self.size.height == 0 {
             return false;
         }
+
+        // Reclaim staging buffers from the previous submission so glyph uploads
+        // for this frame have fresh space available, matching the behaviour in
+        // commit ddf4f615.
+        self.staging_belt.recall();
 
         // Clear to background colour.
         {
