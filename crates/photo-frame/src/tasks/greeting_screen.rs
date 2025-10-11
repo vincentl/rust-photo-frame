@@ -13,6 +13,10 @@ use winit::dpi::PhysicalSize;
 
 use crate::config::ScreenMessageConfig;
 
+mod frame;
+
+use frame::{FrameRenderer, FrameStyle, FrameUpdateParams};
+
 /// Lightweight greeting/sleep screen renderer: clears the surface to the
 /// configured background colour and renders centred text using `glyphon`.
 pub struct GreetingScreen {
@@ -30,8 +34,15 @@ pub struct GreetingScreen {
     message: String,
     background: LinSrgba<f32>,
     font_colour: LinSrgba<f32>,
+    accent_colour: LinSrgba<f32>,
+    stroke_width_dip: f32,
+    corner_radius_dip: f32,
+    scale_factor: f64,
     size: PhysicalSize<u32>,
     text_origin: (f32, f32),
+    text_bounds: (f32, f32),
+    line_height: f32,
+    frame_renderer: FrameRenderer,
 }
 
 impl GreetingScreen {
@@ -58,6 +69,10 @@ impl GreetingScreen {
         let message = screen.message_or_default().into_owned();
         let background = resolve_background_colour(screen.colors.background.as_deref());
         let font_colour = resolve_font_colour(screen.colors.font.as_deref());
+        let accent_colour = resolve_accent_colour(screen.colors.accent.as_deref());
+        let stroke_width_dip = screen.effective_stroke_width_dip();
+        let corner_radius_dip = screen.effective_corner_radius_dip(stroke_width_dip);
+        let frame_renderer = FrameRenderer::new(device, format);
 
         let instance = GreetingScreen {
             device: device.clone(),
@@ -74,14 +89,22 @@ impl GreetingScreen {
             message,
             background,
             font_colour,
+            accent_colour,
+            stroke_width_dip,
+            corner_radius_dip,
+            scale_factor: 1.0,
             size: PhysicalSize::new(0, 0),
             text_origin: (0.0, 0.0),
+            text_bounds: (0.0, 0.0),
+            line_height: 38.4,
+            frame_renderer,
         };
         instance
     }
 
-    pub fn resize(&mut self, new_size: PhysicalSize<u32>, _scale_factor: f64) {
+    pub fn resize(&mut self, new_size: PhysicalSize<u32>, scale_factor: f64) {
         self.size = new_size;
+        self.scale_factor = scale_factor;
     }
 
     pub fn render(
@@ -92,39 +115,39 @@ impl GreetingScreen {
         if self.size.width == 0 || self.size.height == 0 {
             return false;
         }
-            self.viewport.update(
-                &self.queue,
-                Resolution {
-                    width: self.size.width,
-                    height: self.size.height,
-                },
-            );
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.size.width,
+                height: self.size.height,
+            },
+        );
 
-            let text_color = to_text_color(self.font_colour);
-            if let Err(err) = self.text_renderer.prepare(
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                [TextArea {
-                    buffer: &self.text_buffer,
-                    left: self.text_origin.0,
-                    top: self.text_origin.1,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.size.width as i32,
-                        bottom: self.size.height as i32,
-                    },
-                    default_color: text_color,
-                    custom_glyphs: &[],
-                }],
-                &mut self.swash_cache,
-            ) {
-                warn!(error = %err, "greeting_screen_prepare_failed");
-            }
+        let text_color = to_text_color(self.font_colour);
+        if let Err(err) = self.text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            [TextArea {
+                buffer: &self.text_buffer,
+                left: self.text_origin.0,
+                top: self.text_origin.1,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.size.width as i32,
+                    bottom: self.size.height as i32,
+                },
+                default_color: text_color,
+                custom_glyphs: &[],
+            }],
+            &mut self.swash_cache,
+        ) {
+            warn!(error = %err, "greeting_screen_prepare_failed");
+        }
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -142,16 +165,18 @@ impl GreetingScreen {
                 timestamp_writes: None,
             });
 
-                if let Err(err) = self
-                    .text_renderer
-                    .render(&self.atlas, &self.viewport, &mut pass)
-                {
-                    warn!(error = %err, "greeting_screen_draw_failed");
-                }
+            self.frame_renderer.draw(&mut pass);
+
+            if let Err(err) = self
+                .text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+            {
+                warn!(error = %err, "greeting_screen_draw_failed");
+            }
         }
 
-            self.atlas.trim();
-            true
+        self.atlas.trim();
+        true
     }
 
     pub fn after_submit(&mut self) {
@@ -183,8 +208,48 @@ impl GreetingScreen {
         self.text_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
-        self.text_origin = compute_text_origin(&self.text_buffer, self.size);
+        let layout = compute_text_layout(&self.text_buffer, self.size, metrics.line_height);
+        self.text_origin = layout.origin;
+        self.text_bounds = layout.bounds;
+        self.line_height = metrics.line_height;
+
+        let style = self.build_frame_style();
+        let accent = to_frame_color(self.accent_colour);
+        self.frame_renderer.update(
+            &self.device,
+            &self.queue,
+            FrameUpdateParams {
+                surface_size: self.size,
+                text_bounds: self.text_bounds,
+                line_height: self.line_height,
+                color: accent,
+                style,
+            },
+        );
         true
+    }
+
+    fn build_frame_style(&self) -> FrameStyle {
+        let scale = self.scale_factor as f32;
+        let stroke_px = (self.stroke_width_dip * scale).max(1.0);
+        let inner_min = self.dip_to_px(1.5);
+        let inner_stroke_px = (stroke_px * 0.45).clamp(inner_min, stroke_px);
+        let gap_px = (stroke_px * 0.6).max(self.dip_to_px(6.0));
+        let padding_dip = (self.stroke_width_dip * 2.4).max(24.0);
+        let content_padding_px = self.dip_to_px(padding_dip);
+        let corner_radius_px = (self.corner_radius_dip * scale).max(0.0);
+
+        FrameStyle {
+            outer_stroke_px: stroke_px,
+            inner_stroke_px,
+            gap_px,
+            content_padding_px,
+            corner_radius_px,
+        }
+    }
+
+    fn dip_to_px(&self, value: f32) -> f32 {
+        value * self.scale_factor as f32
     }
 }
 
@@ -217,6 +282,12 @@ fn resolve_font_colour(source: Option<&str>) -> LinSrgba<f32> {
     source
         .and_then(parse_hex_color)
         .unwrap_or_else(default_font_colour)
+}
+
+fn resolve_accent_colour(source: Option<&str>) -> LinSrgba<f32> {
+    source
+        .and_then(parse_hex_color)
+        .unwrap_or_else(default_accent_colour)
 }
 
 fn initialize_font_database(db: &mut Database) {
@@ -260,32 +331,56 @@ fn apply_center_alignment(buffer: &mut Buffer) {
     }
 }
 
-fn compute_text_origin(buffer: &Buffer, size: PhysicalSize<u32>) -> (f32, f32) {
+struct TextLayout {
+    origin: (f32, f32),
+    bounds: (f32, f32),
+}
+
+fn compute_text_layout(
+    buffer: &Buffer,
+    size: PhysicalSize<u32>,
+    fallback_line_height: f32,
+) -> TextLayout {
     let mut min_top = f32::MAX;
     let mut max_bottom = f32::MIN;
+    let mut max_width: f32 = 0.0;
     let mut has_runs = false;
 
     for run in buffer.layout_runs() {
         has_runs = true;
         min_top = min_top.min(run.line_top);
         max_bottom = max_bottom.max(run.line_top + run.line_height);
+        max_width = max_width.max(run.line_w);
     }
 
     if !has_runs {
-        return (0.0, (size.height as f32) * 0.5);
+        let height = fallback_line_height.max(0.0);
+        let y = ((size.height as f32) - height) * 0.5;
+        return TextLayout {
+            origin: (0.0, y.max(0.0)),
+            bounds: (0.0, height),
+        };
     }
 
-    let text_height = (max_bottom - min_top).max(0.0);
+    let text_height = (max_bottom - min_top).max(fallback_line_height);
     let container_height = size.height as f32;
     let top_offset = ((container_height - text_height) * 0.5) - min_top;
 
-    (0.0, top_offset.max(0.0))
+    let bounds_width = max_width.max(fallback_line_height * 0.6);
+    TextLayout {
+        origin: (0.0, top_offset.max(0.0)),
+        bounds: (bounds_width, text_height),
+    }
 }
 
 fn to_text_color(color: LinSrgba<f32>) -> Color {
     let srgb: Srgba<f32> = Srgba::from_linear(color);
     let srgb_u8: Srgba<u8> = srgb.into_format();
     Color::rgba(srgb_u8.red, srgb_u8.green, srgb_u8.blue, srgb_u8.alpha)
+}
+
+fn to_frame_color(color: LinSrgba<f32>) -> [f32; 4] {
+    [color.red, color.green, color.blue, color.alpha]
 }
 
 fn parse_hex_color(input: &str) -> Option<LinSrgba<f32>> {
@@ -320,4 +415,8 @@ fn default_background() -> LinSrgba<f32> {
 
 fn default_font_colour() -> LinSrgba<f32> {
     parse_hex_color("#F8FAFC").unwrap()
+}
+
+fn default_accent_colour() -> LinSrgba<f32> {
+    parse_hex_color("#38BDF8").unwrap()
 }
