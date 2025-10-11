@@ -11,3 +11,6 @@ edition = "2024"
 
 [workspace.metadata]
 # Workspace-level metadata placeholder for future shared settings.
+
+[patch.crates-io]
+cosmic-text = { git = "https://github.com/pop-os/cosmic-text.git", rev = "646e04389e1c2e03a85e61946ace06d8fada1fa1" }
