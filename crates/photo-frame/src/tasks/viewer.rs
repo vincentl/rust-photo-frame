@@ -212,6 +212,7 @@ async fn drive_viewer_events(
             cmd = control.recv() => {
                 match cmd {
                     Some(cmd) => {
+                        debug!(command = ?cmd, "viewer_event_forward_command");
                         if proxy.send_event(ViewerEvent::Command(cmd)).is_err() {
                             warn!("viewer event proxy rejected command event; stopping driver loop");
                             break;
@@ -1067,6 +1068,9 @@ pub fn run_windowed(
                 info!("viewer: entering greeting");
             }
             self.viewer_state = ViewerState::Greeting;
+            let duration = self.full_config.greeting_screen.effective_duration();
+            let duration_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
+            debug!(duration_ms, "viewer_greeting_duration_configured");
             self.wake.take_redraw_needed();
             if let Some(gpu) = self.gpu.as_mut() {
                 if let Some(window) = self.window.as_ref() {
