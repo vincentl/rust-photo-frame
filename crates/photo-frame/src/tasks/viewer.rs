@@ -1,3 +1,5 @@
+pub mod scenes;
+
 use crate::config::{
     MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionKind, TransitionMode,
     TransitionOptions,
