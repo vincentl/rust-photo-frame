@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -216,6 +217,24 @@ async fn main() -> Result<()> {
             tasks::photo_effect::run(from_loader, to_viewer, cancel, effect_cfg)
                 .await
                 .context("photo-effect task failed")
+        }
+    });
+
+    // Auto-advance from greeting to wake state after the configured duration
+    tasks.spawn({
+        let cancel = cancel.clone();
+        let control = viewer_control_tx.clone();
+        let greeting_duration = cfg.greeting_screen.effective_duration();
+        async move {
+            tokio::select! {
+                _ = cancel.cancelled() => Ok(()),
+                _ = sleep(greeting_duration) => {
+                    if let Err(err) = control.send(ViewerCommand::SetState(ViewerState::Awake)).await {
+                        tracing::debug!("auto-wake command dropped: {err}");
+                    }
+                    Ok(())
+                }
+            }
         }
     });
 
