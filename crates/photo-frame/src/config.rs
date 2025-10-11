@@ -1864,31 +1864,30 @@ impl<'de> Visitor<'de> for MattingOptionVisitor {
 }
 
 impl MattingConfig {
-    #[allow(dead_code)]
     /// Exposed for integration tests to introspect the parsed selection strategy.
-    pub fn selection(&self) -> MattingSelection {
-        self.selection.clone()
+    pub fn selection(&self) -> &MattingSelection {
+        &self.selection
     }
 
-    #[allow(dead_code)]
     /// Exposed for integration tests to inspect the configured matting options.
     pub fn options(&self) -> &BTreeMap<MattingKind, MattingOptions> {
         &self.options
     }
 
     pub fn primary_option(&self) -> Option<&MattingOptions> {
-        match &self.selection {
-            MattingSelection::Fixed(kind) => self.options.get(kind),
-            MattingSelection::Random(kinds) => kinds.iter().find_map(|kind| self.options.get(kind)),
+        let options = self.options();
+        match self.selection() {
+            MattingSelection::Fixed(kind) => options.get(kind),
+            MattingSelection::Random(kinds) => kinds.iter().find_map(|kind| options.get(kind)),
             MattingSelection::Sequential { kinds, .. } => {
-                kinds.first().and_then(|kind| self.options.get(kind))
+                kinds.first().and_then(|kind| options.get(kind))
             }
         }
     }
 
     pub fn prepare_runtime(&mut self) -> Result<()> {
         ensure!(
-            !self.options.is_empty(),
+            !self.options().is_empty(),
             "matting configuration must include at least one option"
         );
         for option in self.options.values_mut() {
@@ -1900,9 +1899,9 @@ impl MattingConfig {
     }
 
     pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> MattingOptions {
-        match &self.selection {
-            MattingSelection::Fixed(kind) => self
-                .options
+        let options = self.options();
+        match self.selection() {
+            MattingSelection::Fixed(kind) => options
                 .get(kind)
                 .cloned()
                 .expect("validated fixed matting should have selected option"),
@@ -1912,7 +1911,7 @@ impl MattingConfig {
                     .copied()
                     .choose(rng)
                     .expect("validated random matting should have options");
-                self.options
+                options
                     .get(&kind)
                     .cloned()
                     .expect("validated random matting should have matching option")
@@ -1920,7 +1919,7 @@ impl MattingConfig {
             MattingSelection::Sequential { kinds, runtime } => {
                 let index = runtime.next(kinds.len());
                 let kind = kinds[index];
-                self.options
+                options
                     .get(&kind)
                     .cloned()
                     .expect("validated sequential matting should have matching option")
@@ -2509,33 +2508,29 @@ impl Default for TransitionConfig {
 }
 
 impl TransitionConfig {
-    #[allow(dead_code)]
-    pub fn selection(&self) -> TransitionSelection {
-        self.selection.clone()
+    pub fn selection(&self) -> &TransitionSelection {
+        &self.selection
     }
 
-    #[allow(dead_code)]
     pub fn options(&self) -> &BTreeMap<TransitionKind, TransitionOptions> {
         &self.options
     }
 
-    #[allow(dead_code)]
     pub fn primary_option(&self) -> Option<&TransitionOptions> {
-        match &self.selection {
-            TransitionSelection::Fixed(kind) => self.options.get(kind),
-            TransitionSelection::Random(kinds) => {
-                kinds.iter().find_map(|kind| self.options.get(kind))
-            }
+        let options = self.options();
+        match self.selection() {
+            TransitionSelection::Fixed(kind) => options.get(kind),
+            TransitionSelection::Random(kinds) => kinds.iter().find_map(|kind| options.get(kind)),
             TransitionSelection::Sequential { kinds, .. } => {
-                kinds.first().and_then(|kind| self.options.get(kind))
+                kinds.first().and_then(|kind| options.get(kind))
             }
         }
     }
 
     pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> TransitionOptions {
-        match &self.selection {
-            TransitionSelection::Fixed(kind) => self
-                .options
+        let options = self.options();
+        match self.selection() {
+            TransitionSelection::Fixed(kind) => options
                 .get(kind)
                 .cloned()
                 .expect("validated fixed transition should have selected option"),
@@ -2545,7 +2540,7 @@ impl TransitionConfig {
                     .copied()
                     .choose(rng)
                     .expect("validated random transition should have options");
-                self.options
+                options
                     .get(&kind)
                     .cloned()
                     .expect("validated random transition should have matching option")
@@ -2553,7 +2548,7 @@ impl TransitionConfig {
             TransitionSelection::Sequential { kinds, runtime } => {
                 let index = runtime.next(kinds.len());
                 let kind = kinds[index];
-                self.options
+                options
                     .get(&kind)
                     .cloned()
                     .expect("validated sequential transition should have matching option")
