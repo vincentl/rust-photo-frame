@@ -17,7 +17,9 @@ impl GreetingScene {
         format: wgpu::TextureFormat,
         config: &GreetingScreenConfig,
     ) -> Self {
-        let screen = GreetingScreen::new(device, queue, format, config.screen());
+        let mut screen = GreetingScreen::new(device, queue, format, config.screen());
+        let message = config.screen().message_or_default().into_owned();
+        let _ = screen.set_message(message);
         tracing::debug!("greeting_screen_new completed {config:?}");
         Self {
             screen,

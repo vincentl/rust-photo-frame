@@ -55,7 +55,6 @@ impl GreetingScreen {
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         let swash_cache = SwashCache::new();
 
-        let message = screen.message_or_default().into_owned();
         let background = resolve_background_colour(screen.colors.background.as_deref());
         let font_colour = resolve_font_colour(screen.colors.font.as_deref());
 
@@ -71,13 +70,22 @@ impl GreetingScreen {
             font_system,
             swash_cache,
             font_family,
-            message,
+            message: String::new(),
             background,
             font_colour,
             size: PhysicalSize::new(0, 0),
             text_origin: (0.0, 0.0),
         };
         instance
+    }
+
+    pub fn set_message(&mut self, message: impl Into<String>) -> bool {
+        let message = message.into();
+        if self.message == message {
+            return false;
+        }
+        self.message = message;
+        true
     }
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>, _scale_factor: f64) {
