@@ -3,6 +3,7 @@
 //! This module will house the logic for state-specific viewer behaviour.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Instant;
 
 use rand::Rng;
@@ -11,7 +12,7 @@ use wgpu::{CommandEncoder, TextureView};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::config::TransitionConfig;
+use crate::config::{Configuration, TransitionConfig};
 use crate::events::Displayed;
 use crate::tasks::greeting_screen::GreetingScreen;
 
@@ -138,6 +139,47 @@ impl GreetingScene {
     }
 }
 
+impl Scene for GreetingScene {
+    fn enter(&mut self, mut ctx: SceneContext<'_>) {
+        if let Some(window) = ctx.window() {
+            self.resize(window.inner_size(), window.scale_factor());
+        }
+        let message = ctx
+            .config()
+            .greeting_screen
+            .screen()
+            .message_or_default()
+            .into_owned();
+        self.set_message(message);
+        self.mark_redraw_needed();
+        ctx.request_redraw();
+    }
+
+    fn process_tick(&mut self, mut ctx: SceneContext<'_>) {
+        if self.needs_redraw() {
+            ctx.request_redraw();
+        }
+    }
+
+    fn handle_resize(
+        &mut self,
+        mut ctx: SceneContext<'_>,
+        new_size: PhysicalSize<u32>,
+        scale_factor: f64,
+    ) {
+        self.resize(new_size, scale_factor);
+        self.mark_redraw_needed();
+        ctx.request_redraw();
+    }
+
+    fn handle_visibility(&mut self, mut ctx: SceneContext<'_>, is_visible: bool) {
+        if is_visible {
+            self.mark_redraw_needed();
+            ctx.request_redraw();
+        }
+    }
+}
+
 /// State container for the sleep overlay scene.
 pub(super) struct SleepScene {
     overlay: OverlayScene,
@@ -180,6 +222,47 @@ impl SleepScene {
 
     pub(super) fn after_submit(&mut self) {
         self.overlay.after_submit();
+    }
+}
+
+impl Scene for SleepScene {
+    fn enter(&mut self, mut ctx: SceneContext<'_>) {
+        if let Some(window) = ctx.window() {
+            self.resize(window.inner_size(), window.scale_factor());
+        }
+        let message = ctx
+            .config()
+            .sleep_screen
+            .screen()
+            .message_or_default()
+            .into_owned();
+        self.set_message(message);
+        self.mark_redraw_needed();
+        ctx.request_redraw();
+    }
+
+    fn process_tick(&mut self, mut ctx: SceneContext<'_>) {
+        if self.needs_redraw() {
+            ctx.request_redraw();
+        }
+    }
+
+    fn handle_resize(
+        &mut self,
+        mut ctx: SceneContext<'_>,
+        new_size: PhysicalSize<u32>,
+        scale_factor: f64,
+    ) {
+        self.resize(new_size, scale_factor);
+        self.mark_redraw_needed();
+        ctx.request_redraw();
+    }
+
+    fn handle_visibility(&mut self, mut ctx: SceneContext<'_>, is_visible: bool) {
+        if is_visible {
+            self.mark_redraw_needed();
+            ctx.request_redraw();
+        }
     }
 }
 
@@ -368,6 +451,18 @@ impl WakeScene {
             self.displayed_at = Some(Instant::now());
         }
     }
+
+    fn ensure_redraw_requested(&mut self, ctx: &mut SceneContext<'_>) {
+        let pending_redraw = self.needs_redraw();
+        let has_transition = self.transition_state().is_some();
+        if pending_redraw {
+            self.take_redraw_needed();
+        }
+        if pending_redraw || has_transition {
+            tracing::debug!(pending_redraw, has_transition, "viewer_request_redraw_wake");
+            ctx.request_redraw();
+        }
+    }
 }
 
 /// Execution context shared with viewer scenes.
@@ -377,24 +472,21 @@ impl WakeScene {
 /// direct access to unrelated subsystems.
 pub(super) struct SceneContext<'a> {
     window: Option<&'a Window>,
-    greeting_overlay: Option<&'a mut GreetingScene>,
-    sleep_overlay: Option<&'a mut SleepScene>,
     redraw: &'a mut dyn FnMut(),
+    config: Arc<Configuration>,
 }
 
 impl<'a> SceneContext<'a> {
     /// Creates a new [`SceneContext`] scoped to the currently active viewer state.
     pub(super) fn new(
         window: Option<&'a Window>,
-        greeting_overlay: Option<&'a mut GreetingScene>,
-        sleep_overlay: Option<&'a mut SleepScene>,
         redraw: &'a mut dyn FnMut(),
+        config: Arc<Configuration>,
     ) -> Self {
         Self {
             window,
-            greeting_overlay,
-            sleep_overlay,
             redraw,
+            config,
         }
     }
 
@@ -403,19 +495,14 @@ impl<'a> SceneContext<'a> {
         self.window
     }
 
-    /// Provides mutable access to the greeting overlay scene when it is available.
-    pub(super) fn greeting_overlay(&mut self) -> Option<&mut GreetingScene> {
-        self.greeting_overlay.as_deref_mut()
-    }
-
-    /// Provides mutable access to the sleep overlay scene when it is available.
-    pub(super) fn sleep_overlay(&mut self) -> Option<&mut SleepScene> {
-        self.sleep_overlay.as_deref_mut()
-    }
-
     /// Requests a redraw from the viewer event loop.
     pub(super) fn request_redraw(&mut self) {
         (self.redraw)();
+    }
+
+    /// Returns the application configuration.
+    pub(super) fn config(&self) -> &Configuration {
+        &self.config
     }
 }
 
@@ -430,6 +517,60 @@ pub(super) trait Scene {
     /// Called from the event loop `about_to_wait` hook.
     fn about_to_wait(&mut self, _ctx: SceneContext<'_>) {}
 
-    /// Called when the viewer wants the scene to ensure any redraw requests are queued.
-    fn request_redraw(&mut self, _ctx: SceneContext<'_>) {}
+    /// Called when the viewer processes a periodic tick.
+    fn process_tick(&mut self, _ctx: SceneContext<'_>) {}
+
+    /// Called when the window is resized.
+    fn handle_resize(
+        &mut self,
+        _ctx: SceneContext<'_>,
+        _new_size: PhysicalSize<u32>,
+        _scale_factor: f64,
+    ) {
+    }
+
+    /// Called when the window scale factor changes.
+    fn handle_scale_factor_changed(
+        &mut self,
+        ctx: SceneContext<'_>,
+        new_size: PhysicalSize<u32>,
+        scale_factor: f64,
+    ) {
+        self.handle_resize(ctx, new_size, scale_factor);
+    }
+
+    /// Called when the window occlusion state changes.
+    fn handle_visibility(&mut self, _ctx: SceneContext<'_>, _is_visible: bool) {}
+}
+
+impl Scene for WakeScene {
+    fn enter(&mut self, mut ctx: SceneContext<'_>) {
+        self.enter_wake();
+        ctx.request_redraw();
+    }
+
+    fn about_to_wait(&mut self, mut ctx: SceneContext<'_>) {
+        self.ensure_redraw_requested(&mut ctx);
+    }
+
+    fn process_tick(&mut self, mut ctx: SceneContext<'_>) {
+        self.ensure_redraw_requested(&mut ctx);
+    }
+
+    fn handle_resize(
+        &mut self,
+        mut ctx: SceneContext<'_>,
+        _new_size: PhysicalSize<u32>,
+        _scale_factor: f64,
+    ) {
+        self.mark_redraw_needed();
+        ctx.request_redraw();
+    }
+
+    fn handle_visibility(&mut self, mut ctx: SceneContext<'_>, is_visible: bool) {
+        if is_visible {
+            self.mark_redraw_needed();
+            ctx.request_redraw();
+        }
+    }
 }
