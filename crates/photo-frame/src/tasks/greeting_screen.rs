@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use bytemuck::{Pod, Zeroable};
 use fontdb::{Database, Family, Query};
 use glyphon::cosmic_text::Align;
 use glyphon::{
@@ -9,9 +10,21 @@ use glyphon::{
 };
 use palette::{LinSrgba, Srgb, Srgba};
 use tracing::warn;
+use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 
 use crate::config::ScreenMessageConfig;
+
+const FRAME_SHADER: wgpu::ShaderModuleDescriptor<'static> =
+    wgpu::include_wgsl!("shaders/greeting_frame.wgsl");
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct FrameUniform {
+    size_outer_inner: [f32; 4],
+    gap_radius: [f32; 4],
+    color: [f32; 4],
+}
 
 /// Lightweight greeting/sleep screen renderer: clears the surface to the
 /// configured background colour and renders centred text using `glyphon`.
@@ -30,8 +43,16 @@ pub struct GreetingScreen {
     message: String,
     background: LinSrgba<f32>,
     font_colour: LinSrgba<f32>,
+    accent_colour: LinSrgba<f32>,
+    stroke_width_dip: f32,
+    corner_radius_dip: f32,
     size: PhysicalSize<u32>,
+    scale_factor: f64,
     text_origin: (f32, f32),
+    frame_uniform: FrameUniform,
+    frame_buffer: wgpu::Buffer,
+    frame_bind_group: wgpu::BindGroup,
+    frame_pipeline: wgpu::RenderPipeline,
 }
 
 impl GreetingScreen {
@@ -58,8 +79,81 @@ impl GreetingScreen {
         let message = screen.message_or_default().into_owned();
         let background = resolve_background_colour(screen.colors.background.as_deref());
         let font_colour = resolve_font_colour(screen.colors.font.as_deref());
+        let accent_colour = resolve_accent_colour(screen.colors.accent.as_deref());
+        let stroke_width_dip = screen.effective_stroke_width_dip();
+        let corner_radius_dip = screen.effective_corner_radius_dip(stroke_width_dip);
 
-        let instance = GreetingScreen {
+        let frame_uniform = FrameUniform {
+            size_outer_inner: [0.0, 0.0, 0.0, 0.0],
+            gap_radius: [0.0, 0.0, 0.0, 0.0],
+            color: [
+                accent_colour.red,
+                accent_colour.green,
+                accent_colour.blue,
+                accent_colour.alpha,
+            ],
+        };
+        let frame_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("greeting-frame-uniform"),
+            contents: bytemuck::bytes_of(&frame_uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let frame_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("greeting-frame-bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("greeting-frame-bind-group"),
+            layout: &frame_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: frame_buffer.as_entire_binding(),
+            }],
+        });
+
+        let shader = device.create_shader_module(FRAME_SHADER);
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("greeting-frame-pipeline-layout"),
+            bind_group_layouts: &[&frame_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let frame_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("greeting-frame-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        GreetingScreen {
             device: device.clone(),
             queue: queue.clone(),
             format,
@@ -74,14 +168,23 @@ impl GreetingScreen {
             message,
             background,
             font_colour,
+            accent_colour,
+            stroke_width_dip,
+            corner_radius_dip,
             size: PhysicalSize::new(0, 0),
+            scale_factor: 1.0,
             text_origin: (0.0, 0.0),
-        };
-        instance
+            frame_uniform,
+            frame_buffer,
+            frame_bind_group,
+            frame_pipeline,
+        }
     }
 
-    pub fn resize(&mut self, new_size: PhysicalSize<u32>, _scale_factor: f64) {
+    pub fn resize(&mut self, new_size: PhysicalSize<u32>, scale_factor: f64) {
         self.size = new_size;
+        self.scale_factor = scale_factor;
+        self.update_frame_uniform();
     }
 
     pub fn render(
@@ -92,39 +195,39 @@ impl GreetingScreen {
         if self.size.width == 0 || self.size.height == 0 {
             return false;
         }
-            self.viewport.update(
-                &self.queue,
-                Resolution {
-                    width: self.size.width,
-                    height: self.size.height,
-                },
-            );
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.size.width,
+                height: self.size.height,
+            },
+        );
 
-            let text_color = to_text_color(self.font_colour);
-            if let Err(err) = self.text_renderer.prepare(
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                [TextArea {
-                    buffer: &self.text_buffer,
-                    left: self.text_origin.0,
-                    top: self.text_origin.1,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.size.width as i32,
-                        bottom: self.size.height as i32,
-                    },
-                    default_color: text_color,
-                    custom_glyphs: &[],
-                }],
-                &mut self.swash_cache,
-            ) {
-                warn!(error = %err, "greeting_screen_prepare_failed");
-            }
+        let text_color = to_text_color(self.font_colour);
+        if let Err(err) = self.text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            [TextArea {
+                buffer: &self.text_buffer,
+                left: self.text_origin.0,
+                top: self.text_origin.1,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.size.width as i32,
+                    bottom: self.size.height as i32,
+                },
+                default_color: text_color,
+                custom_glyphs: &[],
+            }],
+            &mut self.swash_cache,
+        ) {
+            warn!(error = %err, "greeting_screen_prepare_failed");
+        }
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -142,16 +245,20 @@ impl GreetingScreen {
                 timestamp_writes: None,
             });
 
-                if let Err(err) = self
-                    .text_renderer
-                    .render(&self.atlas, &self.viewport, &mut pass)
-                {
-                    warn!(error = %err, "greeting_screen_draw_failed");
-                }
+            pass.set_pipeline(&self.frame_pipeline);
+            pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+
+            if let Err(err) = self
+                .text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+            {
+                warn!(error = %err, "greeting_screen_draw_failed");
+            }
         }
 
-            self.atlas.trim();
-            true
+        self.atlas.trim();
+        true
     }
 
     pub fn after_submit(&mut self) {
@@ -186,6 +293,61 @@ impl GreetingScreen {
         self.text_origin = compute_text_origin(&self.text_buffer, self.size);
         true
     }
+
+    fn update_frame_uniform(&mut self) {
+        self.frame_uniform.color = [
+            self.accent_colour.red,
+            self.accent_colour.green,
+            self.accent_colour.blue,
+            self.accent_colour.alpha,
+        ];
+
+        let width = self.size.width as f32;
+        let height = self.size.height as f32;
+
+        if width <= 0.0 || height <= 0.0 {
+            self.frame_uniform.size_outer_inner = [width, height, 0.0, 0.0];
+            self.frame_uniform.gap_radius = [0.0, 0.0, 0.0, 0.0];
+        } else {
+            let scale = self.scale_factor as f32;
+            let mut outer_stroke = (self.stroke_width_dip * scale).clamp(0.5, width.min(height));
+            let mut gap = (outer_stroke * 0.5).max(0.5);
+            let mut inner_stroke = (outer_stroke * 0.6).max(0.5);
+            let mut corner_radius = (self.corner_radius_dip * scale).max(0.0);
+
+            let half_min = 0.5 * width.min(height);
+            if half_min > 1.0 {
+                let total = outer_stroke + gap + inner_stroke;
+                if total >= half_min {
+                    let limit = (half_min - 1.0).max(0.5);
+                    if total > 0.0 {
+                        let factor = (limit / total).clamp(0.1, 1.0);
+                        outer_stroke *= factor;
+                        gap *= factor;
+                        inner_stroke *= factor;
+                    }
+                }
+            } else {
+                outer_stroke = half_min.max(0.0);
+                gap = 0.0;
+                inner_stroke = 0.0;
+            }
+
+            let max_corner = half_min.max(0.0);
+            if corner_radius > max_corner {
+                corner_radius = max_corner;
+            }
+
+            self.frame_uniform.size_outer_inner = [width, height, outer_stroke, inner_stroke];
+            self.frame_uniform.gap_radius = [gap, corner_radius, 0.0, 0.0];
+        }
+
+        self.queue.write_buffer(
+            &self.frame_buffer,
+            0,
+            bytemuck::bytes_of(&self.frame_uniform),
+        );
+    }
 }
 
 fn compute_font_size(message: &str, size: PhysicalSize<u32>) -> f32 {
@@ -217,6 +379,12 @@ fn resolve_font_colour(source: Option<&str>) -> LinSrgba<f32> {
     source
         .and_then(parse_hex_color)
         .unwrap_or_else(default_font_colour)
+}
+
+fn resolve_accent_colour(source: Option<&str>) -> LinSrgba<f32> {
+    source
+        .and_then(parse_hex_color)
+        .unwrap_or_else(default_accent_colour)
 }
 
 fn initialize_font_database(db: &mut Database) {
@@ -320,4 +488,8 @@ fn default_background() -> LinSrgba<f32> {
 
 fn default_font_colour() -> LinSrgba<f32> {
     parse_hex_color("#F8FAFC").unwrap()
+}
+
+fn default_accent_colour() -> LinSrgba<f32> {
+    parse_hex_color("#38BDF8").unwrap()
 }
