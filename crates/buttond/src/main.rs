@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use evdev::{Device, InputEventKind, Key};
-use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use evdev::{Device, EventSummary, KeyCode};
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -72,8 +72,8 @@ fn main() -> Result<()> {
                 let mut handled = false;
                 for event in events {
                     handled = true;
-                    match event.kind() {
-                        InputEventKind::Key(Key::KEY_POWER) => match event.value() {
+                    match event.destructure() {
+                        EventSummary::Key(_, KeyCode::KEY_POWER, value) => match value {
                             1 => {
                                 tracker.on_press(Instant::now());
                             }
@@ -105,10 +105,10 @@ fn main() -> Result<()> {
 }
 
 fn set_nonblocking(device: &Device) -> Result<()> {
-    let fd = device.as_raw_fd();
-    let current = fcntl(fd, FcntlArg::F_GETFL).context("F_GETFL failed")?;
-    let flags = OFlag::from_bits_truncate(current) | OFlag::O_NONBLOCK;
-    fcntl(fd, FcntlArg::F_SETFL(flags)).context("F_SETFL failed")?;
+    let current = fcntl(device.as_fd(), FcntlArg::F_GETFL).context("F_GETFL failed")?;
+    let mut flags = OFlag::from_bits_retain(current);
+    flags.insert(OFlag::O_NONBLOCK);
+    fcntl(device.as_fd(), FcntlArg::F_SETFL(flags)).context("F_SETFL failed")?;
     Ok(())
 }
 
@@ -206,7 +206,7 @@ fn ensure_power_key(device: &Device, path: &Path) -> Result<()> {
     let Some(keys) = device.supported_keys() else {
         bail!("{} does not advertise any keys", path.display());
     };
-    if !keys.contains(Key::KEY_POWER) {
+    if !keys.contains(KeyCode::KEY_POWER) {
         bail!("{} does not support KEY_POWER", path.display());
     }
     Ok(())
