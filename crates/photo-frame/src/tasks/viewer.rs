@@ -163,7 +163,7 @@ impl ViewerApp {
 
         let scenes = Scenes {
             greeting: GreetingScene::new(&device, &queue, format, &self.cfg.greeting_screen),
-            awake: AwakeScene::new(),
+            awake: AwakeScene::new(&device, &queue, format, &self.cfg),
             asleep: AsleepScene::new(&device, &queue, format, &self.cfg.sleep_screen),
         };
 
