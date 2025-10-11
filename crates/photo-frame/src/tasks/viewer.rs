@@ -1,6 +1,6 @@
 pub mod scenes;
 
-use self::scenes::{GreetingScene, SleepScene};
+use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
     MattingConfig, MattingMode, MattingOptions, TransitionKind, TransitionMode, TransitionOptions,
@@ -678,6 +678,12 @@ pub fn run_windowed(
         },
     }
 
+    #[derive(Copy, Clone)]
+    enum SceneHook {
+        Enter,
+        Exit,
+    }
+
     impl ViewerMode {
         fn new(kind: ViewerModeKind, wake: scenes::WakeScene) -> Self {
             let greeting = None;
@@ -882,6 +888,96 @@ pub fn run_windowed(
 
         fn mode_kind(&self) -> ViewerModeKind {
             self.mode().kind()
+        }
+
+        fn set_mode(&mut self, target: ViewerModeKind) -> ViewerModeKind {
+            let current = self.mode_kind();
+            if current == target {
+                return current;
+            }
+
+            let mut mode = self.mode.take().expect("viewer mode not initialized");
+
+            self.dispatch_scene_hook(&mut mode, SceneHook::Exit);
+
+            mode = mode.into_kind(target);
+
+            self.dispatch_scene_hook(&mut mode, SceneHook::Enter);
+
+            self.mode = Some(mode);
+            current
+        }
+
+        fn dispatch_scene_hook(&mut self, mode: &mut ViewerMode, hook: SceneHook) {
+            match mode {
+                ViewerMode::Greeting {
+                    greeting, sleep, ..
+                } => {
+                    if let Some(scene) = greeting.as_mut() {
+                        let window_ref = self.window.as_deref();
+                        let window_handle = self.window.as_ref().map(Arc::clone);
+                        let mut request_redraw = move || {
+                            if let Some(window) = window_handle.as_ref() {
+                                window.request_redraw();
+                            }
+                        };
+                        let ctx = SceneContext::new(
+                            window_ref,
+                            None,
+                            sleep.as_mut().map(|scene| &mut *scene),
+                            &mut request_redraw,
+                        );
+                        Self::run_scene_hook(scene, hook, ctx);
+                    }
+                }
+                ViewerMode::Wake {
+                    greeting,
+                    wake,
+                    sleep,
+                } => {
+                    let window_ref = self.window.as_deref();
+                    let window_handle = self.window.as_ref().map(Arc::clone);
+                    let mut request_redraw = move || {
+                        if let Some(window) = window_handle.as_ref() {
+                            window.request_redraw();
+                        }
+                    };
+                    let ctx = SceneContext::new(
+                        window_ref,
+                        greeting.as_mut().map(|scene| &mut *scene),
+                        sleep.as_mut().map(|scene| &mut *scene),
+                        &mut request_redraw,
+                    );
+                    Self::run_scene_hook(wake, hook, ctx);
+                }
+                ViewerMode::Sleep {
+                    greeting, sleep, ..
+                } => {
+                    if let Some(scene) = sleep.as_mut() {
+                        let window_ref = self.window.as_deref();
+                        let window_handle = self.window.as_ref().map(Arc::clone);
+                        let mut request_redraw = move || {
+                            if let Some(window) = window_handle.as_ref() {
+                                window.request_redraw();
+                            }
+                        };
+                        let ctx = SceneContext::new(
+                            window_ref,
+                            greeting.as_mut().map(|scene| &mut *scene),
+                            None,
+                            &mut request_redraw,
+                        );
+                        Self::run_scene_hook(scene, hook, ctx);
+                    }
+                }
+            }
+        }
+
+        fn run_scene_hook(scene: &mut dyn Scene, hook: SceneHook, ctx: SceneContext<'_>) {
+            match hook {
+                SceneHook::Enter => scene.enter(ctx),
+                SceneHook::Exit => scene.exit(ctx),
+            }
         }
 
         fn reset_for_resume(&mut self) {
@@ -1255,27 +1351,25 @@ pub fn run_windowed(
                 return;
             }
             info!("viewer: entering sleep");
-            let mut mode = self.mode.take().expect("viewer mode not initialized");
-            mode.wake_mut().take_redraw_needed();
-            mode = mode.into_kind(ViewerModeKind::Sleep);
-            if let Some(window) = self.window.as_ref() {
-                if let Some(sleep) = mode.sleep_mut() {
-                    let size = window.inner_size();
-                    let scale_factor = window.scale_factor();
+            self.mode_mut().wake_mut().take_redraw_needed();
+            self.set_mode(ViewerModeKind::Sleep);
+            let window_dims = self
+                .window
+                .as_ref()
+                .map(|window| (window.inner_size(), window.scale_factor()));
+            let sleep_message = self
+                .full_config
+                .sleep_screen
+                .screen()
+                .message_or_default()
+                .into_owned();
+            if let Some(sleep) = self.mode_mut().sleep_mut() {
+                if let Some((size, scale_factor)) = window_dims {
                     sleep.resize(size, scale_factor);
                 }
-            }
-            if let Some(sleep) = mode.sleep_mut() {
-                let message = self
-                    .full_config
-                    .sleep_screen
-                    .screen()
-                    .message_or_default()
-                    .into_owned();
-                sleep.set_message(message);
+                sleep.set_message(sleep_message);
                 sleep.mark_redraw_needed();
             }
-            self.mode = Some(mode);
             self.request_redraw();
             self.log_event_loop_state("enter_sleep");
         }
@@ -1285,10 +1379,7 @@ pub fn run_windowed(
                 return;
             }
             info!("viewer: entering wake");
-            let mut mode = self.mode.take().expect("viewer mode not initialized");
-            mode = mode.into_kind(ViewerModeKind::Wake);
-            mode.wake_mut().enter_wake();
-            self.mode = Some(mode);
+            self.set_mode(ViewerModeKind::Wake);
             self.request_redraw();
             self.log_event_loop_state("enter_wake");
         }
@@ -1297,27 +1388,25 @@ pub fn run_windowed(
             if self.mode_kind() != ViewerModeKind::Greeting {
                 info!("viewer: entering greeting");
             }
-            let mut mode = self.mode.take().expect("viewer mode not initialized");
-            mode.wake_mut().take_redraw_needed();
-            mode = mode.into_kind(ViewerModeKind::Greeting);
-            if let Some(window) = self.window.as_ref() {
-                if let Some(greeting) = mode.greeting_mut() {
-                    let size = window.inner_size();
-                    let scale_factor = window.scale_factor();
+            self.mode_mut().wake_mut().take_redraw_needed();
+            self.set_mode(ViewerModeKind::Greeting);
+            let window_dims = self
+                .window
+                .as_ref()
+                .map(|window| (window.inner_size(), window.scale_factor()));
+            let greeting_message = self
+                .full_config
+                .greeting_screen
+                .screen()
+                .message_or_default()
+                .into_owned();
+            if let Some(greeting) = self.mode_mut().greeting_mut() {
+                if let Some((size, scale_factor)) = window_dims {
                     greeting.resize(size, scale_factor);
                 }
-            }
-            if let Some(greeting) = mode.greeting_mut() {
-                let message = self
-                    .full_config
-                    .greeting_screen
-                    .screen()
-                    .message_or_default()
-                    .into_owned();
-                greeting.set_message(message);
+                greeting.set_message(greeting_message);
                 greeting.mark_redraw_needed();
             }
-            self.mode = Some(mode);
             self.request_redraw();
             self.log_event_loop_state("enter_greeting");
         }
