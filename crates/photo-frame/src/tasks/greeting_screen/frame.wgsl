@@ -1,5 +1,5 @@
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>;
+    @builtin(position) position: vec4<f32>,
 };
 
 struct FrameUniform {
