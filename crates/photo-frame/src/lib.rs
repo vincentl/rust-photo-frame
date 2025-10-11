@@ -8,5 +8,4 @@ pub mod tasks {
     pub mod loader;
     pub mod manager;
     pub mod photo_effect;
-    pub mod viewer;
 }

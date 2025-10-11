@@ -2,17 +2,17 @@
 
 ## Work On
 
+- broken greeting screen
+
 [ ] Validate Wifi Manager
 
-- photos/local and photos/cloud not found
-- broken greeting screen
-- disorganized setup directory
-
 [ ] New install
+
+- photos/local and photos/cloud not found
+
+[ ] Hesitation on wipe transition
 [ ] Test button 1 or 2 click events
-
 [ ] Cloud sync
-
 [ ] Tailscale
 
 [ ] Sleep schedule

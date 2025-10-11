@@ -45,7 +45,7 @@ systemctl status display-manager
 journalctl -u greetd -b
 ```
 
-`systemctl status greetd` should show the unit as `active (running)` with `/usr/bin/cage -s -- /usr/local/bin/photoframe-session` in the command line. The journal contains both greetd session logs and the photo frame application output.
+`systemctl status greetd` should show the unit as `active (running)` with `/usr/bin/cage -s -- /usr/local/bin/photoframe-session` in the command line. The journal contains both greetd session logs and the photo frame application output. Note that `cage -s` merely forces every surface to match the output resolution; it does **not** touch pointer visibility. Hiding the cursor is entirely the application's responsibility (for example via `Window::set_cursor_visible(false)` in the Winit window handler), so the mouse pointer can remain visible on the greeting screen until we implement that in the renderer.
 
 ## Operations quick reference
 
