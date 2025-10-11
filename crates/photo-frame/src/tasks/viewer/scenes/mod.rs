@@ -9,6 +9,7 @@ use rand::Rng;
 use tokio::sync::mpsc::Sender;
 use wgpu::{CommandEncoder, TextureView};
 use winit::dpi::PhysicalSize;
+use winit::window::Window;
 
 use crate::config::TransitionConfig;
 use crate::events::Displayed;
@@ -367,4 +368,68 @@ impl WakeScene {
             self.displayed_at = Some(Instant::now());
         }
     }
+}
+
+/// Execution context shared with viewer scenes.
+///
+/// A [`SceneContext`] exposes the subset of the viewer application state that a scene may
+/// interact with. This keeps scene logic focused on presentation concerns while preventing
+/// direct access to unrelated subsystems.
+pub(super) struct SceneContext<'a> {
+    window: Option<&'a Window>,
+    greeting_overlay: Option<&'a mut GreetingScene>,
+    sleep_overlay: Option<&'a mut SleepScene>,
+    redraw: &'a mut dyn FnMut(),
+}
+
+impl<'a> SceneContext<'a> {
+    /// Creates a new [`SceneContext`] scoped to the currently active viewer state.
+    pub(super) fn new(
+        window: Option<&'a Window>,
+        greeting_overlay: Option<&'a mut GreetingScene>,
+        sleep_overlay: Option<&'a mut SleepScene>,
+        redraw: &'a mut dyn FnMut(),
+    ) -> Self {
+        Self {
+            window,
+            greeting_overlay,
+            sleep_overlay,
+            redraw,
+        }
+    }
+
+    /// Returns the active window handle, if the viewer has created one.
+    pub(super) fn window(&self) -> Option<&'a Window> {
+        self.window
+    }
+
+    /// Provides mutable access to the greeting overlay scene when it is available.
+    pub(super) fn greeting_overlay(&mut self) -> Option<&mut GreetingScene> {
+        self.greeting_overlay.as_deref_mut()
+    }
+
+    /// Provides mutable access to the sleep overlay scene when it is available.
+    pub(super) fn sleep_overlay(&mut self) -> Option<&mut SleepScene> {
+        self.sleep_overlay.as_deref_mut()
+    }
+
+    /// Requests a redraw from the viewer event loop.
+    pub(super) fn request_redraw(&mut self) {
+        (self.redraw)();
+    }
+}
+
+/// Common interface implemented by each viewer scene (greeting, wake, sleep).
+pub(super) trait Scene {
+    /// Called when the scene becomes active.
+    fn enter(&mut self, _ctx: SceneContext<'_>) {}
+
+    /// Called before the scene is deactivated.
+    fn exit(&mut self, _ctx: SceneContext<'_>) {}
+
+    /// Called from the event loop `about_to_wait` hook.
+    fn about_to_wait(&mut self, _ctx: SceneContext<'_>) {}
+
+    /// Called when the viewer wants the scene to ensure any redraw requests are queued.
+    fn request_redraw(&mut self, _ctx: SceneContext<'_>) {}
 }
