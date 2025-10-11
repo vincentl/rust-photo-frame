@@ -339,6 +339,83 @@ pub fn run_windowed(
         }
     }
 
+    struct MattingBridge<'a> {
+        preload_count: usize,
+        mat_inflight: &'a mut usize,
+        deferred_images: &'a mut VecDeque<QueuedImage>,
+        ready_results: &'a mut VecDeque<MatResult>,
+        from_loader: &'a mut Receiver<PhotoLoaded>,
+        gpu: Option<&'a GpuCtx>,
+        matting: &'a MattingConfig,
+        oversample: f32,
+        mat_pipeline: &'a MattingPipeline,
+    }
+
+    impl<'a> MattingBridge<'a> {
+        fn queue_for_wake(&mut self, wake: &mut scenes::WakeScene) {
+            while wake.pending().len() + *self.mat_inflight < self.preload_count {
+                let next_img = if let Some(img) = self.deferred_images.pop_front() {
+                    Some(img)
+                } else {
+                    match self.from_loader.try_recv() {
+                        Ok(PhotoLoaded { prepared, priority }) => Some(QueuedImage {
+                            image: prepared,
+                            priority,
+                        }),
+                        Err(_) => None,
+                    }
+                };
+                let Some(queued) = next_img else {
+                    break;
+                };
+                let path = queued.image.path.clone();
+                if queued.priority {
+                    self.deferred_images
+                        .retain(|pending| pending.image.path != path);
+                    self.ready_results.retain(|pending| pending.path != path);
+                    wake.pending_mut().retain(|pending| pending.path != path);
+                    if wake.next().is_some_and(|stage| stage.path == path) {
+                        wake.set_next(None);
+                    }
+                }
+                let Some(gpu) = self.gpu else {
+                    self.deferred_images.push_front(queued);
+                    break;
+                };
+                let mut rng = rand::rng();
+                let matting = self.matting.choose_option(&mut rng);
+                let params = MatParams {
+                    screen_w: gpu.config.width.max(1),
+                    screen_h: gpu.config.height.max(1),
+                    oversample: self.oversample,
+                    max_dim: gpu.limits.max_texture_dimension_2d,
+                    matting,
+                };
+                let QueuedImage {
+                    image: img,
+                    priority,
+                } = queued;
+                let task = MatTask {
+                    image: img,
+                    params,
+                    priority,
+                };
+                match self.mat_pipeline.try_submit(task) {
+                    Ok(()) => {
+                        *self.mat_inflight += 1;
+                    }
+                    Err(MatTask {
+                        image, priority, ..
+                    }) => {
+                        self.deferred_images
+                            .push_front(QueuedImage { image, priority });
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     fn process_mat_task(task: MatTask) -> Option<MatResult> {
         let MatTask {
             image,
@@ -803,21 +880,45 @@ pub fn run_windowed(
             window: Option<&'a Window>,
             config: Arc<crate::config::Configuration>,
             redraw: &'a mut dyn FnMut(),
+            rng: &'a mut rand::rngs::ThreadRng,
+            notify_displayed: &'a mut dyn FnMut(std::path::PathBuf),
+            enqueue_matting: &'a mut dyn FnMut(&mut scenes::WakeScene),
             f: impl FnOnce(&mut dyn Scene, SceneContext<'a>) -> R,
         ) -> Option<R> {
             match self {
                 ViewerMode::Greeting { greeting, .. } => {
                     let scene = greeting.as_mut()?;
-                    let ctx = SceneContext::new(window, redraw, Arc::clone(&config));
+                    let ctx = SceneContext::new(
+                        window,
+                        redraw,
+                        Arc::clone(&config),
+                        rng,
+                        notify_displayed,
+                        enqueue_matting,
+                    );
                     Some(f(scene, ctx))
                 }
                 ViewerMode::Wake { wake, .. } => {
-                    let ctx = SceneContext::new(window, redraw, Arc::clone(&config));
+                    let ctx = SceneContext::new(
+                        window,
+                        redraw,
+                        Arc::clone(&config),
+                        rng,
+                        notify_displayed,
+                        enqueue_matting,
+                    );
                     Some(f(wake, ctx))
                 }
                 ViewerMode::Sleep { sleep, .. } => {
                     let scene = sleep.as_mut()?;
-                    let ctx = SceneContext::new(window, redraw, config);
+                    let ctx = SceneContext::new(
+                        window,
+                        redraw,
+                        config,
+                        rng,
+                        notify_displayed,
+                        enqueue_matting,
+                    );
                     Some(f(scene, ctx))
                 }
             }
@@ -927,9 +1028,43 @@ pub fn run_windowed(
                 }
             };
             let config = Arc::clone(&self.full_config);
-            self.mode
-                .as_mut()
-                .and_then(|mode| mode.with_scene_mut(window_ref, config, &mut request_redraw, f))
+            let mut notify_displayed = {
+                let sender = self.to_manager_displayed.clone();
+                move |path: std::path::PathBuf| {
+                    let _ = sender.try_send(Displayed(path));
+                }
+            };
+
+            let Some(mut mode) = self.mode.take() else {
+                return None;
+            };
+            let mut bridge = MattingBridge {
+                preload_count: self.preload_count,
+                mat_inflight: &mut self.mat_inflight,
+                deferred_images: &mut self.deferred_images,
+                ready_results: &mut self.ready_results,
+                from_loader: &mut self.from_loader,
+                gpu: self.gpu.as_ref(),
+                matting: &self.matting,
+                oversample: self.oversample,
+                mat_pipeline: &self.mat_pipeline,
+            };
+            let mut enqueue_matting = move |wake: &mut scenes::WakeScene| {
+                bridge.queue_for_wake(wake);
+            };
+            let rng = &mut self.rng;
+
+            let result = mode.with_scene_mut(
+                window_ref,
+                config,
+                &mut request_redraw,
+                rng,
+                &mut notify_displayed,
+                &mut enqueue_matting,
+                f,
+            );
+            self.mode = Some(mode);
+            result
         }
 
         fn mode_kind(&self) -> ViewerModeKind {
@@ -966,9 +1101,38 @@ pub fn run_windowed(
                 }
             };
             let config = Arc::clone(&self.full_config);
-            let _ = mode.with_scene_mut(window_ref, config, &mut request_redraw, |scene, ctx| {
-                Self::run_scene_hook(scene, hook, ctx);
-            });
+            let mut notify_displayed = {
+                let sender = self.to_manager_displayed.clone();
+                move |path: std::path::PathBuf| {
+                    let _ = sender.try_send(Displayed(path));
+                }
+            };
+            let mut bridge = MattingBridge {
+                preload_count: self.preload_count,
+                mat_inflight: &mut self.mat_inflight,
+                deferred_images: &mut self.deferred_images,
+                ready_results: &mut self.ready_results,
+                from_loader: &mut self.from_loader,
+                gpu: self.gpu.as_ref(),
+                matting: &self.matting,
+                oversample: self.oversample,
+                mat_pipeline: &self.mat_pipeline,
+            };
+            let mut enqueue_matting = move |wake: &mut scenes::WakeScene| {
+                bridge.queue_for_wake(wake);
+            };
+            let rng = &mut self.rng;
+            let _ = mode.with_scene_mut(
+                window_ref,
+                config,
+                &mut request_redraw,
+                rng,
+                &mut notify_displayed,
+                &mut enqueue_matting,
+                |scene, ctx| {
+                    Self::run_scene_hook(scene, hook, ctx);
+                },
+            );
         }
 
         fn run_scene_hook(scene: &mut dyn Scene, hook: SceneHook, ctx: SceneContext<'_>) {
@@ -1102,16 +1266,15 @@ pub fn run_windowed(
 
             self.drain_mat_results();
 
-            match self.mode_kind() {
-                ViewerModeKind::Sleep => {}
-                ViewerModeKind::Greeting => {
-                    self.upload_ready_results();
-                    self.queue_mat_tasks();
-                }
-                ViewerModeKind::Wake => {
-                    self.upload_ready_results();
-                    self.queue_mat_tasks();
-                    self.tick_awake();
+            let mode_kind = self.mode_kind();
+            if !matches!(mode_kind, ViewerModeKind::Sleep) {
+                if let Some(mut mode) = self.mode.take() {
+                    {
+                        let wake = mode.wake_mut();
+                        self.upload_ready_results_for_wake(wake);
+                        self.queue_mat_tasks_for_wake(wake);
+                    }
+                    self.mode = Some(mode);
                 }
             }
 
@@ -1132,20 +1295,7 @@ pub fn run_windowed(
             }
         }
 
-        fn tick_awake(&mut self) {
-            self.upload_ready_results();
-            self.queue_mat_tasks();
-            self.ensure_current_image();
-            let displayed_sender = self.to_manager_displayed.clone();
-            self.mode_mut()
-                .wake_mut()
-                .finalize_transition(&displayed_sender);
-            let mut rng = std::mem::replace(&mut self.rng, rand::rng());
-            self.mode_mut().wake_mut().maybe_start_transition(&mut rng);
-            self.rng = rng;
-        }
-
-        fn upload_ready_results(&mut self) {
+        fn upload_ready_results_for_wake(&mut self, wake: &mut scenes::WakeScene) {
             while let Some(result) = self.ready_results.pop_front() {
                 let path = result.path.clone();
                 let priority = result.priority;
@@ -1154,7 +1304,6 @@ pub fn run_windowed(
                     break;
                 };
                 if let Some(new_tex) = upload_mat_result(gpu, result) {
-                    let wake = self.mode_mut().wake_mut();
                     if priority {
                         let replace_next = wake.next().is_some_and(|stage| stage.path == path);
                         wake.pending_mut().retain(|queued| queued.path != path);
@@ -1177,95 +1326,19 @@ pub fn run_windowed(
             }
         }
 
-        fn queue_mat_tasks(&mut self) {
-            while self.mode().wake().pending().len() + self.mat_inflight < self.preload_count {
-                let next_img = if let Some(img) = self.deferred_images.pop_front() {
-                    Some(img)
-                } else {
-                    match self.from_loader.try_recv() {
-                        Ok(PhotoLoaded { prepared, priority }) => Some(QueuedImage {
-                            image: prepared,
-                            priority,
-                        }),
-                        Err(_) => None,
-                    }
-                };
-                let Some(queued) = next_img else {
-                    break;
-                };
-                let path = queued.image.path.clone();
-                if queued.priority {
-                    self.deferred_images
-                        .retain(|pending| pending.image.path != path);
-                    self.ready_results.retain(|pending| pending.path != path);
-                    {
-                        let wake = self.mode_mut().wake_mut();
-                        wake.pending_mut().retain(|pending| pending.path != path);
-                        if wake.next().is_some_and(|stage| stage.path == path) {
-                            wake.set_next(None);
-                        }
-                    }
-                }
-                let Some(gpu) = self.gpu.as_ref() else {
-                    self.deferred_images.push_front(queued);
-                    break;
-                };
-                let mut rng = rand::rng();
-                let matting = self.matting.choose_option(&mut rng);
-                let params = MatParams {
-                    screen_w: gpu.config.width.max(1),
-                    screen_h: gpu.config.height.max(1),
-                    oversample: self.oversample,
-                    max_dim: gpu.limits.max_texture_dimension_2d,
-                    matting,
-                };
-                let QueuedImage {
-                    image: img,
-                    priority,
-                } = queued;
-                let task = MatTask {
-                    image: img,
-                    params,
-                    priority,
-                };
-                match self.mat_pipeline.try_submit(task) {
-                    Ok(()) => {
-                        self.mat_inflight += 1;
-                    }
-                    Err(MatTask {
-                        image, priority, ..
-                    }) => {
-                        self.deferred_images
-                            .push_front(QueuedImage { image, priority });
-                        break;
-                    }
-                }
-            }
-        }
-
-        fn ensure_current_image(&mut self) {
-            if self.mode_kind() != ViewerModeKind::Wake {
-                return;
-            }
-            let mut to_send = None;
-            {
-                let wake = self.mode_mut().wake_mut();
-                if wake.current().is_some() || wake.transition_state().is_some() {
-                    return;
-                }
-                if let Some(first) = wake.pending_mut().pop_front() {
-                    info!("first_image path={}", first.path.display());
-                    wake.set_current(Some(first));
-                    wake.mark_redraw_needed();
-                    wake.set_displayed_at(Some(std::time::Instant::now()));
-                    if let Some(cur) = wake.current() {
-                        to_send = Some(cur.path.clone());
-                    }
-                }
-            }
-            if let Some(path) = to_send {
-                let _ = self.to_manager_displayed.try_send(Displayed(path));
-            }
+        fn queue_mat_tasks_for_wake(&mut self, wake: &mut scenes::WakeScene) {
+            let mut bridge = MattingBridge {
+                preload_count: self.preload_count,
+                mat_inflight: &mut self.mat_inflight,
+                deferred_images: &mut self.deferred_images,
+                ready_results: &mut self.ready_results,
+                from_loader: &mut self.from_loader,
+                gpu: self.gpu.as_ref(),
+                matting: &self.matting,
+                oversample: self.oversample,
+                mat_pipeline: &self.mat_pipeline,
+            };
+            bridge.queue_for_wake(wake);
         }
 
         fn enter_sleep(&mut self) {

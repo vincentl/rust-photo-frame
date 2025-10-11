@@ -3,17 +3,16 @@
 //! This module will house the logic for state-specific viewer behaviour.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use rand::Rng;
-use tokio::sync::mpsc::Sender;
 use wgpu::{CommandEncoder, TextureView};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 use crate::config::{Configuration, TransitionConfig};
-use crate::events::Displayed;
 use crate::tasks::greeting_screen::GreetingScreen;
 
 use super::{ImgTex, TransitionState};
@@ -382,7 +381,7 @@ impl WakeScene {
     }
 
     /// Finalizes an in-flight transition, promoting the staged image to current if complete.
-    pub(super) fn finalize_transition(&mut self, to_manager_displayed: &Sender<Displayed>) {
+    pub(super) fn finalize_transition(&mut self, ctx: &mut SceneContext<'_>) {
         if self
             .transition_state
             .as_ref()
@@ -403,8 +402,26 @@ impl WakeScene {
                 self.current = Some(next);
                 self.pending_redraw = true;
                 self.displayed_at = Some(Instant::now());
-                let _ = to_manager_displayed.try_send(Displayed(path));
+                ctx.notify_displayed(path);
             }
+        }
+    }
+
+    fn ensure_current_image(&mut self, ctx: &mut SceneContext<'_>) {
+        if self.current.is_some() || self.transition_state().is_some() {
+            return;
+        }
+        if let Some(first) = self.pending_mut().pop_front() {
+            let path = first.path.clone();
+            tracing::info!(
+                "first_image path={} queue_depth={}",
+                path.display(),
+                self.pending.len()
+            );
+            self.current = Some(first);
+            self.pending_redraw = true;
+            self.displayed_at = Some(Instant::now());
+            ctx.notify_displayed(path);
         }
     }
 
@@ -474,6 +491,9 @@ pub(super) struct SceneContext<'a> {
     window: Option<&'a Window>,
     redraw: &'a mut dyn FnMut(),
     config: Arc<Configuration>,
+    rng: &'a mut rand::rngs::ThreadRng,
+    notify_displayed: &'a mut dyn FnMut(PathBuf),
+    enqueue_matting: &'a mut dyn FnMut(&mut WakeScene),
 }
 
 impl<'a> SceneContext<'a> {
@@ -482,11 +502,17 @@ impl<'a> SceneContext<'a> {
         window: Option<&'a Window>,
         redraw: &'a mut dyn FnMut(),
         config: Arc<Configuration>,
+        rng: &'a mut rand::rngs::ThreadRng,
+        notify_displayed: &'a mut dyn FnMut(PathBuf),
+        enqueue_matting: &'a mut dyn FnMut(&mut WakeScene),
     ) -> Self {
         Self {
             window,
             redraw,
             config,
+            rng,
+            notify_displayed,
+            enqueue_matting,
         }
     }
 
@@ -503,6 +529,21 @@ impl<'a> SceneContext<'a> {
     /// Returns the application configuration.
     pub(super) fn config(&self) -> &Configuration {
         &self.config
+    }
+
+    /// Provides mutable access to the viewer RNG for scenes that need randomness.
+    pub(super) fn rng(&mut self) -> &mut rand::rngs::ThreadRng {
+        self.rng
+    }
+
+    /// Notifies the manager that a new image has been displayed.
+    pub(super) fn notify_displayed(&mut self, path: PathBuf) {
+        (self.notify_displayed)(path);
+    }
+
+    /// Requests additional matting work for the wake scene.
+    pub(super) fn enqueue_matting(&mut self, wake: &mut WakeScene) {
+        (self.enqueue_matting)(wake);
     }
 }
 
@@ -546,6 +587,8 @@ pub(super) trait Scene {
 impl Scene for WakeScene {
     fn enter(&mut self, mut ctx: SceneContext<'_>) {
         self.enter_wake();
+        ctx.enqueue_matting(self);
+        self.ensure_current_image(&mut ctx);
         ctx.request_redraw();
     }
 
@@ -554,6 +597,13 @@ impl Scene for WakeScene {
     }
 
     fn process_tick(&mut self, mut ctx: SceneContext<'_>) {
+        ctx.enqueue_matting(self);
+        self.ensure_current_image(&mut ctx);
+        self.finalize_transition(&mut ctx);
+        {
+            let rng = ctx.rng();
+            self.maybe_start_transition(rng);
+        }
         self.ensure_redraw_requested(&mut ctx);
     }
 
