@@ -1,6 +1,6 @@
 pub mod scenes;
 
-use self::scenes::{GreetingScene, SleepScene};
+use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
     MattingConfig, MattingMode, MattingOptions, TransitionKind, TransitionMode, TransitionOptions,
@@ -146,11 +146,11 @@ impl TransitionState {
 //
 // Viewer state machine overview
 // -----------------------------
-//  - `ViewerState::Greeting` shows the greeting overlay once after resume and
+//  - `ViewerModeKind::Greeting` shows the greeting overlay once after resume and
 //    stays idle until the first photo is ready.
-//  - `ViewerState::Wake` drives the continuous photo slideshow, requesting
+//  - `ViewerModeKind::Wake` drives the continuous photo slideshow, requesting
 //    redraws while transitions or new frames are pending.
-//  - `ViewerState::Sleep` renders a single "Going to Sleep" banner and then
+//  - `ViewerModeKind::Sleep` renders a single "Going to Sleep" banner and then
 //    idles until the power state changes again.
 //
 // Redraw policy
@@ -264,8 +264,6 @@ pub fn run_windowed(
         sampler: wgpu::Sampler,
         pipeline: wgpu::RenderPipeline,
         blank_plane: TexturePlane,
-        greeting: GreetingScene,
-        sleep: SleepScene,
     }
 
     #[derive(Clone)]
@@ -657,10 +655,208 @@ pub fn run_windowed(
     }
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-    enum ViewerState {
+    enum ViewerModeKind {
         Greeting,
         Wake,
         Sleep,
+    }
+
+    enum ViewerMode {
+        Greeting {
+            greeting: Option<GreetingScene>,
+            wake: scenes::WakeScene,
+            sleep: Option<SleepScene>,
+        },
+        Wake {
+            greeting: Option<GreetingScene>,
+            wake: scenes::WakeScene,
+            sleep: Option<SleepScene>,
+        },
+        Sleep {
+            greeting: Option<GreetingScene>,
+            wake: scenes::WakeScene,
+            sleep: Option<SleepScene>,
+        },
+    }
+
+    #[derive(Copy, Clone)]
+    enum SceneHook {
+        Enter,
+        Exit,
+    }
+
+    impl ViewerMode {
+        fn new(kind: ViewerModeKind, wake: scenes::WakeScene) -> Self {
+            let greeting = None;
+            let sleep = None;
+            match kind {
+                ViewerModeKind::Greeting => ViewerMode::Greeting {
+                    greeting,
+                    wake,
+                    sleep,
+                },
+                ViewerModeKind::Wake => ViewerMode::Wake {
+                    greeting,
+                    wake,
+                    sleep,
+                },
+                ViewerModeKind::Sleep => ViewerMode::Sleep {
+                    greeting,
+                    wake,
+                    sleep,
+                },
+            }
+        }
+
+        fn kind(&self) -> ViewerModeKind {
+            match self {
+                ViewerMode::Greeting { .. } => ViewerModeKind::Greeting,
+                ViewerMode::Wake { .. } => ViewerModeKind::Wake,
+                ViewerMode::Sleep { .. } => ViewerModeKind::Sleep,
+            }
+        }
+
+        fn wake(&self) -> &scenes::WakeScene {
+            match self {
+                ViewerMode::Greeting { wake, .. }
+                | ViewerMode::Wake { wake, .. }
+                | ViewerMode::Sleep { wake, .. } => wake,
+            }
+        }
+
+        fn wake_mut(&mut self) -> &mut scenes::WakeScene {
+            match self {
+                ViewerMode::Greeting { wake, .. }
+                | ViewerMode::Wake { wake, .. }
+                | ViewerMode::Sleep { wake, .. } => wake,
+            }
+        }
+
+        fn greeting(&self) -> Option<&GreetingScene> {
+            match self {
+                ViewerMode::Greeting {
+                    greeting: Some(greeting),
+                    ..
+                }
+                | ViewerMode::Wake {
+                    greeting: Some(greeting),
+                    ..
+                }
+                | ViewerMode::Sleep {
+                    greeting: Some(greeting),
+                    ..
+                } => Some(greeting),
+                _ => None,
+            }
+        }
+
+        fn greeting_mut(&mut self) -> Option<&mut GreetingScene> {
+            match self {
+                ViewerMode::Greeting {
+                    greeting: Some(greeting),
+                    ..
+                }
+                | ViewerMode::Wake {
+                    greeting: Some(greeting),
+                    ..
+                }
+                | ViewerMode::Sleep {
+                    greeting: Some(greeting),
+                    ..
+                } => Some(greeting),
+                _ => None,
+            }
+        }
+
+        fn sleep(&self) -> Option<&SleepScene> {
+            match self {
+                ViewerMode::Greeting {
+                    sleep: Some(sleep), ..
+                }
+                | ViewerMode::Wake {
+                    sleep: Some(sleep), ..
+                }
+                | ViewerMode::Sleep {
+                    sleep: Some(sleep), ..
+                } => Some(sleep),
+                _ => None,
+            }
+        }
+
+        fn sleep_mut(&mut self) -> Option<&mut SleepScene> {
+            match self {
+                ViewerMode::Greeting {
+                    sleep: Some(sleep), ..
+                }
+                | ViewerMode::Wake {
+                    sleep: Some(sleep), ..
+                }
+                | ViewerMode::Sleep {
+                    sleep: Some(sleep), ..
+                } => Some(sleep),
+                _ => None,
+            }
+        }
+
+        fn set_overlays(&mut self, greeting: Option<GreetingScene>, sleep: Option<SleepScene>) {
+            match self {
+                ViewerMode::Greeting {
+                    greeting: current_greeting,
+                    sleep: current_sleep,
+                    ..
+                }
+                | ViewerMode::Wake {
+                    greeting: current_greeting,
+                    sleep: current_sleep,
+                    ..
+                }
+                | ViewerMode::Sleep {
+                    greeting: current_greeting,
+                    sleep: current_sleep,
+                    ..
+                } => {
+                    *current_greeting = greeting;
+                    *current_sleep = sleep;
+                }
+            }
+        }
+
+        fn into_kind(self, kind: ViewerModeKind) -> Self {
+            let (greeting, wake, sleep) = match self {
+                ViewerMode::Greeting {
+                    greeting,
+                    wake,
+                    sleep,
+                }
+                | ViewerMode::Wake {
+                    greeting,
+                    wake,
+                    sleep,
+                }
+                | ViewerMode::Sleep {
+                    greeting,
+                    wake,
+                    sleep,
+                } => (greeting, wake, sleep),
+            };
+            match kind {
+                ViewerModeKind::Greeting => ViewerMode::Greeting {
+                    greeting,
+                    wake,
+                    sleep,
+                },
+                ViewerModeKind::Wake => ViewerMode::Wake {
+                    greeting,
+                    wake,
+                    sleep,
+                },
+                ViewerModeKind::Sleep => ViewerMode::Sleep {
+                    greeting,
+                    wake,
+                    sleep,
+                },
+            }
+        }
     }
 
     struct App {
@@ -669,7 +865,7 @@ pub fn run_windowed(
         cancel: CancellationToken,
         window: Option<Arc<Window>>,
         gpu: Option<GpuCtx>,
-        wake: scenes::WakeScene,
+        mode: Option<ViewerMode>,
         preload_count: usize,
         oversample: f32,
         matting: MattingConfig,
@@ -680,25 +876,126 @@ pub fn run_windowed(
         clear_color: wgpu::Color,
         rng: rand::rngs::ThreadRng,
         full_config: crate::config::Configuration,
-        viewer_state: ViewerState,
     }
 
     impl App {
+        fn mode(&self) -> &ViewerMode {
+            self.mode.as_ref().expect("viewer mode not initialized")
+        }
+
+        fn mode_mut(&mut self) -> &mut ViewerMode {
+            self.mode.as_mut().expect("viewer mode not initialized")
+        }
+
+        fn mode_kind(&self) -> ViewerModeKind {
+            self.mode().kind()
+        }
+
+        fn set_mode(&mut self, target: ViewerModeKind) -> ViewerModeKind {
+            let current = self.mode_kind();
+            if current == target {
+                return current;
+            }
+
+            let mut mode = self.mode.take().expect("viewer mode not initialized");
+
+            self.dispatch_scene_hook(&mut mode, SceneHook::Exit);
+
+            mode = mode.into_kind(target);
+
+            self.dispatch_scene_hook(&mut mode, SceneHook::Enter);
+
+            self.mode = Some(mode);
+            current
+        }
+
+        fn dispatch_scene_hook(&mut self, mode: &mut ViewerMode, hook: SceneHook) {
+            match mode {
+                ViewerMode::Greeting {
+                    greeting, sleep, ..
+                } => {
+                    if let Some(scene) = greeting.as_mut() {
+                        let window_ref = self.window.as_deref();
+                        let window_handle = self.window.as_ref().map(Arc::clone);
+                        let mut request_redraw = move || {
+                            if let Some(window) = window_handle.as_ref() {
+                                window.request_redraw();
+                            }
+                        };
+                        let ctx = SceneContext::new(
+                            window_ref,
+                            None,
+                            sleep.as_mut().map(|scene| &mut *scene),
+                            &mut request_redraw,
+                        );
+                        Self::run_scene_hook(scene, hook, ctx);
+                    }
+                }
+                ViewerMode::Wake {
+                    greeting,
+                    wake,
+                    sleep,
+                } => {
+                    let window_ref = self.window.as_deref();
+                    let window_handle = self.window.as_ref().map(Arc::clone);
+                    let mut request_redraw = move || {
+                        if let Some(window) = window_handle.as_ref() {
+                            window.request_redraw();
+                        }
+                    };
+                    let ctx = SceneContext::new(
+                        window_ref,
+                        greeting.as_mut().map(|scene| &mut *scene),
+                        sleep.as_mut().map(|scene| &mut *scene),
+                        &mut request_redraw,
+                    );
+                    Self::run_scene_hook(wake, hook, ctx);
+                }
+                ViewerMode::Sleep {
+                    greeting, sleep, ..
+                } => {
+                    if let Some(scene) = sleep.as_mut() {
+                        let window_ref = self.window.as_deref();
+                        let window_handle = self.window.as_ref().map(Arc::clone);
+                        let mut request_redraw = move || {
+                            if let Some(window) = window_handle.as_ref() {
+                                window.request_redraw();
+                            }
+                        };
+                        let ctx = SceneContext::new(
+                            window_ref,
+                            greeting.as_mut().map(|scene| &mut *scene),
+                            None,
+                            &mut request_redraw,
+                        );
+                        Self::run_scene_hook(scene, hook, ctx);
+                    }
+                }
+            }
+        }
+
+        fn run_scene_hook(scene: &mut dyn Scene, hook: SceneHook, ctx: SceneContext<'_>) {
+            match hook {
+                SceneHook::Enter => scene.enter(ctx),
+                SceneHook::Exit => scene.exit(ctx),
+            }
+        }
+
         fn reset_for_resume(&mut self) {
-            self.wake.reset();
+            self.mode_mut().wake_mut().reset();
             self.ready_results.clear();
             self.deferred_images.clear();
-            if self.viewer_state == ViewerState::Sleep {
-                self.wake.take_redraw_needed();
-                if let Some(gpu) = self.gpu.as_mut() {
-                    let message = self
-                        .full_config
-                        .sleep_screen
-                        .screen()
-                        .message_or_default()
-                        .into_owned();
-                    gpu.sleep.set_message(message);
-                    gpu.sleep.mark_redraw_needed();
+            if self.mode_kind() == ViewerModeKind::Sleep {
+                self.mode_mut().wake_mut().take_redraw_needed();
+                let message = self
+                    .full_config
+                    .sleep_screen
+                    .screen()
+                    .message_or_default()
+                    .into_owned();
+                if let Some(sleep) = self.mode_mut().sleep_mut() {
+                    sleep.set_message(message);
+                    sleep.mark_redraw_needed();
                 }
             } else {
                 self.enter_greeting();
@@ -712,34 +1009,32 @@ pub fn run_windowed(
                 return;
             }
             let now = Instant::now();
-            let current_path = self
-                .wake
-                .current()
-                .map(|img| img.path.display().to_string());
-            let next_path = self.wake.next().map(|img| img.path.display().to_string());
-            let displayed_elapsed_ms = self
-                .wake
+            let mode = self.mode();
+            let wake = mode.wake();
+            let current_path = wake.current().map(|img| img.path.display().to_string());
+            let next_path = wake.next().map(|img| img.path.display().to_string());
+            let displayed_elapsed_ms = wake
                 .displayed_at()
                 .map(|instant| now.saturating_duration_since(instant).as_millis() as u64);
-            let transition_kind = self.wake.transition_state().map(TransitionState::kind);
-            let transition_progress = self.wake.transition_state().map(TransitionState::progress);
-            let (greeting_pending, sleep_pending) = self
-                .gpu
-                .as_ref()
-                .map(|gpu| (gpu.greeting.needs_redraw(), gpu.sleep.needs_redraw()))
-                .unwrap_or((false, false));
+            let transition_kind = wake.transition_state().map(TransitionState::kind);
+            let transition_progress = wake.transition_state().map(TransitionState::progress);
+            let greeting_pending = mode
+                .greeting()
+                .map(GreetingScene::needs_redraw)
+                .unwrap_or(false);
+            let sleep_pending = mode.sleep().map(SleepScene::needs_redraw).unwrap_or(false);
 
             debug!(
                 context = context,
-                viewer_state = ?self.viewer_state,
+                viewer_mode = ?self.mode_kind(),
                 has_window = self.window.is_some(),
                 has_gpu = self.gpu.is_some(),
-                pending_queue_len = self.wake.pending().len(),
+                pending_queue_len = wake.pending().len(),
                 ready_results_len = self.ready_results.len(),
                 deferred_queue_len = self.deferred_images.len(),
                 mat_inflight = self.mat_inflight,
                 preload_target = self.preload_count,
-                pending_redraw = self.wake.needs_redraw(),
+                pending_redraw = wake.needs_redraw(),
                 greeting_overlay_pending = greeting_pending,
                 sleep_overlay_pending = sleep_pending,
                 displayed_elapsed_ms,
@@ -747,8 +1042,8 @@ pub fn run_windowed(
                 next_path = next_path.as_deref(),
                 transition_kind = ?transition_kind,
                 transition_progress,
-                has_next_stage = self.wake.next().is_some(),
-                has_current_stage = self.wake.current().is_some(),
+                has_next_stage = wake.next().is_some(),
+                has_current_stage = wake.current().is_some(),
                 "viewer_event_loop_state"
             );
         }
@@ -783,15 +1078,24 @@ pub fn run_windowed(
         }
 
         fn teardown_gpu(&mut self) {
-            self.wake.reset();
-            if let Some(gpu) = self.gpu.as_mut() {
-                match self.viewer_state {
-                    ViewerState::Wake => self.wake.mark_redraw_needed(),
-                    ViewerState::Greeting => gpu.greeting.mark_redraw_needed(),
-                    ViewerState::Sleep => gpu.sleep.mark_redraw_needed(),
+            let current_kind = self.mode_kind();
+            {
+                let mode = self.mode_mut();
+                mode.wake_mut().reset();
+                match current_kind {
+                    ViewerModeKind::Wake => mode.wake_mut().mark_redraw_needed(),
+                    ViewerModeKind::Greeting => {
+                        if let Some(greeting) = mode.greeting_mut() {
+                            greeting.mark_redraw_needed();
+                        }
+                    }
+                    ViewerModeKind::Sleep => {
+                        if let Some(sleep) = mode.sleep_mut() {
+                            sleep.mark_redraw_needed();
+                        }
+                    }
                 }
-            } else if self.viewer_state == ViewerState::Wake {
-                self.wake.mark_redraw_needed();
+                mode.set_overlays(None, None);
             }
             self.gpu = None;
             self.log_event_loop_state("teardown_gpu");
@@ -802,9 +1106,9 @@ pub fn run_windowed(
             match cmd {
                 ViewerCommand::SetState(ControlViewerState::Awake) => self.enter_wake(),
                 ViewerCommand::SetState(ControlViewerState::Asleep) => self.enter_sleep(),
-                ViewerCommand::ToggleState => match self.viewer_state {
-                    ViewerState::Sleep => self.enter_wake(),
-                    ViewerState::Greeting | ViewerState::Wake => self.enter_sleep(),
+                ViewerCommand::ToggleState => match self.mode_kind() {
+                    ViewerModeKind::Sleep => self.enter_wake(),
+                    ViewerModeKind::Greeting | ViewerModeKind::Wake => self.enter_sleep(),
                 },
             }
         }
@@ -818,24 +1122,24 @@ pub fn run_windowed(
 
             self.drain_mat_results();
 
-            match self.viewer_state {
-                ViewerState::Sleep => {
-                    if let Some(gpu) = self.gpu.as_mut() {
-                        if gpu.sleep.needs_redraw() {
-                            self.request_redraw();
-                        }
+            match self.mode_kind() {
+                ViewerModeKind::Sleep => {
+                    if self.mode().sleep().is_some_and(SleepScene::needs_redraw) {
+                        self.request_redraw();
                     }
                 }
-                ViewerState::Greeting => {
+                ViewerModeKind::Greeting => {
                     self.upload_ready_results();
                     self.queue_mat_tasks();
-                    if let Some(gpu) = self.gpu.as_mut() {
-                        if gpu.greeting.needs_redraw() {
-                            self.request_redraw();
-                        }
+                    if self
+                        .mode()
+                        .greeting()
+                        .is_some_and(GreetingScene::needs_redraw)
+                    {
+                        self.request_redraw();
                     }
                 }
-                ViewerState::Wake => {
+                ViewerModeKind::Wake => {
                     self.tick_awake();
                     self.request_redraw();
                 }
@@ -858,37 +1162,41 @@ pub fn run_windowed(
             self.upload_ready_results();
             self.queue_mat_tasks();
             self.ensure_current_image();
-            self.wake.finalize_transition(&self.to_manager_displayed);
-            self.wake.maybe_start_transition(&mut self.rng);
+            let displayed_sender = self.to_manager_displayed.clone();
+            self.mode_mut()
+                .wake_mut()
+                .finalize_transition(&displayed_sender);
+            let mut rng = std::mem::replace(&mut self.rng, rand::rng());
+            self.mode_mut().wake_mut().maybe_start_transition(&mut rng);
+            self.rng = rng;
         }
 
         fn upload_ready_results(&mut self) {
-            let Some(gpu) = self.gpu.as_ref() else {
-                return;
-            };
             while let Some(result) = self.ready_results.pop_front() {
                 let path = result.path.clone();
                 let priority = result.priority;
+                let Some(gpu) = self.gpu.as_ref() else {
+                    self.ready_results.push_front(result);
+                    break;
+                };
                 if let Some(new_tex) = upload_mat_result(gpu, result) {
+                    let wake = self.mode_mut().wake_mut();
                     if priority {
-                        self.wake.pending_mut().retain(|queued| queued.path != path);
-                        let displaced_next =
-                            if self.wake.next().is_some_and(|stage| stage.path == path) {
-                                self.wake.take_next()
-                            } else {
-                                None
-                            };
-                        if let Some(stage) = displaced_next {
-                            self.wake.pending_mut().push_front(stage);
+                        let replace_next = wake.next().is_some_and(|stage| stage.path == path);
+                        wake.pending_mut().retain(|queued| queued.path != path);
+                        if replace_next {
+                            if let Some(stage) = wake.take_next() {
+                                wake.pending_mut().push_front(stage);
+                            }
                         }
-                        self.wake.pending_mut().push_front(new_tex);
+                        wake.pending_mut().push_front(new_tex);
                     } else {
-                        self.wake.pending_mut().push_back(new_tex);
+                        wake.pending_mut().push_back(new_tex);
                     }
                     debug!(
                         path = %path.display(),
                         priority,
-                        depth = self.wake.pending().len(),
+                        depth = wake.pending().len(),
                         "queued_image"
                     );
                 }
@@ -896,7 +1204,7 @@ pub fn run_windowed(
         }
 
         fn queue_mat_tasks(&mut self) {
-            while self.wake.pending().len() + self.mat_inflight < self.preload_count {
+            while self.mode().wake().pending().len() + self.mat_inflight < self.preload_count {
                 let next_img = if let Some(img) = self.deferred_images.pop_front() {
                     Some(img)
                 } else {
@@ -916,11 +1224,12 @@ pub fn run_windowed(
                     self.deferred_images
                         .retain(|pending| pending.image.path != path);
                     self.ready_results.retain(|pending| pending.path != path);
-                    self.wake
-                        .pending_mut()
-                        .retain(|pending| pending.path != path);
-                    if self.wake.next().is_some_and(|stage| stage.path == path) {
-                        self.wake.set_next(None);
+                    {
+                        let wake = self.mode_mut().wake_mut();
+                        wake.pending_mut().retain(|pending| pending.path != path);
+                        if wake.next().is_some_and(|stage| stage.path == path) {
+                            wake.set_next(None);
+                        }
                     }
                 }
                 let Some(gpu) = self.gpu.as_ref() else {
@@ -961,110 +1270,123 @@ pub fn run_windowed(
         }
 
         fn ensure_current_image(&mut self) {
-            if self.viewer_state != ViewerState::Wake {
+            if self.mode_kind() != ViewerModeKind::Wake {
                 return;
             }
-            if self.wake.current().is_some() || self.wake.transition_state().is_some() {
-                return;
-            }
-            if let Some(first) = self.wake.pending_mut().pop_front() {
-                info!("first_image path={}", first.path.display());
-                self.wake.set_current(Some(first));
-                self.wake.mark_redraw_needed();
-                self.wake.set_displayed_at(Some(std::time::Instant::now()));
-                if let Some(cur) = self.wake.current() {
-                    let _ = self
-                        .to_manager_displayed
-                        .try_send(Displayed(cur.path.clone()));
+            let mut to_send = None;
+            {
+                let wake = self.mode_mut().wake_mut();
+                if wake.current().is_some() || wake.transition_state().is_some() {
+                    return;
                 }
+                if let Some(first) = wake.pending_mut().pop_front() {
+                    info!("first_image path={}", first.path.display());
+                    wake.set_current(Some(first));
+                    wake.mark_redraw_needed();
+                    wake.set_displayed_at(Some(std::time::Instant::now()));
+                    if let Some(cur) = wake.current() {
+                        to_send = Some(cur.path.clone());
+                    }
+                }
+            }
+            if let Some(path) = to_send {
+                let _ = self.to_manager_displayed.try_send(Displayed(path));
             }
         }
 
         fn request_redraw(&mut self) {
-            let Some(window) = self.window.as_ref() else {
-                return;
-            };
-            match self.viewer_state {
-                ViewerState::Wake => {
-                    let has_transition = self.wake.transition_state().is_some();
-                    let should_redraw = self.wake.needs_redraw() || has_transition;
-                    if should_redraw {
-                        debug!(
-                            pending_redraw = self.wake.needs_redraw(),
-                            has_transition, "viewer_request_redraw_wake"
-                        );
-                        window.request_redraw();
-                        self.wake.take_redraw_needed();
+            let mode_kind = self.mode_kind();
+            let mut request_redraw = false;
+            match mode_kind {
+                ViewerModeKind::Wake => {
+                    let (pending_redraw, has_transition) = {
+                        let wake = self.mode_mut().wake_mut();
+                        let has_transition = wake.transition_state().is_some();
+                        let needs_redraw = wake.needs_redraw();
+                        if needs_redraw {
+                            wake.take_redraw_needed();
+                        }
+                        (needs_redraw, has_transition)
+                    };
+                    if pending_redraw || has_transition {
+                        debug!(pending_redraw, has_transition, "viewer_request_redraw_wake");
+                        request_redraw = true;
                     }
                 }
-                ViewerState::Greeting => {
-                    if let Some(gpu) = self.gpu.as_ref() {
-                        let pending = gpu.greeting.needs_redraw();
+                ViewerModeKind::Greeting => {
+                    if let Some(greeting) = self.mode().greeting() {
+                        let pending = greeting.needs_redraw();
                         if pending {
                             debug!(
-                                viewer_state = ?self.viewer_state,
+                                viewer_mode = ?mode_kind,
                                 overlay_pending = pending,
                                 "viewer_request_redraw_overlay"
                             );
-                            window.request_redraw();
+                            request_redraw = true;
                         }
                     }
                 }
-                ViewerState::Sleep => {
-                    if let Some(gpu) = self.gpu.as_ref() {
-                        let pending = gpu.sleep.needs_redraw();
+                ViewerModeKind::Sleep => {
+                    if let Some(sleep) = self.mode().sleep() {
+                        let pending = sleep.needs_redraw();
                         if pending {
                             debug!(
-                                viewer_state = ?self.viewer_state,
+                                viewer_mode = ?mode_kind,
                                 overlay_pending = pending,
                                 "viewer_request_redraw_overlay"
                             );
-                            window.request_redraw();
+                            request_redraw = true;
                         }
                     }
+                }
+            }
+            if request_redraw {
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
                 }
             }
         }
 
         fn enter_sleep(&mut self) {
-            if self.viewer_state == ViewerState::Sleep {
+            if self.mode_kind() == ViewerModeKind::Sleep {
                 return;
             }
             info!("viewer: entering sleep");
-            self.viewer_state = ViewerState::Sleep;
-            self.wake.take_redraw_needed();
-            if let Some(gpu) = self.gpu.as_mut() {
-                if let Some(window) = self.window.as_ref() {
-                    let size = window.inner_size();
-                    let scale_factor = window.scale_factor();
-                    gpu.sleep.resize(size, scale_factor);
+            self.mode_mut().wake_mut().take_redraw_needed();
+            self.set_mode(ViewerModeKind::Sleep);
+            let window_dims = self
+                .window
+                .as_ref()
+                .map(|window| (window.inner_size(), window.scale_factor()));
+            let sleep_message = self
+                .full_config
+                .sleep_screen
+                .screen()
+                .message_or_default()
+                .into_owned();
+            if let Some(sleep) = self.mode_mut().sleep_mut() {
+                if let Some((size, scale_factor)) = window_dims {
+                    sleep.resize(size, scale_factor);
                 }
-                let message = self
-                    .full_config
-                    .sleep_screen
-                    .screen()
-                    .message_or_default()
-                    .into_owned();
-                gpu.sleep.set_message(message);
-                gpu.sleep.mark_redraw_needed();
+                sleep.set_message(sleep_message);
+                sleep.mark_redraw_needed();
             }
             self.request_redraw();
             self.log_event_loop_state("enter_sleep");
         }
 
         fn enter_wake(&mut self) {
-            if self.viewer_state == ViewerState::Wake {
+            if self.mode_kind() == ViewerModeKind::Wake {
                 return;
             }
             info!("viewer: entering wake");
-            self.viewer_state = ViewerState::Wake;
-            self.wake.enter_wake();
+            self.set_mode(ViewerModeKind::Wake);
             self.request_redraw();
             self.log_event_loop_state("enter_wake");
         }
 
         fn enter_greeting(&mut self) {
-            if self.viewer_state != ViewerState::Greeting {
+            if self.mode_kind() != ViewerModeKind::Greeting {
                 info!("viewer: entering greeting");
             }
             self.viewer_state = ViewerState::Greeting;
@@ -1078,14 +1400,8 @@ pub fn run_windowed(
                     let scale_factor = window.scale_factor();
                     gpu.greeting.resize(size, scale_factor);
                 }
-                let message = self
-                    .full_config
-                    .greeting_screen
-                    .screen()
-                    .message_or_default()
-                    .into_owned();
-                gpu.greeting.set_message(message);
-                gpu.greeting.mark_redraw_needed();
+                greeting.set_message(greeting_message);
+                greeting.mark_redraw_needed();
             }
             self.request_redraw();
             self.log_event_loop_state("enter_greeting");
@@ -1381,7 +1697,7 @@ pub fn run_windowed(
             sleep.set_message(sleep_message);
 
             self.window = Some(window);
-            let mut gpu = GpuCtx {
+            let gpu = GpuCtx {
                 device,
                 queue,
                 surface,
@@ -1393,19 +1709,32 @@ pub fn run_windowed(
                 sampler,
                 pipeline,
                 blank_plane,
-                greeting,
-                sleep,
             };
-            match self.viewer_state {
-                ViewerState::Greeting => gpu.greeting.mark_redraw_needed(),
-                ViewerState::Sleep => gpu.sleep.mark_redraw_needed(),
-                ViewerState::Wake => self.wake.mark_redraw_needed(),
+            if let Some(mode) = self.mode.as_mut() {
+                mode.set_overlays(Some(greeting), Some(sleep));
+            }
+            let current_kind = self.mode_kind();
+            match current_kind {
+                ViewerModeKind::Greeting => {
+                    if let Some(greeting) = self.mode_mut().greeting_mut() {
+                        greeting.mark_redraw_needed();
+                    }
+                }
+                ViewerModeKind::Sleep => {
+                    if let Some(sleep) = self.mode_mut().sleep_mut() {
+                        sleep.mark_redraw_needed();
+                    }
+                }
+                ViewerModeKind::Wake => {
+                    self.mode_mut().wake_mut().mark_redraw_needed();
+                }
             }
             self.gpu = Some(gpu);
-            self.wake.set_current(None);
-            self.wake.set_next(None);
-            self.wake.set_transition_state(None);
-            self.wake.set_displayed_at(None);
+            let wake = self.mode_mut().wake_mut();
+            wake.set_current(None);
+            wake.set_next(None);
+            wake.set_transition_state(None);
+            wake.set_displayed_at(None);
             self.request_redraw();
             self.log_event_loop_state("resumed_gpu_ready");
         }
@@ -1427,34 +1756,47 @@ pub fn run_windowed(
             if window.id() != window_id {
                 return;
             }
-            if self.gpu.is_none() {
-                return;
-            }
             self.log_event_loop_state("window_event_pre");
-            let Some(gpu) = self.gpu.as_mut() else {
-                return;
-            };
             match event {
                 WindowEvent::CloseRequested => {
                     debug!("viewer_window_close_requested");
                     event_loop.exit();
                 }
                 WindowEvent::Resized(new_size) => {
-                    debug!(
-                        width = new_size.width,
-                        height = new_size.height,
-                        "viewer_window_resized"
-                    );
-                    gpu.config.width = new_size.width.max(1);
-                    gpu.config.height = new_size.height.max(1);
-                    gpu.surface.configure(&gpu.device, &gpu.config);
-                    let scale_factor = window.scale_factor();
-                    gpu.greeting.resize(new_size, scale_factor);
-                    gpu.sleep.resize(new_size, scale_factor);
-                    match self.viewer_state {
-                        ViewerState::Wake => self.wake.mark_redraw_needed(),
-                        ViewerState::Greeting => gpu.greeting.mark_redraw_needed(),
-                        ViewerState::Sleep => gpu.sleep.mark_redraw_needed(),
+                    let mode_kind = self.mode_kind();
+                    {
+                        let (Some(gpu), Some(mode)) = (self.gpu.as_mut(), self.mode.as_mut())
+                        else {
+                            return;
+                        };
+                        debug!(
+                            width = new_size.width,
+                            height = new_size.height,
+                            "viewer_window_resized"
+                        );
+                        gpu.config.width = new_size.width.max(1);
+                        gpu.config.height = new_size.height.max(1);
+                        gpu.surface.configure(&gpu.device, &gpu.config);
+                        let scale_factor = window.scale_factor();
+                        if let Some(greeting) = mode.greeting_mut() {
+                            greeting.resize(new_size, scale_factor);
+                        }
+                        if let Some(sleep) = mode.sleep_mut() {
+                            sleep.resize(new_size, scale_factor);
+                        }
+                        match mode_kind {
+                            ViewerModeKind::Wake => mode.wake_mut().mark_redraw_needed(),
+                            ViewerModeKind::Greeting => {
+                                if let Some(greeting) = mode.greeting_mut() {
+                                    greeting.mark_redraw_needed();
+                                }
+                            }
+                            ViewerModeKind::Sleep => {
+                                if let Some(sleep) = mode.sleep_mut() {
+                                    sleep.mark_redraw_needed();
+                                }
+                            }
+                        }
                     }
                     self.request_redraw();
                 }
@@ -1462,33 +1804,67 @@ pub fn run_windowed(
                     mut inner_size_writer,
                     ..
                 } => {
-                    let scale_factor = window.scale_factor();
-                    let size = window.inner_size();
-                    debug!(
-                        scale_factor = scale_factor,
-                        width = size.width,
-                        height = size.height,
-                        "viewer_window_scale_factor_changed"
-                    );
-                    let _ = inner_size_writer.request_inner_size(size);
-                    gpu.config.width = size.width.max(1);
-                    gpu.config.height = size.height.max(1);
-                    gpu.surface.configure(&gpu.device, &gpu.config);
-                    gpu.greeting.resize(size, scale_factor);
-                    gpu.sleep.resize(size, scale_factor);
-                    match self.viewer_state {
-                        ViewerState::Wake => self.wake.mark_redraw_needed(),
-                        ViewerState::Greeting => gpu.greeting.mark_redraw_needed(),
-                        ViewerState::Sleep => gpu.sleep.mark_redraw_needed(),
+                    let mode_kind = self.mode_kind();
+                    {
+                        let (Some(gpu), Some(mode)) = (self.gpu.as_mut(), self.mode.as_mut())
+                        else {
+                            return;
+                        };
+                        let scale_factor = window.scale_factor();
+                        let size = window.inner_size();
+                        debug!(
+                            scale_factor = scale_factor,
+                            width = size.width,
+                            height = size.height,
+                            "viewer_window_scale_factor_changed"
+                        );
+                        let _ = inner_size_writer.request_inner_size(size);
+                        gpu.config.width = size.width.max(1);
+                        gpu.config.height = size.height.max(1);
+                        gpu.surface.configure(&gpu.device, &gpu.config);
+                        if let Some(greeting) = mode.greeting_mut() {
+                            greeting.resize(size, scale_factor);
+                        }
+                        if let Some(sleep) = mode.sleep_mut() {
+                            sleep.resize(size, scale_factor);
+                        }
+                        match mode_kind {
+                            ViewerModeKind::Wake => mode.wake_mut().mark_redraw_needed(),
+                            ViewerModeKind::Greeting => {
+                                if let Some(greeting) = mode.greeting_mut() {
+                                    greeting.mark_redraw_needed();
+                                }
+                            }
+                            ViewerModeKind::Sleep => {
+                                if let Some(sleep) = mode.sleep_mut() {
+                                    sleep.mark_redraw_needed();
+                                }
+                            }
+                        }
                     }
                     self.request_redraw();
                 }
                 WindowEvent::Occluded(false) => {
-                    debug!("viewer_window_occluded_false");
-                    match self.viewer_state {
-                        ViewerState::Wake => self.wake.mark_redraw_needed(),
-                        ViewerState::Greeting => gpu.greeting.mark_redraw_needed(),
-                        ViewerState::Sleep => gpu.sleep.mark_redraw_needed(),
+                    let mode_kind = self.mode_kind();
+                    {
+                        let (Some(_gpu), Some(mode)) = (self.gpu.as_mut(), self.mode.as_mut())
+                        else {
+                            return;
+                        };
+                        debug!("viewer_window_occluded_false");
+                        match mode_kind {
+                            ViewerModeKind::Wake => mode.wake_mut().mark_redraw_needed(),
+                            ViewerModeKind::Greeting => {
+                                if let Some(greeting) = mode.greeting_mut() {
+                                    greeting.mark_redraw_needed();
+                                }
+                            }
+                            ViewerModeKind::Sleep => {
+                                if let Some(sleep) = mode.sleep_mut() {
+                                    sleep.mark_redraw_needed();
+                                }
+                            }
+                        }
                     }
                     self.request_redraw();
                 }
@@ -1496,64 +1872,75 @@ pub fn run_windowed(
                     debug!("viewer_window_occluded_true");
                 }
                 WindowEvent::RedrawRequested => {
-                    let overlay_pending = match self.viewer_state {
-                        ViewerState::Greeting => gpu.greeting.needs_redraw(),
-                        ViewerState::Sleep => gpu.sleep.needs_redraw(),
-                        ViewerState::Wake => false,
+                    let mode_kind = self.mode_kind();
+                    let (Some(gpu), Some(mode)) = (self.gpu.as_mut(), self.mode.as_mut()) else {
+                        return;
                     };
+                    let overlay_pending = match mode_kind {
+                        ViewerModeKind::Greeting => mode
+                            .greeting()
+                            .map(GreetingScene::needs_redraw)
+                            .unwrap_or(false),
+                        ViewerModeKind::Sleep => {
+                            mode.sleep().map(SleepScene::needs_redraw).unwrap_or(false)
+                        }
+                        ViewerModeKind::Wake => false,
+                    };
+                    let wake = mode.wake();
                     debug!(
-                        viewer_state = ?self.viewer_state,
+                        viewer_mode = ?mode_kind,
                         overlay_pending,
-                        pending_redraw = self.wake.needs_redraw(),
-                        queue_depth = self.wake.pending().len(),
+                        pending_redraw = wake.needs_redraw(),
+                        queue_depth = wake.pending().len(),
                         ready_results = self.ready_results.len(),
                         mat_inflight = self.mat_inflight,
-                        has_transition = self.wake.transition_state().is_some(),
+                        has_transition = wake.transition_state().is_some(),
                         "viewer_window_redraw_requested"
                     );
-                    if matches!(
-                        self.viewer_state,
-                        ViewerState::Greeting | ViewerState::Sleep
-                    ) && !overlay_pending
+                    if matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep)
+                        && !overlay_pending
                     {
                         return;
                     }
-                    if matches!(
-                        self.viewer_state,
-                        ViewerState::Greeting | ViewerState::Sleep
-                    ) {
+                    if matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep) {
                         let size = window.inner_size();
                         let scale_factor = window.scale_factor();
-                        let layout_ready = match self.viewer_state {
-                            ViewerState::Greeting => {
-                                let message = self
-                                    .full_config
-                                    .greeting_screen
-                                    .screen()
-                                    .message_or_default()
-                                    .into_owned();
-                                let screen = &mut gpu.greeting;
-                                screen.resize(size, scale_factor);
-                                screen.set_message(message);
-                                screen.ensure_layout_ready()
+                        let layout_ready = match mode_kind {
+                            ViewerModeKind::Greeting => {
+                                if let Some(screen) = mode.greeting_mut() {
+                                    let message = self
+                                        .full_config
+                                        .greeting_screen
+                                        .screen()
+                                        .message_or_default()
+                                        .into_owned();
+                                    screen.resize(size, scale_factor);
+                                    screen.set_message(message);
+                                    screen.ensure_layout_ready()
+                                } else {
+                                    false
+                                }
                             }
-                            ViewerState::Sleep => {
-                                let message = self
-                                    .full_config
-                                    .sleep_screen
-                                    .screen()
-                                    .message_or_default()
-                                    .into_owned();
-                                let screen = &mut gpu.sleep;
-                                screen.resize(size, scale_factor);
-                                screen.set_message(message);
-                                screen.ensure_layout_ready()
+                            ViewerModeKind::Sleep => {
+                                if let Some(screen) = mode.sleep_mut() {
+                                    let message = self
+                                        .full_config
+                                        .sleep_screen
+                                        .screen()
+                                        .message_or_default()
+                                        .into_owned();
+                                    screen.resize(size, scale_factor);
+                                    screen.set_message(message);
+                                    screen.ensure_layout_ready()
+                                } else {
+                                    false
+                                }
                             }
-                            ViewerState::Wake => true,
+                            ViewerModeKind::Wake => true,
                         };
                         if !layout_ready {
                             debug!(
-                                viewer_state = ?self.viewer_state,
+                                viewer_mode = ?mode_kind,
                                 width = size.width,
                                 height = size.height,
                                 "viewer_overlay_waiting_for_layout"
@@ -1613,10 +2000,13 @@ pub fn run_windowed(
                                 label: Some("draw-encoder"),
                             });
 
-                    match self.viewer_state {
-                        ViewerState::Sleep => {
+                    match mode_kind {
+                        ViewerModeKind::Sleep => {
+                            let Some(screen) = mode.sleep_mut() else {
+                                return;
+                            };
                             encoder.push_debug_group("sleep-banner");
-                            let rendered = gpu.sleep.render(&mut encoder, &view);
+                            let rendered = screen.render(&mut encoder, &view);
                             encoder.pop_debug_group();
 
                             if !rendered {
@@ -1626,12 +2016,15 @@ pub fn run_windowed(
 
                             gpu.queue.submit(Some(encoder.finish()));
                             frame.present();
-                            gpu.sleep.after_submit();
+                            screen.after_submit();
                             return;
                         }
-                        ViewerState::Greeting => {
+                        ViewerModeKind::Greeting => {
+                            let Some(screen) = mode.greeting_mut() else {
+                                return;
+                            };
                             encoder.push_debug_group("greeting-banner");
-                            let rendered = gpu.greeting.render(&mut encoder, &view);
+                            let rendered = screen.render(&mut encoder, &view);
                             encoder.pop_debug_group();
 
                             if !rendered {
@@ -1641,10 +2034,11 @@ pub fn run_windowed(
 
                             gpu.queue.submit(Some(encoder.finish()));
                             frame.present();
-                            gpu.greeting.after_submit();
+                            screen.after_submit();
                             return;
                         }
-                        ViewerState::Wake => {
+                        ViewerModeKind::Wake => {
+                            let wake = mode.wake();
                             encoder.push_debug_group("wake-draw");
                             let mut rpass =
                                 encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1678,8 +2072,8 @@ pub fn run_windowed(
                             let mut next_bind = &gpu.blank_plane.bind;
                             let mut have_draw = false;
 
-                            if let Some(state) = self.wake.transition_state() {
-                                if let Some(cur) = self.wake.current() {
+                            if let Some(state) = wake.transition_state() {
+                                if let Some(cur) = wake.current() {
                                     let rect = compute_cover_rect(
                                         cur.plane.w,
                                         cur.plane.h,
@@ -1690,7 +2084,7 @@ pub fn run_windowed(
                                     current_bind = &cur.plane.bind;
                                     have_draw = true;
                                 }
-                                if let Some(next) = self.wake.next() {
+                                if let Some(next) = wake.next() {
                                     let rect = compute_cover_rect(
                                         next.plane.w,
                                         next.plane.h,
@@ -1744,7 +2138,7 @@ pub fn run_windowed(
                                         uniforms.params1[3] = flash_color[2].clamp(0.0, 1.0);
                                     }
                                 }
-                            } else if let Some(cur) = self.wake.current() {
+                            } else if let Some(cur) = wake.current() {
                                 let rect = compute_cover_rect(
                                     cur.plane.w,
                                     cur.plane.h,
@@ -1774,6 +2168,7 @@ pub fn run_windowed(
                         }
                     }
                 }
+
                 other => {
                     debug!(event = ?other, "viewer_window_event_other");
                 }
@@ -1782,8 +2177,9 @@ pub fn run_windowed(
 
         fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
             self.log_event_loop_state("about_to_wait");
-            debug!(viewer_state = ?self.viewer_state, "viewer_about_to_wait");
-            if self.viewer_state == ViewerState::Wake {
+            let mode_kind = self.mode_kind();
+            debug!(viewer_mode = ?mode_kind, "viewer_about_to_wait");
+            if mode_kind == ViewerModeKind::Wake {
                 self.request_redraw();
             }
         }
@@ -1874,13 +2270,14 @@ pub fn run_windowed(
         })
     };
     let control_driver = tokio::spawn(drive_viewer_events(command_rx, control_cancel, proxy));
+    let initial_wake = scenes::WakeScene::new(cfg.dwell_ms, cfg.transition.clone());
     let mut app = App {
         from_loader,
         to_manager_displayed,
         cancel,
         window: None,
         gpu: None,
-        wake: scenes::WakeScene::new(cfg.dwell_ms, cfg.transition.clone()),
+        mode: Some(ViewerMode::new(ViewerModeKind::Greeting, initial_wake)),
         preload_count: cfg.viewer_preload_count,
         oversample: cfg.oversample,
         matting: cfg.matting.clone(),
@@ -1891,7 +2288,6 @@ pub fn run_windowed(
         clear_color,
         rng: rand::rng(),
         full_config: cfg.clone(),
-        viewer_state: ViewerState::Greeting,
     };
     app.enter_greeting();
     event_loop.run_app(&mut app)?;
