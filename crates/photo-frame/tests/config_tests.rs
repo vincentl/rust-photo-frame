@@ -53,7 +53,7 @@ matting:
     let options = cfg.matting.options();
     assert_eq!(
         cfg.matting.selection(),
-        MattingSelection::Fixed(MattingKind::Studio)
+        &MattingSelection::Fixed(MattingKind::Studio)
     );
     let mat = options
         .get(&MattingKind::Studio)
@@ -153,7 +153,7 @@ matting:
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(
         cfg.matting.selection(),
-        MattingSelection::Random(vec![MattingKind::FixedColor, MattingKind::Blur])
+        &MattingSelection::Random(vec![MattingKind::FixedColor, MattingKind::Blur])
     );
     let options = cfg.matting.options();
     assert_eq!(options.len(), 2);
@@ -224,7 +224,7 @@ matting:
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     match cfg.matting.selection() {
         MattingSelection::Sequential { kinds, .. } => {
-            assert_eq!(kinds, vec![MattingKind::FixedColor, MattingKind::Blur]);
+            assert_eq!(kinds.as_slice(), &[MattingKind::FixedColor, MattingKind::Blur]);
         }
         other => panic!("expected sequential matting selection, got {other:?}"),
     }
@@ -460,7 +460,7 @@ transition:
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(
         cfg.transition.selection(),
-        TransitionSelection::Fixed(TransitionKind::Fade)
+        &TransitionSelection::Fixed(TransitionKind::Fade)
     );
     let options = cfg.transition.options();
     let fade = options
@@ -497,7 +497,7 @@ transition:
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(
         cfg.transition.selection(),
-        TransitionSelection::Random(vec![
+        &TransitionSelection::Random(vec![
             TransitionKind::Fade,
             TransitionKind::Wipe,
             TransitionKind::Push,
@@ -556,7 +556,7 @@ transition:
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     match cfg.transition.selection() {
         TransitionSelection::Sequential { kinds, .. } => {
-            assert_eq!(kinds, vec![TransitionKind::Push, TransitionKind::Wipe]);
+            assert_eq!(kinds.as_slice(), &[TransitionKind::Push, TransitionKind::Wipe]);
         }
         other => panic!("expected sequential transition selection, got {other:?}"),
     }
