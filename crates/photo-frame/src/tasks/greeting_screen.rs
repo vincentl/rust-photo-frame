@@ -139,6 +139,7 @@ impl GreetingScreen {
                 label: Some("greeting-background"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target_view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(to_wgpu_color(self.background)),
@@ -163,7 +164,7 @@ impl GreetingScreen {
     }
 
     pub fn after_submit(&mut self) {
-        let _ = self.device.poll(wgpu::PollType::Wait);
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
     }
 
     pub fn update_layout(&mut self) -> bool {
@@ -186,6 +187,7 @@ impl GreetingScreen {
             &self.message,
             &attrs,
             Shaping::Advanced,
+            None,
         );
         apply_center_alignment(&mut self.text_buffer);
         self.text_buffer

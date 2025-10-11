@@ -1146,6 +1146,7 @@ pub fn run_windowed(
                     label: Some("viewer-device"),
                     required_features: wgpu::Features::empty(),
                     required_limits: limits.clone(),
+                    experimental_features: wgpu::ExperimentalFeatures::default(),
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::default(),
                 })) {
@@ -1646,6 +1647,7 @@ pub fn run_windowed(
                                     label: Some("draw-pass"),
                                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                                         view: &view,
+                                        depth_slice: None,
                                         resolve_target: None,
                                         ops: wgpu::Operations {
                                             load: wgpu::LoadOp::Clear(self.clear_color),
