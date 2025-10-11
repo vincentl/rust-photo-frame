@@ -1,6 +1,6 @@
 pub mod scenes;
 
-use self::scenes::Scene;
+use self::scenes::{GreetingScene, Scene, SleepScene};
 
 use crate::config::{
     MattingConfig, MattingMode, MattingOptions, TransitionKind, TransitionMode, TransitionOptions,
@@ -263,8 +263,8 @@ pub fn run_windowed(
         sampler: wgpu::Sampler,
         pipeline: wgpu::RenderPipeline,
         blank_plane: TexturePlane,
-        greeting: GreetingScreen,
-        sleep: GreetingScreen,
+        greeting: GreetingScene,
+        sleep: SleepScene,
     }
 
     #[derive(Clone)]
@@ -682,7 +682,6 @@ pub fn run_windowed(
         rng: rand::rngs::ThreadRng,
         full_config: crate::config::Configuration,
         viewer_state: ViewerState,
-        overlay_frame_pending: bool,
     }
 
     impl App {
@@ -692,8 +691,17 @@ pub fn run_windowed(
             self.deferred_images.clear();
             if self.viewer_state == ViewerState::Sleep {
                 self.greeting_deadline = None;
-                self.overlay_frame_pending = true;
                 self.wake.take_redraw_needed();
+                if let Some(gpu) = self.gpu.as_mut() {
+                    let message = self
+                        .full_config
+                        .sleep_screen
+                        .screen()
+                        .message_or_default()
+                        .into_owned();
+                    gpu.sleep.set_message(message);
+                    gpu.sleep.mark_redraw_needed();
+                }
             } else {
                 self.enter_greeting();
             }
@@ -722,6 +730,11 @@ pub fn run_windowed(
                 .map(|instant| now.saturating_duration_since(instant).as_millis() as u64);
             let transition_kind = self.wake.transition_state().map(TransitionState::kind);
             let transition_progress = self.wake.transition_state().map(TransitionState::progress);
+            let (greeting_pending, sleep_pending) = self
+                .gpu
+                .as_ref()
+                .map(|gpu| (gpu.greeting.needs_redraw(), gpu.sleep.needs_redraw()))
+                .unwrap_or((false, false));
 
             debug!(
                 context = context,
@@ -734,7 +747,8 @@ pub fn run_windowed(
                 mat_inflight = self.mat_inflight,
                 preload_target = self.preload_count,
                 pending_redraw = self.wake.needs_redraw(),
-                overlay_frame_pending = self.overlay_frame_pending,
+                greeting_overlay_pending = greeting_pending,
+                sleep_overlay_pending = sleep_pending,
                 greeting_deadline_remaining_ms,
                 displayed_elapsed_ms,
                 current_path = current_path.as_deref(),
@@ -779,14 +793,16 @@ pub fn run_windowed(
         fn teardown_gpu(&mut self) {
             self.wake.reset();
             self.greeting_deadline = None;
-            self.gpu = None;
-            if self.viewer_state == ViewerState::Wake {
+            if let Some(gpu) = self.gpu.as_mut() {
+                match self.viewer_state {
+                    ViewerState::Wake => self.wake.mark_redraw_needed(),
+                    ViewerState::Greeting => gpu.greeting.mark_redraw_needed(),
+                    ViewerState::Sleep => gpu.sleep.mark_redraw_needed(),
+                }
+            } else if self.viewer_state == ViewerState::Wake {
                 self.wake.mark_redraw_needed();
             }
-            self.overlay_frame_pending = matches!(
-                self.viewer_state,
-                ViewerState::Greeting | ViewerState::Sleep
-            );
+            self.gpu = None;
             self.log_event_loop_state("teardown_gpu");
         }
 
@@ -813,16 +829,20 @@ pub fn run_windowed(
 
             match self.viewer_state {
                 ViewerState::Sleep => {
-                    if self.overlay_frame_pending {
-                        self.request_redraw();
+                    if let Some(gpu) = self.gpu.as_mut() {
+                        if gpu.sleep.needs_redraw() {
+                            self.request_redraw();
+                        }
                     }
                 }
                 ViewerState::Greeting => {
                     self.upload_ready_results();
                     self.queue_mat_tasks();
                     self.ensure_current_image();
-                    if self.overlay_frame_pending {
-                        self.request_redraw();
+                    if let Some(gpu) = self.gpu.as_mut() {
+                        if gpu.greeting.needs_redraw() {
+                            self.request_redraw();
+                        }
                     }
                 }
                 ViewerState::Wake => {
@@ -995,14 +1015,30 @@ pub fn run_windowed(
                         self.wake.take_redraw_needed();
                     }
                 }
-                ViewerState::Greeting | ViewerState::Sleep => {
-                    if self.overlay_frame_pending {
-                        debug!(
-                            viewer_state = ?self.viewer_state,
-                            overlay_frame_pending = self.overlay_frame_pending,
-                            "viewer_request_redraw_overlay"
-                        );
-                        window.request_redraw();
+                ViewerState::Greeting => {
+                    if let Some(gpu) = self.gpu.as_ref() {
+                        let pending = gpu.greeting.needs_redraw();
+                        if pending {
+                            debug!(
+                                viewer_state = ?self.viewer_state,
+                                overlay_pending = pending,
+                                "viewer_request_redraw_overlay"
+                            );
+                            window.request_redraw();
+                        }
+                    }
+                }
+                ViewerState::Sleep => {
+                    if let Some(gpu) = self.gpu.as_ref() {
+                        let pending = gpu.sleep.needs_redraw();
+                        if pending {
+                            debug!(
+                                viewer_state = ?self.viewer_state,
+                                overlay_pending = pending,
+                                "viewer_request_redraw_overlay"
+                            );
+                            window.request_redraw();
+                        }
                     }
                 }
             }
@@ -1015,8 +1051,21 @@ pub fn run_windowed(
             info!("viewer: entering sleep");
             self.viewer_state = ViewerState::Sleep;
             self.wake.take_redraw_needed();
-            self.overlay_frame_pending = true;
-            self.refresh_overlay_layout();
+            if let Some(gpu) = self.gpu.as_mut() {
+                if let Some(window) = self.window.as_ref() {
+                    let size = window.inner_size();
+                    let scale_factor = window.scale_factor();
+                    gpu.sleep.resize(size, scale_factor);
+                }
+                let message = self
+                    .full_config
+                    .sleep_screen
+                    .screen()
+                    .message_or_default()
+                    .into_owned();
+                gpu.sleep.set_message(message);
+                gpu.sleep.mark_redraw_needed();
+            }
             self.request_redraw();
             self.log_event_loop_state("enter_sleep");
         }
@@ -1027,7 +1076,6 @@ pub fn run_windowed(
             }
             info!("viewer: entering wake");
             self.viewer_state = ViewerState::Wake;
-            self.overlay_frame_pending = false;
             self.greeting_deadline = None;
             self.wake.enter_wake();
             self.request_redraw();
@@ -1040,37 +1088,24 @@ pub fn run_windowed(
             }
             self.viewer_state = ViewerState::Greeting;
             self.wake.take_redraw_needed();
-            self.overlay_frame_pending = true;
             self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
-            self.refresh_overlay_layout();
-            self.request_redraw();
-            self.log_event_loop_state("enter_greeting");
-        }
-
-        fn refresh_overlay_layout(&mut self) {
-            if let (Some(window), Some(gpu)) = (self.window.as_ref(), self.gpu.as_mut()) {
-                let size = window.inner_size();
-                let scale_factor = window.scale_factor();
-                gpu.greeting.resize(size, scale_factor);
-                let greeting_message = self
+            if let Some(gpu) = self.gpu.as_mut() {
+                if let Some(window) = self.window.as_ref() {
+                    let size = window.inner_size();
+                    let scale_factor = window.scale_factor();
+                    gpu.greeting.resize(size, scale_factor);
+                }
+                let message = self
                     .full_config
                     .greeting_screen
                     .screen()
                     .message_or_default()
                     .into_owned();
-                let _ = gpu.greeting.set_message(greeting_message);
-                let _ = gpu.greeting.update_layout();
-
-                gpu.sleep.resize(size, scale_factor);
-                let sleep_message = self
-                    .full_config
-                    .sleep_screen
-                    .screen()
-                    .message_or_default()
-                    .into_owned();
-                let _ = gpu.sleep.set_message(sleep_message);
-                let _ = gpu.sleep.update_layout();
+                gpu.greeting.set_message(message);
+                gpu.greeting.mark_redraw_needed();
             }
+            self.request_redraw();
+            self.log_event_loop_state("enter_greeting");
         }
     }
 
@@ -1330,40 +1365,39 @@ pub fn run_windowed(
 
             let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
 
-            let mut greeting = GreetingScreen::new(
+            let scale_factor = window.scale_factor();
+            let mut greeting = GreetingScene::new(GreetingScreen::new(
                 &device,
                 &queue,
                 format,
                 self.full_config.greeting_screen.screen(),
-            );
-            greeting.resize(size, window.scale_factor());
+            ));
+            greeting.resize(size, scale_factor);
             let greeting_message = self
                 .full_config
                 .greeting_screen
                 .screen()
                 .message_or_default()
                 .into_owned();
-            let _ = greeting.set_message(greeting_message);
-            let _ = greeting.update_layout();
+            greeting.set_message(greeting_message);
 
-            let mut sleep = GreetingScreen::new(
+            let mut sleep = SleepScene::new(GreetingScreen::new(
                 &device,
                 &queue,
                 format,
                 self.full_config.sleep_screen.screen(),
-            );
-            sleep.resize(size, window.scale_factor());
+            ));
+            sleep.resize(size, scale_factor);
             let sleep_message = self
                 .full_config
                 .sleep_screen
                 .screen()
                 .message_or_default()
                 .into_owned();
-            let _ = sleep.set_message(sleep_message);
-            let _ = sleep.update_layout();
+            sleep.set_message(sleep_message);
 
             self.window = Some(window);
-            self.gpu = Some(GpuCtx {
+            let mut gpu = GpuCtx {
                 device,
                 queue,
                 surface,
@@ -1377,16 +1411,17 @@ pub fn run_windowed(
                 blank_plane,
                 greeting,
                 sleep,
-            });
+            };
+            match self.viewer_state {
+                ViewerState::Greeting => gpu.greeting.mark_redraw_needed(),
+                ViewerState::Sleep => gpu.sleep.mark_redraw_needed(),
+                ViewerState::Wake => self.wake.mark_redraw_needed(),
+            }
+            self.gpu = Some(gpu);
             self.wake.set_current(None);
             self.wake.set_next(None);
             self.wake.set_transition_state(None);
             self.wake.set_displayed_at(None);
-            if self.viewer_state == ViewerState::Wake {
-                self.wake.mark_redraw_needed();
-            } else {
-                self.overlay_frame_pending = true;
-            }
             self.request_redraw();
             self.log_event_loop_state("resumed_gpu_ready");
         }
@@ -1431,14 +1466,11 @@ pub fn run_windowed(
                     gpu.surface.configure(&gpu.device, &gpu.config);
                     let scale_factor = window.scale_factor();
                     gpu.greeting.resize(new_size, scale_factor);
-                    let _ = gpu.greeting.update_layout();
                     gpu.sleep.resize(new_size, scale_factor);
-                    let _ = gpu.sleep.update_layout();
                     match self.viewer_state {
                         ViewerState::Wake => self.wake.mark_redraw_needed(),
-                        ViewerState::Greeting | ViewerState::Sleep => {
-                            self.overlay_frame_pending = true;
-                        }
+                        ViewerState::Greeting => gpu.greeting.mark_redraw_needed(),
+                        ViewerState::Sleep => gpu.sleep.mark_redraw_needed(),
                     }
                     self.request_redraw();
                 }
@@ -1459,14 +1491,11 @@ pub fn run_windowed(
                     gpu.config.height = size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
                     gpu.greeting.resize(size, scale_factor);
-                    let _ = gpu.greeting.update_layout();
                     gpu.sleep.resize(size, scale_factor);
-                    let _ = gpu.sleep.update_layout();
                     match self.viewer_state {
                         ViewerState::Wake => self.wake.mark_redraw_needed(),
-                        ViewerState::Greeting | ViewerState::Sleep => {
-                            self.overlay_frame_pending = true;
-                        }
+                        ViewerState::Greeting => gpu.greeting.mark_redraw_needed(),
+                        ViewerState::Sleep => gpu.sleep.mark_redraw_needed(),
                     }
                     self.request_redraw();
                 }
@@ -1474,9 +1503,8 @@ pub fn run_windowed(
                     debug!("viewer_window_occluded_false");
                     match self.viewer_state {
                         ViewerState::Wake => self.wake.mark_redraw_needed(),
-                        ViewerState::Greeting | ViewerState::Sleep => {
-                            self.overlay_frame_pending = true;
-                        }
+                        ViewerState::Greeting => gpu.greeting.mark_redraw_needed(),
+                        ViewerState::Sleep => gpu.sleep.mark_redraw_needed(),
                     }
                     self.request_redraw();
                 }
@@ -1484,9 +1512,14 @@ pub fn run_windowed(
                     debug!("viewer_window_occluded_true");
                 }
                 WindowEvent::RedrawRequested => {
+                    let overlay_pending = match self.viewer_state {
+                        ViewerState::Greeting => gpu.greeting.needs_redraw(),
+                        ViewerState::Sleep => gpu.sleep.needs_redraw(),
+                        ViewerState::Wake => false,
+                    };
                     debug!(
                         viewer_state = ?self.viewer_state,
-                        overlay_frame_pending = self.overlay_frame_pending,
+                        overlay_pending,
                         pending_redraw = self.wake.needs_redraw(),
                         queue_depth = self.wake.pending().len(),
                         ready_results = self.ready_results.len(),
@@ -1497,7 +1530,7 @@ pub fn run_windowed(
                     if matches!(
                         self.viewer_state,
                         ViewerState::Greeting | ViewerState::Sleep
-                    ) && !self.overlay_frame_pending
+                    ) && !overlay_pending
                     {
                         return;
                     }
@@ -1517,8 +1550,8 @@ pub fn run_windowed(
                                     .into_owned();
                                 let screen = &mut gpu.greeting;
                                 screen.resize(size, scale_factor);
-                                let _ = screen.set_message(message);
-                                screen.update_layout()
+                                screen.set_message(message);
+                                screen.ensure_layout_ready()
                             }
                             ViewerState::Sleep => {
                                 let message = self
@@ -1529,8 +1562,8 @@ pub fn run_windowed(
                                     .into_owned();
                                 let screen = &mut gpu.sleep;
                                 screen.resize(size, scale_factor);
-                                let _ = screen.set_message(message);
-                                screen.update_layout()
+                                screen.set_message(message);
+                                screen.ensure_layout_ready()
                             }
                             ViewerState::Wake => true,
                         };
@@ -1604,14 +1637,12 @@ pub fn run_windowed(
 
                             if !rendered {
                                 debug!("sleep_banner_render_deferred");
-                                self.overlay_frame_pending = true;
                                 return;
                             }
 
                             gpu.queue.submit(Some(encoder.finish()));
                             frame.present();
                             gpu.sleep.after_submit();
-                            self.overlay_frame_pending = false;
                             return;
                         }
                         ViewerState::Greeting => {
@@ -1621,14 +1652,12 @@ pub fn run_windowed(
 
                             if !rendered {
                                 debug!("greeting_banner_render_deferred");
-                                self.overlay_frame_pending = true;
                                 return;
                             }
 
                             gpu.queue.submit(Some(encoder.finish()));
                             frame.present();
                             gpu.greeting.after_submit();
-                            self.overlay_frame_pending = false;
                             return;
                         }
                         ViewerState::Wake => {
@@ -1881,7 +1910,6 @@ pub fn run_windowed(
         rng: rand::rng(),
         full_config: cfg.clone(),
         viewer_state: ViewerState::Greeting,
-        overlay_frame_pending: true,
     };
     app.greeting_deadline = None;
     app.enter_greeting();

@@ -7,12 +7,15 @@ use std::time::Instant;
 
 use rand::Rng;
 use tokio::sync::mpsc::Sender;
+use wgpu::{CommandEncoder, TextureView};
+use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
 use crate::config::TransitionConfig;
 use crate::events::Displayed;
+use crate::tasks::greeting_screen::GreetingScreen;
 
 use super::{ImgTex, TransitionState};
 
@@ -53,6 +56,172 @@ pub(super) trait Scene {
 
     /// Handles viewer-specific user events dispatched through the event loop.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: super::ViewerEvent) {}
+}
+
+struct OverlayScene {
+    screen: GreetingScreen,
+    layout_dirty: bool,
+    redraw_pending: bool,
+    size: PhysicalSize<u32>,
+    scale_factor: f64,
+}
+
+impl OverlayScene {
+    fn new(screen: GreetingScreen) -> Self {
+        Self {
+            screen,
+            layout_dirty: true,
+            redraw_pending: false,
+            size: PhysicalSize::new(0, 0),
+            scale_factor: 1.0,
+        }
+    }
+
+    fn resize(&mut self, new_size: PhysicalSize<u32>, scale_factor: f64) {
+        if self.size == new_size && (self.scale_factor - scale_factor).abs() < f64::EPSILON {
+            return;
+        }
+        self.size = new_size;
+        self.scale_factor = scale_factor;
+        self.screen.resize(new_size, scale_factor);
+        self.mark_layout_dirty();
+    }
+
+    fn set_message(&mut self, message: impl Into<String>) {
+        if self.screen.set_message(message) {
+            self.mark_layout_dirty();
+        }
+    }
+
+    fn ensure_layout_ready(&mut self) -> bool {
+        if !self.layout_dirty {
+            return true;
+        }
+        if self.screen.update_layout() {
+            self.layout_dirty = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn render(&mut self, encoder: &mut CommandEncoder, target_view: &TextureView) -> bool {
+        if !self.ensure_layout_ready() {
+            return false;
+        }
+        if !self.screen.render(encoder, target_view) {
+            return false;
+        }
+        self.redraw_pending = false;
+        true
+    }
+
+    fn mark_layout_dirty(&mut self) {
+        self.layout_dirty = true;
+        self.redraw_pending = true;
+    }
+
+    fn mark_redraw_needed(&mut self) {
+        self.redraw_pending = true;
+    }
+
+    fn needs_redraw(&self) -> bool {
+        self.redraw_pending
+    }
+
+    fn after_submit(&mut self) {
+        self.screen.after_submit();
+    }
+}
+
+/// State container for the greeting overlay scene.
+pub(super) struct GreetingScene {
+    overlay: OverlayScene,
+}
+
+impl GreetingScene {
+    pub(super) fn new(screen: GreetingScreen) -> Self {
+        Self {
+            overlay: OverlayScene::new(screen),
+        }
+    }
+
+    pub(super) fn resize(&mut self, new_size: PhysicalSize<u32>, scale_factor: f64) {
+        self.overlay.resize(new_size, scale_factor);
+    }
+
+    pub(super) fn set_message(&mut self, message: impl Into<String>) {
+        self.overlay.set_message(message);
+    }
+
+    pub(super) fn ensure_layout_ready(&mut self) -> bool {
+        self.overlay.ensure_layout_ready()
+    }
+
+    pub(super) fn render(
+        &mut self,
+        encoder: &mut CommandEncoder,
+        target_view: &TextureView,
+    ) -> bool {
+        self.overlay.render(encoder, target_view)
+    }
+
+    pub(super) fn mark_redraw_needed(&mut self) {
+        self.overlay.mark_redraw_needed();
+    }
+
+    pub(super) fn needs_redraw(&self) -> bool {
+        self.overlay.needs_redraw()
+    }
+
+    pub(super) fn after_submit(&mut self) {
+        self.overlay.after_submit();
+    }
+}
+
+/// State container for the sleep overlay scene.
+pub(super) struct SleepScene {
+    overlay: OverlayScene,
+}
+
+impl SleepScene {
+    pub(super) fn new(screen: GreetingScreen) -> Self {
+        Self {
+            overlay: OverlayScene::new(screen),
+        }
+    }
+
+    pub(super) fn resize(&mut self, new_size: PhysicalSize<u32>, scale_factor: f64) {
+        self.overlay.resize(new_size, scale_factor);
+    }
+
+    pub(super) fn set_message(&mut self, message: impl Into<String>) {
+        self.overlay.set_message(message);
+    }
+
+    pub(super) fn ensure_layout_ready(&mut self) -> bool {
+        self.overlay.ensure_layout_ready()
+    }
+
+    pub(super) fn render(
+        &mut self,
+        encoder: &mut CommandEncoder,
+        target_view: &TextureView,
+    ) -> bool {
+        self.overlay.render(encoder, target_view)
+    }
+
+    pub(super) fn mark_redraw_needed(&mut self) {
+        self.overlay.mark_redraw_needed();
+    }
+
+    pub(super) fn needs_redraw(&self) -> bool {
+        self.overlay.needs_redraw()
+    }
+
+    pub(super) fn after_submit(&mut self) {
+        self.overlay.after_submit();
+    }
 }
 
 /// State container for the wake (slideshow) scene.
