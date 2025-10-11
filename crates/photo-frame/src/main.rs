@@ -146,13 +146,36 @@ async fn main() -> Result<()> {
         });
     }
 
+    let greeting_duration = cfg.greeting_screen.effective_duration();
+
     if let Some(schedule_cfg) = cfg.awake_schedule.clone() {
         let cancel = cancel.clone();
         let control = viewer_control_tx.clone();
+        let greeting_duration = greeting_duration;
         tasks.spawn(async move {
-            schedule::run(schedule_cfg, cancel, control)
+            schedule::run(schedule_cfg, cancel, control, greeting_duration)
                 .await
                 .context("awake schedule task failed")
+        });
+    } else {
+        let cancel = cancel.clone();
+        let control = viewer_control_tx.clone();
+        let greeting_duration = greeting_duration;
+        let greeting_duration_ms = greeting_duration.as_millis().min(u128::from(u64::MAX)) as u64;
+        tasks.spawn(async move {
+            tracing::debug!(greeting_duration_ms, "auto_wake_timer_armed");
+            tokio::select! {
+                _ = cancel.cancelled() => Ok(()),
+                _ = sleep(greeting_duration) => {
+                    tracing::debug!(greeting_duration_ms, "auto_wake_timer_elapsed");
+                    if let Err(err) = control.send(ViewerCommand::SetState(ViewerState::Awake)).await {
+                        tracing::debug!("auto-wake command dropped: {err}");
+                    } else {
+                        tracing::debug!("auto_wake_command_sent");
+                    }
+                    Ok(())
+                }
+            }
         });
     }
 
@@ -217,31 +240,6 @@ async fn main() -> Result<()> {
             tasks::photo_effect::run(from_loader, to_viewer, cancel, effect_cfg)
                 .await
                 .context("photo-effect task failed")
-        }
-    });
-
-    // Auto-advance from greeting to wake state after the configured duration
-    tasks.spawn({
-        let cancel = cancel.clone();
-        let control = viewer_control_tx.clone();
-        let greeting_duration = cfg.greeting_screen.effective_duration();
-        let greeting_duration_ms = greeting_duration
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64;
-        tracing::debug!(greeting_duration_ms, "auto_wake_timer_armed");
-        async move {
-            tokio::select! {
-                _ = cancel.cancelled() => Ok(()),
-                _ = sleep(greeting_duration) => {
-                    tracing::debug!(greeting_duration_ms, "auto_wake_timer_elapsed");
-                    if let Err(err) = control.send(ViewerCommand::SetState(ViewerState::Awake)).await {
-                        tracing::debug!("auto-wake command dropped: {err}");
-                    } else {
-                        tracing::debug!("auto_wake_command_sent");
-                    }
-                    Ok(())
-                }
-            }
         }
     });
 
