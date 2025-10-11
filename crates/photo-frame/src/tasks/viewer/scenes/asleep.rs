@@ -42,6 +42,7 @@ impl Scene for AsleepScene {
         scale_factor: f64,
     ) {
         self.resize(new_size, scale_factor);
+        let _ = self.screen.update_layout();
     }
 
     fn render(&mut self, ctx: &mut RenderCtx<'_, '_>) -> RenderResult {
