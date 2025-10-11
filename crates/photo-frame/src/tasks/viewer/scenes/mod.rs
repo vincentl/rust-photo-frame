@@ -9,54 +9,12 @@ use rand::Rng;
 use tokio::sync::mpsc::Sender;
 use wgpu::{CommandEncoder, TextureView};
 use winit::dpi::PhysicalSize;
-use winit::event::WindowEvent;
-use winit::event_loop::ActiveEventLoop;
-use winit::window::WindowId;
 
 use crate::config::TransitionConfig;
 use crate::events::Displayed;
 use crate::tasks::greeting_screen::GreetingScreen;
 
 use super::{ImgTex, TransitionState};
-
-/// Shared callbacks that each viewer scene must implement.
-///
-/// The [`Scene`] trait mirrors the hooks currently implemented inside
-/// `tasks/viewer.rs` on the top-level application type. Each concrete scene
-/// will provide state-specific behaviour for these callbacks in a future
-/// refactor.
-#[allow(dead_code)]
-pub(super) trait Scene {
-    /// Called when the viewer should transition into the greeting scene.
-    fn enter_greeting(&mut self) {}
-
-    /// Called when the viewer should transition into the wake (slideshow) scene.
-    fn enter_wake(&mut self) {}
-
-    /// Called when the viewer should transition into the sleep scene.
-    fn enter_sleep(&mut self) {}
-
-    /// Called on each tick from the control loop.
-    fn process_tick(&mut self, _event_loop: &ActiveEventLoop) {}
-
-    /// Called when the scene should request a redraw.
-    fn request_redraw(&mut self) {}
-
-    /// Handles window events targeted at the viewer window.
-    fn window_event(
-        &mut self,
-        _event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        _event: WindowEvent,
-    ) {
-    }
-
-    /// Called right before the event loop goes idle.
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {}
-
-    /// Handles viewer-specific user events dispatched through the event loop.
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: super::ViewerEvent) {}
-}
 
 struct OverlayScene {
     screen: GreetingScreen,
@@ -239,6 +197,14 @@ pub(super) struct WakeScene {
 impl WakeScene {
     /// Creates a new [`WakeScene`] configured with the slideshow dwell and transition settings.
     pub(super) fn new(dwell_ms: u64, transition_cfg: TransitionConfig) -> Self {
+        if let Some(option) = transition_cfg.primary_option() {
+            tracing::debug!(
+                transition_kind = ?option.kind(),
+                duration_ms = option.duration().as_millis(),
+                "wake_scene_primary_transition_loaded"
+            );
+        }
+
         Self {
             current: None,
             next: None,
@@ -394,10 +360,8 @@ impl WakeScene {
             self.transition_state = Some(state);
         }
     }
-}
 
-impl Scene for WakeScene {
-    fn enter_wake(&mut self) {
+    pub(super) fn enter_wake(&mut self) {
         self.pending_redraw = true;
         if self.displayed_at.is_some() {
             self.displayed_at = Some(Instant::now());

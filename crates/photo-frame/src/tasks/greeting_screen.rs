@@ -12,14 +12,13 @@ use tracing::warn;
 use winit::dpi::PhysicalSize;
 
 use crate::config::ScreenMessageConfig;
+use crate::gpu::debug_overlay;
 
 /// Lightweight greeting/sleep screen renderer: clears the surface to the
 /// configured background colour and renders centred text using `glyphon`.
 pub struct GreetingScreen {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    format: wgpu::TextureFormat,
-    cache: Cache,
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
@@ -32,6 +31,10 @@ pub struct GreetingScreen {
     font_colour: LinSrgba<f32>,
     size: PhysicalSize<u32>,
     text_origin: (f32, f32),
+    stroke_dip: f32,
+    corner_radius_dip: f32,
+    scale_factor: f64,
+    padding_px: f32,
 }
 
 impl GreetingScreen {
@@ -55,14 +58,15 @@ impl GreetingScreen {
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         let swash_cache = SwashCache::new();
 
+        let stroke_dip = screen.effective_stroke_width_dip();
+        let corner_radius_dip = screen.effective_corner_radius_dip(stroke_dip);
+
         let background = resolve_background_colour(screen.colors.background.as_deref());
         let font_colour = resolve_font_colour(screen.colors.font.as_deref());
 
-        let instance = GreetingScreen {
+        let mut instance = GreetingScreen {
             device: device.clone(),
             queue: queue.clone(),
-            format,
-            cache,
             viewport,
             atlas,
             text_renderer,
@@ -75,7 +79,12 @@ impl GreetingScreen {
             font_colour,
             size: PhysicalSize::new(0, 0),
             text_origin: (0.0, 0.0),
+            stroke_dip,
+            corner_radius_dip,
+            scale_factor: 1.0,
+            padding_px: 0.0,
         };
+        instance.recompute_padding();
         instance
     }
 
@@ -88,8 +97,10 @@ impl GreetingScreen {
         true
     }
 
-    pub fn resize(&mut self, new_size: PhysicalSize<u32>, _scale_factor: f64) {
+    pub fn resize(&mut self, new_size: PhysicalSize<u32>, scale_factor: f64) {
         self.size = new_size;
+        self.scale_factor = scale_factor;
+        self.recompute_padding();
     }
 
     pub fn render(
@@ -134,14 +145,23 @@ impl GreetingScreen {
             warn!(error = %err, "greeting_screen_prepare_failed");
         }
 
+        debug_overlay::render(
+            encoder,
+            target_view,
+            "greeting-background",
+            to_wgpu_color(self.background),
+            None::<fn(&mut wgpu::RenderPass<'_>)>,
+        );
+
+        let mut render_error = None;
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("greeting-background"),
+                label: Some("greeting-text"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(to_wgpu_color(self.background)),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -154,8 +174,12 @@ impl GreetingScreen {
                 .text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
             {
-                warn!(error = %err, "greeting_screen_draw_failed");
+                render_error = Some(err);
             }
+        }
+
+        if let Some(err) = render_error {
+            warn!(error = %err, "greeting_screen_draw_failed");
         }
 
         self.atlas.trim();
@@ -173,11 +197,13 @@ impl GreetingScreen {
 
         let font_size = compute_font_size(&self.message, self.size);
         let metrics = Metrics::new(font_size, font_size * 1.2);
+        let available_width = (self.size.width as f32 - 2.0 * self.padding_px).max(1.0);
+        let available_height = (self.size.height as f32 - 2.0 * self.padding_px).max(1.0);
         self.text_buffer.set_metrics_and_size(
             &mut self.font_system,
             metrics,
-            Some(self.size.width as f32),
-            Some(self.size.height as f32),
+            Some(available_width),
+            Some(available_height),
         );
 
         let attrs = Attrs::new().family(self.font_family.as_family());
@@ -191,8 +217,15 @@ impl GreetingScreen {
         self.text_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
-        self.text_origin = compute_text_origin(&self.text_buffer, self.size);
+        self.text_origin = compute_text_origin(&self.text_buffer, self.size, self.padding_px);
         true
+    }
+
+    fn recompute_padding(&mut self) {
+        let scale = self.scale_factor.max(0.0) as f32;
+        let stroke_px = (self.stroke_dip * scale).max(0.0);
+        let corner_px = (self.corner_radius_dip * scale).max(0.0);
+        self.padding_px = stroke_px.max(corner_px * 0.5);
     }
 }
 
@@ -268,7 +301,7 @@ fn apply_center_alignment(buffer: &mut Buffer) {
     }
 }
 
-fn compute_text_origin(buffer: &Buffer, size: PhysicalSize<u32>) -> (f32, f32) {
+fn compute_text_origin(buffer: &Buffer, size: PhysicalSize<u32>, padding: f32) -> (f32, f32) {
     let mut min_top = f32::MAX;
     let mut max_bottom = f32::MIN;
     let mut has_runs = false;
@@ -280,14 +313,18 @@ fn compute_text_origin(buffer: &Buffer, size: PhysicalSize<u32>) -> (f32, f32) {
     }
 
     if !has_runs {
-        return (0.0, (size.height as f32) * 0.5);
+        return (
+            padding.max(0.0),
+            (size.height as f32 * 0.5).max(padding.max(0.0)),
+        );
     }
 
     let text_height = (max_bottom - min_top).max(0.0);
-    let container_height = size.height as f32;
-    let top_offset = ((container_height - text_height) * 0.5) - min_top;
+    let container_height = (size.height as f32 - 2.0 * padding).max(0.0);
+    let centered_offset = ((container_height - text_height) * 0.5).max(0.0);
+    let top_offset = padding + centered_offset - min_top;
 
-    (0.0, top_offset.max(0.0))
+    (padding.max(0.0), top_offset.max(padding.max(0.0)))
 }
 
 fn to_text_color(color: LinSrgba<f32>) -> Color {

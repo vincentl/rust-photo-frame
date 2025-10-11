@@ -17,7 +17,7 @@ fn blur_cpu(image: &RgbaImage, sigma: f32) -> RgbaImage {
     imageops::blur(image, sigma)
 }
 
-#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+#[cfg(target_arch = "aarch64")]
 fn gaussian_kernel(sigma: f32) -> (Vec<f32>, u32) {
     let sigma = sigma.max(0.01);
     let radius = (sigma * 3.0).ceil() as i32;
@@ -44,7 +44,7 @@ fn gaussian_kernel(sigma: f32) -> (Vec<f32>, u32) {
     (weights, radius as u32)
 }
 
-#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+#[cfg(target_arch = "aarch64")]
 fn rgba_to_f32(image: &RgbaImage) -> Vec<f32> {
     image
         .pixels()
@@ -52,7 +52,7 @@ fn rgba_to_f32(image: &RgbaImage) -> Vec<f32> {
         .collect()
 }
 
-#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+#[cfg(target_arch = "aarch64")]
 fn f32_to_rgba(width: u32, height: u32, data: &[f32]) -> RgbaImage {
     let mut out = RgbaImage::new(width, height);
     for (i, pixel) in out.pixels_mut().enumerate() {

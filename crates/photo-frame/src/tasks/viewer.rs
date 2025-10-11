@@ -1,6 +1,6 @@
 pub mod scenes;
 
-use self::scenes::{GreetingScene, Scene, SleepScene};
+use self::scenes::{GreetingScene, SleepScene};
 
 use crate::config::{
     MattingConfig, MattingMode, MattingOptions, TransitionKind, TransitionMode, TransitionOptions,
