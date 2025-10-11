@@ -148,7 +148,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
                     }
                 };
 
-                let jitter_ms: u64 = rand::thread_rng().gen_range(0..500);
+                let jitter_ms: u64 = rand::rng().random_range(0..500);
                 let base = Duration::from_secs(config.check_interval_sec);
                 sleep(base + Duration::from_millis(jitter_ms)).await;
             } => {}
