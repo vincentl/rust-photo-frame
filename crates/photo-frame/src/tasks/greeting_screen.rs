@@ -92,39 +92,39 @@ impl GreetingScreen {
         if self.size.width == 0 || self.size.height == 0 {
             return false;
         }
-            self.viewport.update(
-                &self.queue,
-                Resolution {
-                    width: self.size.width,
-                    height: self.size.height,
-                },
-            );
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.size.width,
+                height: self.size.height,
+            },
+        );
 
-            let text_color = to_text_color(self.font_colour);
-            if let Err(err) = self.text_renderer.prepare(
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                [TextArea {
-                    buffer: &self.text_buffer,
-                    left: self.text_origin.0,
-                    top: self.text_origin.1,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.size.width as i32,
-                        bottom: self.size.height as i32,
-                    },
-                    default_color: text_color,
-                    custom_glyphs: &[],
-                }],
-                &mut self.swash_cache,
-            ) {
-                warn!(error = %err, "greeting_screen_prepare_failed");
-            }
+        let text_color = to_text_color(self.font_colour);
+        if let Err(err) = self.text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            [TextArea {
+                buffer: &self.text_buffer,
+                left: self.text_origin.0,
+                top: self.text_origin.1,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.size.width as i32,
+                    bottom: self.size.height as i32,
+                },
+                default_color: text_color,
+                custom_glyphs: &[],
+            }],
+            &mut self.swash_cache,
+        ) {
+            warn!(error = %err, "greeting_screen_prepare_failed");
+        }
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -142,16 +142,16 @@ impl GreetingScreen {
                 timestamp_writes: None,
             });
 
-                if let Err(err) = self
-                    .text_renderer
-                    .render(&self.atlas, &self.viewport, &mut pass)
-                {
-                    warn!(error = %err, "greeting_screen_draw_failed");
-                }
+            if let Err(err) = self
+                .text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+            {
+                warn!(error = %err, "greeting_screen_draw_failed");
+            }
         }
 
-            self.atlas.trim();
-            true
+        self.atlas.trim();
+        true
     }
 
     pub fn after_submit(&mut self) {
