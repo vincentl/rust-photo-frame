@@ -433,3 +433,46 @@ pub(super) trait Scene {
     /// Called when the viewer wants the scene to ensure any redraw requests are queued.
     fn request_redraw(&mut self, _ctx: SceneContext<'_>) {}
 }
+
+impl Scene for GreetingScene {
+    fn enter(&mut self, mut ctx: SceneContext<'_>) {
+        self.mark_redraw_needed();
+        ctx.request_redraw();
+    }
+
+    fn request_redraw(&mut self, mut ctx: SceneContext<'_>) {
+        if self.needs_redraw() {
+            ctx.request_redraw();
+        }
+    }
+}
+
+impl Scene for SleepScene {
+    fn enter(&mut self, mut ctx: SceneContext<'_>) {
+        self.mark_redraw_needed();
+        ctx.request_redraw();
+    }
+
+    fn request_redraw(&mut self, mut ctx: SceneContext<'_>) {
+        if self.needs_redraw() {
+            ctx.request_redraw();
+        }
+    }
+}
+
+impl Scene for WakeScene {
+    fn enter(&mut self, mut ctx: SceneContext<'_>) {
+        self.enter_wake();
+        ctx.request_redraw();
+    }
+
+    fn exit(&mut self, _ctx: SceneContext<'_>) {
+        self.take_redraw_needed();
+    }
+
+    fn request_redraw(&mut self, mut ctx: SceneContext<'_>) {
+        if self.needs_redraw() || self.transition_state().is_some() {
+            ctx.request_redraw();
+        }
+    }
+}

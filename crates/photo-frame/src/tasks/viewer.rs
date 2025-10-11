@@ -986,7 +986,6 @@ pub fn run_windowed(
             self.ready_results.clear();
             self.deferred_images.clear();
             if self.mode_kind() == ViewerModeKind::Sleep {
-                self.mode_mut().wake_mut().take_redraw_needed();
                 let message = self
                     .full_config
                     .sleep_screen
@@ -1352,7 +1351,6 @@ pub fn run_windowed(
                 return;
             }
             info!("viewer: entering sleep");
-            self.mode_mut().wake_mut().take_redraw_needed();
             self.set_mode(ViewerModeKind::Sleep);
             let window_dims = self
                 .window
@@ -1371,7 +1369,6 @@ pub fn run_windowed(
                 sleep.set_message(sleep_message);
                 sleep.mark_redraw_needed();
             }
-            self.request_redraw();
             self.log_event_loop_state("enter_sleep");
         }
 
@@ -1381,7 +1378,6 @@ pub fn run_windowed(
             }
             info!("viewer: entering wake");
             self.set_mode(ViewerModeKind::Wake);
-            self.request_redraw();
             self.log_event_loop_state("enter_wake");
         }
 
@@ -1389,7 +1385,6 @@ pub fn run_windowed(
             if self.mode_kind() != ViewerModeKind::Greeting {
                 info!("viewer: entering greeting");
             }
-            self.mode_mut().wake_mut().take_redraw_needed();
             self.set_mode(ViewerModeKind::Greeting);
             let window_dims = self
                 .window
@@ -1408,7 +1403,6 @@ pub fn run_windowed(
                 greeting.set_message(greeting_message);
                 greeting.mark_redraw_needed();
             }
-            self.request_redraw();
             self.log_event_loop_state("enter_greeting");
         }
     }
