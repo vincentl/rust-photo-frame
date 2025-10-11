@@ -225,12 +225,19 @@ async fn main() -> Result<()> {
         let cancel = cancel.clone();
         let control = viewer_control_tx.clone();
         let greeting_duration = cfg.greeting_screen.effective_duration();
+        let greeting_duration_ms = greeting_duration
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        tracing::debug!(greeting_duration_ms, "auto_wake_timer_armed");
         async move {
             tokio::select! {
                 _ = cancel.cancelled() => Ok(()),
                 _ = sleep(greeting_duration) => {
+                    tracing::debug!(greeting_duration_ms, "auto_wake_timer_elapsed");
                     if let Err(err) = control.send(ViewerCommand::SetState(ViewerState::Awake)).await {
                         tracing::debug!("auto-wake command dropped: {err}");
+                    } else {
+                        tracing::debug!("auto_wake_command_sent");
                     }
                     Ok(())
                 }

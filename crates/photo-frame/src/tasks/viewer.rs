@@ -212,6 +212,7 @@ async fn drive_viewer_events(
             cmd = control.recv() => {
                 match cmd {
                     Some(cmd) => {
+                        debug!(command = ?cmd, "viewer_event_forward_command");
                         if proxy.send_event(ViewerEvent::Command(cmd)).is_err() {
                             warn!("viewer event proxy rejected command event; stopping driver loop");
                             break;
@@ -1388,21 +1389,16 @@ pub fn run_windowed(
             if self.mode_kind() != ViewerModeKind::Greeting {
                 info!("viewer: entering greeting");
             }
-            self.mode_mut().wake_mut().take_redraw_needed();
-            self.set_mode(ViewerModeKind::Greeting);
-            let window_dims = self
-                .window
-                .as_ref()
-                .map(|window| (window.inner_size(), window.scale_factor()));
-            let greeting_message = self
-                .full_config
-                .greeting_screen
-                .screen()
-                .message_or_default()
-                .into_owned();
-            if let Some(greeting) = self.mode_mut().greeting_mut() {
-                if let Some((size, scale_factor)) = window_dims {
-                    greeting.resize(size, scale_factor);
+            self.viewer_state = ViewerState::Greeting;
+            let duration = self.full_config.greeting_screen.effective_duration();
+            let duration_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
+            debug!(duration_ms, "viewer_greeting_duration_configured");
+            self.wake.take_redraw_needed();
+            if let Some(gpu) = self.gpu.as_mut() {
+                if let Some(window) = self.window.as_ref() {
+                    let size = window.inner_size();
+                    let scale_factor = window.scale_factor();
+                    gpu.greeting.resize(size, scale_factor);
                 }
                 greeting.set_message(greeting_message);
                 greeting.mark_redraw_needed();
