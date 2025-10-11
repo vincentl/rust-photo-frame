@@ -669,8 +669,6 @@ pub fn run_windowed(
         window: Option<Arc<Window>>,
         gpu: Option<GpuCtx>,
         wake: scenes::WakeScene,
-        greeting_duration: Duration,
-        greeting_deadline: Option<Instant>,
         preload_count: usize,
         oversample: f32,
         matting: MattingConfig,
@@ -690,7 +688,6 @@ pub fn run_windowed(
             self.ready_results.clear();
             self.deferred_images.clear();
             if self.viewer_state == ViewerState::Sleep {
-                self.greeting_deadline = None;
                 self.wake.take_redraw_needed();
                 if let Some(gpu) = self.gpu.as_mut() {
                     let message = self
@@ -719,11 +716,6 @@ pub fn run_windowed(
                 .current()
                 .map(|img| img.path.display().to_string());
             let next_path = self.wake.next().map(|img| img.path.display().to_string());
-            let greeting_deadline_remaining_ms = self.greeting_deadline.and_then(|deadline| {
-                deadline
-                    .checked_duration_since(now)
-                    .map(|duration| duration.as_millis() as u64)
-            });
             let displayed_elapsed_ms = self
                 .wake
                 .displayed_at()
@@ -749,7 +741,6 @@ pub fn run_windowed(
                 pending_redraw = self.wake.needs_redraw(),
                 greeting_overlay_pending = greeting_pending,
                 sleep_overlay_pending = sleep_pending,
-                greeting_deadline_remaining_ms,
                 displayed_elapsed_ms,
                 current_path = current_path.as_deref(),
                 next_path = next_path.as_deref(),
@@ -792,7 +783,6 @@ pub fn run_windowed(
 
         fn teardown_gpu(&mut self) {
             self.wake.reset();
-            self.greeting_deadline = None;
             if let Some(gpu) = self.gpu.as_mut() {
                 match self.viewer_state {
                     ViewerState::Wake => self.wake.mark_redraw_needed(),
@@ -838,7 +828,6 @@ pub fn run_windowed(
                 ViewerState::Greeting => {
                     self.upload_ready_results();
                     self.queue_mat_tasks();
-                    self.ensure_current_image();
                     if let Some(gpu) = self.gpu.as_mut() {
                         if gpu.greeting.needs_redraw() {
                             self.request_redraw();
@@ -971,29 +960,21 @@ pub fn run_windowed(
         }
 
         fn ensure_current_image(&mut self) {
-            if self.wake.current().is_some() || self.wake.transition_state().is_some() {
+            if self.viewer_state != ViewerState::Wake {
                 return;
             }
-            let greeting_finished = self
-                .greeting_deadline
-                .map(|deadline| Instant::now() >= deadline)
-                .unwrap_or(true);
-            if !greeting_finished {
+            if self.wake.current().is_some() || self.wake.transition_state().is_some() {
                 return;
             }
             if let Some(first) = self.wake.pending_mut().pop_front() {
                 info!("first_image path={}", first.path.display());
                 self.wake.set_current(Some(first));
                 self.wake.mark_redraw_needed();
-                self.greeting_deadline = None;
                 self.wake.set_displayed_at(Some(std::time::Instant::now()));
                 if let Some(cur) = self.wake.current() {
                     let _ = self
                         .to_manager_displayed
                         .try_send(Displayed(cur.path.clone()));
-                }
-                if self.viewer_state != ViewerState::Wake {
-                    self.enter_wake();
                 }
             }
         }
@@ -1076,7 +1057,6 @@ pub fn run_windowed(
             }
             info!("viewer: entering wake");
             self.viewer_state = ViewerState::Wake;
-            self.greeting_deadline = None;
             self.wake.enter_wake();
             self.request_redraw();
             self.log_event_loop_state("enter_wake");
@@ -1088,7 +1068,6 @@ pub fn run_windowed(
             }
             self.viewer_state = ViewerState::Greeting;
             self.wake.take_redraw_needed();
-            self.greeting_deadline = Some(Instant::now() + self.greeting_duration);
             if let Some(gpu) = self.gpu.as_mut() {
                 if let Some(window) = self.window.as_ref() {
                     let size = window.inner_size();
@@ -1889,7 +1868,6 @@ pub fn run_windowed(
         })
     };
     let control_driver = tokio::spawn(drive_viewer_events(command_rx, control_cancel, proxy));
-    let greeting_duration = cfg.greeting_screen.effective_duration();
     let mut app = App {
         from_loader,
         to_manager_displayed,
@@ -1897,8 +1875,6 @@ pub fn run_windowed(
         window: None,
         gpu: None,
         wake: scenes::WakeScene::new(cfg.dwell_ms, cfg.transition.clone()),
-        greeting_duration,
-        greeting_deadline: Some(Instant::now() + greeting_duration),
         preload_count: cfg.viewer_preload_count,
         oversample: cfg.oversample,
         matting: cfg.matting.clone(),
@@ -1911,7 +1887,6 @@ pub fn run_windowed(
         full_config: cfg.clone(),
         viewer_state: ViewerState::Greeting,
     };
-    app.greeting_deadline = None;
     app.enter_greeting();
     event_loop.run_app(&mut app)?;
 
