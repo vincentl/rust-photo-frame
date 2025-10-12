@@ -245,16 +245,17 @@ async fn main() -> Result<()> {
 
     // Run the windowed viewer on the main thread (blocking) after spawning other tasks
     // This call returns when the window closes or cancellation occurs
-    if let Err(e) = tasks::viewer::run_windowed(
+    let viewer_result = tasks::viewer::run_windowed(
         processed_rx,
         displayed_tx.clone(),
         cancel.clone(),
         cfg.clone(),
         viewer_control_rx,
     )
-    .context("viewer failed")
-    {
-        tracing::error!("{e:?}");
+    .context("viewer failed");
+
+    if let Err(err) = &viewer_result {
+        tracing::error!("{err:?}");
     }
     // Ensure other tasks are asked to stop
     cancel.cancel();
@@ -268,7 +269,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    Ok(())
+    viewer_result
 }
 
 fn run_playlist_dry_run(
