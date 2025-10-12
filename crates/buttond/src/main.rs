@@ -46,6 +46,14 @@ struct Args {
     /// Logging level (error|warn|info|debug|trace).
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// PID file written by the photo frame kiosk process.
+    #[arg(long)]
+    pidfile: Option<PathBuf>,
+
+    /// Expected process name for the kiosk PID (matches `/proc/<pid>/comm`).
+    #[arg(long)]
+    procname: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -387,6 +395,18 @@ fn perform_action(action: Action, args: &Args) {
 }
 
 fn trigger_single(args: &Args) -> Result<()> {
+    if let Some(pidfile) = &args.pidfile {
+        let running = target_process_running(pidfile, args.procname.as_deref())?;
+        if !running {
+            warn!(
+                pidfile = %pidfile.display(),
+                procname = args.procname.as_deref().unwrap_or("<unspecified>"),
+                "skipping toggle-state command: kiosk process not running"
+            );
+            return Ok(());
+        }
+    }
+
     let mut stream = UnixStream::connect(&args.control_socket).with_context(|| {
         format!(
             "failed to connect to control socket at {}",
@@ -411,9 +431,45 @@ fn trigger_shutdown(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn target_process_running(pidfile: &Path, expected_name: Option<&str>) -> Result<bool> {
+    let contents = match fs::read_to_string(pidfile) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read pidfile {}", pidfile.display()));
+        }
+    };
+
+    let contents = contents.trim();
+    if contents.is_empty() {
+        bail!("pidfile {} is empty", pidfile.display());
+    }
+
+    let pid: i32 = contents
+        .parse()
+        .with_context(|| format!("invalid pid '{}' in {}", contents, pidfile.display()))?;
+
+    let proc_path = Path::new("/proc").join(pid.to_string());
+    if !proc_path.exists() {
+        return Ok(false);
+    }
+
+    if let Some(expected) = expected_name {
+        let comm_path = proc_path.join("comm");
+        let comm = fs::read_to_string(&comm_path)
+            .with_context(|| format!("failed to read process name from {}", comm_path.display()))?;
+        if comm.trim_end() != expected {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Action, ButtonTracker, Durations};
+    use super::{Action, ButtonTracker, Durations, target_process_running};
     use std::time::{Duration, Instant};
 
     fn durations() -> Durations {
@@ -482,5 +538,38 @@ mod tests {
             tracker.handle_timeout(start + Duration::from_millis(700)),
             Some(Action::Single)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn target_process_running_true_for_current_process() -> anyhow::Result<()> {
+        use std::fs;
+
+        let pid = std::process::id();
+        let temp_dir = tempfile::tempdir()?;
+        let pidfile = temp_dir.path().join("kiosk.pid");
+        fs::write(&pidfile, pid.to_string())?;
+
+        let comm = fs::read_to_string("/proc/self/comm")?;
+        let name = comm.trim_end().to_string();
+
+        assert!(target_process_running(&pidfile, Some(&name))?);
+        assert!(target_process_running(&pidfile, None)?);
+        assert!(!target_process_running(
+            &pidfile,
+            Some("definitely-not-the-name")
+        )?);
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn target_process_running_false_when_pidfile_missing() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let pidfile = temp_dir.path().join("missing.pid");
+
+        assert!(!target_process_running(&pidfile, None)?);
+        Ok(())
     }
 }

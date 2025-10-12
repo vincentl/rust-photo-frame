@@ -225,6 +225,8 @@ The setup pipeline installs `/opt/photo-frame/bin/powerctl`, a thin wrapper arou
   --single-window-ms 250 \
   --double-window-ms 400 \
   --debounce-ms 20 \
+  --pidfile /run/photoframe/app.pid \
+  --procname rust-photo-frame \
   --control-socket /run/photo-frame/control.sock \
   --shutdown /opt/photo-frame/bin/photo-safe-shutdown
 ```
@@ -233,6 +235,7 @@ The setup pipeline installs `/opt/photo-frame/bin/powerctl`, a thin wrapper arou
 - **Double press:** runs `/opt/photo-frame/bin/photo-safe-shutdown`, which wraps `shutdown -h now`.
 - **Long press:** bypassed so the Pi firmware can force power-off.
 - **System integration:** The provisioning script also installs a `systemd-logind` drop-in that sets `HandlePowerKey=ignore` so the desktop stack never interprets the press as a global poweroff request; only the daemon reacts to the event.
+- **Process guard:** When `--pidfile` and `--procname` are supplied the daemon verifies that the kiosk process listed in the PID file is running (and matches the expected name) before attempting to toggle playback. This avoids spurious log noise when the UI is offline.
 
 Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. If the wrong device is chosen, override it by editing the unit to pass `--device /dev/input/by-path/...-event`. Debounce, single-press, and double-press windows are configurable in milliseconds.
 
