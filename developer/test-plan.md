@@ -35,6 +35,13 @@ Exercise each axis at least once per release cycle.
   ```
 - [ ] Capture evidence via `tests/collect_logs.sh` (provides modes, EDID, journals).
 
+- [ ] **Local build verification:** ensure the binaries and tests compile cleanly before touching hardware.
+  ```sh
+  cargo check --workspace
+  cargo test --workspace
+  ```
+  Both commands should finish without warnings or failures. This validates the `photo-frame`, `buttond`, and `wifi-manager` crates prior to deploying to a Raspberry Pi.
+
 ## Phase 1 – Blank-Pi Install
 - [ ] Flash the latest Raspberry Pi OS (Trixie, 64-bit) onto a reliable microSD using Raspberry Pi Imager (preload hostname, user, Wi-Fi, SSH key).
 - [ ] On first boot, sign in as the deployment user (default `frame`) and confirm network connectivity.
