@@ -15,6 +15,8 @@ PACKAGES=(
     libdrm2
     mesa-vulkan-drivers
     seatd
+    dbus
+    dbus-user-session
     network-manager
     build-essential
     pkg-config
