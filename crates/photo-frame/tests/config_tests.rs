@@ -1,7 +1,7 @@
 use rand::{SeedableRng, rngs::StdRng};
 use rust_photo_frame::config::{
-    ColorSelection, Configuration, FixedImagePathSelection, MattingKind, MattingMode,
-    MattingSelection, StudioMatColor, TransitionKind, TransitionSelection,
+    ColorSelection, Configuration, FixedImagePathSelection, IrisDirection, IrisStyle, MattingKind,
+    MattingMode, MattingSelection, StudioMatColor, TransitionKind, TransitionSelection,
 };
 use std::path::PathBuf;
 
@@ -479,6 +479,46 @@ transition:
 }
 
 #[test]
+fn parse_inline_iris_transition() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  types: [iris]
+  duration-ms: 640
+  style: polygon
+  edge-softness-px: 14.5
+  blades: 8
+  curvature: 0.25
+  center-x: 0.45
+  center-y: 0.6
+  direction: close
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(
+        cfg.transition.selection(),
+        &TransitionSelection::Fixed(TransitionKind::Iris)
+    );
+    let options = cfg.transition.options();
+    let iris = options
+        .get(&TransitionKind::Iris)
+        .expect("expected iris transition option");
+    assert_eq!(iris.duration().as_millis(), 640);
+    match iris.mode() {
+        rust_photo_frame::config::TransitionMode::Iris(cfg) => {
+            assert_eq!(cfg.style, IrisStyle::Polygon);
+            assert!((cfg.edge_softness_px - 14.5).abs() < f32::EPSILON);
+            assert_eq!(cfg.blades, 8);
+            assert!((cfg.curvature - 0.25).abs() < f32::EPSILON);
+            assert!((cfg.center_x - 0.45).abs() < f32::EPSILON);
+            assert!((cfg.center_y - 0.6).abs() < f32::EPSILON);
+            assert_eq!(cfg.direction, IrisDirection::Close);
+        }
+        _ => panic!("expected iris transition"),
+    }
+}
+
+#[test]
 fn parse_random_transition_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
@@ -672,6 +712,22 @@ transition:
     assert!(
         err.to_string()
             .contains("requires angle-jitter-degrees >= 0")
+    );
+}
+
+#[test]
+fn iris_transition_rejects_negative_softness() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  types: [iris]
+  edge-softness-px: -5.0
+"#;
+
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("requires iris.edge-softness-px >= 0")
     );
 }
 

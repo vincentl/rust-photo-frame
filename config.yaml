@@ -13,7 +13,7 @@ control-socket-path: /run/photo-frame/control.sock
 # Render/transition settings
 transition:
   # List one or more transition kinds to rotate between.
-  types: [fade, wipe, push, e-ink]
+  types: [fade, wipe, push, e-ink, iris]
   # Choose how to iterate through the transition types: random or sequential.
   type-selection: random
   options:
@@ -37,6 +37,15 @@ transition:
       reveal-portion: 0.55
       stripe-count: 24
       flash-color: [0, 0, 0]
+    iris:
+      duration-ms: 520
+      style: polygon
+      edge-softness-px: 16.0
+      blades: 6
+      curvature: 0.4
+      center-x: 0.5
+      center-y: 0.5
+      direction: open
 
 # Dwell time (ms) the current image remains fully displayed before the next transition
 dwell-ms: 2000

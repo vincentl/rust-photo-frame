@@ -3,7 +3,8 @@ pub mod scenes;
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
-    MattingConfig, MattingMode, MattingOptions, TransitionKind, TransitionMode, TransitionOptions,
+    IrisDirection, IrisStyle, MattingConfig, MattingMode, MattingOptions, TransitionKind,
+    TransitionMode, TransitionOptions,
 };
 use crate::events::{
     Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
@@ -42,6 +43,14 @@ pub(super) enum ActiveTransition {
         stripe_count: u32,
         flash_color: [f32; 3],
         noise_seed: [f32; 2],
+    },
+    Iris {
+        style: IrisStyle,
+        edge_softness_px: f32,
+        blades: u32,
+        curvature: f32,
+        center: [f32; 2],
+        direction: IrisDirection,
     },
 }
 
@@ -113,6 +122,14 @@ impl TransitionState {
                     .flash_color
                     .map(|channel| (channel as f32 / 255.0).clamp(0.0, 1.0)),
                 noise_seed: [rng.random_range(0.0..=1.0), rng.random_range(0.0..=1.0)],
+            },
+            TransitionMode::Iris(cfg) => ActiveTransition::Iris {
+                style: cfg.style,
+                edge_softness_px: cfg.edge_softness_px.max(0.0),
+                blades: cfg.blades.max(1),
+                curvature: cfg.curvature.clamp(0.0, 1.0),
+                center: [cfg.center_x.clamp(0.0, 1.0), cfg.center_y.clamp(0.0, 1.0)],
+                direction: cfg.direction,
             },
         };
 
@@ -2008,6 +2025,29 @@ pub fn run_windowed(
                                         uniforms.params1[1] = flash_color[0].clamp(0.0, 1.0);
                                         uniforms.params1[2] = flash_color[1].clamp(0.0, 1.0);
                                         uniforms.params1[3] = flash_color[2].clamp(0.0, 1.0);
+                                    }
+                                    ActiveTransition::Iris {
+                                        style,
+                                        edge_softness_px,
+                                        blades,
+                                        curvature,
+                                        center,
+                                        direction,
+                                    } => {
+                                        uniforms.params0[0] = match style {
+                                            IrisStyle::Circular => 0.0,
+                                            IrisStyle::Polygon => 1.0,
+                                        };
+                                        uniforms.params0[1] = match direction {
+                                            IrisDirection::Open => 1.0,
+                                            IrisDirection::Close => -1.0,
+                                        };
+                                        uniforms.params0[2] = (*edge_softness_px).max(0.0);
+                                        uniforms.params0[3] = (*curvature).clamp(0.0, 1.0);
+                                        uniforms.params1[0] = (*blades).max(1) as f32;
+                                        uniforms.params1[1] = center[0].clamp(0.0, 1.0);
+                                        uniforms.params1[2] = center[1].clamp(0.0, 1.0);
+                                        uniforms.params1[3] = 0.0;
                                     }
                                 }
                             } else if let Some(cur) = wake.current() {

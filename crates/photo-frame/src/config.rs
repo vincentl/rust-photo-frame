@@ -2441,11 +2441,12 @@ pub enum TransitionKind {
     Wipe,
     Push,
     EInk,
+    Iris,
 }
 
 impl TransitionKind {
-    const ALL: &'static [Self] = &[Self::Fade, Self::Wipe, Self::Push, Self::EInk];
-    const NAMES: &'static [&'static str] = &["fade", "wipe", "push", "e-ink"];
+    const ALL: &'static [Self] = &[Self::Fade, Self::Wipe, Self::Push, Self::EInk, Self::Iris];
+    const NAMES: &'static [&'static str] = &["fade", "wipe", "push", "e-ink", "iris"];
 
     fn as_str(&self) -> &'static str {
         match self {
@@ -2453,6 +2454,7 @@ impl TransitionKind {
             Self::Wipe => "wipe",
             Self::Push => "push",
             Self::EInk => "e-ink",
+            Self::Iris => "iris",
         }
     }
 
@@ -2462,6 +2464,7 @@ impl TransitionKind {
             Self::Wipe => 2,
             Self::Push => 3,
             Self::EInk => 4,
+            Self::Iris => 5,
         }
     }
 }
@@ -2600,6 +2603,7 @@ impl TransitionOptions {
             TransitionKind::Wipe => (400, TransitionMode::Wipe(WipeTransition::default())),
             TransitionKind::Push => (400, TransitionMode::Push(PushTransition::default())),
             TransitionKind::EInk => (1600, TransitionMode::EInk(EInkTransition::default())),
+            TransitionKind::Iris => (500, TransitionMode::Iris(IrisTransition::default())),
         };
         Self {
             kind,
@@ -2653,6 +2657,9 @@ impl TransitionOptions {
                 }
                 eink.flash_count = eink.flash_count.min(6);
             }
+            TransitionMode::Iris(iris) => {
+                iris.normalize(self.kind)?;
+            }
         }
         Ok(())
     }
@@ -2691,6 +2698,20 @@ impl TransitionOptions {
                     flash_color: builder.eink_flash_color.unwrap_or(defaults.flash_color),
                 })
             }
+            TransitionKind::Iris => {
+                let defaults = IrisTransition::default();
+                TransitionMode::Iris(IrisTransition {
+                    style: builder.iris_style.unwrap_or(defaults.style),
+                    edge_softness_px: builder
+                        .iris_edge_softness_px
+                        .unwrap_or(defaults.edge_softness_px),
+                    blades: builder.iris_blades.unwrap_or(defaults.blades),
+                    curvature: builder.iris_curvature.unwrap_or(defaults.curvature),
+                    center_x: builder.iris_center_x.unwrap_or(defaults.center_x),
+                    center_y: builder.iris_center_y.unwrap_or(defaults.center_y),
+                    direction: builder.iris_direction.unwrap_or(defaults.direction),
+                })
+            }
         };
         let mut option = Self {
             kind,
@@ -2719,6 +2740,9 @@ impl TransitionOptions {
                 }
                 eink.flash_count = eink.flash_count.min(6);
             }
+            TransitionMode::Iris(iris) => {
+                iris.normalize(kind)?;
+            }
         }
 
         Ok(option)
@@ -2731,6 +2755,7 @@ pub enum TransitionMode {
     Wipe(WipeTransition),
     Push(PushTransition),
     EInk(EInkTransition),
+    Iris(IrisTransition),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -2895,6 +2920,95 @@ impl Default for EInkTransition {
             stripe_count: 24,
             flash_color: [255, 255, 255],
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IrisStyle {
+    Circular,
+    Polygon,
+}
+
+impl Default for IrisStyle {
+    fn default() -> Self {
+        Self::Circular
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IrisDirection {
+    Open,
+    Close,
+}
+
+impl Default for IrisDirection {
+    fn default() -> Self {
+        Self::Open
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IrisTransition {
+    pub style: IrisStyle,
+    pub edge_softness_px: f32,
+    pub blades: u32,
+    pub curvature: f32,
+    pub center_x: f32,
+    pub center_y: f32,
+    pub direction: IrisDirection,
+}
+
+impl Default for IrisTransition {
+    fn default() -> Self {
+        Self {
+            style: IrisStyle::default(),
+            edge_softness_px: 18.0,
+            blades: 6,
+            curvature: 0.35,
+            center_x: 0.5,
+            center_y: 0.5,
+            direction: IrisDirection::default(),
+        }
+    }
+}
+
+impl IrisTransition {
+    fn normalize(&mut self, kind: TransitionKind) -> Result<()> {
+        ensure!(
+            self.edge_softness_px.is_finite(),
+            format!(
+                "transition option {} has non-finite iris.edge-softness-px",
+                kind
+            )
+        );
+        ensure!(
+            self.edge_softness_px >= 0.0,
+            format!(
+                "transition option {} requires iris.edge-softness-px >= 0",
+                kind
+            )
+        );
+        if self.blades == 0 {
+            self.blades = 1;
+        }
+        ensure!(
+            self.curvature.is_finite(),
+            format!("transition option {} has non-finite iris.curvature", kind)
+        );
+        self.curvature = self.curvature.clamp(0.0, 1.0);
+        ensure!(
+            self.center_x.is_finite(),
+            format!("transition option {} has non-finite iris.center-x", kind)
+        );
+        ensure!(
+            self.center_y.is_finite(),
+            format!("transition option {} has non-finite iris.center-y", kind)
+        );
+        self.center_x = self.center_x.clamp(0.0, 1.0);
+        self.center_y = self.center_y.clamp(0.0, 1.0);
+        Ok(())
     }
 }
 
@@ -3177,6 +3291,13 @@ struct TransitionOptionBuilder {
     eink_reveal_portion: Option<f32>,
     eink_stripe_count: Option<u32>,
     eink_flash_color: Option<[u8; 3]>,
+    iris_style: Option<IrisStyle>,
+    iris_edge_softness_px: Option<f32>,
+    iris_blades: Option<u32>,
+    iris_curvature: Option<f32>,
+    iris_center_x: Option<f32>,
+    iris_center_y: Option<f32>,
+    iris_direction: Option<IrisDirection>,
 }
 
 fn apply_transition_inline_field<E: de::Error>(
@@ -3231,6 +3352,27 @@ fn apply_transition_inline_field<E: de::Error>(
         "flash-color" if matches!(kind, TransitionKind::EInk) => {
             builder.eink_flash_color = Some(inline_value_to::<[u8; 3], E>(value)?);
         }
+        "style" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_style = Some(inline_value_to::<IrisStyle, E>(value)?);
+        }
+        "edge-softness-px" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_edge_softness_px = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "blades" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_blades = Some(inline_value_to::<u32, E>(value)?);
+        }
+        "curvature" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_curvature = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "center-x" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_center_x = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "center-y" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_center_y = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "direction" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_direction = Some(inline_value_to::<IrisDirection, E>(value)?);
+        }
         _ => {
             return Err(de::Error::unknown_field(
                 field,
@@ -3245,6 +3387,13 @@ fn apply_transition_inline_field<E: de::Error>(
                     "reveal-portion",
                     "stripe-count",
                     "flash-color",
+                    "style",
+                    "edge-softness-px",
+                    "blades",
+                    "curvature",
+                    "center-x",
+                    "center-y",
+                    "direction",
                 ],
             ));
         }
