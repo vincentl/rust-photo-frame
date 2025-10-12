@@ -3,7 +3,8 @@ pub mod scenes;
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
-    MattingConfig, MattingMode, MattingOptions, TransitionKind, TransitionMode, TransitionOptions,
+    IrisDirection, IrisEasing, MattingConfig, MattingMode, MattingOptions, TransitionConfig,
+    TransitionKind, TransitionMode, TransitionOptions,
 };
 use crate::events::{
     Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
@@ -261,6 +262,13 @@ struct MattingBridge<'a> {
     matting: &'a MattingConfig,
     oversample: f32,
     mat_pipeline: &'a MattingPipeline,
+}
+
+fn surface_state_for_queue(
+    surface_ready: bool,
+    surface: Option<SurfaceState>,
+) -> Option<SurfaceState> {
+    if surface_ready { surface } else { None }
 }
 
 impl<'a> MattingBridge<'a> {
@@ -1036,6 +1044,7 @@ pub fn run_windowed(
         cancel: CancellationToken,
         window: Option<Arc<Window>>,
         gpu: Option<GpuCtx>,
+        surface_ready: bool,
         mode: Option<ViewerMode>,
         preload_count: usize,
         oversample: f32,
@@ -1056,6 +1065,25 @@ pub fn run_windowed(
 
         fn mode_mut(&mut self) -> &mut ViewerMode {
             self.mode.as_mut().expect("viewer mode not initialized")
+        }
+
+        fn active_surface(&self) -> Option<SurfaceState> {
+            let surface = self
+                .gpu
+                .as_ref()
+                .map(|gpu| SurfaceState::from_config(&gpu.config, &gpu.limits));
+            surface_state_for_queue(self.surface_ready, surface)
+        }
+
+        fn update_surface_ready(&mut self, width: u32, height: u32) {
+            let ready = width > 1 && height > 1;
+            if ready != self.surface_ready {
+                debug!(
+                    surface_ready = ready,
+                    width, height, "viewer_surface_ready_state_changed"
+                );
+            }
+            self.surface_ready = ready;
         }
 
         fn with_active_scene<R>(
@@ -1083,16 +1111,14 @@ pub fn run_windowed(
             let Some(mut mode) = self.mode.take() else {
                 return None;
             };
+            let surface = gface();
             let mut bridge = MattingBridge {
                 preload_count: self.preload_count,
                 mat_inflight: &mut self.mat_inflight,
                 deferred_images: &mut self.deferred_images,
                 ready_results: &mut self.ready_results,
                 from_loader: &mut self.from_loader,
-                surface: self
-                    .gpu
-                    .as_ref()
-                    .map(|gpu| SurfaceState::from_config(&gpu.config, &gpu.limits)),
+                surface,
                 matting: &self.matting,
                 oversample: self.oversample,
                 mat_pipeline: &self.mat_pipeline,
@@ -1155,16 +1181,14 @@ pub fn run_windowed(
                     let _ = sender.try_send(Displayed(path));
                 }
             };
+            let surface = self.active_surface();
             let mut bridge = MattingBridge {
                 preload_count: self.preload_count,
                 mat_inflight: &mut self.mat_inflight,
                 deferred_images: &mut self.deferred_images,
                 ready_results: &mut self.ready_results,
                 from_loader: &mut self.from_loader,
-                surface: self
-                    .gpu
-                    .as_ref()
-                    .map(|gpu| SurfaceState::from_config(&gpu.config, &gpu.limits)),
+                surface,
                 matting: &self.matting,
                 oversample: self.oversample,
                 mat_pipeline: &self.mat_pipeline,
@@ -1206,6 +1230,7 @@ pub fn run_windowed(
                 self.enter_greeting();
             }
             self.mat_inflight = 0;
+            self.surface_ready = false;
             self.log_event_loop_state("reset_for_resume");
         }
 
@@ -1234,6 +1259,7 @@ pub fn run_windowed(
                 viewer_mode = ?self.mode_kind(),
                 has_window = self.window.is_some(),
                 has_gpu = self.gpu.is_some(),
+                surface_ready = self.surface_ready,
                 pending_queue_len = wake.pending().len(),
                 ready_results_len = self.ready_results.len(),
                 deferred_queue_len = self.deferred_images.len(),
@@ -1293,6 +1319,7 @@ pub fn run_windowed(
                 mode.set_overlays(None, None);
             }
             self.gpu = None;
+            self.surface_ready = false;
             self.log_event_loop_state("teardown_gpu");
         }
 
@@ -1381,16 +1408,14 @@ pub fn run_windowed(
             // `queue_for_wake` defers work until the surface reports a usable size.
             // Once `WindowEvent::Resized` updates `self.gpu.config`, the next tick will
             // call this helper again and retry automatically.
+            let surface = self.active_surface();
             let mut bridge = MattingBridge {
                 preload_count: self.preload_count,
                 mat_inflight: &mut self.mat_inflight,
                 deferred_images: &mut self.deferred_images,
                 ready_results: &mut self.ready_results,
                 from_loader: &mut self.from_loader,
-                surface: self
-                    .gpu
-                    .as_ref()
-                    .map(|gpu| SurfaceState::from_config(&gpu.config, &gpu.limits)),
+                surface,
                 matting: &self.matting,
                 oversample: self.oversample,
                 mat_pipeline: &self.mat_pipeline,
@@ -1761,6 +1786,7 @@ pub fn run_windowed(
                         gpu.config.height = new_size.height.max(1);
                         gpu.surface.configure(&gpu.device, &gpu.config);
                     }
+                    self.update_surface_ready(new_size.width, new_size.height);
                     let scale_factor = self
                         .window
                         .as_ref()
@@ -1786,6 +1812,7 @@ pub fn run_windowed(
                         gpu.config.width = size.width.max(1);
                         gpu.config.height = size.height.max(1);
                         gpu.surface.configure(&gpu.device, &gpu.config);
+                        self.update_surface_ready(size.width, size.height);
                         let _ = self.with_active_scene(|scene, ctx| {
                             scene.handle_scale_factor_changed(ctx, size, scale_factor);
                         });
@@ -2227,6 +2254,7 @@ pub fn run_windowed(
         cancel,
         window: None,
         gpu: None,
+        surface_ready: false,
         mode: Some(ViewerMode::new(ViewerModeKind::Greeting, initial_wake)),
         preload_count: cfg.viewer_preload_count,
         oversample: cfg.oversample,
@@ -2683,6 +2711,144 @@ fn compute_wipe_span(normal: [f32; 2], screen_w: f32, screen_h: f32) -> (f32, f3
     }
     let span = (max_proj - min_proj).abs().max(1e-3);
     (min_proj, 1.0 / span)
+}
+
+#[doc(hidden)]
+#[allow(dead_code)]
+pub mod testkit {
+    //! Internal viewer harness helpers exposed for integration testing.
+    use super::*;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
+
+    pub struct MattingQueueHarness {
+        preload_count: usize,
+        mat_inflight: usize,
+        deferred_images: VecDeque<QueuedImage>,
+        ready_results: VecDeque<MatResult>,
+        from_loader_tx: mpsc::Sender<PhotoLoaded>,
+        from_loader_rx: mpsc::Receiver<PhotoLoaded>,
+        mat_pipeline: MattingPipeline,
+        wake: scenes::WakeScene,
+        oversample: f32,
+        matting: MattingConfig,
+        surface_ready: bool,
+        surface: Option<SurfaceState>,
+    }
+
+    pub struct ProcessedCanvas {
+        pub path: std::path::PathBuf,
+        pub width: u32,
+        pub height: u32,
+        pub priority: bool,
+    }
+
+    impl MattingQueueHarness {
+        pub fn new(
+            preload_count: usize,
+            oversample: f32,
+            matting: MattingConfig,
+            dwell_ms: u64,
+            transition_cfg: TransitionConfig,
+        ) -> Self {
+            let (from_loader_tx, from_loader_rx) = mpsc::channel(8);
+            Self {
+                preload_count,
+                mat_inflight: 0,
+                deferred_images: VecDeque::new(),
+                ready_results: VecDeque::new(),
+                from_loader_tx,
+                from_loader_rx,
+                mat_pipeline: MattingPipeline::new(1, preload_count.max(2)),
+                wake: scenes::WakeScene::new(dwell_ms, transition_cfg),
+                oversample,
+                matting,
+                surface_ready: false,
+                surface: None,
+            }
+        }
+
+        pub fn loader_sender(&self) -> mpsc::Sender<PhotoLoaded> {
+            self.from_loader_tx.clone()
+        }
+
+        pub fn update_surface_state(&mut self, surface: Option<(u32, u32, u32)>) {
+            self.surface = surface.map(|(width, height, max_texture_dimension)| SurfaceState {
+                width,
+                height,
+                max_texture_dimension,
+            });
+        }
+
+        pub fn set_surface_ready(&mut self, ready: bool) {
+            self.surface_ready = ready;
+        }
+
+        pub fn push_deferred(&mut self, image: PreparedImageCpu, priority: bool) {
+            self.deferred_images
+                .push_back(QueuedImage { image, priority });
+        }
+
+        pub fn queue_once(&mut self) {
+            let mut bridge = MattingBridge {
+                preload_count: self.preload_count,
+                mat_inflight: &mut self.mat_inflight,
+                deferred_images: &mut self.deferred_images,
+                ready_results: &mut self.ready_results,
+                from_loader: &mut self.from_loader_rx,
+                surface: surface_state_for_queue(self.surface_ready, self.surface),
+                matting: &self.matting,
+                oversample: self.oversample,
+                mat_pipeline: &self.mat_pipeline,
+            };
+            bridge.queue_for_wake(&mut self.wake);
+        }
+
+        pub fn drain_pipeline(&mut self) {
+            while let Some(result) = self.mat_pipeline.try_recv() {
+                self.mat_inflight = self.mat_inflight.saturating_sub(1);
+                self.ready_results.push_back(result);
+            }
+        }
+
+        pub async fn wait_for_ready_results(&mut self, timeout: Duration) {
+            let deadline = Instant::now() + timeout;
+            loop {
+                self.drain_pipeline();
+                if (!self.ready_results.is_empty() || self.mat_inflight == 0)
+                    || Instant::now() >= deadline
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        pub fn take_ready_canvases(&mut self) -> Vec<ProcessedCanvas> {
+            self.ready_results
+                .drain(..)
+                .map(|result| ProcessedCanvas {
+                    path: result.path,
+                    width: result.canvas.width,
+                    height: result.canvas.height,
+                    priority: result.priority,
+                })
+                .collect()
+        }
+
+        pub fn deferred_queue_len(&self) -> usize {
+            self.deferred_images.len()
+        }
+    }
+
+    pub fn compute_canvas_size_for_test(
+        screen_w: u32,
+        screen_h: u32,
+        oversample: f32,
+        max_dim: u32,
+    ) -> (u32, u32) {
+        compute_canvas_size(screen_w, screen_h, oversample, max_dim)
+    }
 }
 
 #[cfg(test)]
