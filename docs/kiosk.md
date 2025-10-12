@@ -21,6 +21,13 @@ The script performs the following actions:
 - deploys the `photoframe-*` helper units (wifi manager, sync timer, button daemon), and
 - enables the kiosk units, starting them automatically once the corresponding binaries exist in `/opt/photo-frame`.
 
+When the script encounters a host that already reserves tty1 for greetd, it now prints idempotent status lines instead of systemd's verbose output. Expect logs like the following on subsequent runs:
+
+```
+[install.sh] INFO: getty@tty1.service already masked; skipping disable/mask
+[install.sh] INFO: greetd.service is static; nothing to enable
+```
+
 Re-run the script after OS or application updates to reapply package dependencies or repair systemd units; it is idempotent.
 
 ## Resulting configuration

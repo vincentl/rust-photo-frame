@@ -50,21 +50,62 @@ done
 # Ensure greetd owns VT1 and launches on graphical.target
 if command -v systemctl >/dev/null 2>&1; then
     log INFO "Enforcing greetd ownership of tty1"
-    # Ensure greetd owns VT1 and no getty competes for tty1
-    sudo systemctl disable --now getty@tty1.service || true
-    sudo systemctl mask getty@tty1.service || true
+    getty_state="$(systemctl show -p UnitFileState getty@tty1.service 2>/dev/null | cut -d'=' -f2 | tr -d $'\n' || true)"
+    if [[ "${getty_state}" == "masked" || "${getty_state}" == "masked-runtime" ]]; then
+        log INFO "getty@tty1.service already masked; skipping disable/mask"
+    else
+        if sudo systemctl disable --now getty@tty1.service >/dev/null 2>&1; then
+            log INFO "Disabled getty@tty1.service"
+        else
+            log WARN "Failed to disable getty@tty1.service"
+        fi
+        if sudo systemctl mask getty@tty1.service >/dev/null 2>&1; then
+            log INFO "Masked getty@tty1.service"
+        else
+            log WARN "Failed to mask getty@tty1.service"
+        fi
+    fi
 
-    # Make greetd the display manager
-    sudo systemctl enable greetd.service
+    greetd_state="$(systemctl show -p UnitFileState greetd.service 2>/dev/null | cut -d'=' -f2 | tr -d $'\n' || true)"
+    case "${greetd_state}" in
+        static)
+            log INFO "greetd.service is static; nothing to enable"
+            ;;
+        masked|masked-runtime)
+            log WARN "greetd.service is masked; enable manually once unmasked"
+            ;;
+        *)
+            if sudo systemctl enable greetd.service >/dev/null 2>&1; then
+                log INFO "Enabled greetd.service"
+            else
+                log WARN "Failed to enable greetd.service (state: ${greetd_state:-unknown})"
+            fi
+            ;;
+    esac
 
-    # Default to graphical target so greetd starts at boot
-    sudo systemctl set-default graphical.target
+    if sudo systemctl set-default graphical.target >/dev/null 2>&1; then
+        log INFO "Set graphical.target as default boot target"
+    else
+        log WARN "Failed to set graphical.target as default"
+    fi
 
-    # Clear rate-limit and (re)launch greetd cleanly
-    sudo systemctl reset-failed greetd.service || true
-    sudo systemctl stop greetd.service || true
+    if sudo systemctl reset-failed greetd.service >/dev/null 2>&1; then
+        log INFO "Cleared greetd.service failure state"
+    else
+        log WARN "Failed to reset greetd.service failure state"
+    fi
+
+    if sudo systemctl stop greetd.service >/dev/null 2>&1; then
+        log INFO "Stopped greetd.service"
+    else
+        log WARN "Failed to stop greetd.service"
+    fi
     sleep 1
-    sudo systemctl start greetd.service
+    if sudo systemctl start greetd.service >/dev/null 2>&1; then
+        log INFO "Started greetd.service"
+    else
+        log WARN "Failed to start greetd.service"
+    fi
 else
     log WARN "systemctl not available; skipping greetd ownership enforcement"
 fi
