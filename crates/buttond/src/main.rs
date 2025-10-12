@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use evdev::{Device, EventSummary, KeyCode};
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
