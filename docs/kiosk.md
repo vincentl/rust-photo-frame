@@ -13,7 +13,7 @@ sudo ./setup/bootstrap/run.sh
 The script performs the following actions:
 
 - verifies `/etc/os-release` reports `VERSION_CODENAME=trixie` and applies Raspberry Pi 5 boot tweaks (set `ENABLE_4K_BOOT=0` to skip the 4K60 profile),
-- installs the Wayland stack required for kiosk mode (`greetd`, `sway`, `swaybg`, `swayidle`, `swaylock`, `mesa-vulkan-drivers`, `vulkan-tools`, `wayland-protocols`, and `socat` for control-socket tooling) alongside general dependencies,
+- installs the Wayland stack required for kiosk mode (`greetd`, `sway`, `swaybg`, `swayidle`, `swaylock`, `mesa-vulkan-drivers`, `vulkan-tools`, `wayland-protocols`, and `socat` for control-socket tooling) alongside general dependencies, including `dbus`/`dbus-user-session` so `dbus-run-session` is present for the kiosk launch wrapper,
 - creates the `kiosk` account with a locked shell and ensures it belongs to the `video`, `render`, and `input` groups,
 - provisions `/run/photo-frame` (owned by `kiosk:kiosk`, mode `0770`) and drops an `/etc/tmpfiles.d/photo-frame.conf` entry so the control socket directory exists on every boot,
 - installs `/usr/local/bin/photoframe-session` and writes `/etc/greetd/config.toml` so virtual terminal 1 runs `/usr/local/bin/photoframe-session` as the `kiosk` user,
