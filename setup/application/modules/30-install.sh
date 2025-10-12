@@ -61,7 +61,7 @@ install_tree() {
     done
 }
 
-bootstrap_runtime() {
+prepare_runtime() {
     if [[ ! -d "${VAR_ROOT}" ]]; then
         run_sudo install -d -m 750 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${VAR_ROOT}"
     fi
@@ -113,7 +113,7 @@ set_permissions() {
 require_stage_dir
 validate_service_principal
 install_tree
-bootstrap_runtime
+prepare_runtime
 set_permissions
 
 log INFO "Installation tree updated at ${INSTALL_ROOT}"

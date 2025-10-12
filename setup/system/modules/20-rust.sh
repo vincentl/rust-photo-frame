@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODULE="bootstrap:20-rust"
+MODULE="system:20-rust"
 
 log() {
     printf '[%s] %s\n' "${MODULE}" "$*"

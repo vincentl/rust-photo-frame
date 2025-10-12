@@ -1,16 +1,16 @@
 # Photo Frame Setup Pipeline
 
-This directory houses idempotent provisioning scripts for Raspberry Pi photo frame deployments. Each script can be re-run safely after OS updates or image refreshes.
+This directory houses idempotent provisioning scripts for Raspberry Pi photo frame deployments. Each stage can be re-run safely after OS updates or image refreshes.
 
-## Bootstrap the operating system (Trixie)
+## System provisioning (Trixie)
 
-Provision a Raspberry Pi OS Trixie kiosk and install shared dependencies with:
+Provision Raspberry Pi OS (Trixie) for kiosk duty and install shared dependencies with:
 
 ```bash
-sudo ./setup/bootstrap/run.sh
+sudo ./setup/system/install.sh
 ```
 
-The bootstrap pipeline is ordered via numbered modules and performs the following actions:
+The system pipeline executes its numbered modules in order and performs the following actions:
 
 - installs base apt packages (graphics stack, build tools, networking utilities),
 - installs or updates the system-wide Rust toolchain under `/usr/local/cargo`,
@@ -20,14 +20,14 @@ The bootstrap pipeline is ordered via numbered modules and performs the followin
 - installs the greetd configuration and kiosk session wrapper at `/usr/local/bin/photoframe-session`, and
 - deploys the `photoframe-*` systemd units, enabling them and starting them when the corresponding binaries are present in `/opt/photo-frame`.
 
-Run the script before building the application so the toolchain and dependencies are ready. Re-run it after `./setup/app/run.sh` completes to let the kiosk services start once the binaries are installed. The modules are idempotent, so repeated invocations are safe.
+Run the script before building the application so the toolchain and dependencies are ready. Re-run it after `./setup/application/deploy.sh` completes to let the kiosk services start once the binaries are installed. The modules are idempotent, so repeated invocations are safe.
 
 ## Diagnose kiosk health
 
 Inspect the greetd session, kiosk user, and display-manager wiring:
 
 ```bash
-sudo ./setup/bootstrap/tools/diagnostics.sh
+sudo ./setup/system/tools/diagnostics.sh
 ```
 
 Run this from the device when display login fails or the kiosk session will not start; it flags missing packages, disabled units, and other common misconfigurations.
@@ -37,10 +37,10 @@ Run this from the device when display login fails or the kiosk session will not 
 Build and install release artifacts from an unprivileged shell:
 
 ```bash
-./setup/app/run.sh
+./setup/application/deploy.sh
 ```
 
-The app stage compiles the workspace, stages binaries and documentation under `setup/app/build/stage`, ensures the kiosk service user exists, and installs the artifacts into `/opt/photo-frame`.
+The application stage compiles the workspace, stages binaries and documentation under `setup/application/build/stage`, ensures the kiosk service user exists, and installs the artifacts into `/opt/photo-frame`.
 
 ## systemd helper library
 

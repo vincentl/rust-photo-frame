@@ -24,18 +24,18 @@ if [[ ! -d "${MODULE_DIR}" ]]; then
 fi
 
 export REPO_ROOT SCRIPT_DIR MODULE_DIR TOOLS_DIR
-export BOOTSTRAP_STAGE="bootstrap"
+export SYSTEM_STAGE="system"
 
 shopt -s nullglob
 modules=("${MODULE_DIR}"/[0-9][0-9]-*.sh)
 shopt -u nullglob
 
 if [[ ${#modules[@]} -eq 0 ]]; then
-    log INFO "No bootstrap modules found in ${MODULE_DIR}."
+    log INFO "No system modules found in ${MODULE_DIR}."
     exit 0
 fi
 
-log INFO "Executing bootstrap modules as user $(id -un)"
+log INFO "Executing system provisioning modules as user $(id -un)"
 for module in "${modules[@]}"; do
     module_name="$(basename "${module}")"
     log INFO "Starting ${module_name}"
@@ -47,5 +47,5 @@ for module in "${modules[@]}"; do
     echo
 done
 
-log INFO "Bootstrap stage complete."
+log INFO "System provisioning complete."
 

@@ -4,10 +4,10 @@ The photo frame boots straight into the Wayland app using a greetd-managed sessi
 
 ## Provisioning workflow
 
-Run the bootstrap pipeline on a fresh Debian 13 (or Raspberry Pi OS trixie) image:
+Run the system provisioning pipeline on a fresh Debian 13 (or Raspberry Pi OS trixie) image:
 
 ```bash
-sudo ./setup/bootstrap/run.sh
+sudo ./setup/system/install.sh
 ```
 
 The script performs the following actions:

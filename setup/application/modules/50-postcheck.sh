@@ -124,8 +124,8 @@ if systemd_available; then
         fi
     }
 
-    kiosk_hint="run 'sudo ./setup/bootstrap/run.sh' to provision kiosk services"
-    seatd_hint="install seatd and rerun bootstrap provisioning"
+    kiosk_hint="run 'sudo ./setup/system/install.sh' to provision kiosk services"
+    seatd_hint="install seatd and rerun system provisioning"
 
     check_service "${KIOSK_SERVICE}" "ERROR" "${kiosk_hint}"
     check_enabled "${KIOSK_SERVICE}" "${kiosk_hint}"

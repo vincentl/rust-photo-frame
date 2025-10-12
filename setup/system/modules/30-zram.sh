@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODULE="bootstrap:30-zram"
+MODULE="system:30-zram"
 
 log() {
     printf '[%s] %s\n' "${MODULE}" "$*"
@@ -82,7 +82,7 @@ configure_zram_generator() {
     log "Configuring systemd zram generator"
     install -d -m 0755 "${config_dir}"
     cat <<'CONF' >"${config_file}"
-# Managed by setup/bootstrap/modules/30-zram.sh
+# Managed by setup/system/modules/30-zram.sh
 # Configure a compressed swap device sized to half of physical memory (up to 2 GiB).
 # Higher priority ensures the kernel prefers zram swap over any other device if reintroduced.
 [zram0]

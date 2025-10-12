@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODULE="bootstrap:10-apt-packages"
+MODULE="system:10-apt-packages"
 
 log() {
     printf '[%s] %s\n' "${MODULE}" "$*"

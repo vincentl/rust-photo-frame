@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODULE="bootstrap:60-systemd"
+MODULE="system:60-systemd"
 
 log() {
     printf '[%s] %s\n' "${MODULE}" "$*"

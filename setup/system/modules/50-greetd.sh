@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODULE="bootstrap:50-greetd"
+MODULE="system:50-greetd"
 
 log() {
     printf '[%s] %s\n' "${MODULE}" "$*"
@@ -92,7 +92,7 @@ workspace number 1 output HDMI-A-1
 assign [app_id="$photo_app_id"] workspace number 1
 
 for_window [app_id="$photo_app_id"] fullscreen enable, inhibit_idle fullscreen
-for_window [app_id="$overlay_app_id"] floating enable, border none
+for_window [app_id="$overlay_app_id"] fullscreen enable, focus, border none
 
 bar {
     mode invisible
