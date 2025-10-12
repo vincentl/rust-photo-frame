@@ -39,12 +39,8 @@ transition:
       flash-color: [0, 0, 0]
     iris:
       duration-ms: 520
-      style: polygon
-      edge-softness-px: 16.0
       blades: 6
-      curvature: 0.4
-      center-x: 0.5
-      center-y: 0.5
+      curvature: 0.1
       direction: open
 
 # Dwell time (ms) the current image remains fully displayed before the next transition

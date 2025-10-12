@@ -147,39 +147,37 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       }
     }
     case 5u: {
-      let style = U.params0.x;
+      let min_shape = clamp(U.params0.x, 1e-4, 1.0);
       let direction = U.params0.y;
-      let softness_px = max(U.params0.z, 0.0);
-      let curvature = clamp(U.params0.w, 0.0, 1.0);
-      let blades = max(U.params1.x, 1.0);
-      let center = vec2<f32>(clamp(U.params1.y, 0.0, 1.0), clamp(U.params1.z, 0.0, 1.0));
-      let max_dim = max(max(U.screen_size.x, U.screen_size.y), 1.0);
-      let softness = softness_px / max_dim;
-      let rel = in.screen_uv - center;
-      let dist = length(rel);
-      var effective_dist = dist;
-      if (style > 0.5) {
-        let angle = atan2(rel.y, rel.x);
-        let wave = abs(cos(blades * angle * 0.5));
-        let scale = max(mix(wave, 1.0, curvature), 1e-3);
-        effective_dist = dist / scale;
-      }
-      let corners = array<vec2<f32>, 4>(
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(1.0, 1.0)
-      );
-      var max_radius = 0.0;
-      for (var i: i32 = 0; i < 4; i = i + 1) {
-        max_radius = max(max_radius, distance(center, corners[i]));
-      }
+      let curvature = clamp(U.params0.z, 0.0, 1.0);
+      let cos_half = clamp(U.params0.w, 1e-4, 1.0);
+      let blade_angle = max(U.params1.x, 1e-4);
+      let feather_factor = max(U.params1.y, 0.0);
       let progress = clamp(U.progress, 0.0, 1.0);
+      let aspect = U.screen_size.x / max(U.screen_size.y, 1.0);
+      let rel = vec2<f32>((in.screen_uv.x - 0.5) * aspect, in.screen_uv.y - 0.5);
+      let dist = length(rel);
+      let angle = atan2(rel.y, rel.x);
+      let inv_sector = 1.0 / blade_angle;
+      let wrapped = angle - blade_angle * floor(angle * inv_sector);
+      let offset = wrapped - blade_angle * 0.5;
+      let denom = cos(offset);
+      let polygon_norm = cos_half / max(denom, 1e-3);
+      let shape_factor = mix(polygon_norm, 1.0, curvature);
+      let max_radius = length(vec2<f32>(aspect * 0.5, 0.5));
+      let base_radius = max_radius / max(min_shape, 1e-3);
       let openness = select(1.0 - progress, progress, direction > 0.0);
-      let base_radius = max_radius * clamp(openness, 0.0, 1.0);
-      let feather = max(softness, 1e-4);
-      let mask = smoothstep(base_radius - feather, base_radius + feather, effective_dist);
-      color = mix(next, current, mask);
+      let aperture = clamp(openness, 0.0, 1.0);
+      let target_radius = base_radius * aperture * shape_factor;
+      let feather = max(max_radius * feather_factor, 1e-4);
+      var iris_cover = 1.0;
+      if (aperture > 1e-4) {
+        iris_cover = smoothstep(target_radius - feather, target_radius + feather, dist);
+      }
+      if (aperture >= 0.999) {
+        iris_cover = 0.0;
+      }
+      color = mix(next, current, iris_cover);
     }
     default: {
       color = current;

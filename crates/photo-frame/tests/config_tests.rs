@@ -1,6 +1,6 @@
 use rand::{SeedableRng, rngs::StdRng};
 use rust_photo_frame::config::{
-    ColorSelection, Configuration, FixedImagePathSelection, IrisDirection, IrisStyle, MattingKind,
+    ColorSelection, Configuration, FixedImagePathSelection, IrisDirection, MattingKind,
     MattingMode, MattingSelection, StudioMatColor, TransitionKind, TransitionSelection,
 };
 use std::path::PathBuf;
@@ -485,12 +485,8 @@ photo-library-path: "/photos"
 transition:
   types: [iris]
   duration-ms: 640
-  style: polygon
-  edge-softness-px: 14.5
-  blades: 8
+  blades: 7
   curvature: 0.25
-  center-x: 0.45
-  center-y: 0.6
   direction: close
 "#;
 
@@ -506,12 +502,8 @@ transition:
     assert_eq!(iris.duration().as_millis(), 640);
     match iris.mode() {
         rust_photo_frame::config::TransitionMode::Iris(cfg) => {
-            assert_eq!(cfg.style, IrisStyle::Polygon);
-            assert!((cfg.edge_softness_px - 14.5).abs() < f32::EPSILON);
-            assert_eq!(cfg.blades, 8);
+            assert_eq!(cfg.blades, 7);
             assert!((cfg.curvature - 0.25).abs() < f32::EPSILON);
-            assert!((cfg.center_x - 0.45).abs() < f32::EPSILON);
-            assert!((cfg.center_y - 0.6).abs() < f32::EPSILON);
             assert_eq!(cfg.direction, IrisDirection::Close);
         }
         _ => panic!("expected iris transition"),
@@ -716,19 +708,26 @@ transition:
 }
 
 #[test]
-fn iris_transition_rejects_negative_softness() {
+fn iris_transition_clamps_blade_count() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
   types: [iris]
-  edge-softness-px: -5.0
+  blades: 0
 "#;
 
-    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("requires iris.edge-softness-px >= 0")
-    );
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let iris = cfg
+        .transition
+        .options()
+        .get(&TransitionKind::Iris)
+        .expect("expected iris transition option");
+    match iris.mode() {
+        rust_photo_frame::config::TransitionMode::Iris(cfg) => {
+            assert_eq!(cfg.blades, 1);
+        }
+        _ => panic!("expected iris transition"),
+    }
 }
 
 #[test]
