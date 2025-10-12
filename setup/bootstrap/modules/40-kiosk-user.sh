@@ -205,16 +205,22 @@ ensure_kiosk_user() {
 ensure_runtime_dirs() {
     local runtime_dir="/run/photo-frame"
     local tmpfiles_conf="/etc/tmpfiles.d/photo-frame.conf"
+    local kiosk_uid
+
+    kiosk_uid="$(id -u kiosk)"
 
     log "Ensuring runtime control socket directory ${runtime_dir}"
     install -d -m 0770 -o kiosk -g kiosk "${runtime_dir}"
 
     log "Writing tmpfiles.d entry ${tmpfiles_conf}"
     install -d -m 0755 "$(dirname "${tmpfiles_conf}")"
-    cat <<'TMPFILES' >"${tmpfiles_conf}"
+    cat <<TMPFILES >"${tmpfiles_conf}"
 # photo-frame runtime directories
 d /run/photo-frame 0770 kiosk kiosk -
+d /run/user/${kiosk_uid} 0700 kiosk kiosk -
 TMPFILES
+
+    install -d -m 0700 -o kiosk -g kiosk "/run/user/${kiosk_uid}"
 }
 
 install_polkit_rules() {
