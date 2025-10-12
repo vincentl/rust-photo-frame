@@ -2,8 +2,6 @@
 
 ## Work On
 
-- broken greeting screen
-
 [ ] Validate Wifi Manager
 
 [ ] New install

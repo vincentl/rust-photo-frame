@@ -49,21 +49,21 @@ greeting-screen:
   message: "Warming up your photo memories…"
   font: "Macondo"
   stroke-width: 16
-  duration-seconds: 4
+  duration-seconds: 16
   colors:
-    background: "#f8fafc"
-    font: "#111827"
-    accent: "#38bdf8"
+    background: "#f0e8d5"   # warm parchment
+    font: "#2d3748"         # soft charcoal
+    accent: "#7da8a5"       # tranquil sea-glass teal
 
 # Sleep screen displayed when the frame is entering sleep mode
 sleep-screen:
-  message: "Going to Sleep"
+  message: "Tucking in for a nap…"
   font: "Macondo"
   stroke-width: 16
   colors:
-    background: "#111827"
-    font: "#f8fafc"
-    accent: "#38bdf8"
+    background: "#1e293b"   # deep slate blue
+    font: "#f0e8d5"         # warm ivory
+    accent: "#375978"       # muted indigo-teal
 
 # Optional awake schedule (viewer sleeps outside these intervals)
 awake-schedule:
