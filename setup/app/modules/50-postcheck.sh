@@ -13,6 +13,7 @@ KIOSK_SERVICE="${KIOSK_SERVICE:-greetd.service}"
 WIFI_SERVICE="${WIFI_SERVICE:-photoframe-wifi-manager.service}"
 SYNC_TIMER="${SYNC_TIMER:-photoframe-sync.timer}"
 BUTTON_SERVICE="${BUTTON_SERVICE:-photoframe-buttond.service}"
+SEATD_SERVICE="${SEATD_SERVICE:-seatd.service}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/systemd.sh
 source "${SCRIPT_DIR}/../../lib/systemd.sh"
@@ -124,9 +125,13 @@ if systemd_available; then
     }
 
     kiosk_hint="run 'sudo ./setup/bootstrap/run.sh' to provision kiosk services"
+    seatd_hint="install seatd and rerun bootstrap provisioning"
 
     check_service "${KIOSK_SERVICE}" "ERROR" "${kiosk_hint}"
     check_enabled "${KIOSK_SERVICE}" "${kiosk_hint}"
+
+    check_service "${SEATD_SERVICE}" "ERROR" "${seatd_hint}"
+    check_enabled "${SEATD_SERVICE}" "${seatd_hint}"
 
     check_service "${WIFI_SERVICE}" "ERROR" "${kiosk_hint}"
     check_enabled "${WIFI_SERVICE}" "${kiosk_hint}"
@@ -145,11 +150,13 @@ if systemd_available; then
     wifi_service_status=$(systemd_unit_property "${WIFI_SERVICE}" ActiveState 2>/dev/null || echo "not-found")
     button_status=$(systemd_unit_property "${BUTTON_SERVICE}" ActiveState 2>/dev/null || echo "not-found")
     sync_status=$(systemd_unit_property "${SYNC_TIMER}" ActiveState 2>/dev/null || echo "not-found")
+    seatd_status=$(systemd_unit_property "${SEATD_SERVICE}" ActiveState 2>/dev/null || echo "not-found")
 else
     service_status="not checked (systemctl unavailable)"
     wifi_service_status="not checked (systemctl unavailable)"
     button_status="not checked (systemctl unavailable)"
     sync_status="not checked (systemctl unavailable)"
+    seatd_status="not checked (systemctl unavailable)"
 fi
 
 log INFO "Deployment summary:"
@@ -170,6 +177,7 @@ ${KIOSK_SERVICE} : ${service_status}
 ${WIFI_SERVICE}: ${wifi_service_status}
 ${BUTTON_SERVICE}: ${button_status}
 ${SYNC_TIMER}: ${sync_status}
+${SEATD_SERVICE}: ${seatd_status}
 Next steps:
   - Customize ${VAR_CONFIG} for your site.
   - Review journal logs with 'journalctl -u ${KIOSK_SERVICE} -f'.

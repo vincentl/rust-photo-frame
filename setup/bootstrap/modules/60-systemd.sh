@@ -77,6 +77,17 @@ enable_systemd_units() {
     local session_bin="/opt/photo-frame/bin/rust-photo-frame"
     local greetd_started=0
 
+    local seatd_units=(seatd.service seatd.socket)
+    local seatd_unit
+    for seatd_unit in "${seatd_units[@]}"; do
+        if systemctl list-unit-files "${seatd_unit}" >/dev/null 2>&1; then
+            log "Enabling ${seatd_unit}"
+            systemctl enable "${seatd_unit}" >/dev/null 2>&1 || true
+            log "Starting ${seatd_unit}"
+            systemctl start "${seatd_unit}" >/dev/null 2>&1 || true
+        fi
+    done
+
     log "Setting greetd as the system display manager"
     if [[ -x "${session_bin}" ]]; then
         systemctl enable --now greetd.service >/dev/null 2>&1 || true
