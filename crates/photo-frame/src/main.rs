@@ -25,6 +25,8 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 #[cfg(unix)]
+use anyhow::anyhow;
+#[cfg(unix)]
 use serde::Deserialize;
 #[cfg(unix)]
 use tokio::io::AsyncReadExt;
@@ -440,15 +442,37 @@ async fn run_control_socket(
 }
 
 #[cfg(unix)]
+const MAX_CONTROL_PAYLOAD_BYTES: usize = 16 * 1024;
+
+#[cfg(unix)]
 async fn handle_control_connection(
     mut stream: tokio::net::UnixStream,
     control: mpsc::Sender<ViewerCommand>,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(128);
-    stream
-        .read_to_end(&mut buf)
-        .await
-        .context("failed to read control command")?;
+
+    loop {
+        let bytes_read = stream
+            .read_buf(&mut buf)
+            .await
+            .context("failed to read control command")?;
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        if buf.len() > MAX_CONTROL_PAYLOAD_BYTES {
+            tracing::warn!(
+                payload_len = buf.len(),
+                limit = MAX_CONTROL_PAYLOAD_BYTES,
+                "control payload exceeds limit"
+            );
+            return Err(anyhow!(
+                "control payload exceeds {} bytes",
+                MAX_CONTROL_PAYLOAD_BYTES
+            ));
+        }
+    }
 
     if buf.is_empty() {
         tracing::debug!("ignoring empty control payload");
@@ -580,5 +604,30 @@ mod tests {
         assert!(message.contains("unknown variant"));
         assert!(message.contains("awake"));
         assert!(message.contains("asleep"));
+    }
+
+    #[tokio::test]
+    async fn control_connection_rejects_large_payloads() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, server) =
+            tokio::net::UnixStream::pair().expect("unix stream pair should create");
+
+        let limit = super::MAX_CONTROL_PAYLOAD_BYTES;
+        let payload = vec![b'a'; limit + 1];
+        client
+            .write_all(&payload)
+            .await
+            .expect("should write payload");
+        client.shutdown().await.expect("should shutdown");
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+
+        let err = super::handle_control_connection(server, tx)
+            .await
+            .expect_err("payload should be rejected");
+
+        let message = err.to_string();
+        assert!(message.contains("control payload exceeds"));
     }
 }
