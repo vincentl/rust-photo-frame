@@ -8,6 +8,12 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=../lib/systemd.sh
 source "${SCRIPT_DIR}/../lib/systemd.sh"
 
+require_root() {
+    if [[ $(id -u) -ne 0 ]]; then
+        die "This module must be run as root"
+    fi
+}
+
 log() {
     printf '[%s] %s\n' "${MODULE}" "$*"
 }
@@ -20,7 +26,7 @@ die() {
 require_commands() {
     local missing=()
     local cmd
-    for cmd in apt-get id useradd usermod groupadd install cp sed grep awk; do
+    for cmd in apt-get dpkg-query getent id useradd usermod groupadd install cp sed grep awk systemctl chown sync; do
         if ! command -v "${cmd}" >/dev/null 2>&1; then
             missing+=("${cmd}")
         fi
@@ -311,7 +317,7 @@ ensure_persistent_journald() {
 }
 
 main() {
-    require_root "$@"
+    require_root
     require_trixie
     require_commands
 
