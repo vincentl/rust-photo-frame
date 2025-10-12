@@ -54,6 +54,8 @@ pub struct OverlayConfig {
     pub photo_app_id: String,
     #[serde(default = "default_overlay_app_id")]
     pub overlay_app_id: String,
+    #[serde(default)]
+    pub sway_socket: Option<PathBuf>,
 }
 
 impl Config {
@@ -91,6 +93,7 @@ impl Default for OverlayConfig {
             command: default_overlay_command(),
             photo_app_id: default_photo_app_id(),
             overlay_app_id: default_overlay_app_id(),
+            sway_socket: None,
         }
     }
 }
