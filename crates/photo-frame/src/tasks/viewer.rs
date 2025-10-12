@@ -165,6 +165,192 @@ impl TransitionState {
     }
 }
 
+#[derive(Clone)]
+struct MatParams {
+    screen_w: u32,
+    screen_h: u32,
+    oversample: f32,
+    max_dim: u32,
+    matting: MattingOptions,
+}
+
+struct MatTask {
+    image: PreparedImageCpu,
+    params: MatParams,
+    priority: bool,
+}
+
+struct ImagePlane {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+struct MatResult {
+    path: std::path::PathBuf,
+    canvas: ImagePlane,
+    priority: bool,
+}
+
+struct QueuedImage {
+    image: PreparedImageCpu,
+    priority: bool,
+}
+
+struct MattingPipeline {
+    task_tx: CbSender<MatTask>,
+    result_rx: CbReceiver<MatResult>,
+}
+
+impl MattingPipeline {
+    fn new(worker_count: usize, capacity: usize) -> Self {
+        let worker_count = worker_count.max(1);
+        let capacity = capacity.max(worker_count).max(2);
+        let (task_tx, task_rx) = bounded::<MatTask>(capacity);
+        let (result_tx, result_rx) = bounded::<MatResult>(capacity);
+        let task_rx = Arc::new(task_rx);
+        let result_tx = Arc::new(result_tx);
+        for _ in 0..worker_count {
+            let task_rx = Arc::clone(&task_rx);
+            let result_tx = Arc::clone(&result_tx);
+            std::thread::spawn(move || {
+                while let Ok(task) = task_rx.recv() {
+                    if let Some(result) = process_mat_task(task) {
+                        if result_tx.send(result).is_err() {
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        Self { task_tx, result_rx }
+    }
+
+    fn try_submit(&self, task: MatTask) -> Result<(), MatTask> {
+        match self.task_tx.try_send(task) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(task)) | Err(TrySendError::Disconnected(task)) => Err(task),
+        }
+    }
+
+    fn try_recv(&self) -> Option<MatResult> {
+        self.result_rx.try_recv().ok()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SurfaceState {
+    width: u32,
+    height: u32,
+    max_texture_dimension: u32,
+}
+
+impl SurfaceState {
+    fn from_config(config: &wgpu::SurfaceConfiguration, limits: &wgpu::Limits) -> Self {
+        Self {
+            width: config.width,
+            height: config.height,
+            max_texture_dimension: limits.max_texture_dimension_2d,
+        }
+    }
+
+    #[cfg(test)]
+    fn new(width: u32, height: u32, max_texture_dimension: u32) -> Self {
+        Self {
+            width,
+            height,
+            max_texture_dimension,
+        }
+    }
+}
+
+struct MattingBridge<'a> {
+    preload_count: usize,
+    mat_inflight: &'a mut usize,
+    deferred_images: &'a mut VecDeque<QueuedImage>,
+    ready_results: &'a mut VecDeque<MatResult>,
+    from_loader: &'a mut Receiver<PhotoLoaded>,
+    surface: Option<SurfaceState>,
+    matting: &'a MattingConfig,
+    oversample: f32,
+    mat_pipeline: &'a MattingPipeline,
+}
+
+impl<'a> MattingBridge<'a> {
+    fn queue_for_wake(&mut self, wake: &mut scenes::WakeScene) {
+        while wake.pending().len() + *self.mat_inflight < self.preload_count {
+            let next_img = if let Some(img) = self.deferred_images.pop_front() {
+                Some(img)
+            } else {
+                match self.from_loader.try_recv() {
+                    Ok(PhotoLoaded { prepared, priority }) => Some(QueuedImage {
+                        image: prepared,
+                        priority,
+                    }),
+                    Err(_) => None,
+                }
+            };
+            let Some(queued) = next_img else {
+                break;
+            };
+            let path = queued.image.path.clone();
+            if queued.priority {
+                self.deferred_images
+                    .retain(|pending| pending.image.path != path);
+                self.ready_results.retain(|pending| pending.path != path);
+                wake.pending_mut().retain(|pending| pending.path != path);
+                if wake.next().is_some_and(|stage| stage.path == path) {
+                    wake.set_next(None);
+                }
+            }
+            let Some(surface) = self.surface else {
+                self.deferred_images.push_front(queued);
+                break;
+            };
+            if surface.width <= 1 || surface.height <= 1 {
+                debug!(
+                    screen_w = surface.width,
+                    screen_h = surface.height,
+                    path = %path.display(),
+                    "deferring_matting_until_surface_configured"
+                );
+                self.deferred_images.push_front(queued);
+                break;
+            }
+            let mut rng = rand::rng();
+            let matting = self.matting.choose_option(&mut rng);
+            let params = MatParams {
+                screen_w: surface.width.max(1),
+                screen_h: surface.height.max(1),
+                oversample: self.oversample,
+                max_dim: surface.max_texture_dimension,
+                matting,
+            };
+            let QueuedImage {
+                image: img,
+                priority,
+            } = queued;
+            let task = MatTask {
+                image: img,
+                params,
+                priority,
+            };
+            match self.mat_pipeline.try_submit(task) {
+                Ok(()) => {
+                    *self.mat_inflight += 1;
+                }
+                Err(MatTask {
+                    image, priority, ..
+                }) => {
+                    self.deferred_images
+                        .push_front(QueuedImage { image, priority });
+                    break;
+                }
+            }
+        }
+    }
+}
+
 //
 // Viewer state machine overview
 // -----------------------------
@@ -182,6 +368,234 @@ impl TransitionState {
 //    scale/format in sync.
 
 const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(4);
+fn process_mat_task(task: MatTask) -> Option<MatResult> {
+    let MatTask {
+        image,
+        params,
+        priority,
+    } = task;
+    let PreparedImageCpu {
+        path,
+        width,
+        height,
+        pixels,
+    } = image;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let src = RgbaImage::from_raw(width, height, pixels)?;
+    let MatParams {
+        screen_w,
+        screen_h,
+        oversample,
+        max_dim,
+        matting,
+    } = params;
+    if screen_w == 0 || screen_h == 0 {
+        return None;
+    }
+
+    let (canvas_w, canvas_h) = compute_canvas_size(screen_w, screen_h, oversample, max_dim);
+    let margin = (matting.minimum_mat_percentage / 100.0).clamp(0.0, 0.45);
+    let max_upscale = matting.max_upscale_factor.max(1.0);
+    let avg_color = average_color(&src);
+
+    if let MattingMode::Studio {
+        bevel_width_px,
+        bevel_color,
+        texture_strength,
+        warp_period_px,
+        weft_period_px,
+        ..
+    } = &matting.style
+    {
+        let mut rng = rand::rng();
+        let mat_color = matting
+            .runtime
+            .select_studio_color(&mut rng, avg_color)
+            .unwrap_or(avg_color);
+        let mut bevel_px = bevel_width_px.max(0.0);
+        let margin_x = (canvas_w as f32 * margin).round();
+        let margin_y = (canvas_h as f32 * margin).round();
+        let inner_w = (canvas_w as f32 - 2.0 * margin_x).max(1.0);
+        let inner_h = (canvas_h as f32 - 2.0 * margin_y).max(1.0);
+        let max_bevel = 0.5 * inner_w.min(inner_h).max(0.0);
+        if max_bevel <= 0.0 {
+            bevel_px = 0.0;
+        } else {
+            bevel_px = bevel_px.min(max_bevel);
+        }
+        let photo_space_w = (canvas_w as f32 - 2.0 * (margin_x + bevel_px)).max(1.0);
+        let photo_space_h = (canvas_h as f32 - 2.0 * (margin_y + bevel_px)).max(1.0);
+
+        let iw = width.max(1) as f32;
+        let ih = height.max(1) as f32;
+        let mut scale = (photo_space_w / iw)
+            .min(photo_space_h / ih)
+            .min(max_upscale);
+        if !scale.is_finite() || scale <= 0.0 {
+            scale = 1.0;
+        }
+        let max_photo_w = photo_space_w.floor().max(1.0);
+        let max_photo_h = photo_space_h.floor().max(1.0);
+        let mut photo_w = (iw * scale).round().clamp(1.0, max_photo_w);
+        let mut photo_h = (ih * scale).round().clamp(1.0, max_photo_h);
+        photo_w = photo_w.clamp(1.0, canvas_w as f32);
+        photo_h = photo_h.clamp(1.0, canvas_h as f32);
+        let photo_w = photo_w as u32;
+        let photo_h = photo_h as u32;
+        let (offset_x, offset_y) = center_offset(photo_w, photo_h, canvas_w, canvas_h);
+
+        let main_img: Cow<'_, RgbaImage> = if photo_w == width && photo_h == height {
+            Cow::Borrowed(&src)
+        } else {
+            Cow::Owned(imageops::resize(
+                &src,
+                photo_w,
+                photo_h,
+                imageops::FilterType::Triangle,
+            ))
+        };
+
+        let canvas = render_studio_mat(
+            canvas_w,
+            canvas_h,
+            offset_x,
+            offset_y,
+            photo_w,
+            photo_h,
+            main_img.as_ref(),
+            mat_color,
+            bevel_px,
+            *bevel_color,
+            *texture_strength,
+            *warp_period_px,
+            *weft_period_px,
+        );
+
+        let canvas = ImagePlane {
+            width: canvas_w,
+            height: canvas_h,
+            pixels: canvas.into_raw(),
+        };
+
+        return Some(MatResult {
+            path,
+            canvas,
+            priority,
+        });
+    }
+
+    let (final_w, final_h) =
+        resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
+    let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
+
+    let main_img: Cow<'_, RgbaImage> = if final_w == width && final_h == height {
+        Cow::Borrowed(&src)
+    } else {
+        Cow::Owned(imageops::resize(
+            &src,
+            final_w,
+            final_h,
+            imageops::FilterType::Triangle,
+        ))
+    };
+
+    let mut background = match &matting.style {
+        MattingMode::FixedColor { colors, .. } => {
+            let mut rng = rand::rng();
+            let color = matting
+                .runtime
+                .select_fixed_color(&mut rng)
+                .or_else(|| colors.first().copied())
+                .unwrap_or([0, 0, 0]);
+            let px = Rgba([color[0], color[1], color[2], 255]);
+            RgbaImage::from_pixel(canvas_w, canvas_h, px)
+        }
+        MattingMode::Blur {
+            sigma,
+            sample_scale,
+            backend,
+        } => {
+            let bg = scale_image_to_cover_canvas(&src, canvas_w, canvas_h, max_dim);
+            if *sigma > 0.0 {
+                let mut sample = bg;
+                let mut sigma_px = *sigma;
+                let scale = sample_scale
+                    .is_finite()
+                    .then_some(*sample_scale)
+                    .unwrap_or_else(MattingMode::default_blur_sample_scale)
+                    .clamp(0.01, 1.0);
+                if scale < 1.0 {
+                    let sample_w = ((canvas_w as f32) * scale)
+                        .round()
+                        .clamp(1.0, canvas_w as f32) as u32;
+                    let sample_h = ((canvas_h as f32) * scale)
+                        .round()
+                        .clamp(1.0, canvas_h as f32) as u32;
+                    sample = imageops::resize(
+                        &sample,
+                        sample_w,
+                        sample_h,
+                        imageops::FilterType::CatmullRom,
+                    );
+                    sigma_px *= scale.max(0.01);
+                }
+
+                let mut blurred: RgbaImage = apply_blur(&sample, sigma_px, *backend);
+                if blurred.width() != canvas_w || blurred.height() != canvas_h {
+                    blurred = imageops::resize(
+                        &blurred,
+                        canvas_w,
+                        canvas_h,
+                        imageops::FilterType::CatmullRom,
+                    );
+                }
+                blurred
+            } else {
+                bg
+            }
+        }
+        MattingMode::Studio { .. } => unreachable!(),
+        MattingMode::FixedImage { fit, .. } => {
+            let mut rng = rand::rng();
+            if let Some(bg) = matting.runtime.select_fixed_image(&mut rng) {
+                match bg.canvas_for(*fit, canvas_w, canvas_h, max_dim) {
+                    Ok(prepared) => prepared.as_ref().clone(),
+                    Err(err) => {
+                        warn!(
+                            "failed to prepare fixed background from {}: {err}",
+                            bg.path().display()
+                        );
+                        RgbaImage::from_pixel(canvas_w, canvas_h, Rgba([0, 0, 0, 255]))
+                    }
+                }
+            } else {
+                RgbaImage::from_pixel(canvas_w, canvas_h, Rgba([0, 0, 0, 255]))
+            }
+        }
+    };
+
+    imageops::overlay(
+        &mut background,
+        main_img.as_ref(),
+        offset_x as i64,
+        offset_y as i64,
+    );
+
+    let canvas = ImagePlane {
+        width: canvas_w,
+        height: canvas_h,
+        pixels: background.into_raw(),
+    };
+
+    Some(MatResult {
+        path,
+        canvas,
+        priority,
+    })
+}
+
 fn wait_for_retry(cancel: &CancellationToken, mut remaining: Duration) -> bool {
     if remaining.is_zero() {
         return cancel.is_cancelled();
@@ -288,386 +702,6 @@ pub fn run_windowed(
         sampler: wgpu::Sampler,
         pipeline: wgpu::RenderPipeline,
         blank_plane: TexturePlane,
-    }
-
-    #[derive(Clone)]
-    struct MatParams {
-        screen_w: u32,
-        screen_h: u32,
-        oversample: f32,
-        max_dim: u32,
-        matting: MattingOptions,
-    }
-
-    struct MatTask {
-        image: PreparedImageCpu,
-        params: MatParams,
-        priority: bool,
-    }
-
-    struct ImagePlane {
-        width: u32,
-        height: u32,
-        pixels: Vec<u8>,
-    }
-
-    struct MatResult {
-        path: std::path::PathBuf,
-        canvas: ImagePlane,
-        priority: bool,
-    }
-
-    struct QueuedImage {
-        image: PreparedImageCpu,
-        priority: bool,
-    }
-
-    struct MattingPipeline {
-        task_tx: CbSender<MatTask>,
-        result_rx: CbReceiver<MatResult>,
-    }
-
-    impl MattingPipeline {
-        fn new(worker_count: usize, capacity: usize) -> Self {
-            let worker_count = worker_count.max(1);
-            let capacity = capacity.max(worker_count).max(2);
-            let (task_tx, task_rx) = bounded::<MatTask>(capacity);
-            let (result_tx, result_rx) = bounded::<MatResult>(capacity);
-            let task_rx = Arc::new(task_rx);
-            let result_tx = Arc::new(result_tx);
-            for _ in 0..worker_count {
-                let task_rx = Arc::clone(&task_rx);
-                let result_tx = Arc::clone(&result_tx);
-                std::thread::spawn(move || {
-                    while let Ok(task) = task_rx.recv() {
-                        if let Some(result) = process_mat_task(task) {
-                            if result_tx.send(result).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                });
-            }
-            Self { task_tx, result_rx }
-        }
-
-        fn try_submit(&self, task: MatTask) -> Result<(), MatTask> {
-            match self.task_tx.try_send(task) {
-                Ok(()) => Ok(()),
-                Err(TrySendError::Full(task)) | Err(TrySendError::Disconnected(task)) => Err(task),
-            }
-        }
-
-        fn try_recv(&self) -> Option<MatResult> {
-            self.result_rx.try_recv().ok()
-        }
-    }
-
-    struct MattingBridge<'a> {
-        preload_count: usize,
-        mat_inflight: &'a mut usize,
-        deferred_images: &'a mut VecDeque<QueuedImage>,
-        ready_results: &'a mut VecDeque<MatResult>,
-        from_loader: &'a mut Receiver<PhotoLoaded>,
-        gpu: Option<&'a GpuCtx>,
-        matting: &'a MattingConfig,
-        oversample: f32,
-        mat_pipeline: &'a MattingPipeline,
-    }
-
-    impl<'a> MattingBridge<'a> {
-        fn queue_for_wake(&mut self, wake: &mut scenes::WakeScene) {
-            while wake.pending().len() + *self.mat_inflight < self.preload_count {
-                let next_img = if let Some(img) = self.deferred_images.pop_front() {
-                    Some(img)
-                } else {
-                    match self.from_loader.try_recv() {
-                        Ok(PhotoLoaded { prepared, priority }) => Some(QueuedImage {
-                            image: prepared,
-                            priority,
-                        }),
-                        Err(_) => None,
-                    }
-                };
-                let Some(queued) = next_img else {
-                    break;
-                };
-                let path = queued.image.path.clone();
-                if queued.priority {
-                    self.deferred_images
-                        .retain(|pending| pending.image.path != path);
-                    self.ready_results.retain(|pending| pending.path != path);
-                    wake.pending_mut().retain(|pending| pending.path != path);
-                    if wake.next().is_some_and(|stage| stage.path == path) {
-                        wake.set_next(None);
-                    }
-                }
-                let Some(gpu) = self.gpu else {
-                    self.deferred_images.push_front(queued);
-                    break;
-                };
-                let mut rng = rand::rng();
-                let matting = self.matting.choose_option(&mut rng);
-                let params = MatParams {
-                    screen_w: gpu.config.width.max(1),
-                    screen_h: gpu.config.height.max(1),
-                    oversample: self.oversample,
-                    max_dim: gpu.limits.max_texture_dimension_2d,
-                    matting,
-                };
-                let QueuedImage {
-                    image: img,
-                    priority,
-                } = queued;
-                let task = MatTask {
-                    image: img,
-                    params,
-                    priority,
-                };
-                match self.mat_pipeline.try_submit(task) {
-                    Ok(()) => {
-                        *self.mat_inflight += 1;
-                    }
-                    Err(MatTask {
-                        image, priority, ..
-                    }) => {
-                        self.deferred_images
-                            .push_front(QueuedImage { image, priority });
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    fn process_mat_task(task: MatTask) -> Option<MatResult> {
-        let MatTask {
-            image,
-            params,
-            priority,
-        } = task;
-        let PreparedImageCpu {
-            path,
-            width,
-            height,
-            pixels,
-        } = image;
-        if width == 0 || height == 0 {
-            return None;
-        }
-        let src = RgbaImage::from_raw(width, height, pixels)?;
-        let MatParams {
-            screen_w,
-            screen_h,
-            oversample,
-            max_dim,
-            matting,
-        } = params;
-        if screen_w == 0 || screen_h == 0 {
-            return None;
-        }
-
-        let (canvas_w, canvas_h) = compute_canvas_size(screen_w, screen_h, oversample, max_dim);
-        let margin = (matting.minimum_mat_percentage / 100.0).clamp(0.0, 0.45);
-        let max_upscale = matting.max_upscale_factor.max(1.0);
-        let avg_color = average_color(&src);
-
-        if let MattingMode::Studio {
-            bevel_width_px,
-            bevel_color,
-            texture_strength,
-            warp_period_px,
-            weft_period_px,
-            ..
-        } = &matting.style
-        {
-            let mut rng = rand::rng();
-            let mat_color = matting
-                .runtime
-                .select_studio_color(&mut rng, avg_color)
-                .unwrap_or(avg_color);
-            let mut bevel_px = bevel_width_px.max(0.0);
-            let margin_x = (canvas_w as f32 * margin).round();
-            let margin_y = (canvas_h as f32 * margin).round();
-            let inner_w = (canvas_w as f32 - 2.0 * margin_x).max(1.0);
-            let inner_h = (canvas_h as f32 - 2.0 * margin_y).max(1.0);
-            let max_bevel = 0.5 * inner_w.min(inner_h).max(0.0);
-            if max_bevel <= 0.0 {
-                bevel_px = 0.0;
-            } else {
-                bevel_px = bevel_px.min(max_bevel);
-            }
-            let photo_space_w = (canvas_w as f32 - 2.0 * (margin_x + bevel_px)).max(1.0);
-            let photo_space_h = (canvas_h as f32 - 2.0 * (margin_y + bevel_px)).max(1.0);
-
-            let iw = width.max(1) as f32;
-            let ih = height.max(1) as f32;
-            let mut scale = (photo_space_w / iw)
-                .min(photo_space_h / ih)
-                .min(max_upscale);
-            if !scale.is_finite() || scale <= 0.0 {
-                scale = 1.0;
-            }
-            let max_photo_w = photo_space_w.floor().max(1.0);
-            let max_photo_h = photo_space_h.floor().max(1.0);
-            let mut photo_w = (iw * scale).round().clamp(1.0, max_photo_w);
-            let mut photo_h = (ih * scale).round().clamp(1.0, max_photo_h);
-            photo_w = photo_w.clamp(1.0, canvas_w as f32);
-            photo_h = photo_h.clamp(1.0, canvas_h as f32);
-            let photo_w = photo_w as u32;
-            let photo_h = photo_h as u32;
-            let (offset_x, offset_y) = center_offset(photo_w, photo_h, canvas_w, canvas_h);
-
-            let main_img: Cow<'_, RgbaImage> = if photo_w == width && photo_h == height {
-                Cow::Borrowed(&src)
-            } else {
-                Cow::Owned(imageops::resize(
-                    &src,
-                    photo_w,
-                    photo_h,
-                    imageops::FilterType::Triangle,
-                ))
-            };
-
-            let canvas = render_studio_mat(
-                canvas_w,
-                canvas_h,
-                offset_x,
-                offset_y,
-                photo_w,
-                photo_h,
-                main_img.as_ref(),
-                mat_color,
-                bevel_px,
-                *bevel_color,
-                *texture_strength,
-                *warp_period_px,
-                *weft_period_px,
-            );
-
-            let canvas = ImagePlane {
-                width: canvas_w,
-                height: canvas_h,
-                pixels: canvas.into_raw(),
-            };
-
-            return Some(MatResult {
-                path,
-                canvas,
-                priority,
-            });
-        }
-
-        let (final_w, final_h) =
-            resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
-        let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
-
-        let main_img: Cow<'_, RgbaImage> = if final_w == width && final_h == height {
-            Cow::Borrowed(&src)
-        } else {
-            Cow::Owned(imageops::resize(
-                &src,
-                final_w,
-                final_h,
-                imageops::FilterType::Triangle,
-            ))
-        };
-
-        let mut background = match &matting.style {
-            MattingMode::FixedColor { colors, .. } => {
-                let mut rng = rand::rng();
-                let color = matting
-                    .runtime
-                    .select_fixed_color(&mut rng)
-                    .or_else(|| colors.first().copied())
-                    .unwrap_or([0, 0, 0]);
-                let px = Rgba([color[0], color[1], color[2], 255]);
-                RgbaImage::from_pixel(canvas_w, canvas_h, px)
-            }
-            MattingMode::Blur {
-                sigma,
-                sample_scale,
-                backend,
-            } => {
-                let bg = scale_image_to_cover_canvas(&src, canvas_w, canvas_h, max_dim);
-                if *sigma > 0.0 {
-                    let mut sample = bg;
-                    let mut sigma_px = *sigma;
-                    let scale = sample_scale
-                        .is_finite()
-                        .then_some(*sample_scale)
-                        .unwrap_or_else(MattingMode::default_blur_sample_scale)
-                        .clamp(0.01, 1.0);
-                    if scale < 1.0 {
-                        let sample_w = ((canvas_w as f32) * scale)
-                            .round()
-                            .clamp(1.0, canvas_w as f32)
-                            as u32;
-                        let sample_h = ((canvas_h as f32) * scale)
-                            .round()
-                            .clamp(1.0, canvas_h as f32)
-                            as u32;
-                        sample = imageops::resize(
-                            &sample,
-                            sample_w,
-                            sample_h,
-                            imageops::FilterType::CatmullRom,
-                        );
-                        sigma_px *= scale.max(0.01);
-                    }
-
-                    let mut blurred: RgbaImage = apply_blur(&sample, sigma_px, *backend);
-                    if blurred.width() != canvas_w || blurred.height() != canvas_h {
-                        blurred = imageops::resize(
-                            &blurred,
-                            canvas_w,
-                            canvas_h,
-                            imageops::FilterType::CatmullRom,
-                        );
-                    }
-                    blurred
-                } else {
-                    bg
-                }
-            }
-            MattingMode::Studio { .. } => unreachable!(),
-            MattingMode::FixedImage { fit, .. } => {
-                let mut rng = rand::rng();
-                if let Some(bg) = matting.runtime.select_fixed_image(&mut rng) {
-                    match bg.canvas_for(*fit, canvas_w, canvas_h, max_dim) {
-                        Ok(prepared) => prepared.as_ref().clone(),
-                        Err(err) => {
-                            warn!(
-                                "failed to prepare fixed background from {}: {err}",
-                                bg.path().display()
-                            );
-                            RgbaImage::from_pixel(canvas_w, canvas_h, Rgba([0, 0, 0, 255]))
-                        }
-                    }
-                } else {
-                    RgbaImage::from_pixel(canvas_w, canvas_h, Rgba([0, 0, 0, 255]))
-                }
-            }
-        };
-
-        imageops::overlay(
-            &mut background,
-            main_img.as_ref(),
-            offset_x as i64,
-            offset_y as i64,
-        );
-
-        let canvas = ImagePlane {
-            width: canvas_w,
-            height: canvas_h,
-            pixels: background.into_raw(),
-        };
-
-        Some(MatResult {
-            path,
-            canvas,
-            priority,
-        })
     }
 
     fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
@@ -1068,7 +1102,10 @@ pub fn run_windowed(
                 deferred_images: &mut self.deferred_images,
                 ready_results: &mut self.ready_results,
                 from_loader: &mut self.from_loader,
-                gpu: self.gpu.as_ref(),
+                surface: self
+                    .gpu
+                    .as_ref()
+                    .map(|gpu| SurfaceState::from_config(&gpu.config, &gpu.limits)),
                 matting: &self.matting,
                 oversample: self.oversample,
                 mat_pipeline: &self.mat_pipeline,
@@ -1137,7 +1174,10 @@ pub fn run_windowed(
                 deferred_images: &mut self.deferred_images,
                 ready_results: &mut self.ready_results,
                 from_loader: &mut self.from_loader,
-                gpu: self.gpu.as_ref(),
+                surface: self
+                    .gpu
+                    .as_ref()
+                    .map(|gpu| SurfaceState::from_config(&gpu.config, &gpu.limits)),
                 matting: &self.matting,
                 oversample: self.oversample,
                 mat_pipeline: &self.mat_pipeline,
@@ -1351,13 +1391,19 @@ pub fn run_windowed(
         }
 
         fn queue_mat_tasks_for_wake(&mut self, wake: &mut scenes::WakeScene) {
+            // `queue_for_wake` defers work until the surface reports a usable size.
+            // Once `WindowEvent::Resized` updates `self.gpu.config`, the next tick will
+            // call this helper again and retry automatically.
             let mut bridge = MattingBridge {
                 preload_count: self.preload_count,
                 mat_inflight: &mut self.mat_inflight,
                 deferred_images: &mut self.deferred_images,
                 ready_results: &mut self.ready_results,
                 from_loader: &mut self.from_loader,
-                gpu: self.gpu.as_ref(),
+                surface: self
+                    .gpu
+                    .as_ref()
+                    .map(|gpu| SurfaceState::from_config(&gpu.config, &gpu.limits)),
                 matting: &self.matting,
                 oversample: self.oversample,
                 mat_pipeline: &self.mat_pipeline,
@@ -2670,7 +2716,11 @@ fn compute_wipe_span(normal: [f32; 2], screen_w: f32, screen_h: f32) -> (f32, f3
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TransitionConfig;
     use image::{Rgba, RgbaImage};
+    use std::collections::VecDeque;
+    use std::path::PathBuf;
+    use tokio::sync::mpsc;
 
     fn make_gradient(width: u32, height: u32) -> RgbaImage {
         image::ImageBuffer::from_fn(width, height, |x, y| {
@@ -2725,5 +2775,44 @@ mod tests {
         let (w, h) = resize_to_fit_with_margin(1920, 1080, 4000, 1000, 0.1, 1.5);
         assert!(w <= 1920 && h <= 1080);
         assert!(w > 0 && h > 0);
+    }
+
+    #[test]
+    fn matting_bridge_defers_until_surface_configured() {
+        let mut mat_inflight = 0usize;
+        let mut deferred_images = VecDeque::new();
+        let prepared = PreparedImageCpu {
+            path: PathBuf::from("/tmp/photo.jpg"),
+            width: 100,
+            height: 50,
+            pixels: vec![0; (100 * 50 * 4) as usize],
+        };
+        deferred_images.push_back(QueuedImage {
+            image: prepared,
+            priority: false,
+        });
+        let mut ready_results = VecDeque::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        drop(tx);
+        let matting = MattingConfig::default();
+        let mat_pipeline = MattingPipeline::new(1, 2);
+        let mut bridge = MattingBridge {
+            preload_count: 1,
+            mat_inflight: &mut mat_inflight,
+            deferred_images: &mut deferred_images,
+            ready_results: &mut ready_results,
+            from_loader: &mut rx,
+            surface: Some(SurfaceState::new(1, 1, 4096)),
+            matting: &matting,
+            oversample: 1.0,
+            mat_pipeline: &mat_pipeline,
+        };
+        let mut wake = scenes::WakeScene::new(5_000, TransitionConfig::default());
+
+        bridge.queue_for_wake(&mut wake);
+
+        assert_eq!(mat_inflight, 0);
+        assert!(wake.pending().is_empty());
+        assert_eq!(deferred_images.len(), 1);
     }
 }
