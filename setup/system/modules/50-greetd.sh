@@ -61,7 +61,7 @@ runner=()
 if command -v dbus-run-session >/dev/null 2>&1; then
     runner+=(dbus-run-session)
     if command -v seatd-launch >/dev/null 2>&1; then
-        runner+=(seatd-launch)
+        runner+=(seatd-launch "--")
     fi
 fi
 
