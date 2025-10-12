@@ -53,6 +53,7 @@ overlay:
     - overlay
   photo-app-id: rust-photo-frame
   overlay-app-id: wifi-overlay
+  # sway-socket: /run/user/1000/sway-ipc.1000.123.sock
 ```
 
 | Key                            | Description                                                                                      |
@@ -70,6 +71,7 @@ overlay:
 | `overlay.command`              | Executable invoked to render the on-device hotspot instructions (default `wifi-manager overlay`). |
 | `overlay.photo-app-id`         | Sway `app_id` assigned to the photo frame window so it can be re-focused after recovery. |
 | `overlay.overlay-app-id`       | Sway `app_id` that the overlay binary advertises; used for focus/teardown commands. |
+| `overlay.sway-socket`          | Optional override for the Sway IPC socket. Detected automatically from `/run/user/<uid>` when omitted. |
 
 Whenever you change the config, run `sudo systemctl restart wifi-manager` for the daemon to pick up the new settings.
 

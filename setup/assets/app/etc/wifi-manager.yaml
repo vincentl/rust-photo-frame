@@ -17,3 +17,4 @@ overlay:
     - overlay
   photo-app-id: rust-photo-frame
   overlay-app-id: wifi-overlay
+  # sway-socket: /run/user/1000/sway-ipc.1000.123.sock
