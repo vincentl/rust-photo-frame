@@ -320,6 +320,11 @@ impl WakeScene {
         self.current = current;
     }
 
+    /// Removes and returns the current image, if present.
+    pub(super) fn take_current(&mut self) -> Option<ImgTex> {
+        self.current.take()
+    }
+
     /// Returns the next staged image.
     pub(super) fn next(&self) -> Option<&ImgTex> {
         self.next.as_ref()

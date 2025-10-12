@@ -61,6 +61,10 @@ pub(super) struct TexturePlane {
 pub(super) struct ImgTex {
     pub(super) plane: TexturePlane,
     pub(super) path: std::path::PathBuf,
+    source: PreparedImageCpu,
+    screen_w: u32,
+    screen_h: u32,
+    priority: bool,
 }
 
 pub(super) struct TransitionState {
@@ -291,6 +295,7 @@ pub fn run_windowed(
         image: PreparedImageCpu,
         params: MatParams,
         priority: bool,
+        source: PreparedImageCpu,
     }
 
     struct ImagePlane {
@@ -303,6 +308,9 @@ pub fn run_windowed(
         path: std::path::PathBuf,
         canvas: ImagePlane,
         priority: bool,
+        screen_w: u32,
+        screen_h: u32,
+        source: PreparedImageCpu,
     }
 
     struct QueuedImage {
@@ -361,10 +369,26 @@ pub fn run_windowed(
         matting: &'a MattingConfig,
         oversample: f32,
         mat_pipeline: &'a MattingPipeline,
+        surface_ready: bool,
     }
 
     impl<'a> MattingBridge<'a> {
         fn queue_for_wake(&mut self, wake: &mut scenes::WakeScene) {
+            if !self.surface_ready {
+                tracing::debug!(
+                    pending = wake.pending().len(),
+                    inflight = *self.mat_inflight,
+                    "matting_queue_surface_not_ready"
+                );
+                return;
+            }
+
+            tracing::debug!(
+                pending = wake.pending().len(),
+                inflight = *self.mat_inflight,
+                "matting_queue_surface_ready"
+            );
+
             while wake.pending().len() + *self.mat_inflight < self.preload_count {
                 let next_img = if let Some(img) = self.deferred_images.pop_front() {
                     Some(img)
@@ -397,8 +421,8 @@ pub fn run_windowed(
                 let mut rng = rand::rng();
                 let matting = self.matting.choose_option(&mut rng);
                 let params = MatParams {
-                    screen_w: gpu.config.width.max(1),
-                    screen_h: gpu.config.height.max(1),
+                    screen_w: gpu.config.width,
+                    screen_h: gpu.config.height,
                     oversample: self.oversample,
                     max_dim: gpu.limits.max_texture_dimension_2d,
                     matting,
@@ -407,10 +431,12 @@ pub fn run_windowed(
                     image: img,
                     priority,
                 } = queued;
+                let source = img.clone();
                 let task = MatTask {
                     image: img,
                     params,
                     priority,
+                    source,
                 };
                 match self.mat_pipeline.try_submit(task) {
                     Ok(()) => {
@@ -433,6 +459,7 @@ pub fn run_windowed(
             image,
             params,
             priority,
+            source,
         } = task;
         let PreparedImageCpu {
             path,
@@ -444,13 +471,11 @@ pub fn run_windowed(
             return None;
         }
         let src = RgbaImage::from_raw(width, height, pixels)?;
-        let MatParams {
-            screen_w,
-            screen_h,
-            oversample,
-            max_dim,
-            matting,
-        } = params;
+        let screen_w = params.screen_w;
+        let screen_h = params.screen_h;
+        let oversample = params.oversample;
+        let max_dim = params.max_dim;
+        let matting = params.matting.clone();
         if screen_w == 0 || screen_h == 0 {
             return None;
         }
@@ -543,6 +568,9 @@ pub fn run_windowed(
                 path,
                 canvas,
                 priority,
+                screen_w,
+                screen_h,
+                source,
             });
         }
 
@@ -655,6 +683,9 @@ pub fn run_windowed(
             path,
             canvas,
             priority,
+            screen_w,
+            screen_h,
+            source,
         })
     }
 
@@ -738,9 +769,23 @@ pub fn run_windowed(
     }
 
     fn upload_mat_result(gpu: &GpuCtx, result: MatResult) -> Option<ImgTex> {
-        let MatResult { path, canvas, .. } = result;
+        let MatResult {
+            path,
+            canvas,
+            priority,
+            screen_w,
+            screen_h,
+            source,
+        } = result;
         let plane = upload_plane(gpu, canvas)?;
-        Some(ImgTex { plane, path })
+        Some(ImgTex {
+            plane,
+            path,
+            source,
+            screen_w,
+            screen_h,
+            priority,
+        })
     }
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -1014,6 +1059,7 @@ pub fn run_windowed(
         clear_color: wgpu::Color,
         rng: rand::rngs::ThreadRng,
         full_config: Arc<crate::config::Configuration>,
+        surface_ready: bool,
     }
 
     impl App {
@@ -1060,6 +1106,7 @@ pub fn run_windowed(
                 matting: &self.matting,
                 oversample: self.oversample,
                 mat_pipeline: &self.mat_pipeline,
+                surface_ready: self.surface_ready,
             };
             let mut enqueue_matting = move |wake: &mut scenes::WakeScene| {
                 bridge.queue_for_wake(wake);
@@ -1129,6 +1176,7 @@ pub fn run_windowed(
                 matting: &self.matting,
                 oversample: self.oversample,
                 mat_pipeline: &self.mat_pipeline,
+                surface_ready: self.surface_ready,
             };
             let mut enqueue_matting = move |wake: &mut scenes::WakeScene| {
                 bridge.queue_for_wake(wake);
@@ -1158,6 +1206,7 @@ pub fn run_windowed(
             self.mode_mut().wake_mut().reset();
             self.ready_results.clear();
             self.deferred_images.clear();
+            self.surface_ready = false;
             if self.mode_kind() == ViewerModeKind::Sleep {
                 self.mode_mut().wake_mut().take_redraw_needed();
                 let _ = self.with_active_scene(|scene, ctx| {
@@ -1195,6 +1244,7 @@ pub fn run_windowed(
                 viewer_mode = ?self.mode_kind(),
                 has_window = self.window.is_some(),
                 has_gpu = self.gpu.is_some(),
+                surface_ready = self.surface_ready,
                 pending_queue_len = wake.pending().len(),
                 ready_results_len = self.ready_results.len(),
                 deferred_queue_len = self.deferred_images.len(),
@@ -1254,6 +1304,7 @@ pub fn run_windowed(
                 mode.set_overlays(None, None);
             }
             self.gpu = None;
+            self.surface_ready = false;
             self.log_event_loop_state("teardown_gpu");
         }
 
@@ -1349,8 +1400,142 @@ pub fn run_windowed(
                 matting: &self.matting,
                 oversample: self.oversample,
                 mat_pipeline: &self.mat_pipeline,
+                surface_ready: self.surface_ready,
             };
             bridge.queue_for_wake(wake);
+        }
+
+        fn requeue_cpu_image(&mut self, image: PreparedImageCpu, priority: bool) {
+            let path = image.path.clone();
+            self.deferred_images
+                .retain(|pending| pending.image.path != path);
+            self.ready_results.retain(|pending| pending.path != path);
+            let queued = QueuedImage { image, priority };
+            if priority {
+                self.deferred_images.push_front(queued);
+            } else {
+                self.deferred_images.push_back(queued);
+            }
+        }
+
+        fn invalidate_mats_for_surface(&mut self, new_screen_w: u32, new_screen_h: u32) {
+            let Some(max_dim) = self
+                .gpu
+                .as_ref()
+                .map(|gpu| gpu.limits.max_texture_dimension_2d)
+            else {
+                return;
+            };
+            let mut to_requeue: Vec<(PreparedImageCpu, bool)> = Vec::new();
+            let mut retained = VecDeque::with_capacity(self.ready_results.len());
+            while let Some(result) = self.ready_results.pop_front() {
+                if result.screen_w == new_screen_w && result.screen_h == new_screen_h {
+                    retained.push_back(result);
+                } else {
+                    debug!(
+                        path = %result.path.display(),
+                        old_w = result.screen_w,
+                        old_h = result.screen_h,
+                        new_w = new_screen_w,
+                        new_h = new_screen_h,
+                        "viewer_flush_ready_mat_for_resize"
+                    );
+                    to_requeue.push((result.source, result.priority));
+                }
+            }
+            self.ready_results = retained;
+
+            let Some(mut mode) = self.mode.take() else {
+                for (image, priority) in to_requeue {
+                    self.requeue_cpu_image(image, priority);
+                }
+                return;
+            };
+
+            let mut removed_any = false;
+            let mut cleared_current = false;
+            {
+                let wake = mode.wake_mut();
+                if let Some(current) = wake.take_current() {
+                    if current.screen_w != new_screen_w || current.screen_h != new_screen_h {
+                        debug!(
+                            path = %current.path.display(),
+                            old_w = current.screen_w,
+                            old_h = current.screen_h,
+                            new_w = new_screen_w,
+                            new_h = new_screen_h,
+                            "viewer_flush_current_mat_for_resize"
+                        );
+                        to_requeue.push((current.source, current.priority));
+                        removed_any = true;
+                        cleared_current = true;
+                    } else {
+                        wake.set_current(Some(current));
+                    }
+                }
+
+                if let Some(next) = wake.take_next() {
+                    if next.screen_w != new_screen_w || next.screen_h != new_screen_h {
+                        debug!(
+                            path = %next.path.display(),
+                            old_w = next.screen_w,
+                            old_h = next.screen_h,
+                            new_w = new_screen_w,
+                            new_h = new_screen_h,
+                            "viewer_flush_next_mat_for_resize"
+                        );
+                        to_requeue.push((next.source, next.priority));
+                        removed_any = true;
+                    } else {
+                        wake.set_next(Some(next));
+                    }
+                }
+
+                let pending = wake.pending_mut();
+                let mut refreshed = VecDeque::with_capacity(pending.len());
+                for tex in pending.drain(..) {
+                    if tex.screen_w != new_screen_w || tex.screen_h != new_screen_h {
+                        debug!(
+                            path = %tex.path.display(),
+                            old_w = tex.screen_w,
+                            old_h = tex.screen_h,
+                            new_w = new_screen_w,
+                            new_h = new_screen_h,
+                            "viewer_flush_pending_mat_for_resize"
+                        );
+                        to_requeue.push((tex.source, tex.priority));
+                        removed_any = true;
+                    } else {
+                        refreshed.push_back(tex);
+                    }
+                }
+                *pending = refreshed;
+
+                if removed_any {
+                    wake.set_transition_state(None);
+                    if cleared_current {
+                        wake.set_displayed_at(None);
+                    }
+                    wake.mark_redraw_needed();
+                }
+            }
+
+            self.mode = Some(mode);
+
+            for (image, priority) in to_requeue {
+                self.requeue_cpu_image(image, priority);
+            }
+
+            let (new_canvas_w, new_canvas_h) =
+                compute_canvas_size(new_screen_w, new_screen_h, self.oversample, max_dim);
+            debug!(
+                new_screen_w,
+                new_screen_h,
+                new_canvas_w,
+                new_canvas_h,
+                removed_any,
+                "viewer_surface_resize_invalidate"
+            );
         }
 
         fn enter_sleep(&mut self) {
@@ -1480,6 +1665,9 @@ pub fn run_windowed(
                 desired_maximum_frame_latency: 2,
             };
             surface.configure(&device, &config);
+            if config.width > 1 && config.height > 1 {
+                self.surface_ready = true;
+            }
             debug!(
                 width = config.width,
                 height = config.height,
@@ -1706,15 +1894,41 @@ pub fn run_windowed(
                     event_loop.exit();
                 }
                 WindowEvent::Resized(new_size) => {
+                    let mut should_invalidate = None;
                     if let Some(gpu) = self.gpu.as_mut() {
+                        let old_w = gpu.config.width;
+                        let old_h = gpu.config.height;
+                        let had_ready = self.surface_ready;
+                        let new_w = new_size.width.max(1);
+                        let new_h = new_size.height.max(1);
                         debug!(
                             width = new_size.width,
                             height = new_size.height,
                             "viewer_window_resized"
                         );
-                        gpu.config.width = new_size.width.max(1);
-                        gpu.config.height = new_size.height.max(1);
+                        self.surface_ready = new_size.width > 1 && new_size.height > 1;
+                        if self.surface_ready && !had_ready {
+                            info!(
+                                width = new_size.width,
+                                height = new_size.height,
+                                "viewer_surface_ready"
+                            );
+                        } else if !self.surface_ready && had_ready {
+                            info!(
+                                width = new_size.width,
+                                height = new_size.height,
+                                "viewer_surface_unready"
+                            );
+                        }
+                        gpu.config.width = new_w;
+                        gpu.config.height = new_h;
                         gpu.surface.configure(&gpu.device, &gpu.config);
+                        if self.surface_ready && (new_w != old_w || new_h != old_h) {
+                            should_invalidate = Some((new_w, new_h));
+                        }
+                    }
+                    if let Some((new_w, new_h)) = should_invalidate {
+                        self.invalidate_mats_for_surface(new_w, new_h);
                     }
                     let scale_factor = self
                         .window
@@ -1728,9 +1942,15 @@ pub fn run_windowed(
                     mut inner_size_writer,
                     ..
                 } => {
+                    let mut should_invalidate = None;
                     if let Some(gpu) = self.gpu.as_mut() {
                         let scale_factor = window.scale_factor();
                         let size = window.inner_size();
+                        let old_w = gpu.config.width;
+                        let old_h = gpu.config.height;
+                        let had_ready = self.surface_ready;
+                        let new_w = size.width.max(1);
+                        let new_h = size.height.max(1);
                         debug!(
                             scale_factor = scale_factor,
                             width = size.width,
@@ -1738,12 +1958,32 @@ pub fn run_windowed(
                             "viewer_window_scale_factor_changed"
                         );
                         let _ = inner_size_writer.request_inner_size(size);
-                        gpu.config.width = size.width.max(1);
-                        gpu.config.height = size.height.max(1);
+                        self.surface_ready = size.width > 1 && size.height > 1;
+                        if self.surface_ready && !had_ready {
+                            info!(
+                                width = size.width,
+                                height = size.height,
+                                "viewer_surface_ready"
+                            );
+                        } else if !self.surface_ready && had_ready {
+                            info!(
+                                width = size.width,
+                                height = size.height,
+                                "viewer_surface_unready"
+                            );
+                        }
+                        gpu.config.width = new_w;
+                        gpu.config.height = new_h;
                         gpu.surface.configure(&gpu.device, &gpu.config);
+                        if self.surface_ready && (new_w != old_w || new_h != old_h) {
+                            should_invalidate = Some((new_w, new_h));
+                        }
                         let _ = self.with_active_scene(|scene, ctx| {
                             scene.handle_scale_factor_changed(ctx, size, scale_factor);
                         });
+                    }
+                    if let Some((new_w, new_h)) = should_invalidate {
+                        self.invalidate_mats_for_surface(new_w, new_h);
                     }
                 }
                 WindowEvent::Occluded(false) => {
@@ -2195,6 +2435,7 @@ pub fn run_windowed(
         clear_color,
         rng: rand::rng(),
         full_config: Arc::new(cfg.clone()),
+        surface_ready: false,
     };
     app.enter_greeting();
     event_loop.run_app(&mut app)?;
