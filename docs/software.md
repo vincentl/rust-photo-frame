@@ -141,15 +141,15 @@ systemctl status display-manager
 journalctl -u greetd -b
 ```
 
-`systemctl status` should report `active (running)` and show `cage -s -- /usr/local/bin/photoframe-session` in the command line. The journal should contain the photo frame application logs for the current boot. Once these checks pass, reboot the device to land directly in the fullscreen photo frame experience.
+`systemctl status` should report `active (running)` and show `/usr/local/bin/photoframe-session` in the command line. The journal should contain the photo frame application logs for the current boot. Once these checks pass, reboot the device to land directly in the fullscreen photo frame experience.
 
 ## Kiosk session reference
 
 When both setup stages complete successfully the Raspberry Pi is ready to boot directly into a kiosk session:
 
-- `/etc/greetd/config.toml` binds greetd to virtual terminal 1 and runs `cage -s -- /usr/local/bin/photoframe-session` as the `kiosk` user. The wrapper applies the HDMI 4K60 layout via `wlr-randr` before launching the photo frame binary through `systemd-cat` so logs land in the journal. greetd creates the login session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` while `/var/lib/photo-frame` remains writable by the kiosk account.
+- `/etc/greetd/config.toml` binds greetd to virtual terminal 1 and runs `/usr/local/bin/photoframe-session` as the `kiosk` user. The wrapper launches Sway via `dbus-run-session`/`seatd-launch`, applies the HDMI 4K60 layout through the provisioned Sway config, and streams the photo frame logs into journald with `systemd-cat`. greetd creates the login session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` while `/var/lib/photo-frame` remains writable by the kiosk account.
 - Device access comes from the `kiosk` user belonging to the `render`, `video`, and `input` groups. The setup stage wires this up so Vulkan/GL stacks can open `/dev/dri/renderD128` without any extra udev hacks.
-- The kiosk stack relies on `greetd` + `cage`; no display-manager compatibility targets or tty autologin services are installed.
+- The kiosk stack relies on `greetd` + Sway; no display-manager compatibility targets or tty autologin services are installed.
 
 For smoke testing, temporarily modify `/etc/greetd/config.toml` to run `kmscube` instead of the photo frame binary. A spinning cube on HDMI verifies DRM, GBM, and input permissions before deploying the full app.
 

@@ -73,10 +73,10 @@ check_greetd_config() {
         err 'config missing "vt = 1"'
     fi
 
-    if grep -Fxq 'command = "cage -s -- /usr/local/bin/photoframe-session"' "${config}"; then
+    if grep -Fxq 'command = "/usr/local/bin/photoframe-session"' "${config}"; then
         ok 'config launches photoframe session wrapper'
     else
-        err 'config missing cage session wrapper command'
+        err 'config missing photoframe session command'
     fi
 
     if grep -Fxq 'user = "kiosk"' "${config}"; then
@@ -110,8 +110,26 @@ check_kiosk_user() {
     fi
 }
 
+check_sway_config() {
+    title 'Validating sway configuration'
+    local config="/usr/local/share/photoframe/sway/config"
+    if [[ ! -f "${config}" ]]; then
+        err "${config} missing"
+        return
+    fi
+
+    ok 'sway config present'
+
+    if grep -Fxq 'exec --no-startup-id env WINIT_APP_ID=$photo_app_id RUST_LOG=info systemd-cat --identifier=rust-photo-frame /opt/photo-frame/bin/rust-photo-frame $config_path' "${config}"; then
+        ok 'rust-photo-frame launch command configured'
+    else
+        warn 'rust-photo-frame exec line missing from sway config'
+    fi
+}
+
 check_greetd_unit
 check_greetd_config
+check_sway_config
 check_kiosk_user
 
 exit ${FAIL}

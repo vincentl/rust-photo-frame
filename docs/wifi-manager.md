@@ -8,7 +8,7 @@ The `wifi-manager` crate is the frame's single entry point for Wi-Fi monitoring,
 - Creates or updates an idempotent hotspot profile (`pf-hotspot`) and brings it online with a random three-word passphrase.
 - Serves a lightweight HTTP UI for submitting replacement SSID/password credentials, then provisions them via `nmcli`.
 - Renders a QR code that points to the recovery portal so phones can jump directly to the setup page.
-- Drives the `photo-frame.service`/`wifi-manager.service` hand-off so the recovery instructions occupy the screen whenever Wi-Fi needs attention.
+- Uses Sway IPC to present a fullscreen overlay with hotspot instructions whenever Wi-Fi needs attention.
 - Emits structured logs for every state transition (`ONLINE`, `OFFLINE`, `HOTSPOT`, `PROVISIONING`) and stores the last provisioning attempt in JSON.
 
 ## Binary layout and subcommands
@@ -21,6 +21,8 @@ The release build installs to `/opt/photo-frame/bin/wifi-manager` and exposes th
 | `ui`       | Runs only the HTTP UI server. This is spawned automatically by `watch` when the hotspot is active but can be used independently for debugging. |
 | `qr`       | Generates `/var/lib/photo-frame/wifi-qr.png`, a QR code pointing to the configured UI URL.                                                     |
 | `nm`       | Thin wrapper around `nmcli` operations (`add`, `modify`, `connect`) used internally. Safe to run manually for diagnostics.                     |
+| `overlay`  | Renders the on-device recovery overlay window. Invoked automatically by the watcher; exposed for manual testing.
+                              |
 
 Running the binary with `--help` or `--version` is permitted as root; all other modes refuse to start if `UID==0` to honour the project's "never run cargo as root" policy.
 
@@ -45,26 +47,29 @@ hotspot:
 ui:
   bind-address: 0.0.0.0
   port: 8080
-display:
-  photo-frame-service: photo-frame.service
-  wifi-manager-service: wifi-manager.service
+overlay:
+  command:
+    - /opt/photo-frame/bin/wifi-manager
+    - overlay
+  photo-app-id: rust-photo-frame
+  overlay-app-id: wifi-overlay
 ```
 
 | Key                            | Description                                                                                      |
 | ------------------------------ | ------------------------------------------------------------------------------------------------ |
-| `interface`                    | Wireless device monitored for connectivity (default `wlan0`).                                    |
-| `check-interval-sec`           | Base delay between connectivity probes. A small jitter is added internally.                      |
-| `offline-grace-sec`            | Seconds the frame must remain offline before the hotspot is activated.                           |
-| `wordlist-path`                | Source file for the random three-word hotspot passphrase. Installed via setup.                   |
-| `var-dir`                      | Directory for runtime artifacts (password file, QR PNG, status JSON, temp sockets).              |
+| `interface`                    | Wireless device monitored for connectivity (default `wlan0`).             |
+| `check-interval-sec`           | Base delay between connectivity probes. A small jitter is added internally. |
+| `offline-grace-sec`            | Seconds the frame must remain offline before the hotspot is activated.     |
+| `wordlist-path`                | Source file for the random three-word hotspot passphrase. Installed via setup. |
+| `var-dir`                      | Directory for runtime artifacts (password file, QR PNG, status JSON, temp sockets). |
 | `hotspot.connection-id`        | NetworkManager profile name used for the AP. The manager will create or update it automatically. |
-| `hotspot.ssid`                 | Broadcast SSID for the recovery hotspot.                                                         |
-| `hotspot.ipv4-addr`            | Address assigned to the hotspot interface and advertised via DHCP.                               |
-| `ui.bind-address`              | Bind address for the HTTP UI. Normally `0.0.0.0`.                                                |
-| `ui.port`                      | HTTP UI port (default `8080`).                                                                   |
-| `display.photo-frame-service`  | Systemd unit that owns the primary photo frame session.                                          |
-| `display.wifi-manager-service` | Systemd unit that presents the Wi-Fi recovery UI in Cage.                                        |
-| `display.systemctl-path`       | Override path to `systemctl` if not `/usr/bin/systemctl`.                                        |
+| `hotspot.ssid`                 | Broadcast SSID for the recovery hotspot.                                     |
+| `hotspot.ipv4-addr`            | Address assigned to the hotspot interface and advertised via DHCP.          |
+| `ui.bind-address`              | Bind address for the HTTP UI. Normally `0.0.0.0`.                           |
+| `ui.port`                      | HTTP UI port (default `8080`).                                              |
+| `overlay.command`              | Executable invoked to render the on-device hotspot instructions (default `wifi-manager overlay`). |
+| `overlay.photo-app-id`         | Sway `app_id` assigned to the photo frame window so it can be re-focused after recovery. |
+| `overlay.overlay-app-id`       | Sway `app_id` that the overlay binary advertises; used for focus/teardown commands. |
 
 Whenever you change the config, run `sudo systemctl restart wifi-manager` for the daemon to pick up the new settings.
 
@@ -80,24 +85,24 @@ All mutable state lives under `/var/lib/photo-frame` and is owned by the `photo-
 ## Web provisioning flow
 
 1. The `watch` loop marks the frame `OFFLINE` after `offline-grace-sec` seconds without a gateway response.
-2. The hotspot profile (`pf-hotspot`) is ensured, then activated on the configured interface with WPA2-PSK security. The watcher simultaneously starts `wifi-manager.service`, which stops the photo frame session and launches the Cage-hosted recovery UI on `tty1`.
+2. The hotspot profile (`pf-hotspot`) is ensured, then activated on the configured interface with WPA2-PSK security. The watcher simultaneously launches the `wifi-manager overlay` subcommand via Sway IPC and brings the web UI online so the on-device instructions, QR code, and portal stay in sync.
 3. A random three-word passphrase is selected from the bundled wordlist and written to `/var/lib/photo-frame/hotspot-password.txt`.
 4. The QR code generator produces `/var/lib/photo-frame/wifi-qr.png`, embedding the configured UI URL (default `http://192.168.4.1:8080/`).
 5. The HTTP UI binds to `0.0.0.0:<port>` and serves:
    - `GET /` – single-page HTML form for SSID + password entry with inline guidance and QR instructions.
    - `POST /submit` – validates inputs, uses `nmcli` to add/modify the connection, and reports progress.
    - A status polling endpoint so the UI can reflect provisioning progress in near real time.
-6. On success, the hotspot is torn down only after NetworkManager confirms association and DHCP success on the new SSID. At that point the watcher restarts `photo-frame.service`, returning the slideshow to `tty1`. Failures leave the hotspot active for another attempt.
+6. On success, the hotspot is torn down only after NetworkManager confirms association and DHCP success on the new SSID. At that point the watcher hides the overlay, refocuses the photo frame window, and continues monitoring online. Failures leave the hotspot active for another attempt.
 7. Results (masked SSID, status, timestamps) are appended to `wifi-last.json` for later support review.
 
 ## Setup automation
 
 The Wi-Fi manager is wired into the refreshed setup pipeline:
 
-- `setup/bootstrap/modules/10-apt-packages.sh` pulls in NetworkManager, Cage, GPU drivers, and build prerequisites.
+- `setup/bootstrap/modules/10-apt-packages.sh` pulls in NetworkManager, Sway, GPU drivers, and build prerequisites.
 - `setup/bootstrap/modules/20-rust.sh` installs the system-wide Rust toolchain used to build the binaries under `/opt/photo-frame`.
 - `setup/bootstrap/modules/40-kiosk-user.sh` provisions the kiosk user, runtime directories, and polkit rule that unlocks NetworkManager access for `kiosk`.
-- `setup/bootstrap/modules/50-greetd.sh` installs the Cage session wrapper greetd launches on tty1.
+- `setup/bootstrap/modules/50-greetd.sh` installs the Sway session wrapper greetd launches on tty1.
 - `setup/bootstrap/modules/60-systemd.sh` installs and enables `/etc/systemd/system/photoframe-wifi-manager.service` alongside the other kiosk units once the binaries exist.
 - `setup/app/modules/10-build.sh` compiles `wifi-manager` in release mode as the invoking user (never root).
 - `setup/app/modules/20-stage.sh` stages the binary, config template, wordlist, and docs.

@@ -9,7 +9,6 @@ log() {
 
 PACKAGES=(
     at
-    cage
     libinput10
     libwayland-client0
     libgbm1
@@ -31,6 +30,10 @@ PACKAGES=(
     logrotate
     acl
     rclone
+    sway
+    swaybg
+    swayidle
+    swaylock
     vulkan-tools
     kmscube
 )
