@@ -60,10 +60,10 @@ runner=()
 
 if command -v dbus-run-session >/dev/null 2>&1; then
     runner+=(dbus-run-session)
-    if command -v seatd-launch >/dev/null 2>&1; then
-        runner+=(seatd-launch "--")
-    fi
 fi
+
+# seatd.service already provides the compositor with a socket, so avoid
+# wrapping sway in seatd-launch (which would fail when seatd is active).
 
 if [[ ${#runner[@]} -eq 0 ]]; then
     exec systemd-cat -t rust-photo-frame -- "${CMD[@]}"
