@@ -32,11 +32,39 @@ WIFI_BIN_PATH="${INSTALL_ROOT}/bin/wifi-manager"
 CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/config.yaml"
 WIFI_CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/wifi-manager.yaml"
 WORDLIST_PATH="${INSTALL_ROOT}/share/wordlist.txt"
+PHOTO_BIN_PATH="${INSTALL_ROOT}/bin/photo-frame"
 VAR_DIR="/var/lib/photo-frame"
 VAR_CONFIG="${VAR_DIR}/config/config.yaml"
 
+dump_logs_on_failure() {
+    local status=$1
+    if (( status == 0 )); then
+        return
+    fi
+
+    set +e
+    log ERROR "Application postcheck failed; dumping rust-photo-frame journal tail"
+    if command -v journalctl >/dev/null 2>&1; then
+        if command -v sudo >/dev/null 2>&1; then
+            sudo journalctl -t rust-photo-frame -b -n 100 || true
+        else
+            journalctl -t rust-photo-frame -b -n 100 || true
+        fi
+    else
+        log WARN "journalctl unavailable; cannot show rust-photo-frame logs"
+    fi
+    printf '[postcheck] HINT: Temporarily set /etc/greetd/config.toml to command="/usr/bin/kmscube" for smoke tests.\n'
+}
+
+trap 'dump_logs_on_failure $?' EXIT
+
 if [[ ! -x "${BIN_PATH}" ]]; then
     log ERROR "Binary ${BIN_PATH} missing or not executable"
+    exit 1
+fi
+
+if [[ ! -x "${PHOTO_BIN_PATH}" ]]; then
+    log ERROR "Binary ${PHOTO_BIN_PATH} missing or not executable"
     exit 1
 fi
 

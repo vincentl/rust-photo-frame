@@ -90,4 +90,22 @@ for module in "${modules[@]}"; do
     echo
 done
 
+launcher="/usr/local/bin/photo-frame"
+log INFO "Updating ${launcher} helper"
+sudo install -d -m 0755 "$(dirname "${launcher}")"
+sudo tee "${launcher}" >/dev/null <<'LAUNCHER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP="/opt/photo-frame/bin/photo-frame"
+
+if [[ ! -x "${APP}" ]]; then
+    echo "[photo-frame] binary not found at ${APP}" >&2
+    exit 127
+fi
+
+exec systemd-cat -t rust-photo-frame -- "${APP}" "$@"
+LAUNCHER
+sudo chmod 0755 "${launcher}"
+
 log INFO "Application deployment complete."
