@@ -382,6 +382,13 @@ impl FrameRenderer {
         let inner_outer_inset = outer_inner_inset + stroke_px * 2.0;
         let inner_inner_inset = inner_outer_inset + stroke_px;
 
+        let outer_outer_radius = corner_radius_px.max(0.0);
+        let outer_inner_radius = (corner_radius_px - (outer_inner_inset - outer_inset)).max(0.0);
+        let inner_outer_radius =
+            (outer_inner_radius - (inner_outer_inset - outer_inner_inset)).max(0.0);
+        let inner_inner_radius =
+            (inner_outer_radius - (inner_inner_inset - inner_outer_inset)).max(0.0);
+
         let uniforms = FrameUniforms {
             resolution: [width, height],
             _pad0: [0.0, 0.0],
@@ -392,10 +399,10 @@ impl FrameRenderer {
                 inner_inner_inset,
             ],
             radii: [
-                (corner_radius_px - outer_inset).max(0.0),
-                (corner_radius_px - outer_inner_inset).max(0.0),
-                (corner_radius_px - inner_outer_inset).max(0.0),
-                (corner_radius_px - inner_inner_inset).max(0.0),
+                outer_outer_radius,
+                outer_inner_radius,
+                inner_outer_radius,
+                inner_inner_radius,
             ],
             accent: linear_color_to_array(accent),
             background: linear_color_to_array(background),
