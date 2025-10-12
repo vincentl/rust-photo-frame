@@ -2240,12 +2240,25 @@ fn compute_padded_stride(bytes_per_row: u32) -> u32 {
 }
 
 fn compute_canvas_size(screen_w: u32, screen_h: u32, oversample: f32, max_dim: u32) -> (u32, u32) {
-    let sw = (screen_w as f32 * oversample)
-        .round()
-        .clamp(1.0, max_dim as f32);
-    let sh = (screen_h as f32 * oversample)
-        .round()
-        .clamp(1.0, max_dim as f32);
+    let safe_max_dim = max_dim.max(1) as f32;
+    let safe_oversample = if oversample.is_finite() && oversample > 0.0 {
+        oversample
+    } else {
+        1.0
+    };
+
+    let mut sw = (screen_w.max(1) as f32 * safe_oversample).round().max(1.0);
+    let mut sh = (screen_h.max(1) as f32 * safe_oversample).round().max(1.0);
+
+    if sw > safe_max_dim || sh > safe_max_dim {
+        let scale = safe_max_dim / sw.max(sh).max(1.0);
+        sw = (sw * scale).round().clamp(1.0, safe_max_dim);
+        sh = (sh * scale).round().clamp(1.0, safe_max_dim);
+    } else {
+        sw = sw.min(safe_max_dim);
+        sh = sh.min(safe_max_dim);
+    }
+
     (sw as u32, sh as u32)
 }
 
@@ -2659,6 +2672,27 @@ mod tests {
         let top_left = canvas.get_pixel(0, 0);
         let bottom_right = canvas.get_pixel(1919, 1079);
         assert!(top_left[3] == 255 && bottom_right[3] == 255);
+    }
+
+    #[test]
+    fn compute_canvas_size_preserves_aspect_ratio_when_limited() {
+        let (w, h) = compute_canvas_size(3840, 2160, 1.25, 4096);
+        assert_eq!(w, 4096);
+        assert_eq!(h, 2304);
+        assert!(w <= 4096 && h <= 4096);
+
+        fn gcd(mut a: u32, mut b: u32) -> u32 {
+            while b != 0 {
+                let r = a % b;
+                a = b;
+                b = r;
+            }
+            a
+        }
+
+        let divisor = gcd(w, h);
+        assert_eq!(w / divisor, 16);
+        assert_eq!(h / divisor, 9);
     }
 
     #[test]
