@@ -3,8 +3,7 @@ pub mod scenes;
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
-    IrisDirection, IrisEasing, MattingConfig, MattingMode, MattingOptions, TransitionKind,
-    TransitionMode, TransitionOptions,
+    MattingConfig, MattingMode, MattingOptions, TransitionKind, TransitionMode, TransitionOptions,
 };
 use crate::events::{
     Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
@@ -47,13 +46,7 @@ pub(super) enum ActiveTransition {
     },
     Iris {
         blades: u32,
-        direction: IrisDirection,
-        line_rgba: [f32; 4],
-        arc_rgba: [f32; 4],
-        line_thickness_px: f32,
-        taper: f32,
-        vignette: f32,
-        easing: IrisEasing,
+        blade_rgba: [f32; 4],
     },
 }
 
@@ -128,13 +121,7 @@ impl TransitionState {
             },
             TransitionMode::Iris(cfg) => ActiveTransition::Iris {
                 blades: cfg.blades.max(1),
-                direction: cfg.direction,
-                line_rgba: cfg.line_rgba,
-                arc_rgba: cfg.arc_rgba,
-                line_thickness_px: cfg.line_thickness_px.max(0.0),
-                taper: cfg.taper.clamp(0.0, 1.0),
-                vignette: cfg.vignette.clamp(0.0, 1.0),
-                easing: cfg.easing,
+                blade_rgba: cfg.blade_rgba,
             },
         };
 
@@ -2043,10 +2030,7 @@ pub fn run_windowed(
                                 let cubic_progress =
                                     base_progress * base_progress * (3.0 - 2.0 * base_progress);
                                 let progress = match state.variant() {
-                                    ActiveTransition::Iris { easing, .. } => match easing {
-                                        IrisEasing::Linear => base_progress,
-                                        IrisEasing::Cubic => cubic_progress,
-                                    },
+                                    ActiveTransition::Iris { .. } => base_progress,
                                     _ => cubic_progress,
                                 };
                                 uniforms.progress = progress;
@@ -2089,31 +2073,19 @@ pub fn run_windowed(
                                         uniforms.params1[2] = flash_color[1].clamp(0.0, 1.0);
                                         uniforms.params1[3] = flash_color[2].clamp(0.0, 1.0);
                                     }
-                                    ActiveTransition::Iris {
-                                        blades,
-                                        direction,
-                                        line_rgba,
-                                        arc_rgba,
-                                        line_thickness_px,
-                                        taper,
-                                        vignette,
-                                        easing: _,
-                                    } => {
+                                    ActiveTransition::Iris { blades, blade_rgba } => {
                                         let blades_f = (*blades).max(1) as f32;
-                                        let direction_sign = match direction {
-                                            IrisDirection::Open => 1.0,
-                                            IrisDirection::Close => -1.0,
-                                        };
                                         uniforms.params0[0] = blades_f;
-                                        uniforms.params0[1] = direction_sign;
-                                        uniforms.params0[2] = (*line_thickness_px).max(0.0);
-                                        uniforms.params0[3] = (*taper).clamp(0.0, 1.0);
-                                        uniforms.params1[0] = 0.35; // rotation amplitude in radians
-                                        uniforms.params1[1] = 0.012; // feather factor relative to max radius
-                                        uniforms.params1[2] = (*vignette).clamp(0.0, 1.0);
-                                        uniforms.params1[3] = 0.08; // noise amplitude
-                                        uniforms.params2 = *line_rgba;
-                                        uniforms.params3 = *arc_rgba;
+                                        uniforms.params0[1] = 0.0;
+                                        uniforms.params0[2] = 0.0;
+                                        uniforms.params0[3] = 0.0;
+                                        let blade = *blade_rgba;
+                                        uniforms.params1[0] = blade[0].clamp(0.0, 1.0);
+                                        uniforms.params1[1] = blade[1].clamp(0.0, 1.0);
+                                        uniforms.params1[2] = blade[2].clamp(0.0, 1.0);
+                                        uniforms.params1[3] = blade[3].clamp(0.0, 1.0);
+                                        uniforms.params2 = [0.0; 4];
+                                        uniforms.params3 = [0.0; 4];
                                     }
                                 }
                             } else if let Some(cur) = wake.current() {

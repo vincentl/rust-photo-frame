@@ -382,13 +382,9 @@ Each transition exposes a focused set of fields:
   - **`flash-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB color used for the bright flash phases before the black inversion. Channels outside `0–255` are clamped.
 - **`iris`**
   - **`blades`** (integer, default `7`, clamped to `5–18`): Number of shutter spokes sketched around the aperture.
-  - **`direction`** (`open` or `close`, default `open`): Choose whether the aperture grows (`open`) or shrinks (`close`) as the next image is revealed. Rotation direction mirrors the choice.
-  - **`line-rgba`** (`[r, g, b, a]` float array, default `[0.95, 0.95, 0.95, 0.35]`): Stroke color for the animated shutter spokes. Channels outside `0–1` are clamped.
-  - **`arc-rgba`** (`[r, g, b, a]` float array, default `[0.95, 0.95, 0.95, 0.20]`): Accent color for the short arc hints drawn along the aperture edge.
-  - **`line-thickness-px`** (float ≥ 0, default `2.0`): Approximate thickness of the spoke outlines in screen pixels.
-  - **`taper`** (float `0.0–1.0`, default `0.6`): Controls how aggressively the spokes taper as they extend outward; `0` keeps a uniform width.
-  - **`vignette`** (float `0.0–1.0`, default `0.2`): Strength of the subtle darkening toward the screen corners to emphasize the circular aperture.
-  - **`easing`** (`linear` or `cubic`, default `cubic`): Selects the easing curve applied to the shutter progress. `cubic` matches the default smooth ease-in-out, while `linear` sticks to the raw transition timeline.
+  - **`blade-rgba`** (`[r, g, b, a]` float array, default `[0.12, 0.12, 0.12, 1.0]`): Base color for the iris blades. Channels outside `0–1` are clamped; the alpha component scales how dark the rendered blades appear.
+
+  The iris transition renders shaded SLR-style blades that first close over the current photo, then reopen to reveal the next one. Each half of the timeline is dedicated to one of those motions, producing a mechanical shutter feel.
 
 ## Matting configuration
 
