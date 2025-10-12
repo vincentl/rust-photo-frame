@@ -3,8 +3,8 @@ pub mod scenes;
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
-    IrisDirection, IrisStyle, MattingConfig, MattingMode, MattingOptions, TransitionKind,
-    TransitionMode, TransitionOptions,
+    IrisDirection, MattingConfig, MattingMode, MattingOptions, TransitionKind, TransitionMode,
+    TransitionOptions,
 };
 use crate::events::{
     Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
@@ -45,11 +45,8 @@ pub(super) enum ActiveTransition {
         noise_seed: [f32; 2],
     },
     Iris {
-        style: IrisStyle,
-        edge_softness_px: f32,
         blades: u32,
         curvature: f32,
-        center: [f32; 2],
         direction: IrisDirection,
     },
 }
@@ -124,11 +121,8 @@ impl TransitionState {
                 noise_seed: [rng.random_range(0.0..=1.0), rng.random_range(0.0..=1.0)],
             },
             TransitionMode::Iris(cfg) => ActiveTransition::Iris {
-                style: cfg.style,
-                edge_softness_px: cfg.edge_softness_px.max(0.0),
                 blades: cfg.blades.max(1),
                 curvature: cfg.curvature.clamp(0.0, 1.0),
-                center: [cfg.center_x.clamp(0.0, 1.0), cfg.center_y.clamp(0.0, 1.0)],
                 direction: cfg.direction,
             },
         };
@@ -2027,26 +2021,26 @@ pub fn run_windowed(
                                         uniforms.params1[3] = flash_color[2].clamp(0.0, 1.0);
                                     }
                                     ActiveTransition::Iris {
-                                        style,
-                                        edge_softness_px,
                                         blades,
                                         curvature,
-                                        center,
                                         direction,
                                     } => {
-                                        uniforms.params0[0] = match style {
-                                            IrisStyle::Circular => 0.0,
-                                            IrisStyle::Polygon => 1.0,
-                                        };
-                                        uniforms.params0[1] = match direction {
+                                        let blades_f = (*blades).max(1) as f32;
+                                        let direction_sign = match direction {
                                             IrisDirection::Open => 1.0,
                                             IrisDirection::Close => -1.0,
                                         };
-                                        uniforms.params0[2] = (*edge_softness_px).max(0.0);
-                                        uniforms.params0[3] = (*curvature).clamp(0.0, 1.0);
-                                        uniforms.params1[0] = (*blades).max(1) as f32;
-                                        uniforms.params1[1] = center[0].clamp(0.0, 1.0);
-                                        uniforms.params1[2] = center[1].clamp(0.0, 1.0);
+                                        let curvature = (*curvature).clamp(0.0, 1.0);
+                                        let blade_angle = 2.0 * std::f32::consts::PI / blades_f;
+                                        let cos_half = (0.5 * blade_angle).cos();
+                                        let min_shape = cos_half + (1.0 - cos_half) * curvature;
+                                        uniforms.params0[0] = min_shape;
+                                        uniforms.params0[1] = direction_sign;
+                                        uniforms.params0[2] = curvature;
+                                        uniforms.params0[3] = cos_half;
+                                        uniforms.params1[0] = blade_angle;
+                                        uniforms.params1[1] = 0.012;
+                                        uniforms.params1[2] = 0.0;
                                         uniforms.params1[3] = 0.0;
                                     }
                                 }

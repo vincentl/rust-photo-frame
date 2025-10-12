@@ -381,12 +381,9 @@ Each transition exposes a focused set of fields:
   - **`stripe-count`** (integer ≥ 1, default `24`): How many horizontal bands sweep in; higher counts mimic a finer e-ink refresh.
   - **`flash-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB color used for the bright flash phases before the black inversion. Channels outside `0–255` are clamped.
 - **`iris`**
-  - **`style`** (`circular` or `polygon`, default `circular`): Switches between a smooth circular reveal and a bladed polygon reminiscent of a camera iris.
-  - **`edge-softness-px`** (float ≥ 0, default `18.0`): Feather width in pixels along the aperture edge.
-  - **`blades`** (integer ≥ 1, default `6`): Number of blades to render when using the polygon style.
-  - **`curvature`** (float `0.0–1.0`, default `0.35`): Controls how rounded the polygon blades appear; higher values yield more circular arcs.
-  - **`center-x`** and **`center-y`** (floats `0.0–1.0`, defaults `0.5`): Offset the iris center relative to the frame, enabling asymmetric reveals.
-  - **`direction`** (`open` or `close`, default `open`): Whether the iris blooms outward from a closed state or collapses inward to reveal the next slide.
+  - **`blades`** (integer ≥ 1, default `6`): Number of iris blades used to form the polygonal aperture.
+  - **`curvature`** (float `0.0–1.0`, default `0.1`): Blends between sharp polygon edges (`0.0`) and a subtly rounded iris (`1.0`).
+  - **`direction`** (`open` or `close`, default `open`): Whether the iris blooms outward from a closed state or collapses inward to finish the transition.
 
 ## Matting configuration
 
