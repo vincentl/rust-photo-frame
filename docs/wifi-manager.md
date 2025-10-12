@@ -101,14 +101,14 @@ All mutable state lives under `/var/lib/photo-frame` and is owned by the `photo-
 
 The Wi-Fi manager is wired into the refreshed setup pipeline:
 
-- `setup/bootstrap/modules/10-apt-packages.sh` pulls in NetworkManager, Sway, GPU drivers, and build prerequisites.
-- `setup/bootstrap/modules/20-rust.sh` installs the system-wide Rust toolchain used to build the binaries under `/opt/photo-frame`.
-- `setup/bootstrap/modules/40-kiosk-user.sh` provisions the kiosk user, runtime directories, and polkit rule that unlocks NetworkManager access for `kiosk`.
-- `setup/bootstrap/modules/50-greetd.sh` installs the Sway session wrapper greetd launches on tty1.
-- `setup/bootstrap/modules/60-systemd.sh` installs and enables `/etc/systemd/system/photoframe-wifi-manager.service` alongside the other kiosk units once the binaries exist.
-- `setup/app/modules/10-build.sh` compiles `wifi-manager` in release mode as the invoking user (never root).
-- `setup/app/modules/20-stage.sh` stages the binary, config template, wordlist, and docs.
-- `setup/app/modules/30-install.sh` installs artifacts into `/opt/photo-frame` and seeds `/var/lib/photo-frame/config/config.yaml` if missing.
+- `setup/system/modules/10-apt-packages.sh` pulls in NetworkManager, Sway, GPU drivers, and build prerequisites.
+- `setup/system/modules/20-rust.sh` installs the system-wide Rust toolchain used to build the binaries under `/opt/photo-frame`.
+- `setup/system/modules/40-kiosk-user.sh` provisions the kiosk user, runtime directories, and polkit rule that unlocks NetworkManager access for `kiosk`.
+- `setup/system/modules/50-greetd.sh` installs the Sway session wrapper greetd launches on tty1.
+- `setup/system/modules/60-systemd.sh` installs and enables `/etc/systemd/system/photoframe-wifi-manager.service` alongside the other kiosk units once the binaries exist.
+- `setup/application/modules/10-build.sh` compiles `wifi-manager` in release mode as the invoking user (never root).
+- `setup/application/modules/20-stage.sh` stages the binary, config template, wordlist, and docs.
+- `setup/application/modules/30-install.sh` installs artifacts into `/opt/photo-frame` and seeds `/var/lib/photo-frame/config/config.yaml` if missing.
 
 Re-running the scripts is idempotent: binaries are replaced in place, configs are preserved, ACLs stay intact, and systemd units reload cleanly.
 
@@ -160,6 +160,6 @@ These behavioural checks validate the full provisioning lifecycle:
 - **Hotspot never appears:** confirm `journalctl -u photoframe-wifi-manager.service` shows the `OFFLINE → HOTSPOT` transition. If not, verify the interface name in the config matches the Pi's Wi-Fi adapter (often `wlan0`).
 - **Portal unreachable:** ensure the UI port is free (`sudo lsof -iTCP:8080 -sTCP:LISTEN`). The daemon logs whenever it binds the HTTP server.
 - **Provisioning fails repeatedly:** inspect `/var/lib/photo-frame/wifi-last.json` for masked SSIDs and error codes. Run `sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid <name> --psk <pass>` manually to confirm NetworkManager feedback (if this reports `Insufficient privileges`, re-run the kiosk provisioning script to reinstall the polkit rule).
-- **Wordlist missing:** rerun `setup/app/modules/20-stage.sh` and `30-install.sh` to restore `/opt/photo-frame/share/wordlist.txt`; the manager refuses to start without it so that hotspot passwords are never empty.
+- **Wordlist missing:** rerun `setup/application/modules/20-stage.sh` and `30-install.sh` to restore `/opt/photo-frame/share/wordlist.txt`; the manager refuses to start without it so that hotspot passwords are never empty.
 
 With the Wi-Fi manager in place, the frame can recover from outages autonomously and guide users through reconnecting without opening the enclosure or attaching keyboards.

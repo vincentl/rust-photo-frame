@@ -1,4 +1,4 @@
-# Managed by setup/bootstrap/modules/60-systemd.sh
+# Managed by setup/system/modules/60-systemd.sh
 [Unit]
 Description=Run Photo Frame Library Sync hourly
 

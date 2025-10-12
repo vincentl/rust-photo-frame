@@ -74,11 +74,11 @@ modules=("${MODULE_DIR}"/[0-9][0-9]-*.sh)
 shopt -u nullglob
 
 if [[ ${#modules[@]} -eq 0 ]]; then
-    log INFO "No app setup modules found in ${MODULE_DIR}."
+    log INFO "No application modules found in ${MODULE_DIR}."
     exit 0
 fi
 
-log INFO "Executing app setup modules as user $(id -un)"
+log INFO "Executing application deployment modules as user $(id -un)"
 for module in "${modules[@]}"; do
     module_name="$(basename "${module}")"
     log INFO "Starting ${module_name}"
@@ -90,4 +90,4 @@ for module in "${modules[@]}"; do
     echo
 done
 
-log INFO "App setup stage complete."
+log INFO "Application deployment complete."

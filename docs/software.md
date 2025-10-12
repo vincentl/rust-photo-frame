@@ -97,18 +97,18 @@ This workflow prepares a Raspberry Pi OS (Trixie, 64-bit) image that boots direc
 
 Run the automation in two passes. Each script is idempotent, so you can safely re-run it if the connection drops or you need to retry after a reboot.
 
-### 1. Bootstrap the operating system
+### 1. Provision the operating system
 
 ```bash
-sudo ./setup/bootstrap/run.sh
+sudo ./setup/system/install.sh
 ```
 
-   This pipeline installs the apt dependencies, configures zram swap, and installs a system-wide Rust toolchain under `/usr/local/cargo`. It also provisions the kiosk user, greetd configuration, and supporting systemd units. Run it before building so toolchains and packages are ready; re-run it after the application install so the kiosk services start once the binaries exist in `/opt/photo-frame`.
+   This pipeline installs the apt dependencies, configures zram swap, and installs a system-wide Rust toolchain under `/usr/local/cargo`. It also provisions the kiosk user, greetd configuration, and supporting systemd units that launch the photo frame at boot and reserve room for the Wi-Fi overlay. Run it before building so toolchains and packages are ready; re-run it after the application install so the kiosk services start once the binaries exist in `/opt/photo-frame`.
 
-### 2. Build and stage the application
+### 2. Deploy the application
 
 ```bash
-./setup/app/run.sh
+./setup/application/deploy.sh
 ```
 
    Run this command as the unprivileged operator account. It compiles the photo frame, stages the release artifacts, and installs them into `/opt/photo-frame`. The stage verifies the kiosk service account exists and will prompt for sudo to create it (along with its primary group) when missing. The closing postcheck confirms binaries and templates are in place and will warn if the runtime config at `/var/lib/photo-frame/config/config.yaml` is missing; re-running the command recreates it from the staged template.
@@ -120,7 +120,7 @@ sudo ./setup/bootstrap/run.sh
 >
 > Keeping code and mutable state separate allows updates to replace the staged artifacts in `/opt` without disturbing operator-managed data in `/var/lib/photo-frame`.
 
-   The postcheck defers systemd validation until the kiosk environment is provisioned. Expect warnings about `greetd.service` and related helper units until you rerun the bootstrap pipeline after the application install.
+   The postcheck defers systemd validation until the kiosk environment is provisioned. Expect warnings about `greetd.service` and related helper units until you rerun the system pipeline after the application install.
 
 Use the following environment variables to customize an installation:
 
@@ -150,6 +150,7 @@ When both setup stages complete successfully the Raspberry Pi is ready to boot d
 - `/etc/greetd/config.toml` binds greetd to virtual terminal 1 and runs `/usr/local/bin/photoframe-session` as the `kiosk` user. The wrapper launches Sway via `dbus-run-session`/`seatd-launch`, applies the HDMI 4K60 layout through the provisioned Sway config, and streams the photo frame logs into journald with `systemd-cat`. greetd creates the login session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` while `/var/lib/photo-frame` remains writable by the kiosk account.
 - Device access comes from the `kiosk` user belonging to the `render`, `video`, and `input` groups. The setup stage wires this up so Vulkan/GL stacks can open `/dev/dri/renderD128` without any extra udev hacks.
 - The kiosk stack relies on `greetd` + Sway; no display-manager compatibility targets or tty autologin services are installed.
+- The Sway rules mark the photo frame window (`rust-photo-frame`) as fullscreen and reserve the overlay app ID (`wifi-overlay`) for the Wi-Fi manager. When connectivity drops the overlay is promoted to fullscreen on top of the slideshow so users immediately see the hotspot instructions, then it yields focus back to the photo app once provisioning succeeds.
 
 For smoke testing, temporarily modify `/etc/greetd/config.toml` to run `kmscube` instead of the photo frame binary. A spinning cube on HDMI verifies DRM, GBM, and input permissions before deploying the full app.
 
