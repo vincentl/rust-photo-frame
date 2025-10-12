@@ -550,9 +550,110 @@ pub struct MattingConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+enum PipelineSelection {
+    Fixed,
+    Random,
+    Sequential,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum TypeSelection {
     Random,
     Sequential,
+}
+
+#[derive(Debug)]
+struct PipelineEntry<K> {
+    kind: K,
+    fields: Vec<(String, YamlValue)>,
+}
+
+impl<'de, K> Deserialize<'de> for PipelineEntry<K>
+where
+    K: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(PipelineEntryVisitor::<K> {
+            marker: std::marker::PhantomData,
+        })
+    }
+}
+
+struct PipelineEntryVisitor<K> {
+    marker: std::marker::PhantomData<K>,
+}
+
+impl<'de, K> Visitor<'de> for PipelineEntryVisitor<K>
+where
+    K: Deserialize<'de>,
+{
+    type Value = PipelineEntry<K>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a pipeline entry map with a kind tag")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut kind: Option<K> = None;
+        let mut fields = Vec::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "kind" {
+                if kind.is_some() {
+                    return Err(de::Error::duplicate_field("kind"));
+                }
+                kind = Some(map.next_value()?);
+            } else {
+                let value = map.next_value::<YamlValue>()?;
+                fields.push((key, value));
+            }
+        }
+
+        let kind = kind.ok_or_else(|| de::Error::missing_field("kind"))?;
+        Ok(PipelineEntry { kind, fields })
+    }
+}
+
+fn resolve_pipeline_selection<E>(
+    requested: Option<PipelineSelection>,
+    len: usize,
+    context: &str,
+) -> Result<PipelineSelection, E>
+where
+    E: de::Error,
+{
+    if len == 0 {
+        return Err(de::Error::custom(format!(
+            "{} configuration must include at least one active entry",
+            context
+        )));
+    }
+
+    match requested {
+        Some(PipelineSelection::Fixed) => {
+            if len != 1 {
+                return Err(de::Error::custom(format!(
+                    "{} selection 'fixed' requires exactly one active entry",
+                    context
+                )));
+            }
+            Ok(PipelineSelection::Fixed)
+        }
+        Some(selection) => Ok(selection),
+        None => {
+            if len == 1 {
+                Ok(PipelineSelection::Fixed)
+            } else {
+                Ok(PipelineSelection::Random)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1444,422 +1545,63 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut requested_types: Option<Vec<MattingKind>> = None;
-        let mut options: Option<BTreeMap<MattingKind, MattingOptions>> = None;
-        let mut type_selection: Option<TypeSelection> = None;
-        let mut inline_fields: Vec<(String, YamlValue)> = Vec::new();
+        let mut selection: Option<PipelineSelection> = None;
+        let mut active: Option<Vec<PipelineEntry<MattingKind>>> = None;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                "types" => {
-                    if requested_types.is_some() {
-                        return Err(de::Error::duplicate_field("types"));
+                "selection" => {
+                    if selection.is_some() {
+                        return Err(de::Error::duplicate_field("selection"));
                     }
-                    let raw: Vec<String> = map.next_value()?;
-                    requested_types = Some(
-                        parse_matting_types(raw)
-                            .map_err(|err| de::Error::custom(err.to_string()))?,
-                    );
+                    selection = Some(map.next_value()?);
                 }
-                "options" => {
-                    if options.is_some() {
-                        return Err(de::Error::duplicate_field("options"));
+                "active" => {
+                    if active.is_some() {
+                        return Err(de::Error::duplicate_field("active"));
                     }
-                    options = Some(map.next_value_seed(MattingOptionsMapSeed)?);
-                }
-                "type-selection" => {
-                    if type_selection.is_some() {
-                        return Err(de::Error::duplicate_field("type-selection"));
-                    }
-                    type_selection = Some(map.next_value()?);
-                }
-                "type" => {
-                    return Err(de::Error::custom(
-                        "matting.type is no longer supported; use matting.types",
-                    ));
+                    active = Some(map.next_value()?);
                 }
                 _ => {
-                    let value = map.next_value::<YamlValue>()?;
-                    inline_fields.push((key, value));
-                }
-            }
-        }
-
-        if type_selection.is_some() && requested_types.is_none() {
-            return Err(de::Error::custom(
-                "matting.type-selection requires matting.types",
-            ));
-        }
-
-        let mut options = options.unwrap_or_default();
-
-        let types = requested_types.ok_or_else(|| de::Error::missing_field("types"))?;
-
-        if types.is_empty() {
-            return Err(de::Error::custom(
-                "matting.types must include at least one entry",
-            ));
-        }
-
-        let selection = if types.len() == 1 {
-            MattingSelection::Fixed(types[0])
-        } else {
-            match type_selection.unwrap_or(TypeSelection::Random) {
-                TypeSelection::Random => MattingSelection::Random(types.clone()),
-                TypeSelection::Sequential => MattingSelection::Sequential {
-                    kinds: types.clone(),
-                    runtime: SequentialState::default(),
-                },
-            }
-        };
-
-        match &selection {
-            MattingSelection::Random(kinds) | MattingSelection::Sequential { kinds, .. } => {
-                if !inline_fields.is_empty() {
-                    return Err(de::Error::custom(
-                        "matting.types with multiple entries do not support inline matting fields",
+                    return Err(de::Error::unknown_field(
+                        key.as_str(),
+                        &["selection", "active"],
                     ));
                 }
-                for kind in kinds {
-                    if !options.contains_key(kind) {
-                        return Err(de::Error::custom(format!(
-                            "matting.types entry {} must match a key in matting.options",
-                            kind
-                        )));
-                    }
-                }
-            }
-            MattingSelection::Fixed(kind) => {
-                let kind = *kind;
-                if options.is_empty() {
-                    let mut builder = MattingOptionBuilder::default();
-                    for (field, value) in std::mem::take(&mut inline_fields) {
-                        apply_inline_field::<A::Error>(&mut builder, kind, &field, value)?;
-                    }
-                    if matches!(kind, MattingKind::FixedImage)
-                        && builder.fixed_image_paths.is_none()
-                    {
-                        return Err(de::Error::missing_field("path"));
-                    }
-                    let option = MattingOptions::with_kind(kind, builder);
-                    options.insert(kind, option);
-                } else {
-                    if !inline_fields.is_empty() {
-                        return Err(de::Error::custom(
-                            "matting configuration cannot mix inline fields with matting.options",
-                        ));
-                    }
-                    if !options.contains_key(&kind) {
-                        return Err(de::Error::custom(format!(
-                            "matting.types entry {} must match a key in matting.options",
-                            kind
-                        )));
-                    }
-                }
             }
         }
 
-        if options.is_empty() {
-            return Err(de::Error::custom(
-                "matting.options must include at least one entry",
-            ));
-        }
+        let active_entries = active.ok_or_else(|| de::Error::missing_field("active"))?;
+        let resolved_selection =
+            resolve_pipeline_selection::<A::Error>(selection, active_entries.len(), "matting")?;
 
-        Ok(MattingConfig { selection, options })
-    }
-}
-
-fn parse_matting_types(raw: Vec<String>) -> Result<Vec<MattingKind>> {
-    if raw.is_empty() {
-        return Err(anyhow::anyhow!(
-            "matting.types must include at least one entry",
-        ));
-    }
-
-    let mut kinds = Vec::new();
-    for entry in raw {
-        if entry == "random" {
-            return Err(anyhow::anyhow!("matting.types may not include 'random'"));
-        }
-        let kind = MattingKind::ALL
-            .iter()
-            .find(|candidate| entry == candidate.as_str())
-            .copied()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "unknown matting type '{}', expected one of: {}",
-                    entry,
-                    MattingKind::NAMES.join(", ")
-                )
-            })?;
-        if !kinds.contains(&kind) {
+        let mut options = BTreeMap::new();
+        let mut kinds = Vec::with_capacity(active_entries.len());
+        for entry in active_entries {
+            let kind = entry.kind;
+            let mut builder = MattingOptionBuilder::default();
+            for (field, value) in entry.fields {
+                apply_inline_field::<A::Error>(&mut builder, kind, &field, value)?;
+            }
+            if matches!(kind, MattingKind::FixedImage) && builder.fixed_image_paths.is_none() {
+                return Err(de::Error::custom(
+                    "matting.active entry for fixed-image must include a path",
+                ));
+            }
+            let option = MattingOptions::with_kind(kind, builder);
+            options.insert(kind, option);
             kinds.push(kind);
         }
-    }
 
-    Ok(kinds)
-}
+        let selection = match resolved_selection {
+            PipelineSelection::Fixed => MattingSelection::Fixed(kinds[0]),
+            PipelineSelection::Random => MattingSelection::Random(kinds.clone()),
+            PipelineSelection::Sequential => MattingSelection::Sequential {
+                kinds: kinds.clone(),
+                runtime: SequentialState::default(),
+            },
+        };
 
-struct MattingOptionsMapSeed;
-
-impl<'de> DeserializeSeed<'de> for MattingOptionsMapSeed {
-    type Value = BTreeMap<MattingKind, MattingOptions>;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_map(MattingOptionsMapVisitor)
-    }
-}
-
-struct MattingOptionsMapVisitor;
-
-impl<'de> Visitor<'de> for MattingOptionsMapVisitor {
-    type Value = BTreeMap<MattingKind, MattingOptions>;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a map of matting options keyed by matting type")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut options = BTreeMap::new();
-        while let Some(kind) = map.next_key::<MattingKind>()? {
-            if options.contains_key(&kind) {
-                return Err(de::Error::custom(format!(
-                    "duplicate matting option for type {}",
-                    kind
-                )));
-            }
-            let option = map.next_value_seed(MattingOptionSeed { kind })?;
-            if option.kind() != kind {
-                return Err(de::Error::custom(format!(
-                    "matting option for key {} does not match its configuration",
-                    kind
-                )));
-            }
-            options.insert(kind, option);
-        }
-        Ok(options)
-    }
-}
-
-struct MattingOptionSeed {
-    kind: MattingKind,
-}
-
-impl<'de> DeserializeSeed<'de> for MattingOptionSeed {
-    type Value = MattingOptions;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_map(MattingOptionVisitor { kind: self.kind })
-    }
-}
-
-struct MattingOptionVisitor {
-    kind: MattingKind,
-}
-
-impl<'de> Visitor<'de> for MattingOptionVisitor {
-    type Value = MattingOptions;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a matting option configuration map")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut builder = MattingOptionBuilder::default();
-        while let Some(key) = map.next_key::<String>()? {
-            match key.as_str() {
-                "minimum-mat-percentage" => {
-                    if builder.minimum_mat_percentage.is_some() {
-                        return Err(de::Error::duplicate_field("minimum-mat-percentage"));
-                    }
-                    builder.minimum_mat_percentage = Some(map.next_value()?);
-                }
-                "max-upscale-factor" => {
-                    if builder.max_upscale_factor.is_some() {
-                        return Err(de::Error::duplicate_field("max-upscale-factor"));
-                    }
-                    builder.max_upscale_factor = Some(map.next_value()?);
-                }
-                other => match self.kind {
-                    MattingKind::FixedColor => match other {
-                        "colors" => {
-                            if builder.fixed_colors.is_some() {
-                                return Err(de::Error::duplicate_field("colors"));
-                            }
-                            builder.fixed_colors = Some(map.next_value()?);
-                        }
-                        "color" => {
-                            if builder.fixed_colors.is_some() {
-                                return Err(de::Error::duplicate_field("color"));
-                            }
-                            let color: [u8; 3] = map.next_value()?;
-                            builder.fixed_colors = Some(vec![color]);
-                        }
-                        "color-selection" => {
-                            if builder.color_selection.is_some() {
-                                return Err(de::Error::duplicate_field("color-selection"));
-                            }
-                            builder.color_selection = Some(map.next_value()?);
-                        }
-                        _ => {
-                            return Err(de::Error::unknown_field(
-                                other,
-                                &[
-                                    "colors",
-                                    "color",
-                                    "color-selection",
-                                    "minimum-mat-percentage",
-                                    "max-upscale-factor",
-                                ],
-                            ));
-                        }
-                    },
-                    MattingKind::Blur => match other {
-                        "sigma" => {
-                            if builder.sigma.is_some() {
-                                return Err(de::Error::duplicate_field("sigma"));
-                            }
-                            builder.sigma = Some(map.next_value()?);
-                        }
-                        "sample-scale" => {
-                            if builder.sample_scale.is_some() {
-                                return Err(de::Error::duplicate_field("sample-scale"));
-                            }
-                            builder.sample_scale = Some(map.next_value()?);
-                        }
-                        "backend" => {
-                            if builder.blur_backend.is_some() {
-                                return Err(de::Error::duplicate_field("backend"));
-                            }
-                            builder.blur_backend = Some(map.next_value()?);
-                        }
-                        _ => {
-                            return Err(de::Error::unknown_field(
-                                other,
-                                &[
-                                    "sigma",
-                                    "sample-scale",
-                                    "backend",
-                                    "minimum-mat-percentage",
-                                    "max-upscale-factor",
-                                ],
-                            ));
-                        }
-                    },
-                    MattingKind::Studio => match other {
-                        "colors" => {
-                            if builder.studio_colors.is_some() {
-                                return Err(de::Error::duplicate_field("colors"));
-                            }
-                            builder.studio_colors = Some(map.next_value()?);
-                        }
-                        "color-selection" => {
-                            if builder.color_selection.is_some() {
-                                return Err(de::Error::duplicate_field("color-selection"));
-                            }
-                            builder.color_selection = Some(map.next_value()?);
-                        }
-                        "bevel-width-px" => {
-                            if builder.bevel_width_px.is_some() {
-                                return Err(de::Error::duplicate_field("bevel-width-px"));
-                            }
-                            builder.bevel_width_px = Some(map.next_value()?);
-                        }
-                        "bevel-color" => {
-                            if builder.bevel_color.is_some() {
-                                return Err(de::Error::duplicate_field("bevel-color"));
-                            }
-                            builder.bevel_color = Some(map.next_value()?);
-                        }
-                        "texture-strength" => {
-                            if builder.texture_strength.is_some() {
-                                return Err(de::Error::duplicate_field("texture-strength"));
-                            }
-                            builder.texture_strength = Some(map.next_value()?);
-                        }
-                        "warp-period-px" => {
-                            if builder.warp_period_px.is_some() {
-                                return Err(de::Error::duplicate_field("warp-period-px"));
-                            }
-                            builder.warp_period_px = Some(map.next_value()?);
-                        }
-                        "weft-period-px" => {
-                            if builder.weft_period_px.is_some() {
-                                return Err(de::Error::duplicate_field("weft-period-px"));
-                            }
-                            builder.weft_period_px = Some(map.next_value()?);
-                        }
-                        _ => {
-                            return Err(de::Error::unknown_field(
-                                other,
-                                &[
-                                    "colors",
-                                    "color-selection",
-                                    "bevel-width-px",
-                                    "bevel-color",
-                                    "texture-strength",
-                                    "warp-period-px",
-                                    "weft-period-px",
-                                    "minimum-mat-percentage",
-                                    "max-upscale-factor",
-                                ],
-                            ));
-                        }
-                    },
-                    MattingKind::FixedImage => match other {
-                        "path" => {
-                            if builder.fixed_image_paths.is_some() {
-                                return Err(de::Error::duplicate_field("path"));
-                            }
-                            let value: YamlValue = map.next_value()?;
-                            builder.fixed_image_paths =
-                                Some(inline_value_to_fixed_image_paths::<A::Error>(value)?);
-                        }
-                        "path-selection" => {
-                            if builder.fixed_image_path_selection.is_some() {
-                                return Err(de::Error::duplicate_field("path-selection"));
-                            }
-                            builder.fixed_image_path_selection = Some(map.next_value()?);
-                        }
-                        "fit" => {
-                            if builder.fixed_image_fit.is_some() {
-                                return Err(de::Error::duplicate_field("fit"));
-                            }
-                            builder.fixed_image_fit = Some(map.next_value()?);
-                        }
-                        _ => {
-                            return Err(de::Error::unknown_field(
-                                other,
-                                &[
-                                    "path",
-                                    "path-selection",
-                                    "fit",
-                                    "minimum-mat-percentage",
-                                    "max-upscale-factor",
-                                ],
-                            ));
-                        }
-                    },
-                },
-            }
-        }
-
-        if matches!(self.kind, MattingKind::FixedImage) && builder.fixed_image_paths.is_none() {
-            return Err(de::Error::missing_field("path"));
-        }
-
-        Ok(MattingOptions::with_kind(self.kind, builder))
+        Ok(MattingConfig { selection, options })
     }
 }
 
@@ -1888,7 +1630,7 @@ impl MattingConfig {
     pub fn prepare_runtime(&mut self) -> Result<()> {
         ensure!(
             !self.options().is_empty(),
-            "matting configuration must include at least one option"
+            "matting configuration must include at least one active entry"
         );
         for option in self.options.values_mut() {
             option
@@ -2562,7 +2304,7 @@ impl TransitionConfig {
     pub fn validate(&mut self) -> Result<()> {
         ensure!(
             !self.options.is_empty(),
-            "transition configuration must include at least one option"
+            "transition configuration must include at least one active entry"
         );
         for option in self.options.values_mut() {
             option.normalize()?;
@@ -2571,7 +2313,7 @@ impl TransitionConfig {
             TransitionSelection::Fixed(kind) => ensure!(
                 self.options.contains_key(kind),
                 format!(
-                    "transition.types entry {} must match a key in transition.options",
+                    "transition.active entry {} must resolve to a configured option",
                     kind
                 )
             ),
@@ -2579,7 +2321,7 @@ impl TransitionConfig {
                 for kind in kinds {
                     ensure!(
                         self.options.contains_key(kind),
-                        "transition.types entry {} must match a key in transition.options",
+                        "transition.active entry {} must resolve to a configured option",
                         kind
                     );
                 }
@@ -2975,245 +2717,59 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut requested_types: Option<Vec<TransitionKind>> = None;
-        let mut options: Option<BTreeMap<TransitionKind, TransitionOptions>> = None;
-        let mut type_selection: Option<TypeSelection> = None;
-        let mut inline_fields: Vec<(String, YamlValue)> = Vec::new();
+        let mut selection: Option<PipelineSelection> = None;
+        let mut active: Option<Vec<PipelineEntry<TransitionKind>>> = None;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                "types" => {
-                    if requested_types.is_some() {
-                        return Err(de::Error::duplicate_field("types"));
+                "selection" => {
+                    if selection.is_some() {
+                        return Err(de::Error::duplicate_field("selection"));
                     }
-                    let raw: Vec<String> = map.next_value()?;
-                    requested_types = Some(
-                        parse_transition_types(raw)
-                            .map_err(|err| de::Error::custom(err.to_string()))?,
-                    );
+                    selection = Some(map.next_value()?);
                 }
-                "options" => {
-                    if options.is_some() {
-                        return Err(de::Error::duplicate_field("options"));
+                "active" => {
+                    if active.is_some() {
+                        return Err(de::Error::duplicate_field("active"));
                     }
-                    options = Some(map.next_value_seed(TransitionOptionsMapSeed)?);
-                }
-                "type-selection" => {
-                    if type_selection.is_some() {
-                        return Err(de::Error::duplicate_field("type-selection"));
-                    }
-                    type_selection = Some(map.next_value()?);
-                }
-                "type" => {
-                    return Err(de::Error::custom(
-                        "transition.type is no longer supported; use transition.types",
-                    ));
+                    active = Some(map.next_value()?);
                 }
                 _ => {
-                    let value = map.next_value::<YamlValue>()?;
-                    inline_fields.push((key, value));
-                }
-            }
-        }
-
-        if type_selection.is_some() && requested_types.is_none() {
-            return Err(de::Error::custom(
-                "transition.type-selection requires transition.types",
-            ));
-        }
-
-        let mut options = options.unwrap_or_default();
-        let types = requested_types.ok_or_else(|| de::Error::missing_field("types"))?;
-
-        if types.is_empty() {
-            return Err(de::Error::custom(
-                "transition.types must include at least one entry",
-            ));
-        }
-
-        let selection = if types.len() == 1 {
-            TransitionSelection::Fixed(types[0])
-        } else {
-            match type_selection.unwrap_or(TypeSelection::Random) {
-                TypeSelection::Random => TransitionSelection::Random(types.clone()),
-                TypeSelection::Sequential => TransitionSelection::Sequential {
-                    kinds: types.clone(),
-                    runtime: SequentialState::default(),
-                },
-            }
-        };
-
-        match &selection {
-            TransitionSelection::Random(kinds) | TransitionSelection::Sequential { kinds, .. } => {
-                if !inline_fields.is_empty() {
-                    return Err(de::Error::custom(
-                        "transition.types with multiple entries do not support inline transition fields",
+                    return Err(de::Error::unknown_field(
+                        key.as_str(),
+                        &["selection", "active"],
                     ));
                 }
-                for kind in kinds {
-                    if !options.contains_key(kind) {
-                        return Err(de::Error::custom(format!(
-                            "transition.types entry {} must match a key in transition.options",
-                            kind
-                        )));
-                    }
-                }
-            }
-            TransitionSelection::Fixed(kind) => {
-                let kind = *kind;
-                if options.is_empty() {
-                    let mut builder = TransitionOptionBuilder::default();
-                    for (field, value) in std::mem::take(&mut inline_fields) {
-                        apply_transition_inline_field::<A::Error>(
-                            &mut builder,
-                            kind,
-                            &field,
-                            value,
-                        )?;
-                    }
-                    let option = TransitionOptions::with_kind(kind, builder)
-                        .map_err(|err| de::Error::custom(err.to_string()))?;
-                    options.insert(kind, option);
-                } else {
-                    if !inline_fields.is_empty() {
-                        return Err(de::Error::custom(
-                            "transition configuration cannot mix inline fields with transition.options",
-                        ));
-                    }
-                    if !options.contains_key(&kind) {
-                        return Err(de::Error::custom(format!(
-                            "transition.types entry {} must match a key in transition.options",
-                            kind
-                        )));
-                    }
-                }
             }
         }
 
-        if options.is_empty() {
-            return Err(de::Error::custom(
-                "transition.options must include at least one entry",
-            ));
-        }
+        let active_entries = active.ok_or_else(|| de::Error::missing_field("active"))?;
+        let resolved_selection =
+            resolve_pipeline_selection::<A::Error>(selection, active_entries.len(), "transition")?;
 
-        Ok(TransitionConfig { selection, options })
-    }
-}
-
-fn parse_transition_types(raw: Vec<String>) -> Result<Vec<TransitionKind>> {
-    if raw.is_empty() {
-        return Err(anyhow::anyhow!(
-            "transition.types must include at least one entry",
-        ));
-    }
-
-    let mut kinds = Vec::new();
-    for entry in raw {
-        if entry == "random" {
-            return Err(anyhow::anyhow!("transition.types may not include 'random'"));
-        }
-        let kind = TransitionKind::ALL
-            .iter()
-            .find(|candidate| entry == candidate.as_str())
-            .copied()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "unknown transition type '{}', expected one of: {}",
-                    entry,
-                    TransitionKind::NAMES.join(", ")
-                )
-            })?;
-        if !kinds.contains(&kind) {
+        let mut options = BTreeMap::new();
+        let mut kinds = Vec::with_capacity(active_entries.len());
+        for entry in active_entries {
+            let kind = entry.kind;
+            let mut builder = TransitionOptionBuilder::default();
+            for (field, value) in entry.fields {
+                apply_transition_inline_field::<A::Error>(&mut builder, kind, &field, value)?;
+            }
+            let option = TransitionOptions::with_kind(kind, builder)
+                .map_err(|err| de::Error::custom(err.to_string()))?;
+            options.insert(kind, option);
             kinds.push(kind);
         }
-    }
 
-    Ok(kinds)
-}
+        let selection = match resolved_selection {
+            PipelineSelection::Fixed => TransitionSelection::Fixed(kinds[0]),
+            PipelineSelection::Random => TransitionSelection::Random(kinds.clone()),
+            PipelineSelection::Sequential => TransitionSelection::Sequential {
+                kinds: kinds.clone(),
+                runtime: SequentialState::default(),
+            },
+        };
 
-struct TransitionOptionsMapSeed;
-
-impl<'de> DeserializeSeed<'de> for TransitionOptionsMapSeed {
-    type Value = BTreeMap<TransitionKind, TransitionOptions>;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_map(TransitionOptionsMapVisitor)
-    }
-}
-
-struct TransitionOptionsMapVisitor;
-
-impl<'de> Visitor<'de> for TransitionOptionsMapVisitor {
-    type Value = BTreeMap<TransitionKind, TransitionOptions>;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a map of transition options keyed by transition type")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut options = BTreeMap::new();
-        while let Some(kind) = map.next_key::<TransitionKind>()? {
-            if options.contains_key(&kind) {
-                return Err(de::Error::custom(format!(
-                    "duplicate transition option for type {}",
-                    kind
-                )));
-            }
-            let option = map.next_value_seed(TransitionOptionSeed { kind })?;
-            if option.kind() != kind {
-                return Err(de::Error::custom(format!(
-                    "transition option for key {} does not match its configuration",
-                    kind
-                )));
-            }
-            options.insert(kind, option);
-        }
-        Ok(options)
-    }
-}
-
-struct TransitionOptionSeed {
-    kind: TransitionKind,
-}
-
-impl<'de> DeserializeSeed<'de> for TransitionOptionSeed {
-    type Value = TransitionOptions;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_map(TransitionOptionVisitor { kind: self.kind })
-    }
-}
-
-struct TransitionOptionVisitor {
-    kind: TransitionKind,
-}
-
-impl<'de> Visitor<'de> for TransitionOptionVisitor {
-    type Value = TransitionOptions;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a transition option configuration map")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut builder = TransitionOptionBuilder::default();
-        while let Some(key) = map.next_key::<String>()? {
-            let value = map.next_value::<YamlValue>()?;
-            apply_transition_inline_field::<A::Error>(&mut builder, self.kind, &key, value)?;
-        }
-        TransitionOptions::with_kind(self.kind, builder)
-            .map_err(|err| de::Error::custom(err.to_string()))
+        Ok(TransitionConfig { selection, options })
     }
 }
 
