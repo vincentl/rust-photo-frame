@@ -179,11 +179,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let base_radius = max_radius * clamp(openness, 0.0, 1.0);
       let feather = max(softness, 1e-4);
       let mask = smoothstep(base_radius - feather, base_radius + feather, effective_dist);
-      if (direction > 0.0) {
-        color = mix(next, current, mask);
-      } else {
-        color = mix(current, next, mask);
-      }
+      color = mix(next, current, mask);
     }
     default: {
       color = current;
