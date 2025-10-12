@@ -2603,7 +2603,7 @@ impl TransitionOptions {
             TransitionKind::Wipe => (400, TransitionMode::Wipe(WipeTransition::default())),
             TransitionKind::Push => (400, TransitionMode::Push(PushTransition::default())),
             TransitionKind::EInk => (1600, TransitionMode::EInk(EInkTransition::default())),
-            TransitionKind::Iris => (520, TransitionMode::Iris(IrisTransition::default())),
+            TransitionKind::Iris => (900, TransitionMode::Iris(IrisTransition::default())),
         };
         Self {
             kind,
@@ -2702,8 +2702,15 @@ impl TransitionOptions {
                 let defaults = IrisTransition::default();
                 TransitionMode::Iris(IrisTransition {
                     blades: builder.iris_blades.unwrap_or(defaults.blades),
-                    curvature: builder.iris_curvature.unwrap_or(defaults.curvature),
                     direction: builder.iris_direction.unwrap_or(defaults.direction),
+                    line_rgba: builder.iris_line_rgba.unwrap_or(defaults.line_rgba),
+                    arc_rgba: builder.iris_arc_rgba.unwrap_or(defaults.arc_rgba),
+                    line_thickness_px: builder
+                        .iris_line_thickness_px
+                        .unwrap_or(defaults.line_thickness_px),
+                    taper: builder.iris_taper.unwrap_or(defaults.taper),
+                    vignette: builder.iris_vignette.unwrap_or(defaults.vignette),
+                    easing: builder.iris_easing.unwrap_or(defaults.easing),
                 })
             }
         };
@@ -2930,33 +2937,94 @@ impl Default for IrisDirection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IrisEasing {
+    Linear,
+    Cubic,
+}
+
+impl Default for IrisEasing {
+    fn default() -> Self {
+        Self::Cubic
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IrisTransition {
     pub blades: u32,
-    pub curvature: f32,
     pub direction: IrisDirection,
+    pub line_rgba: [f32; 4],
+    pub arc_rgba: [f32; 4],
+    pub line_thickness_px: f32,
+    pub taper: f32,
+    pub vignette: f32,
+    pub easing: IrisEasing,
 }
 
 impl Default for IrisTransition {
     fn default() -> Self {
         Self {
-            blades: 6,
-            curvature: 0.1,
+            blades: 7,
             direction: IrisDirection::default(),
+            line_rgba: [0.95, 0.95, 0.95, 0.35],
+            arc_rgba: [0.95, 0.95, 0.95, 0.20],
+            line_thickness_px: 2.0,
+            taper: 0.6,
+            vignette: 0.2,
+            easing: IrisEasing::default(),
         }
     }
 }
 
 impl IrisTransition {
     fn normalize(&mut self, kind: TransitionKind) -> Result<()> {
-        if self.blades == 0 {
-            self.blades = 1;
+        if self.blades < 5 {
+            self.blades = 5;
+        }
+        if self.blades > 18 {
+            self.blades = 18;
         }
         ensure!(
-            self.curvature.is_finite(),
-            format!("transition option {} has non-finite iris.curvature", kind)
+            self.line_thickness_px.is_finite(),
+            format!(
+                "transition option {} has non-finite iris.line-thickness-px",
+                kind
+            )
         );
-        self.curvature = self.curvature.clamp(0.0, 1.0);
+        if self.line_thickness_px < 0.0 {
+            self.line_thickness_px = 0.0;
+        }
+        ensure!(
+            self.taper.is_finite(),
+            format!("transition option {} has non-finite iris.taper", kind)
+        );
+        self.taper = self.taper.clamp(0.0, 1.0);
+        ensure!(
+            self.vignette.is_finite(),
+            format!("transition option {} has non-finite iris.vignette", kind)
+        );
+        self.vignette = self.vignette.clamp(0.0, 1.0);
+        for (idx, channel) in self.line_rgba.iter_mut().enumerate() {
+            ensure!(
+                channel.is_finite(),
+                format!(
+                    "transition option {} has non-finite iris.line-rgba[{}]",
+                    kind, idx
+                )
+            );
+            *channel = channel.clamp(0.0, 1.0);
+        }
+        for (idx, channel) in self.arc_rgba.iter_mut().enumerate() {
+            ensure!(
+                channel.is_finite(),
+                format!(
+                    "transition option {} has non-finite iris.arc-rgba[{}]",
+                    kind, idx
+                )
+            );
+            *channel = channel.clamp(0.0, 1.0);
+        }
         Ok(())
     }
 }
@@ -3241,8 +3309,13 @@ struct TransitionOptionBuilder {
     eink_stripe_count: Option<u32>,
     eink_flash_color: Option<[u8; 3]>,
     iris_blades: Option<u32>,
-    iris_curvature: Option<f32>,
     iris_direction: Option<IrisDirection>,
+    iris_line_rgba: Option<[f32; 4]>,
+    iris_arc_rgba: Option<[f32; 4]>,
+    iris_line_thickness_px: Option<f32>,
+    iris_taper: Option<f32>,
+    iris_vignette: Option<f32>,
+    iris_easing: Option<IrisEasing>,
 }
 
 fn apply_transition_inline_field<E: de::Error>(
@@ -3300,11 +3373,26 @@ fn apply_transition_inline_field<E: de::Error>(
         "blades" if matches!(kind, TransitionKind::Iris) => {
             builder.iris_blades = Some(inline_value_to::<u32, E>(value)?);
         }
-        "curvature" if matches!(kind, TransitionKind::Iris) => {
-            builder.iris_curvature = Some(inline_value_to::<f32, E>(value)?);
-        }
         "direction" if matches!(kind, TransitionKind::Iris) => {
             builder.iris_direction = Some(inline_value_to::<IrisDirection, E>(value)?);
+        }
+        "line-rgba" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_line_rgba = Some(inline_value_to::<[f32; 4], E>(value)?);
+        }
+        "arc-rgba" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_arc_rgba = Some(inline_value_to::<[f32; 4], E>(value)?);
+        }
+        "line-thickness-px" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_line_thickness_px = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "taper" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_taper = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "vignette" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_vignette = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "easing" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_easing = Some(inline_value_to::<IrisEasing, E>(value)?);
         }
         _ => {
             return Err(de::Error::unknown_field(
@@ -3321,8 +3409,13 @@ fn apply_transition_inline_field<E: de::Error>(
                     "stripe-count",
                     "flash-color",
                     "blades",
-                    "curvature",
                     "direction",
+                    "line-rgba",
+                    "arc-rgba",
+                    "line-thickness-px",
+                    "taper",
+                    "vignette",
+                    "easing",
                 ],
             ));
         }

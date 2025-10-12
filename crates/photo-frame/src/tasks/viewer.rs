@@ -3,8 +3,8 @@ pub mod scenes;
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
-    IrisDirection, MattingConfig, MattingMode, MattingOptions, TransitionKind, TransitionMode,
-    TransitionOptions,
+    IrisDirection, IrisEasing, MattingConfig, MattingMode, MattingOptions, TransitionKind,
+    TransitionMode, TransitionOptions,
 };
 use crate::events::{
     Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
@@ -47,8 +47,13 @@ pub(super) enum ActiveTransition {
     },
     Iris {
         blades: u32,
-        curvature: f32,
         direction: IrisDirection,
+        line_rgba: [f32; 4],
+        arc_rgba: [f32; 4],
+        line_thickness_px: f32,
+        taper: f32,
+        vignette: f32,
+        easing: IrisEasing,
     },
 }
 
@@ -123,8 +128,13 @@ impl TransitionState {
             },
             TransitionMode::Iris(cfg) => ActiveTransition::Iris {
                 blades: cfg.blades.max(1),
-                curvature: cfg.curvature.clamp(0.0, 1.0),
                 direction: cfg.direction,
+                line_rgba: cfg.line_rgba,
+                arc_rgba: cfg.arc_rgba,
+                line_thickness_px: cfg.line_thickness_px.max(0.0),
+                taper: cfg.taper.clamp(0.0, 1.0),
+                vignette: cfg.vignette.clamp(0.0, 1.0),
+                easing: cfg.easing,
             },
         };
 
@@ -262,6 +272,8 @@ pub fn run_windowed(
         next_dest: [f32; 4],
         params0: [f32; 4],
         params1: [f32; 4],
+        params2: [f32; 4],
+        params3: [f32; 4],
     }
 
     struct GpuCtx {
@@ -1951,6 +1963,8 @@ pub fn run_windowed(
                                 next_dest: [0.0; 4],
                                 params0: [0.0; 4],
                                 params1: [0.0; 4],
+                                params2: [0.0; 4],
+                                params3: [0.0; 4],
                             };
                             let mut current_bind = &gpu.blank_plane.bind;
                             let mut next_bind = &gpu.blank_plane.bind;
@@ -1979,8 +1993,16 @@ pub fn run_windowed(
                                     next_bind = &next.plane.bind;
                                     have_draw = true;
                                 }
-                                let mut progress = state.progress();
-                                progress = progress * progress * (3.0 - 2.0 * progress);
+                                let base_progress = state.progress();
+                                let cubic_progress =
+                                    base_progress * base_progress * (3.0 - 2.0 * base_progress);
+                                let progress = match state.variant() {
+                                    ActiveTransition::Iris { easing, .. } => match easing {
+                                        IrisEasing::Linear => base_progress,
+                                        IrisEasing::Cubic => cubic_progress,
+                                    },
+                                    _ => cubic_progress,
+                                };
                                 uniforms.progress = progress;
                                 uniforms.kind = state.kind().as_index();
                                 match state.variant() {
@@ -2023,26 +2045,29 @@ pub fn run_windowed(
                                     }
                                     ActiveTransition::Iris {
                                         blades,
-                                        curvature,
                                         direction,
+                                        line_rgba,
+                                        arc_rgba,
+                                        line_thickness_px,
+                                        taper,
+                                        vignette,
+                                        easing: _,
                                     } => {
                                         let blades_f = (*blades).max(1) as f32;
                                         let direction_sign = match direction {
                                             IrisDirection::Open => 1.0,
                                             IrisDirection::Close => -1.0,
                                         };
-                                        let curvature = (*curvature).clamp(0.0, 1.0);
-                                        let blade_angle = 2.0 * std::f32::consts::PI / blades_f;
-                                        let cos_half = (0.5 * blade_angle).cos();
-                                        let min_shape = cos_half + (1.0 - cos_half) * curvature;
-                                        uniforms.params0[0] = min_shape;
+                                        uniforms.params0[0] = blades_f;
                                         uniforms.params0[1] = direction_sign;
-                                        uniforms.params0[2] = curvature;
-                                        uniforms.params0[3] = cos_half;
-                                        uniforms.params1[0] = blade_angle;
-                                        uniforms.params1[1] = 0.012;
-                                        uniforms.params1[2] = 0.0;
-                                        uniforms.params1[3] = 0.0;
+                                        uniforms.params0[2] = (*line_thickness_px).max(0.0);
+                                        uniforms.params0[3] = (*taper).clamp(0.0, 1.0);
+                                        uniforms.params1[0] = 0.35; // rotation amplitude in radians
+                                        uniforms.params1[1] = 0.012; // feather factor relative to max radius
+                                        uniforms.params1[2] = (*vignette).clamp(0.0, 1.0);
+                                        uniforms.params1[3] = 0.08; // noise amplitude
+                                        uniforms.params2 = *line_rgba;
+                                        uniforms.params3 = *arc_rgba;
                                     }
                                 }
                             } else if let Some(cur) = wake.current() {

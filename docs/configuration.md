@@ -381,9 +381,14 @@ Each transition exposes a focused set of fields:
   - **`stripe-count`** (integer ≥ 1, default `24`): How many horizontal bands sweep in; higher counts mimic a finer e-ink refresh.
   - **`flash-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB color used for the bright flash phases before the black inversion. Channels outside `0–255` are clamped.
 - **`iris`**
-  - **`blades`** (integer ≥ 1, default `6`): Number of iris blades used to form the polygonal aperture.
-  - **`curvature`** (float `0.0–1.0`, default `0.1`): Blends between sharp polygon edges (`0.0`) and a subtly rounded iris (`1.0`).
-  - **`direction`** (`open` or `close`, default `open`): Whether the iris blooms outward from a closed state or collapses inward to finish the transition.
+  - **`blades`** (integer, default `7`, clamped to `5–18`): Number of shutter spokes sketched around the aperture.
+  - **`direction`** (`open` or `close`, default `open`): Choose whether the aperture grows (`open`) or shrinks (`close`) as the next image is revealed. Rotation direction mirrors the choice.
+  - **`line-rgba`** (`[r, g, b, a]` float array, default `[0.95, 0.95, 0.95, 0.35]`): Stroke color for the animated shutter spokes. Channels outside `0–1` are clamped.
+  - **`arc-rgba`** (`[r, g, b, a]` float array, default `[0.95, 0.95, 0.95, 0.20]`): Accent color for the short arc hints drawn along the aperture edge.
+  - **`line-thickness-px`** (float ≥ 0, default `2.0`): Approximate thickness of the spoke outlines in screen pixels.
+  - **`taper`** (float `0.0–1.0`, default `0.6`): Controls how aggressively the spokes taper as they extend outward; `0` keeps a uniform width.
+  - **`vignette`** (float `0.0–1.0`, default `0.2`): Strength of the subtle darkening toward the screen corners to emphasize the circular aperture.
+  - **`easing`** (`linear` or `cubic`, default `cubic`): Selects the easing curve applied to the shutter progress. `cubic` matches the default smooth ease-in-out, while `linear` sticks to the raw transition timeline.
 
 ## Matting configuration
 
