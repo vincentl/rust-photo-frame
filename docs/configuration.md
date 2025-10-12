@@ -316,7 +316,7 @@ The `transition` block controls how the viewer blends between photos. List one o
 
 | Key              | Required?                                                       | Default                        | Accepted values                                                 | Effect                                                                                                                                                              |
 | ---------------- | --------------------------------------------------------------- | ------------------------------ | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `types`          | Yes                                                             | `['fade']`                     | Array containing one or more of `fade`, `wipe`, `push`, `e-ink` | Determines which transition families are in play. Duplicates are ignored; at least one entry must be supplied.                                                      |
+| `types`          | Yes                                                             | `['fade']`                     | Array containing one or more of `fade`, `wipe`, `push`, `e-ink`, `iris` | Determines which transition families are in play. Duplicates are ignored; at least one entry must be supplied.                                                      |
 | `type-selection` | Optional (only valid when `types` has multiple entries)         | `random`                       | `random` or `sequential`                                        | Picks whether the app draws a new type randomly each slide or cycles through the list in order. Ignored when only one type is listed.                               |
 | `options`        | Required when `types` has multiple entries (optional otherwise) | Defaults per transition family | Mapping keyed by transition kind                                | Provides per-type overrides for duration and mode-specific fields. When only one type is listed you can specify the same fields inline instead of creating the map. |
 
@@ -377,6 +377,13 @@ Each transition exposes a focused set of fields:
   - **`reveal-portion`** (float, default `0.55`, clamped to `0.05–0.95`): Fraction of the timeline spent flashing before the stripes start uncovering the next slide.
   - **`stripe-count`** (integer ≥ 1, default `24`): How many horizontal bands sweep in; higher counts mimic a finer e-ink refresh.
   - **`flash-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB color used for the bright flash phases before the black inversion. Channels outside `0–255` are clamped.
+- **`iris`**
+  - **`style`** (`circular` or `polygon`, default `circular`): Switches between a smooth circular reveal and a bladed polygon reminiscent of a camera iris.
+  - **`edge-softness-px`** (float ≥ 0, default `18.0`): Feather width in pixels along the aperture edge.
+  - **`blades`** (integer ≥ 1, default `6`): Number of blades to render when using the polygon style.
+  - **`curvature`** (float `0.0–1.0`, default `0.35`): Controls how rounded the polygon blades appear; higher values yield more circular arcs.
+  - **`center-x`** and **`center-y`** (floats `0.0–1.0`, defaults `0.5`): Offset the iris center relative to the frame, enabling asymmetric reveals.
+  - **`direction`** (`open` or `close`, default `open`): Whether the iris blooms outward from a closed state or collapses inward to reveal the next slide.
 
 ## Matting configuration
 
