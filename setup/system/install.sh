@@ -47,5 +47,34 @@ for module in "${modules[@]}"; do
     echo
 done
 
+# Ensure greetd owns VT1 and launches on graphical.target
+if command -v systemctl >/dev/null 2>&1; then
+    log INFO "Enforcing greetd ownership of tty1"
+    # Ensure greetd owns VT1 and no getty competes for tty1
+    getty_state=$(systemctl is-enabled getty@tty1.service 2>/dev/null || true)
+    if [[ "${getty_state}" != "masked" ]]; then
+        systemctl disable --now getty@tty1.service || true
+    else
+        log INFO "getty@tty1.service already masked; skipping disable"
+    fi
+    systemctl mask getty@tty1.service || true
+
+    # Make greetd the display manager
+    systemctl enable greetd.service
+
+    # Default to graphical target so greetd starts at boot
+    systemctl set-default graphical.target
+
+    # Clear rate-limit and (re)launch greetd cleanly
+    systemctl reset-failed greetd.service || true
+    systemctl stop greetd.service || true
+    sleep 1
+    systemctl start greetd.service
+else
+    log WARN "systemctl not available; skipping greetd ownership enforcement"
+fi
+
+
 log INFO "System provisioning complete."
+
 
