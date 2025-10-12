@@ -6,6 +6,8 @@ struct TransitionUniforms {
   next_dest: vec4<f32>,
   params0: vec4<f32>,
   params1: vec4<f32>,
+  params2: vec4<f32>,
+  params3: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -147,37 +149,78 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       }
     }
     case 5u: {
-      let min_shape = clamp(U.params0.x, 1e-4, 1.0);
-      let direction = U.params0.y;
-      let curvature = clamp(U.params0.z, 0.0, 1.0);
-      let cos_half = clamp(U.params0.w, 1e-4, 1.0);
-      let blade_angle = max(U.params1.x, 1e-4);
+      let blades = max(U.params0.x, 1.0);
+      let direction_sign = U.params0.y;
+      let line_thickness_px = max(U.params0.z, 0.0);
+      let taper = clamp(U.params0.w, 0.0, 1.0);
+      let rotation_amp = U.params1.x;
       let feather_factor = max(U.params1.y, 0.0);
-      let progress = clamp(U.progress, 0.0, 1.0);
+      let vignette_strength = clamp(U.params1.z, 0.0, 1.0);
+      let noise_amount = clamp(U.params1.w, 0.0, 1.0);
+      let line_color = U.params2;
+      let arc_color = U.params3;
+      let base_progress = clamp(U.progress, 0.0, 1.0);
+      var aperture_progress = base_progress;
+      if (direction_sign < 0.0) {
+        aperture_progress = 1.0 - base_progress;
+      }
       let aspect = U.screen_size.x / max(U.screen_size.y, 1.0);
       let rel = vec2<f32>((in.screen_uv.x - 0.5) * aspect, in.screen_uv.y - 0.5);
       let dist = length(rel);
       let angle = atan2(rel.y, rel.x);
-      let inv_sector = 1.0 / blade_angle;
-      let wrapped = angle - blade_angle * floor(angle * inv_sector);
-      let offset = wrapped - blade_angle * 0.5;
-      let denom = cos(offset);
-      let polygon_norm = cos_half / max(denom, 1e-3);
-      let shape_factor = mix(polygon_norm, 1.0, curvature);
       let max_radius = length(vec2<f32>(aspect * 0.5, 0.5));
-      let base_radius = max_radius / max(min_shape, 1e-3);
-      let openness = select(1.0 - progress, progress, direction > 0.0);
-      let aperture = clamp(openness, 0.0, 1.0);
-      let target_radius = base_radius * aperture * shape_factor;
+      let aperture_radius = max_radius * aperture_progress;
       let feather = max(max_radius * feather_factor, 1e-4);
-      var iris_cover = 1.0;
-      if (aperture > 1e-4) {
-        iris_cover = smoothstep(target_radius - feather, target_radius + feather, dist);
+      var cover = 1.0;
+      if (aperture_progress > 1e-4) {
+        cover = smoothstep(aperture_radius - feather, aperture_radius + feather, dist);
       }
-      if (aperture >= 0.999) {
-        iris_cover = 0.0;
+      if (aperture_progress >= 0.9995) {
+        cover = 0.0;
       }
-      color = mix(next, current, iris_cover);
+      let next_weight = clamp(1.0 - cover, 0.0, 1.0);
+      color = mix(current, next, next_weight);
+
+      let rotation = rotation_amp * base_progress * direction_sign;
+      let rotated_angle = angle + rotation;
+      let blades_clamped = max(blades, 1.0);
+      let sin_term = abs(sin(rotated_angle * blades_clamped));
+      let delta_angle = sin_term / blades_clamped;
+      let line_range = max(max_radius - aperture_radius, 1e-4);
+      let outward = max(dist - aperture_radius, 0.0);
+      var line_presence = 0.0;
+      if (line_range > 1e-3) {
+        let entry = smoothstep(0.0, feather * 4.0 + 1e-4, outward);
+        let exit = smoothstep(line_range * 0.85, line_range, outward);
+        line_presence = entry * (1.0 - exit);
+      }
+      let radius_px = max(dist * U.screen_size.y, 1.0);
+      let outward_ratio = clamp(outward / line_range, 0.0, 1.0);
+      let taper_scale = mix(1.0, 1.0 - outward_ratio, taper);
+      let thickness_angle = max(line_thickness_px / radius_px * taper_scale, 1e-4);
+      let angle_ratio = delta_angle / thickness_angle;
+      let line_body = exp(-0.5 * angle_ratio * angle_ratio);
+      let noise = fract(
+        sin(dot(screen_pos, vec2<f32>(12.9898, 78.233))) * 43758.5453
+      );
+      let jitter = (noise - 0.5) * noise_amount;
+      let line_alpha = clamp(line_color.w + jitter, 0.0, 1.0) * line_body * line_presence;
+      color.rgb = mix(color.rgb, line_color.rgb, clamp(line_alpha, 0.0, 1.0));
+
+      let arc_phase = abs(cos(rotated_angle * blades_clamped));
+      let arc_delta = 1.0 - arc_phase;
+      let arc_body = exp(-arc_delta * 12.0);
+      let arc_inner = smoothstep(-feather * 2.0, feather * 2.0, dist - aperture_radius);
+      let arc_outer = 1.0 - smoothstep(feather * 4.0, feather * 4.0 + 1e-3, dist - aperture_radius);
+      let arc_presence = arc_inner * arc_outer;
+      let arc_alpha = clamp(arc_color.w + jitter * 0.5, 0.0, 1.0) * arc_body * arc_presence;
+      color.rgb = mix(color.rgb, arc_color.rgb, clamp(arc_alpha, 0.0, 1.0));
+
+      if (vignette_strength > 0.0) {
+        let radius_norm = clamp(dist / max_radius, 0.0, 1.0);
+        let vignette = 1.0 - vignette_strength * smoothstep(0.55, 1.0, radius_norm);
+        color.rgb *= vignette;
+      }
     }
     default: {
       color = current;

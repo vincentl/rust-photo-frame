@@ -38,10 +38,15 @@ transition:
       stripe-count: 24
       flash-color: [0, 0, 0]
     iris:
-      duration-ms: 520
-      blades: 6
-      curvature: 0.1
+      duration-ms: 900
+      blades: 7
       direction: open
+      line-rgba: [0.95, 0.95, 0.95, 0.35]
+      arc-rgba: [0.95, 0.95, 0.95, 0.20]
+      line-thickness-px: 2.0
+      taper: 0.6
+      vignette: 0.2
+      easing: cubic
 
 # Dwell time (ms) the current image remains fully displayed before the next transition
 dwell-ms: 2000

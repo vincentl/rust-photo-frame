@@ -1,6 +1,6 @@
 use rand::{SeedableRng, rngs::StdRng};
 use rust_photo_frame::config::{
-    ColorSelection, Configuration, FixedImagePathSelection, IrisDirection, MattingKind,
+    ColorSelection, Configuration, FixedImagePathSelection, IrisDirection, IrisEasing, MattingKind,
     MattingMode, MattingSelection, StudioMatColor, TransitionKind, TransitionSelection,
 };
 use std::path::PathBuf;
@@ -484,10 +484,15 @@ fn parse_inline_iris_transition() {
 photo-library-path: "/photos"
 transition:
   types: [iris]
-  duration-ms: 640
-  blades: 7
-  curvature: 0.25
+  duration-ms: 880
+  blades: 9
   direction: close
+  line-rgba: [0.8, 0.7, 0.6, 0.5]
+  arc-rgba: [0.2, 0.3, 0.4, 0.25]
+  line-thickness-px: 3.5
+  taper: 0.4
+  vignette: 0.15
+  easing: linear
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -499,12 +504,17 @@ transition:
     let iris = options
         .get(&TransitionKind::Iris)
         .expect("expected iris transition option");
-    assert_eq!(iris.duration().as_millis(), 640);
+    assert_eq!(iris.duration().as_millis(), 880);
     match iris.mode() {
         rust_photo_frame::config::TransitionMode::Iris(cfg) => {
-            assert_eq!(cfg.blades, 7);
-            assert!((cfg.curvature - 0.25).abs() < f32::EPSILON);
+            assert_eq!(cfg.blades, 9);
             assert_eq!(cfg.direction, IrisDirection::Close);
+            assert_eq!(cfg.line_rgba, [0.8, 0.7, 0.6, 0.5]);
+            assert_eq!(cfg.arc_rgba, [0.2, 0.3, 0.4, 0.25]);
+            assert!((cfg.line_thickness_px - 3.5).abs() < f32::EPSILON);
+            assert!((cfg.taper - 0.4).abs() < f32::EPSILON);
+            assert!((cfg.vignette - 0.15).abs() < f32::EPSILON);
+            assert_eq!(cfg.easing, IrisEasing::Linear);
         }
         _ => panic!("expected iris transition"),
     }
@@ -724,7 +734,7 @@ transition:
         .expect("expected iris transition option");
     match iris.mode() {
         rust_photo_frame::config::TransitionMode::Iris(cfg) => {
-            assert_eq!(cfg.blades, 1);
+            assert_eq!(cfg.blades, 5);
         }
         _ => panic!("expected iris transition"),
     }
