@@ -147,23 +147,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       }
     }
     case 5u: {
-      let style = U.params0.x;
-      let direction = U.params0.y;
-      let softness_px = max(U.params0.z, 0.0);
-      let curvature = clamp(U.params0.w, 0.0, 1.0);
-      let blades = max(U.params1.x, 1.0);
-      let center = vec2<f32>(clamp(U.params1.y, 0.0, 1.0), clamp(U.params1.z, 0.0, 1.0));
-      let max_dim = max(max(U.screen_size.x, U.screen_size.y), 1.0);
-      let softness = softness_px / max_dim;
-      let rel = in.screen_uv - center;
-      let dist = length(rel);
-      var effective_dist = dist;
-      if (style > 0.5) {
-        let angle = atan2(rel.y, rel.x);
-        let wave = abs(cos(blades * angle * 0.5));
-        let scale = max(mix(wave, 1.0, curvature), 1e-3);
-        effective_dist = dist / scale;
-      }
+      let direction = U.params0.x;
+      let curvature = clamp(U.params0.y, 0.0, 1.0);
+      let blades_f = max(U.params1.x, 3.0);
+      let blade_count = clamp(i32(blades_f + 0.5), 3, 12);
+      let center = vec2<f32>(0.5, 0.5);
       let corners = array<vec2<f32>, 4>(
         vec2<f32>(0.0, 0.0),
         vec2<f32>(0.0, 1.0),
@@ -175,11 +163,30 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         max_radius = max(max_radius, distance(center, corners[i]));
       }
       let progress = clamp(U.progress, 0.0, 1.0);
-      let openness = select(1.0 - progress, progress, direction > 0.0);
-      let base_radius = max_radius * clamp(openness, 0.0, 1.0);
-      let feather = max(softness, 1e-4);
-      let mask = smoothstep(base_radius - feather, base_radius + feather, effective_dist);
-      color = mix(next, current, mask);
+      let aperture = clamp(select(1.0 - progress, progress, direction > 0.0), 0.0, 1.0);
+      let max_dim = max(max(U.screen_size.x, U.screen_size.y), 1.0);
+      let feather = max(1.5 / max_dim, 1e-4);
+      let rel = in.screen_uv - center;
+      var min_edge = 1e6;
+      let tau = 6.283185307179586;
+      for (var idx: i32 = 0; idx < 12; idx = idx + 1) {
+        if (idx >= blade_count) {
+          break;
+        }
+        let blade_angle = (f32(idx) + 0.5) * (tau / f32(blade_count));
+        let normal = vec2<f32>(cos(blade_angle), sin(blade_angle));
+        var limit = -1e6;
+        for (var c: i32 = 0; c < 4; c = c + 1) {
+          let corner_vec = corners[c] - center;
+          limit = max(limit, dot(corner_vec, normal));
+        }
+        let curved_limit = mix(limit, max_radius, curvature);
+        let scaled_limit = aperture * curved_limit;
+        let dist_to_edge = scaled_limit - dot(rel, normal);
+        min_edge = min(min_edge, dist_to_edge);
+      }
+      let iris = smoothstep(0.0, feather, min_edge);
+      color = mix(current, next, iris);
     }
     default: {
       color = current;
