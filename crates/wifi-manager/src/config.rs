@@ -22,7 +22,7 @@ pub struct Config {
     #[serde(default)]
     pub ui: UiConfig,
     #[serde(default)]
-    pub display: DisplayConfig,
+    pub overlay: OverlayConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,13 +47,13 @@ pub struct UiConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub struct DisplayConfig {
-    #[serde(default = "default_photo_frame_service")]
-    pub photo_frame_service: String,
-    #[serde(default = "default_wifi_manager_service")]
-    pub wifi_manager_service: String,
-    #[serde(default = "default_systemctl_path")]
-    pub systemctl_path: PathBuf,
+pub struct OverlayConfig {
+    #[serde(default = "default_overlay_command")]
+    pub command: Vec<String>,
+    #[serde(default = "default_photo_app_id")]
+    pub photo_app_id: String,
+    #[serde(default = "default_overlay_app_id")]
+    pub overlay_app_id: String,
 }
 
 impl Config {
@@ -85,12 +85,12 @@ impl Default for UiConfig {
     }
 }
 
-impl Default for DisplayConfig {
+impl Default for OverlayConfig {
     fn default() -> Self {
         Self {
-            photo_frame_service: default_photo_frame_service(),
-            wifi_manager_service: default_wifi_manager_service(),
-            systemctl_path: default_systemctl_path(),
+            command: default_overlay_command(),
+            photo_app_id: default_photo_app_id(),
+            overlay_app_id: default_overlay_app_id(),
         }
     }
 }
@@ -135,14 +135,17 @@ fn default_ui_port() -> u16 {
     8080
 }
 
-fn default_photo_frame_service() -> String {
-    "photo-frame.service".to_string()
+fn default_overlay_command() -> Vec<String> {
+    vec![
+        "/opt/photo-frame/bin/wifi-manager".to_string(),
+        "overlay".to_string(),
+    ]
 }
 
-fn default_wifi_manager_service() -> String {
-    "wifi-manager.service".to_string()
+fn default_photo_app_id() -> String {
+    "rust-photo-frame".to_string()
 }
 
-fn default_systemctl_path() -> PathBuf {
-    PathBuf::from("/usr/bin/systemctl")
+fn default_overlay_app_id() -> String {
+    "wifi-overlay".to_string()
 }

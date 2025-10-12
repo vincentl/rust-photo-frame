@@ -54,7 +54,7 @@ Exercise each axis at least once per release cycle.
   git clone https://github.com/<org>/rust-photo-frame.git
   cd rust-photo-frame
   ```
-- [ ] Run the bootstrap pipeline (installs dependencies, greetd/cage, creates the kiosk user, configures zram, and stages helper units):
+- [ ] Run the bootstrap pipeline (installs dependencies, greetd/Sway, creates the kiosk user, configures zram, and stages helper units):
   ```sh
   sudo ./setup/bootstrap/run.sh
   ```

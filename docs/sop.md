@@ -4,7 +4,7 @@ This document captures routine operational procedures for the kiosk deployment.
 
 ## Viewing runtime logs
 
-The kiosk session launches the photo frame through `cage` and pipes stdout/stderr into journald with `systemd-cat`. All runtime log lines carry the identifier `rust-photo-frame` and default to the `info` level.
+The kiosk session launches the photo frame through Sway and pipes stdout/stderr into journald with `systemd-cat`. All runtime log lines carry the identifier `rust-photo-frame` and default to the `info` level.
 
 To follow the live log stream:
 
@@ -20,7 +20,7 @@ When additional detail is required, edit `/etc/greetd/config.toml` so the launch
 
 ```toml
 [default_session]
-command = "cage -s -- systemd-cat --identifier=rust-photo-frame env RUST_LOG=debug /opt/photo-frame/bin/rust-photo-frame /var/lib/photo-frame/config/config.yaml"
+command = "/usr/local/bin/photoframe-session"
 user = "kiosk"
 ```
 
@@ -37,7 +37,7 @@ sudo systemctl start greetd.service
 ## Starting, stopping, and restarting the viewer
 
 - **Stop**: `sudo systemctl stop greetd.service` - immediately tears down the kiosk session and blanks the display.
-- **Start**: `sudo systemctl start greetd.service` - brings greetd back on tty1, which in turn launches `cage` and the photo frame.
+- **Start**: `sudo systemctl start greetd.service` - brings greetd back on tty1, which in turn launches Sway and the photo frame.
 - **Restart**: `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service` - give logind a moment to release the seat before greetd grabs it again.
 
 If you prefer a reusable helper, wrap the sequence in a shell alias or script (e.g. `restart-greetd()`); just keep the pause in place when you need to refresh the viewer.

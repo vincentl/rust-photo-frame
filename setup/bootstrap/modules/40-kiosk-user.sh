@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+MODULE="bootstrap:40-kiosk-user"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=../lib/systemd.sh
@@ -13,6 +15,19 @@ log() {
 die() {
     printf '[%s] ERROR: %s\n' "${MODULE}" "$*" >&2
     exit 1
+}
+
+require_commands() {
+    local missing=()
+    local cmd
+    for cmd in apt-get id useradd usermod groupadd install cp sed grep awk; do
+        if ! command -v "${cmd}" >/dev/null 2>&1; then
+            missing+=("${cmd}")
+        fi
+    done
+    if (( ${#missing[@]} )); then
+        die "Required commands missing: ${missing[*]}"
+    fi
 }
 
 require_trixie() {
@@ -119,13 +134,15 @@ ensure_boot_config_pi5() {
 
 ensure_kiosk_packages() {
     local packages=(
-        cage
         greetd
         mesa-vulkan-drivers
+        socat
+        sway
+        swaybg
+        swayidle
+        swaylock
         vulkan-tools
         wayland-protocols
-        wlr-randr
-        socat
     )
     local missing=()
     local pkg
@@ -300,17 +317,14 @@ main() {
 
     ensure_boot_config_pi5
 
-    ensure_packages
+    ensure_kiosk_packages
     ensure_kiosk_user
     ensure_runtime_dirs
-    install_session_wrapper
-    write_greetd_config
-    install_auxiliary_units
     install_polkit_rules
     ensure_persistent_journald
     enable_systemd_units
 
-    log "Kiosk provisioning complete. greetd will launch cage on tty1 as kiosk."
+    log "Kiosk provisioning complete. greetd will launch sway on tty1 as kiosk."
 }
 
 main "$@"

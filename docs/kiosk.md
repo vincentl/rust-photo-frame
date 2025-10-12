@@ -1,6 +1,6 @@
 # Debian 13 Wayland Kiosk
 
-The photo frame boots straight into the Wayland app using a greetd-managed session on Debian 13 (trixie). greetd starts `cage` on virtual terminal 1 and runs the photo frame as the dedicated `kiosk` user—no display manager shims or PAM templates are required.
+The photo frame boots straight into the Wayland app using a greetd-managed session on Debian 13 (trixie). greetd launches a dedicated Sway session on virtual terminal 1 and runs the photo frame as the `kiosk` user—no display manager shims or PAM templates are required.
 
 ## Provisioning workflow
 
@@ -13,10 +13,10 @@ sudo ./setup/bootstrap/run.sh
 The script performs the following actions:
 
 - verifies `/etc/os-release` reports `VERSION_CODENAME=trixie` and applies Raspberry Pi 5 boot tweaks (set `ENABLE_4K_BOOT=0` to skip the 4K60 profile),
-- installs the Wayland stack required for kiosk mode (`greetd`, `cage`, `mesa-vulkan-drivers`, `vulkan-tools`, `wlr-randr`, `wayland-protocols`, and `socat` for control-socket tooling) alongside general dependencies,
+- installs the Wayland stack required for kiosk mode (`greetd`, `sway`, `swaybg`, `swayidle`, `swaylock`, `mesa-vulkan-drivers`, `vulkan-tools`, `wayland-protocols`, and `socat` for control-socket tooling) alongside general dependencies,
 - creates the `kiosk` account with a locked shell and ensures it belongs to the `video`, `render`, and `input` groups,
 - provisions `/run/photo-frame` (owned by `kiosk:kiosk`, mode `0770`) and drops an `/etc/tmpfiles.d/photo-frame.conf` entry so the control socket directory exists on every boot,
-- installs `/usr/local/bin/photoframe-session` and writes `/etc/greetd/config.toml` so virtual terminal 1 runs `cage -s -- /usr/local/bin/photoframe-session` as the `kiosk` user,
+- installs `/usr/local/bin/photoframe-session` and writes `/etc/greetd/config.toml` so virtual terminal 1 runs `/usr/local/bin/photoframe-session` as the `kiosk` user,
 - disables other display managers (`gdm3`, `sddm`, `lightdm`), enables `greetd.service` as the system `display-manager.service`, sets `graphical.target` as the default boot target, and masks `getty@tty1.service` to keep greetd in control of tty1,
 - deploys the `photoframe-*` helper units (wifi manager, sync timer, button daemon), and
 - enables the kiosk units, starting them automatically once the corresponding binaries exist in `/opt/photo-frame`.
@@ -32,9 +32,11 @@ Re-run the script after OS or application updates to reapply package dependencie
 vt = 1
 
 [default_session]
-command = "cage -s -- /usr/local/bin/photoframe-session"
+command = "/usr/local/bin/photoframe-session"
 user = "kiosk"
 ```
+
+The wrapper script launches Sway via `dbus-run-session`/`seatd-launch` and relies on `/usr/local/share/photoframe/sway/config` for output, cursor, and application rules. The config pins HDMI-A-1 to 3840×2160@60 Hz, hides the cursor, sets a solid black background with `swaybg`, and spawns the photo frame binary full-screen.
 
 Check the kiosk stack with the following commands:
 
@@ -45,14 +47,14 @@ systemctl status display-manager
 journalctl -u greetd -b
 ```
 
-`systemctl status greetd` should show the unit as `active (running)` with `/usr/bin/cage -s -- /usr/local/bin/photoframe-session` in the command line. The journal contains both greetd session logs and the photo frame application output. Note that `cage -s` merely forces every surface to match the output resolution; it does **not** touch pointer visibility. Hiding the cursor is entirely the application's responsibility (for example via `Window::set_cursor_visible(false)` in the Winit window handler), so the mouse pointer can remain visible on the greeting screen until we implement that in the renderer.
+`systemctl status greetd` should show the unit as `active (running)` with `/usr/local/bin/photoframe-session` in the command line. The journal contains both greetd session logs and the photo frame application output. Sway now handles the fullscreen placement and cursor hiding through the provisioned configuration, so the application no longer needs to manage compositor-specific kiosk tweaks.
 
 ## Operations quick reference
 
 - Restart the kiosk session: `sudo systemctl stop greetd && sleep 1 && sudo systemctl start greetd`.
 - Tail runtime logs: `sudo journalctl -u greetd -f`.
 - Pause the slideshow: `sudo systemctl stop greetd` (resume with `start`).
-- Inspect display state: `wlr-randr` (installed by the kiosk setup script).
+- Inspect display state: `swaymsg -t get_outputs` (available once the kiosk session is up; over SSH export `SWAYSOCK` before invoking).
 - Send runtime commands to the app (requires the default control socket path):
 
   ```bash

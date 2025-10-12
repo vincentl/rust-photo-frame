@@ -2,6 +2,7 @@ mod config;
 mod hotspot;
 mod logging;
 mod nm;
+mod overlay;
 mod password;
 mod qr;
 mod watch;
@@ -41,6 +42,8 @@ enum Commands {
         #[command(subcommand)]
         command: nm::NmCommand,
     },
+    /// Launch the on-device recovery overlay window.
+    Overlay(overlay::ui::OverlayCli),
 }
 
 #[tokio::main]
@@ -76,6 +79,7 @@ async fn try_main() -> Result<()> {
         Commands::Ui => web::run_ui(config).await?,
         Commands::Qr => qr::generate(&config)?,
         Commands::Nm { command } => nm::handle_cli(command, &config).await?,
+        Commands::Overlay(args) => overlay::ui::run(args)?,
     }
 
     Ok(())

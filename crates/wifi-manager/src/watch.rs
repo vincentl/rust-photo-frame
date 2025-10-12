@@ -1,6 +1,7 @@
-use crate::config::{Config, DisplayConfig};
+use crate::config::Config;
 use crate::hotspot;
 use crate::nm;
+use crate::overlay::{OverlayController, overlay_request};
 use crate::qr;
 use anyhow::{Context, Result};
 use rand::Rng;
@@ -13,41 +14,6 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DisplayOwner {
-    PhotoFrame,
-    WifiManager,
-}
-
-struct DisplaySwitcher {
-    config: DisplayConfig,
-    active: Option<DisplayOwner>,
-}
-
-impl DisplaySwitcher {
-    fn new(config: DisplayConfig) -> Self {
-        Self {
-            config,
-            active: None,
-        }
-    }
-
-    async fn switch_to(&mut self, owner: DisplayOwner) -> Result<()> {
-        if self.active == Some(owner) {
-            return Ok(());
-        }
-
-        let (service, label) = match owner {
-            DisplayOwner::PhotoFrame => (&self.config.photo_frame_service, "photo frame"),
-            DisplayOwner::WifiManager => (&self.config.wifi_manager_service, "wifi manager"),
-        };
-
-        start_service(&self.config.systemctl_path, service, label).await?;
-        self.active = Some(owner);
-        Ok(())
-    }
-}
-
 pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     fs::create_dir_all(&config.var_dir)
         .with_context(|| format!("failed to create var dir at {}", config.var_dir.display()))?;
@@ -55,7 +21,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     let mut state = WatchState::Online;
     let mut offline_since: Option<Instant> = None;
     let mut hotspot_state: Option<ActiveHotspot> = None;
-    let mut display = DisplaySwitcher::new(config.display.clone());
+    let mut overlay = OverlayController::new(config.overlay.clone());
 
     let mut sigterm =
         signal(SignalKind::terminate()).context("failed to register SIGTERM handler")?;
@@ -69,12 +35,18 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
                 if let Some(mut active) = hotspot_state.take() {
                     active.stop(&config).await.ok();
                 }
+                if let Err(err) = overlay.hide().await {
+                    warn!(error = ?err, "failed to clear overlay during shutdown");
+                }
                 return Ok(());
             }
             _ = sigint.recv() => {
                 info!("received SIGINT; shutting down");
                 if let Some(mut active) = hotspot_state.take() {
                     active.stop(&config).await.ok();
+                }
+                if let Err(err) = overlay.hide().await {
+                    warn!(error = ?err, "failed to clear overlay during shutdown");
                 }
                 return Ok(());
             }
@@ -111,11 +83,11 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
                                             info!("Hotspot password ready; QR updated");
                                         }
                                         hotspot_state = Some(active);
-                                        if let Err(err) = display
-                                            .switch_to(DisplayOwner::WifiManager)
+                                        if let Err(err) = overlay
+                                            .show(&overlay_request(&config))
                                             .await
                                         {
-                                            warn!(error = ?err, "failed to start wifi-manager display service");
+                                            warn!(error = ?err, "failed to display hotspot overlay");
                                         }
                                         WatchState::Hotspot
                                     }
@@ -137,8 +109,8 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
                         if let Some(mut active) = hotspot_state.take() {
                             active.stop(&config).await.ok();
                         }
-                        if let Err(err) = display.switch_to(DisplayOwner::PhotoFrame).await {
-                            warn!(error = ?err, "failed to restore photo frame display service");
+                        if let Err(err) = overlay.hide().await {
+                            warn!(error = ?err, "failed to hide hotspot overlay");
                         }
                         offline_since = None;
                         WatchState::Online
@@ -164,22 +136,6 @@ async fn start_hotspot(config: &Config, config_path: &PathBuf) -> Result<ActiveH
     );
     let child = spawn_ui(config_path).await?;
     Ok(ActiveHotspot { ui_process: child })
-}
-
-async fn start_service(systemctl_path: &PathBuf, service: &str, label: &str) -> Result<()> {
-    let mut command = Command::new(systemctl_path);
-    command.arg("start").arg(service);
-    command.stdout(Stdio::null());
-    command.stderr(Stdio::null());
-    let status = command
-        .status()
-        .await
-        .with_context(|| format!("failed to invoke systemctl for {label}"))?;
-    if !status.success() {
-        anyhow::bail!("systemctl start {service} exited with status {status}");
-    }
-    info!(service = %service, "systemctl start succeeded");
-    Ok(())
 }
 
 async fn check_online(config: &Config) -> Result<bool> {
