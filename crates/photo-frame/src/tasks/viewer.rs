@@ -3,8 +3,8 @@ pub mod scenes;
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
-    IrisDirection, IrisEasing, MattingConfig, MattingMode, MattingOptions, TransitionConfig,
-    TransitionKind, TransitionMode, TransitionOptions,
+    MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionKind,
+    TransitionMode, TransitionOptions,
 };
 use crate::events::{
     Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
@@ -1111,7 +1111,7 @@ pub fn run_windowed(
             let Some(mut mode) = self.mode.take() else {
                 return None;
             };
-            let surface = gface();
+            let surface = self.active_surface();
             let mut bridge = MattingBridge {
                 preload_count: self.preload_count,
                 mat_inflight: &mut self.mat_inflight,
