@@ -29,12 +29,14 @@ pub struct GreetingScreen {
     message: String,
     background: LinSrgba<f32>,
     font_colour: LinSrgba<f32>,
+    accent_colour: LinSrgba<f32>,
     size: PhysicalSize<u32>,
     text_origin: (f32, f32),
     stroke_dip: f32,
     corner_radius_dip: f32,
     scale_factor: f64,
     padding_px: f32,
+    frame_renderer: FrameRenderer,
 }
 
 impl GreetingScreen {
@@ -63,6 +65,9 @@ impl GreetingScreen {
 
         let background = resolve_background_colour(screen.colors.background.as_deref());
         let font_colour = resolve_font_colour(screen.colors.font.as_deref());
+        let accent_colour = resolve_accent_colour(screen.colors.accent.as_deref());
+
+        let frame_renderer = FrameRenderer::new(device, format);
 
         let mut instance = GreetingScreen {
             device: device.clone(),
@@ -77,12 +82,14 @@ impl GreetingScreen {
             message: String::new(),
             background,
             font_colour,
+            accent_colour,
             size: PhysicalSize::new(0, 0),
             text_origin: (0.0, 0.0),
             stroke_dip,
             corner_radius_dip,
             scale_factor: 1.0,
             padding_px: 0.0,
+            frame_renderer,
         };
         instance.recompute_padding();
         instance
@@ -152,6 +159,8 @@ impl GreetingScreen {
             to_wgpu_color(self.background),
             None::<fn(&mut wgpu::RenderPass<'_>)>,
         );
+
+        self.frame_renderer.render(encoder, target_view);
 
         let mut render_error = None;
         {
@@ -227,7 +236,199 @@ impl GreetingScreen {
         let scale = self.scale_factor.max(0.0) as f32;
         let stroke_px = (self.stroke_dip * scale).max(0.0);
         let corner_px = (self.corner_radius_dip * scale).max(0.0);
-        self.padding_px = stroke_px.max(corner_px * 0.5);
+        let inner_inset = stroke_px * 7.0;
+        self.padding_px = inner_inset.max(corner_px * 0.5);
+        self.frame_renderer.update(
+            &self.queue,
+            self.size,
+            stroke_px,
+            corner_px,
+            self.accent_colour,
+            self.background,
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct FrameUniforms {
+    resolution: [f32; 2],
+    _pad0: [f32; 2],
+    insets: [f32; 4],
+    radii: [f32; 4],
+    accent: [f32; 4],
+    background: [f32; 4],
+}
+
+impl Default for FrameUniforms {
+    fn default() -> Self {
+        Self {
+            resolution: [0.0, 0.0],
+            _pad0: [0.0, 0.0],
+            insets: [0.0; 4],
+            radii: [0.0; 4],
+            accent: [0.0; 4],
+            background: [0.0; 4],
+        }
+    }
+}
+
+struct FrameRenderer {
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    uniform_buffer: wgpu::Buffer,
+    uniforms: FrameUniforms,
+}
+
+impl FrameRenderer {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("greeting-frame-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("greeting_frame.wgsl").into()),
+        });
+
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("greeting-frame-uniforms"),
+            size: std::mem::size_of::<FrameUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("greeting-frame-bind-layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<FrameUniforms>() as u64
+                    ),
+                },
+                count: None,
+            }],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("greeting-frame-bind-group"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("greeting-frame-pipeline-layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("greeting-frame-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        Self {
+            pipeline,
+            bind_group,
+            uniform_buffer,
+            uniforms: FrameUniforms::default(),
+        }
+    }
+
+    fn update(
+        &mut self,
+        queue: &wgpu::Queue,
+        size: PhysicalSize<u32>,
+        stroke_px: f32,
+        corner_radius_px: f32,
+        accent: LinSrgba<f32>,
+        background: LinSrgba<f32>,
+    ) {
+        if size.width == 0 || size.height == 0 {
+            self.uniforms = FrameUniforms::default();
+            queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.uniforms));
+            return;
+        }
+
+        let width = size.width as f32;
+        let height = size.height as f32;
+
+        let outer_inset = stroke_px * 2.0;
+        let outer_inner_inset = outer_inset + stroke_px * 2.0;
+        let inner_outer_inset = outer_inner_inset + stroke_px * 2.0;
+        let inner_inner_inset = inner_outer_inset + stroke_px;
+
+        let uniforms = FrameUniforms {
+            resolution: [width, height],
+            _pad0: [0.0, 0.0],
+            insets: [
+                outer_inset,
+                outer_inner_inset,
+                inner_outer_inset,
+                inner_inner_inset,
+            ],
+            radii: [
+                (corner_radius_px - outer_inset).max(0.0),
+                (corner_radius_px - outer_inner_inset).max(0.0),
+                (corner_radius_px - inner_outer_inset).max(0.0),
+                (corner_radius_px - inner_inner_inset).max(0.0),
+            ],
+            accent: linear_color_to_array(accent),
+            background: linear_color_to_array(background),
+        };
+
+        self.uniforms = uniforms;
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.uniforms));
+    }
+
+    fn render(&self, encoder: &mut wgpu::CommandEncoder, target_view: &wgpu::TextureView) {
+        if self.uniforms.resolution[0] <= 0.0 || self.uniforms.resolution[1] <= 0.0 {
+            return;
+        }
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("greeting-frame"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.draw(0..3, 0..1);
     }
 }
 
@@ -260,6 +461,12 @@ fn resolve_font_colour(source: Option<&str>) -> LinSrgba<f32> {
     source
         .and_then(parse_hex_color)
         .unwrap_or_else(default_font_colour)
+}
+
+fn resolve_accent_colour(source: Option<&str>) -> LinSrgba<f32> {
+    source
+        .and_then(parse_hex_color)
+        .unwrap_or_else(default_accent_colour)
 }
 
 fn initialize_font_database(db: &mut Database) {
@@ -335,6 +542,10 @@ fn to_text_color(color: LinSrgba<f32>) -> Color {
     Color::rgba(srgb_u8.red, srgb_u8.green, srgb_u8.blue, srgb_u8.alpha)
 }
 
+fn linear_color_to_array(color: LinSrgba<f32>) -> [f32; 4] {
+    [color.red, color.green, color.blue, color.alpha]
+}
+
 fn parse_hex_color(input: &str) -> Option<LinSrgba<f32>> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -367,4 +578,8 @@ fn default_background() -> LinSrgba<f32> {
 
 fn default_font_colour() -> LinSrgba<f32> {
     parse_hex_color("#F8FAFC").unwrap()
+}
+
+fn default_accent_colour() -> LinSrgba<f32> {
+    parse_hex_color("#38BDF8").unwrap()
 }
