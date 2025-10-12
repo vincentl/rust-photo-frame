@@ -30,7 +30,7 @@ impl OverlayScene {
         Self {
             screen,
             layout_dirty: true,
-            redraw_pending: false,
+            redraw_pending: true,
             size: PhysicalSize::new(0, 0),
             scale_factor: 1.0,
         }
