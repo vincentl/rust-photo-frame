@@ -205,7 +205,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       );
       let jitter = (noise - 0.5) * noise_amount;
       let line_alpha = clamp(line_color.w + jitter, 0.0, 1.0) * line_body * line_presence;
-      color.rgb = mix(color.rgb, line_color.rgb, clamp(line_alpha, 0.0, 1.0));
+      color = vec4<f32>(
+        mix(color.rgb, line_color.rgb, clamp(line_alpha, 0.0, 1.0)),
+        color.a,
+      );
 
       let arc_phase = abs(cos(rotated_angle * blades_clamped));
       let arc_delta = 1.0 - arc_phase;
@@ -214,12 +217,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let arc_outer = 1.0 - smoothstep(feather * 4.0, feather * 4.0 + 1e-3, dist - aperture_radius);
       let arc_presence = arc_inner * arc_outer;
       let arc_alpha = clamp(arc_color.w + jitter * 0.5, 0.0, 1.0) * arc_body * arc_presence;
-      color.rgb = mix(color.rgb, arc_color.rgb, clamp(arc_alpha, 0.0, 1.0));
+      color = vec4<f32>(
+        mix(color.rgb, arc_color.rgb, clamp(arc_alpha, 0.0, 1.0)),
+        color.a,
+      );
 
       if (vignette_strength > 0.0) {
         let radius_norm = clamp(dist / max_radius, 0.0, 1.0);
         let vignette = 1.0 - vignette_strength * smoothstep(0.55, 1.0, radius_norm);
-        color.rgb *= vignette;
+        color = vec4<f32>(color.rgb * vignette, color.a);
       }
     }
     default: {
