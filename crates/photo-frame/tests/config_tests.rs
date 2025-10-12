@@ -51,10 +51,11 @@ matting:
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
 
     let options = cfg.matting.options();
-    assert_eq!(
+    assert!(matches!(
         cfg.matting.selection(),
-        &MattingSelection::Fixed(MattingKind::Studio)
-    );
+        MattingSelection::Fixed(entry)
+            if entry.kind == MattingKind::Studio && entry.index == 0
+    ));
     let mat = options
         .get(&MattingKind::Studio)
         .expect("expected studio matting option");
@@ -151,10 +152,14 @@ matting:
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(
-        cfg.matting.selection(),
-        &MattingSelection::Random(vec![MattingKind::FixedColor, MattingKind::Blur])
-    );
+    let MattingSelection::Random(entries) = cfg.matting.selection() else {
+        panic!("expected random matting selection");
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].index, 0);
+    assert_eq!(entries[0].kind, MattingKind::FixedColor);
+    assert_eq!(entries[1].index, 1);
+    assert_eq!(entries[1].kind, MattingKind::Blur);
     let options = cfg.matting.options();
     assert_eq!(options.len(), 2);
     let fixed = options
@@ -223,11 +228,12 @@ matting:
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     match cfg.matting.selection() {
-        MattingSelection::Sequential { kinds, .. } => {
-            assert_eq!(
-                kinds.as_slice(),
-                &[MattingKind::FixedColor, MattingKind::Blur]
-            );
+        MattingSelection::Sequential { entries, .. } => {
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].index, 0);
+            assert_eq!(entries[0].kind, MattingKind::FixedColor);
+            assert_eq!(entries[1].index, 1);
+            assert_eq!(entries[1].kind, MattingKind::Blur);
         }
         other => panic!("expected sequential matting selection, got {other:?}"),
     }
@@ -461,10 +467,11 @@ transition:
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(
+    assert!(matches!(
         cfg.transition.selection(),
-        &TransitionSelection::Fixed(TransitionKind::Fade)
-    );
+        TransitionSelection::Fixed(entry)
+            if entry.kind == TransitionKind::Fade && entry.index == 0
+    ));
     let options = cfg.transition.options();
     let fade = options
         .get(&TransitionKind::Fade)
@@ -490,10 +497,11 @@ transition:
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(
+    assert!(matches!(
         cfg.transition.selection(),
-        &TransitionSelection::Fixed(TransitionKind::Iris)
-    );
+        TransitionSelection::Fixed(entry)
+            if entry.kind == TransitionKind::Iris && entry.index == 0
+    ));
     let options = cfg.transition.options();
     let iris = options
         .get(&TransitionKind::Iris)
@@ -528,14 +536,16 @@ transition:
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    assert_eq!(
-        cfg.transition.selection(),
-        &TransitionSelection::Random(vec![
-            TransitionKind::Fade,
-            TransitionKind::Wipe,
-            TransitionKind::Push,
-        ])
-    );
+    let TransitionSelection::Random(entries) = cfg.transition.selection() else {
+        panic!("expected random transition selection");
+    };
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].index, 0);
+    assert_eq!(entries[0].kind, TransitionKind::Fade);
+    assert_eq!(entries[1].index, 1);
+    assert_eq!(entries[1].kind, TransitionKind::Wipe);
+    assert_eq!(entries[2].index, 2);
+    assert_eq!(entries[2].kind, TransitionKind::Push);
     let options = cfg.transition.options();
     assert_eq!(options.len(), 3);
     let wipe = options
@@ -544,7 +554,7 @@ transition:
     assert_eq!(wipe.duration().as_millis(), 600);
     match wipe.mode() {
         rust_photo_frame::config::TransitionMode::Wipe(cfg) => {
-            assert_eq!(cfg.angles.angles_deg, vec![90.0]);
+            assert_eq!(cfg.angles.angles_deg.as_ref(), &[90.0]);
             assert_eq!(
                 cfg.angles.selection,
                 rust_photo_frame::config::AngleSelection::Random
@@ -559,7 +569,7 @@ transition:
         .expect("expected push transition option");
     match push.mode() {
         rust_photo_frame::config::TransitionMode::Push(cfg) => {
-            assert_eq!(cfg.angles.angles_deg, vec![0.0, 180.0]);
+            assert_eq!(cfg.angles.angles_deg.as_ref(), &[0.0, 180.0]);
             assert_eq!(
                 cfg.angles.selection,
                 rust_photo_frame::config::AngleSelection::Sequential
@@ -588,11 +598,12 @@ transition:
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     match cfg.transition.selection() {
-        TransitionSelection::Sequential { kinds, .. } => {
-            assert_eq!(
-                kinds.as_slice(),
-                &[TransitionKind::Push, TransitionKind::Wipe]
-            );
+        TransitionSelection::Sequential { entries, .. } => {
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].index, 0);
+            assert_eq!(entries[0].kind, TransitionKind::Push);
+            assert_eq!(entries[1].index, 1);
+            assert_eq!(entries[1].kind, TransitionKind::Wipe);
         }
         other => panic!("expected sequential transition selection, got {other:?}"),
     }
@@ -748,7 +759,7 @@ transition:
     assert_eq!(option.duration().as_millis(), 725);
     match option.mode() {
         rust_photo_frame::config::TransitionMode::Push(push) => {
-            assert_eq!(push.angles.angles_deg, vec![90.0, 270.0]);
+            assert_eq!(push.angles.angles_deg.as_ref(), &[90.0, 270.0]);
             assert_eq!(
                 push.angles.selection,
                 rust_photo_frame::config::AngleSelection::Sequential

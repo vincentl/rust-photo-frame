@@ -675,12 +675,18 @@ impl SequentialState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionEntry<K: Copy> {
+    pub index: usize,
+    pub kind: K,
+}
+
 #[derive(Debug, Clone)]
 pub enum MattingSelection {
-    Fixed(MattingKind),
-    Random(Vec<MattingKind>),
+    Fixed(SelectionEntry<MattingKind>),
+    Random(Arc<[SelectionEntry<MattingKind>]>),
     Sequential {
-        kinds: Vec<MattingKind>,
+        entries: Arc<[SelectionEntry<MattingKind>]>,
         runtime: SequentialState,
     },
 }
@@ -689,11 +695,11 @@ impl PartialEq for MattingSelection {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (MattingSelection::Fixed(a), MattingSelection::Fixed(b)) => a == b,
-            (MattingSelection::Random(a), MattingSelection::Random(b)) => a == b,
+            (MattingSelection::Random(a), MattingSelection::Random(b)) => a.as_ref() == b.as_ref(),
             (
-                MattingSelection::Sequential { kinds: a, .. },
-                MattingSelection::Sequential { kinds: b, .. },
-            ) => a == b,
+                MattingSelection::Sequential { entries: a, .. },
+                MattingSelection::Sequential { entries: b, .. },
+            ) => a.as_ref() == b.as_ref(),
             _ => false,
         }
     }
@@ -1517,7 +1523,10 @@ impl Default for MattingConfig {
         let mut options = BTreeMap::new();
         options.insert(MattingKind::FixedColor, MattingOptions::default());
         Self {
-            selection: MattingSelection::Fixed(MattingKind::FixedColor),
+            selection: MattingSelection::Fixed(SelectionEntry {
+                index: 0,
+                kind: MattingKind::FixedColor,
+            }),
             options,
         }
     }
@@ -1575,8 +1584,8 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
             resolve_pipeline_selection::<A::Error>(selection, active_entries.len(), "matting")?;
 
         let mut options = BTreeMap::new();
-        let mut kinds = Vec::with_capacity(active_entries.len());
-        for entry in active_entries {
+        let mut entries = Vec::with_capacity(active_entries.len());
+        for (index, entry) in active_entries.into_iter().enumerate() {
             let kind = entry.kind;
             let mut builder = MattingOptionBuilder::default();
             for (field, value) in entry.fields {
@@ -1589,14 +1598,16 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
             }
             let option = MattingOptions::with_kind(kind, builder);
             options.insert(kind, option);
-            kinds.push(kind);
+            entries.push(SelectionEntry { index, kind });
         }
 
+        let entries: Arc<[SelectionEntry<MattingKind>]> = entries.into();
+
         let selection = match resolved_selection {
-            PipelineSelection::Fixed => MattingSelection::Fixed(kinds[0]),
-            PipelineSelection::Random => MattingSelection::Random(kinds.clone()),
+            PipelineSelection::Fixed => MattingSelection::Fixed(entries[0]),
+            PipelineSelection::Random => MattingSelection::Random(entries.clone()),
             PipelineSelection::Sequential => MattingSelection::Sequential {
-                kinds: kinds.clone(),
+                entries: entries.clone(),
                 runtime: SequentialState::default(),
             },
         };
@@ -1619,10 +1630,12 @@ impl MattingConfig {
     pub fn primary_option(&self) -> Option<&MattingOptions> {
         let options = self.options();
         match self.selection() {
-            MattingSelection::Fixed(kind) => options.get(kind),
-            MattingSelection::Random(kinds) => kinds.iter().find_map(|kind| options.get(kind)),
-            MattingSelection::Sequential { kinds, .. } => {
-                kinds.first().and_then(|kind| options.get(kind))
+            MattingSelection::Fixed(entry) => options.get(&entry.kind),
+            MattingSelection::Random(entries) => {
+                entries.first().and_then(|entry| options.get(&entry.kind))
+            }
+            MattingSelection::Sequential { entries, .. } => {
+                entries.first().and_then(|entry| options.get(&entry.kind))
             }
         }
     }
@@ -1643,26 +1656,25 @@ impl MattingConfig {
     pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> MattingOptions {
         let options = self.options();
         match self.selection() {
-            MattingSelection::Fixed(kind) => options
-                .get(kind)
+            MattingSelection::Fixed(entry) => options
+                .get(&entry.kind)
                 .cloned()
                 .expect("validated fixed matting should have selected option"),
-            MattingSelection::Random(kinds) => {
-                let kind = kinds
+            MattingSelection::Random(entries) => {
+                let entry = entries
                     .iter()
-                    .copied()
                     .choose(rng)
                     .expect("validated random matting should have options");
                 options
-                    .get(&kind)
+                    .get(&entry.kind)
                     .cloned()
                     .expect("validated random matting should have matching option")
             }
-            MattingSelection::Sequential { kinds, runtime } => {
-                let index = runtime.next(kinds.len());
-                let kind = kinds[index];
+            MattingSelection::Sequential { entries, runtime } => {
+                let index = runtime.next(entries.len());
+                let entry = &entries[index];
                 options
-                    .get(&kind)
+                    .get(&entry.kind)
                     .cloned()
                     .expect("validated sequential matting should have matching option")
             }
@@ -2153,10 +2165,10 @@ impl<'de> DeserializeSeed<'de> for PhotoEffectOptionSeed {
 
 #[derive(Debug, Clone)]
 pub enum TransitionSelection {
-    Fixed(TransitionKind),
-    Random(Vec<TransitionKind>),
+    Fixed(SelectionEntry<TransitionKind>),
+    Random(Arc<[SelectionEntry<TransitionKind>]>),
     Sequential {
-        kinds: Vec<TransitionKind>,
+        entries: Arc<[SelectionEntry<TransitionKind>]>,
         runtime: SequentialState,
     },
 }
@@ -2165,11 +2177,13 @@ impl PartialEq for TransitionSelection {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (TransitionSelection::Fixed(a), TransitionSelection::Fixed(b)) => a == b,
-            (TransitionSelection::Random(a), TransitionSelection::Random(b)) => a == b,
+            (TransitionSelection::Random(a), TransitionSelection::Random(b)) => {
+                a.as_ref() == b.as_ref()
+            }
             (
-                TransitionSelection::Sequential { kinds: a, .. },
-                TransitionSelection::Sequential { kinds: b, .. },
-            ) => a == b,
+                TransitionSelection::Sequential { entries: a, .. },
+                TransitionSelection::Sequential { entries: b, .. },
+            ) => a.as_ref() == b.as_ref(),
             _ => false,
         }
     }
@@ -2246,7 +2260,10 @@ impl Default for TransitionConfig {
             TransitionOptions::default_for(TransitionKind::Fade),
         );
         Self {
-            selection: TransitionSelection::Fixed(TransitionKind::Fade),
+            selection: TransitionSelection::Fixed(SelectionEntry {
+                index: 0,
+                kind: TransitionKind::Fade,
+            }),
             options,
         }
     }
@@ -2264,10 +2281,12 @@ impl TransitionConfig {
     pub fn primary_option(&self) -> Option<&TransitionOptions> {
         let options = self.options();
         match self.selection() {
-            TransitionSelection::Fixed(kind) => options.get(kind),
-            TransitionSelection::Random(kinds) => kinds.iter().find_map(|kind| options.get(kind)),
-            TransitionSelection::Sequential { kinds, .. } => {
-                kinds.first().and_then(|kind| options.get(kind))
+            TransitionSelection::Fixed(entry) => options.get(&entry.kind),
+            TransitionSelection::Random(entries) => {
+                entries.first().and_then(|entry| options.get(&entry.kind))
+            }
+            TransitionSelection::Sequential { entries, .. } => {
+                entries.first().and_then(|entry| options.get(&entry.kind))
             }
         }
     }
@@ -2275,26 +2294,25 @@ impl TransitionConfig {
     pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> TransitionOptions {
         let options = self.options();
         match self.selection() {
-            TransitionSelection::Fixed(kind) => options
-                .get(kind)
+            TransitionSelection::Fixed(entry) => options
+                .get(&entry.kind)
                 .cloned()
                 .expect("validated fixed transition should have selected option"),
-            TransitionSelection::Random(kinds) => {
-                let kind = kinds
+            TransitionSelection::Random(entries) => {
+                let entry = entries
                     .iter()
-                    .copied()
                     .choose(rng)
                     .expect("validated random transition should have options");
                 options
-                    .get(&kind)
+                    .get(&entry.kind)
                     .cloned()
                     .expect("validated random transition should have matching option")
             }
-            TransitionSelection::Sequential { kinds, runtime } => {
-                let index = runtime.next(kinds.len());
-                let kind = kinds[index];
+            TransitionSelection::Sequential { entries, runtime } => {
+                let index = runtime.next(entries.len());
+                let entry = &entries[index];
                 options
-                    .get(&kind)
+                    .get(&entry.kind)
                     .cloned()
                     .expect("validated sequential transition should have matching option")
             }
@@ -2310,19 +2328,20 @@ impl TransitionConfig {
             option.normalize()?;
         }
         match &self.selection {
-            TransitionSelection::Fixed(kind) => ensure!(
-                self.options.contains_key(kind),
+            TransitionSelection::Fixed(entry) => ensure!(
+                self.options.contains_key(&entry.kind),
                 format!(
                     "transition.active entry {} must resolve to a configured option",
-                    kind
+                    entry.kind
                 )
             ),
-            TransitionSelection::Random(kinds) | TransitionSelection::Sequential { kinds, .. } => {
-                for kind in kinds {
+            TransitionSelection::Random(entries)
+            | TransitionSelection::Sequential { entries, .. } => {
+                for entry in entries.iter() {
                     ensure!(
-                        self.options.contains_key(kind),
+                        self.options.contains_key(&entry.kind),
                         "transition.active entry {} must resolve to a configured option",
-                        kind
+                        entry.kind
                     );
                 }
             }
@@ -2515,7 +2534,7 @@ impl Default for AngleSequenceState {
 
 #[derive(Debug, Clone)]
 pub struct AnglePicker {
-    pub angles_deg: Vec<f32>,
+    pub angles_deg: Arc<[f32]>,
     pub selection: AngleSelection,
     pub jitter_deg: f32,
     runtime: AngleSequenceState,
@@ -2524,7 +2543,7 @@ pub struct AnglePicker {
 impl Default for AnglePicker {
     fn default() -> Self {
         Self {
-            angles_deg: vec![0.0],
+            angles_deg: Arc::from([0.0_f32]),
             selection: AngleSelection::Random,
             jitter_deg: 0.0,
             runtime: AngleSequenceState::default(),
@@ -2539,7 +2558,7 @@ impl AnglePicker {
         jitter_deg: Option<f32>,
     ) -> Self {
         let picker = Self {
-            angles_deg: angles_deg.unwrap_or_else(|| vec![0.0]),
+            angles_deg: Arc::from(angles_deg.unwrap_or_else(|| vec![0.0])),
             selection: selection.unwrap_or(AngleSelection::Random),
             jitter_deg: jitter_deg.unwrap_or(0.0),
             runtime: AngleSequenceState::default(),
@@ -2555,7 +2574,7 @@ impl AnglePicker {
                 kind
             )
         );
-        for angle in &self.angles_deg {
+        for angle in self.angles_deg.iter() {
             ensure!(
                 angle.is_finite(),
                 format!(
@@ -2747,8 +2766,8 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
             resolve_pipeline_selection::<A::Error>(selection, active_entries.len(), "transition")?;
 
         let mut options = BTreeMap::new();
-        let mut kinds = Vec::with_capacity(active_entries.len());
-        for entry in active_entries {
+        let mut entries = Vec::with_capacity(active_entries.len());
+        for (index, entry) in active_entries.into_iter().enumerate() {
             let kind = entry.kind;
             let mut builder = TransitionOptionBuilder::default();
             for (field, value) in entry.fields {
@@ -2757,14 +2776,16 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
             let option = TransitionOptions::with_kind(kind, builder)
                 .map_err(|err| de::Error::custom(err.to_string()))?;
             options.insert(kind, option);
-            kinds.push(kind);
+            entries.push(SelectionEntry { index, kind });
         }
 
+        let entries: Arc<[SelectionEntry<TransitionKind>]> = entries.into();
+
         let selection = match resolved_selection {
-            PipelineSelection::Fixed => TransitionSelection::Fixed(kinds[0]),
-            PipelineSelection::Random => TransitionSelection::Random(kinds.clone()),
+            PipelineSelection::Fixed => TransitionSelection::Fixed(entries[0]),
+            PipelineSelection::Random => TransitionSelection::Random(entries.clone()),
             PipelineSelection::Sequential => TransitionSelection::Sequential {
-                kinds: kinds.clone(),
+                entries: entries.clone(),
                 runtime: SequentialState::default(),
             },
         };
