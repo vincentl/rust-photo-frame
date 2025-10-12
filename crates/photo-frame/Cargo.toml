@@ -23,6 +23,7 @@ chrono = { version = "0.4.38", features = ["serde"] }
 chrono-tz = { version = "0.10.0", features = ["serde"] }
 crossbeam-channel = "0.5.15"
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "io-util"] }
+futures = "0.3.31"
 tokio-util = "0.7.16"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }

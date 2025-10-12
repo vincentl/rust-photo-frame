@@ -14,6 +14,7 @@ use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
 use crate::tasks::greeting_screen::GreetingScreen;
 use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
+use futures::executor::block_on;
 use image::{Rgba, RgbaImage, imageops};
 use rand::Rng;
 use std::borrow::Cow;
@@ -2207,11 +2208,30 @@ pub fn run_windowed(
     drop(command_tx);
     control_driver.abort();
     forward_handle.abort();
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        let _ = handle.block_on(async {
-            let _ = control_driver.await;
-            let _ = forward_handle.await;
-        });
+
+    let wait_handles = async { (control_driver.await, forward_handle.await) };
+
+    let (control_driver_result, forward_handle_result) =
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| block_on(wait_handles))
+        } else {
+            block_on(wait_handles)
+        };
+
+    if let Err(err) = control_driver_result {
+        if err.is_cancelled() {
+            debug!(error = %err, "viewer control driver cancelled while shutting down");
+        } else {
+            warn!(error = %err, "viewer control driver join error during shutdown");
+        }
+    }
+
+    if let Err(err) = forward_handle_result {
+        if err.is_cancelled() {
+            debug!(error = %err, "viewer command forwarder cancelled while shutting down");
+        } else {
+            warn!(error = %err, "viewer command forwarder join error during shutdown");
+        }
     }
 
     Ok(())
