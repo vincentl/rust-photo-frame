@@ -14,9 +14,9 @@ use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
 use crate::renderer::iris_tess::{IrisDrawParams, IrisRenderer, IrisStage};
 use crate::tasks::greeting_screen::GreetingScreen;
-use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
+use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
 use futures::executor::block_on;
-use image::{Rgba, RgbaImage, imageops};
+use image::{imageops, Rgba, RgbaImage};
 use rand::Rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -24,9 +24,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::time::{interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
-use tracing::{Level, debug, info, warn};
+use tracing::{debug, info, warn, Level};
 
 pub(super) enum ActiveTransition {
     Fade {
@@ -274,12 +274,32 @@ enum SurfaceReport {
 struct SurfaceReadyGate {
     ready: bool,
     awaiting_initial_report: bool,
+    expected_minimum: Option<(u32, u32)>,
+    last_reported_size: Option<(u32, u32)>,
 }
 
 impl SurfaceReadyGate {
+    fn set_expected_minimum(&mut self, expected_minimum: Option<(u32, u32)>) -> Option<bool> {
+        self.expected_minimum = expected_minimum;
+
+        if self.awaiting_initial_report {
+            return None;
+        }
+
+        match (self.last_reported_size, self.expected_minimum) {
+            (Some((width, height)), _) => {
+                let ready = self.meets_expectation(width, height);
+                self.set_ready(ready)
+            }
+            (None, Some(_)) => self.set_ready(false),
+            (None, None) => None,
+        }
+    }
+
     fn reset(&mut self) {
         self.ready = false;
         self.awaiting_initial_report = false;
+        self.last_reported_size = None;
     }
 
     fn arm_for_initial_report(&mut self) {
@@ -288,6 +308,7 @@ impl SurfaceReadyGate {
     }
 
     fn update(&mut self, width: u32, height: u32, report: SurfaceReport) -> Option<bool> {
+        self.last_reported_size = Some((width, height));
         match report {
             SurfaceReport::InitialConfig => {
                 if self.awaiting_initial_report {
@@ -299,7 +320,7 @@ impl SurfaceReadyGate {
             }
         }
 
-        let ready = width > 1 && height > 1 && !self.awaiting_initial_report;
+        let ready = !self.awaiting_initial_report && self.meets_expectation(width, height);
         self.set_ready(ready)
     }
 
@@ -313,6 +334,15 @@ impl SurfaceReadyGate {
             Some(ready)
         } else {
             None
+        }
+    }
+
+    fn meets_expectation(&self, width: u32, height: u32) -> bool {
+        match self.expected_minimum {
+            Some((expected_width, expected_height)) => {
+                width >= expected_width && height >= expected_height
+            }
+            None => width > 1 && height > 1,
         }
     }
 }
@@ -333,7 +363,11 @@ fn surface_state_for_queue(
     surface_ready: bool,
     surface: Option<SurfaceState>,
 ) -> Option<SurfaceState> {
-    if surface_ready { surface } else { None }
+    if surface_ready {
+        surface
+    } else {
+        None
+    }
 }
 
 impl<'a> MattingBridge<'a> {
@@ -1351,9 +1385,10 @@ pub fn run_windowed(
         }
 
         fn ensure_window(&mut self, event_loop: &ActiveEventLoop) -> Option<Arc<Window>> {
-            if let Some(window) = self.window.as_ref() {
+            if let Some(window) = self.window.as_ref().cloned() {
+                self.update_surface_gate_expectation(window.as_ref(), event_loop);
                 self.log_event_loop_state("ensure_window_cached");
-                return Some(window.clone());
+                return Some(window);
             }
 
             let attrs = Window::default_attributes().with_title("Photo Frame");
@@ -1369,6 +1404,7 @@ pub fn run_windowed(
             let fullscreen_monitor = window
                 .current_monitor()
                 .or_else(|| event_loop.primary_monitor());
+            self.update_surface_gate_expectation(window.as_ref(), event_loop);
             window.set_fullscreen(Some(match fullscreen_monitor {
                 Some(m) => Fullscreen::Borderless(Some(m)),
                 None => Fullscreen::Borderless(None),
@@ -1377,6 +1413,37 @@ pub fn run_windowed(
             self.window = Some(window.clone());
             self.log_event_loop_state("ensure_window_created");
             Some(window)
+        }
+
+        fn update_surface_gate_expectation(
+            &mut self,
+            window: &Window,
+            event_loop: &ActiveEventLoop,
+        ) {
+            let fullscreen_monitor = window
+                .current_monitor()
+                .or_else(|| event_loop.primary_monitor());
+            if let Some(monitor) = fullscreen_monitor.as_ref() {
+                let size = monitor.size();
+                if let Some(ready) = self
+                    .surface_gate
+                    .set_expected_minimum(Some((size.width, size.height)))
+                {
+                    debug!(
+                        surface_ready = ready,
+                        expected_width = size.width,
+                        expected_height = size.height,
+                        "viewer_surface_ready_state_changed"
+                    );
+                }
+            } else if let Some(ready) = self.surface_gate.set_expected_minimum(None) {
+                debug!(
+                    surface_ready = ready,
+                    expected_width = 0u32,
+                    expected_height = 0u32,
+                    "viewer_surface_ready_state_changed"
+                );
+            }
         }
 
         fn teardown_gpu(&mut self) {
@@ -2967,6 +3034,10 @@ pub mod testkit {
                 height,
                 max_texture_dimension,
             });
+        }
+
+        pub fn set_surface_expected_minimum(&mut self, expected: Option<(u32, u32)>) {
+            let _ = self.surface_gate.set_expected_minimum(expected);
         }
 
         pub fn arm_surface_gate(&mut self) {
