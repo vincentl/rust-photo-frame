@@ -681,6 +681,62 @@ pub struct SelectionEntry<K: Copy> {
     pub kind: K,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct SelectedOption<'a, K: Copy, O> {
+    pub entry: SelectionEntry<K>,
+    pub option: &'a O,
+}
+
+enum SelectionEntries<'a, K: Copy> {
+    Single(Option<SelectionEntry<K>>),
+    Slice(std::iter::Copied<std::slice::Iter<'a, SelectionEntry<K>>>),
+}
+
+impl<'a, K: Copy> SelectionEntries<'a, K> {
+    fn single(entry: SelectionEntry<K>) -> Self {
+        Self::Single(Some(entry))
+    }
+
+    fn from_slice(entries: &'a [SelectionEntry<K>]) -> Self {
+        Self::Slice(entries.iter().copied())
+    }
+}
+
+impl<'a, K: Copy> Iterator for SelectionEntries<'a, K> {
+    type Item = SelectionEntry<K>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Single(entry) => entry.take(),
+            Self::Slice(iter) => iter.next(),
+        }
+    }
+}
+
+struct SelectedIter<'a, K: Copy + Ord, O> {
+    entries: SelectionEntries<'a, K>,
+    options: &'a BTreeMap<K, O>,
+}
+
+impl<'a, K: Copy + Ord, O> SelectedIter<'a, K, O> {
+    fn new(entries: SelectionEntries<'a, K>, options: &'a BTreeMap<K, O>) -> Self {
+        Self { entries, options }
+    }
+}
+
+impl<'a, K: Copy + Ord, O> Iterator for SelectedIter<'a, K, O> {
+    type Item = SelectedOption<'a, K, O>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(entry) = self.entries.next() {
+            if let Some(option) = self.options.get(&entry.kind) {
+                return Some(SelectedOption { entry, option });
+            }
+        }
+        None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum MattingSelection {
     Fixed(SelectionEntry<MattingKind>),
@@ -690,6 +746,8 @@ pub enum MattingSelection {
         runtime: SequentialState,
     },
 }
+
+pub type SelectedMatting<'a> = SelectedOption<'a, MattingKind, MattingOptions>;
 
 impl PartialEq for MattingSelection {
     fn eq(&self, other: &Self) -> bool {
@@ -1627,17 +1685,51 @@ impl MattingConfig {
         &self.options
     }
 
-    pub fn primary_option(&self) -> Option<&MattingOptions> {
-        let options = self.options();
+    fn selection_entries(&self) -> SelectionEntries<'_, MattingKind> {
         match self.selection() {
-            MattingSelection::Fixed(entry) => options.get(&entry.kind),
-            MattingSelection::Random(entries) => {
-                entries.first().and_then(|entry| options.get(&entry.kind))
-            }
+            MattingSelection::Fixed(entry) => SelectionEntries::single(*entry),
+            MattingSelection::Random(entries) => SelectionEntries::from_slice(entries.as_ref()),
             MattingSelection::Sequential { entries, .. } => {
-                entries.first().and_then(|entry| options.get(&entry.kind))
+                SelectionEntries::from_slice(entries.as_ref())
             }
         }
+    }
+
+    pub fn iter_selected(&self) -> impl Iterator<Item = SelectedMatting<'_>> {
+        SelectedIter::new(self.selection_entries(), &self.options)
+    }
+
+    pub fn primary_selected(&self) -> Option<SelectedMatting<'_>> {
+        self.iter_selected().next()
+    }
+
+    pub fn selected_by_index(&self, index: usize) -> Option<SelectedMatting<'_>> {
+        self.iter_selected()
+            .find(|selected| selected.entry.index == index)
+    }
+
+    pub fn select_active<R: Rng + ?Sized>(&self, rng: &mut R) -> SelectedMatting<'_> {
+        let entry = match self.selection() {
+            MattingSelection::Fixed(entry) => *entry,
+            MattingSelection::Random(entries) => *entries
+                .iter()
+                .choose(rng)
+                .expect("validated random matting should have options"),
+            MattingSelection::Sequential { entries, runtime } => {
+                let index = runtime.next(entries.len());
+                entries[index]
+            }
+        };
+
+        let option = self
+            .options
+            .get(&entry.kind)
+            .expect("validated matting selection should resolve to an option");
+        SelectedOption { entry, option }
+    }
+
+    pub fn primary_option(&self) -> Option<&MattingOptions> {
+        self.primary_selected().map(|selected| selected.option)
     }
 
     pub fn prepare_runtime(&mut self) -> Result<()> {
@@ -1654,31 +1746,7 @@ impl MattingConfig {
     }
 
     pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> MattingOptions {
-        let options = self.options();
-        match self.selection() {
-            MattingSelection::Fixed(entry) => options
-                .get(&entry.kind)
-                .cloned()
-                .expect("validated fixed matting should have selected option"),
-            MattingSelection::Random(entries) => {
-                let entry = entries
-                    .iter()
-                    .choose(rng)
-                    .expect("validated random matting should have options");
-                options
-                    .get(&entry.kind)
-                    .cloned()
-                    .expect("validated random matting should have matching option")
-            }
-            MattingSelection::Sequential { entries, runtime } => {
-                let index = runtime.next(entries.len());
-                let entry = &entries[index];
-                options
-                    .get(&entry.kind)
-                    .cloned()
-                    .expect("validated sequential matting should have matching option")
-            }
-        }
+        self.select_active(rng).option.clone()
     }
 }
 
@@ -2173,6 +2241,8 @@ pub enum TransitionSelection {
     },
 }
 
+pub type SelectedTransition<'a> = SelectedOption<'a, TransitionKind, TransitionOptions>;
+
 impl PartialEq for TransitionSelection {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -2278,45 +2348,55 @@ impl TransitionConfig {
         &self.options
     }
 
-    pub fn primary_option(&self) -> Option<&TransitionOptions> {
-        let options = self.options();
+    fn selection_entries(&self) -> SelectionEntries<'_, TransitionKind> {
         match self.selection() {
-            TransitionSelection::Fixed(entry) => options.get(&entry.kind),
-            TransitionSelection::Random(entries) => {
-                entries.first().and_then(|entry| options.get(&entry.kind))
-            }
+            TransitionSelection::Fixed(entry) => SelectionEntries::single(*entry),
+            TransitionSelection::Random(entries) => SelectionEntries::from_slice(entries.as_ref()),
             TransitionSelection::Sequential { entries, .. } => {
-                entries.first().and_then(|entry| options.get(&entry.kind))
+                SelectionEntries::from_slice(entries.as_ref())
             }
         }
     }
 
-    pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> TransitionOptions {
-        let options = self.options();
-        match self.selection() {
-            TransitionSelection::Fixed(entry) => options
-                .get(&entry.kind)
-                .cloned()
-                .expect("validated fixed transition should have selected option"),
-            TransitionSelection::Random(entries) => {
-                let entry = entries
-                    .iter()
-                    .choose(rng)
-                    .expect("validated random transition should have options");
-                options
-                    .get(&entry.kind)
-                    .cloned()
-                    .expect("validated random transition should have matching option")
-            }
+    pub fn iter_selected(&self) -> impl Iterator<Item = SelectedTransition<'_>> {
+        SelectedIter::new(self.selection_entries(), &self.options)
+    }
+
+    pub fn primary_selected(&self) -> Option<SelectedTransition<'_>> {
+        self.iter_selected().next()
+    }
+
+    pub fn selected_by_index(&self, index: usize) -> Option<SelectedTransition<'_>> {
+        self.iter_selected()
+            .find(|selected| selected.entry.index == index)
+    }
+
+    pub fn select_active<R: Rng + ?Sized>(&self, rng: &mut R) -> SelectedTransition<'_> {
+        let entry = match self.selection() {
+            TransitionSelection::Fixed(entry) => *entry,
+            TransitionSelection::Random(entries) => *entries
+                .iter()
+                .choose(rng)
+                .expect("validated random transition should have options"),
             TransitionSelection::Sequential { entries, runtime } => {
                 let index = runtime.next(entries.len());
-                let entry = &entries[index];
-                options
-                    .get(&entry.kind)
-                    .cloned()
-                    .expect("validated sequential transition should have matching option")
+                entries[index]
             }
-        }
+        };
+
+        let option = self
+            .options
+            .get(&entry.kind)
+            .expect("validated transition selection should resolve to an option");
+        SelectedOption { entry, option }
+    }
+
+    pub fn primary_option(&self) -> Option<&TransitionOptions> {
+        self.primary_selected().map(|selected| selected.option)
+    }
+
+    pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> TransitionOptions {
+        self.select_active(rng).option.clone()
     }
 
     pub fn validate(&mut self) -> Result<()> {

@@ -3,8 +3,8 @@ pub mod scenes;
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
-    IrisDirection, IrisEasing, MattingConfig, MattingMode, MattingOptions, TransitionKind,
-    TransitionMode, TransitionOptions,
+    IrisDirection, IrisEasing, MattingConfig, MattingMode, MattingOptions, SelectedTransition,
+    TransitionKind, TransitionMode,
 };
 use crate::events::{
     Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
@@ -77,10 +77,11 @@ pub(super) struct TransitionState {
 
 impl TransitionState {
     pub(super) fn new(
-        option: TransitionOptions,
+        selected: SelectedTransition<'_>,
         started_at: std::time::Instant,
         rng: &mut impl Rng,
     ) -> Self {
+        let option = selected.option;
         let duration = option.duration();
         let kind = option.kind();
         let mode = option.mode().clone();
@@ -318,13 +319,13 @@ impl<'a> MattingBridge<'a> {
                 break;
             }
             let mut rng = rand::rng();
-            let matting = self.matting.choose_option(&mut rng);
+            let selected = self.matting.select_active(&mut rng);
             let params = MatParams {
                 screen_w: surface.width.max(1),
                 screen_h: surface.height.max(1),
                 oversample: self.oversample,
                 max_dim: surface.max_texture_dimension,
-                matting,
+                matting: selected.option.clone(),
             };
             let QueuedImage {
                 image: img,
