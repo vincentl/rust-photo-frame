@@ -99,7 +99,7 @@ fn fs_composite(in: FullscreenOut) -> @location(0) vec4<f32> {
   let current = sample_plane(cur_tex, cur_samp, Comp.current_dest, screen_pos);
   let next = sample_plane(next_tex, next_samp, Comp.next_dest, screen_pos);
   let mask = textureSample(mask_tex, mask_samp, in.screen_uv).r;
-  let mut color = mix(next, current, mask);
+  var color = mix(next, current, mask);
   if (Comp.stage == 1u) {
     color = mix(current, next, mask);
   }
