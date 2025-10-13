@@ -39,7 +39,8 @@ transition:
     - kind: iris
       duration-ms: 900
       blades: 7
-      blade-rgba: [0.12, 0.12, 0.12, 1.0]
+      rotate-radians: 1.05
+      direction: open
 
 # Dwell time (ms) the current image remains fully displayed before the next transition
 dwell-ms: 2000

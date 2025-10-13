@@ -2466,7 +2466,10 @@ impl TransitionOptions {
                 let defaults = IrisTransition::default();
                 TransitionMode::Iris(IrisTransition {
                     blades: builder.iris_blades.unwrap_or(defaults.blades),
-                    blade_rgba: builder.iris_blade_rgba.unwrap_or(defaults.blade_rgba),
+                    rotate_radians: builder
+                        .iris_rotate_radians
+                        .unwrap_or(defaults.rotate_radians),
+                    direction: builder.iris_direction.unwrap_or(defaults.direction),
                 })
             }
         };
@@ -2680,39 +2683,62 @@ impl Default for EInkTransition {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IrisDirection {
+    Open,
+    Close,
+}
+
+impl IrisDirection {
+    pub const fn as_flag(self) -> u32 {
+        match self {
+            Self::Open => 0,
+            Self::Close => 1,
+        }
+    }
+}
+
+impl Default for IrisDirection {
+    fn default() -> Self {
+        Self::Open
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IrisTransition {
     pub blades: u32,
-    pub blade_rgba: [f32; 4],
+    pub rotate_radians: f32,
+    pub direction: IrisDirection,
 }
 
 impl Default for IrisTransition {
     fn default() -> Self {
         Self {
             blades: 7,
-            blade_rgba: [0.12, 0.12, 0.12, 1.0],
+            rotate_radians: 0.9,
+            direction: IrisDirection::Open,
         }
     }
 }
 
 impl IrisTransition {
     fn normalize(&mut self, kind: TransitionKind) -> Result<()> {
-        if self.blades < 5 {
-            self.blades = 5;
+        if self.blades < 3 {
+            self.blades = 3;
         }
-        if self.blades > 18 {
-            self.blades = 18;
+        if self.blades > 12 {
+            self.blades = 12;
         }
-        for (idx, channel) in self.blade_rgba.iter_mut().enumerate() {
-            ensure!(
-                channel.is_finite(),
-                format!(
-                    "transition option {} has non-finite iris.blade-rgba[{}]",
-                    kind, idx
-                )
-            );
-            *channel = channel.clamp(0.0, 1.0);
-        }
+        ensure!(
+            self.rotate_radians.is_finite(),
+            format!(
+                "transition option {} has non-finite iris.rotate-radians",
+                kind
+            )
+        );
+        let max_rotation = std::f32::consts::TAU;
+        self.rotate_radians = self.rotate_radians.clamp(0.0, max_rotation);
         Ok(())
     }
 }
@@ -2813,7 +2839,8 @@ struct TransitionOptionBuilder {
     eink_stripe_count: Option<u32>,
     eink_flash_color: Option<[u8; 3]>,
     iris_blades: Option<u32>,
-    iris_blade_rgba: Option<[f32; 4]>,
+    iris_rotate_radians: Option<f32>,
+    iris_direction: Option<IrisDirection>,
 }
 
 fn apply_transition_inline_field<E: de::Error>(
@@ -2871,8 +2898,11 @@ fn apply_transition_inline_field<E: de::Error>(
         "blades" if matches!(kind, TransitionKind::Iris) => {
             builder.iris_blades = Some(inline_value_to::<u32, E>(value)?);
         }
-        "blade-rgba" if matches!(kind, TransitionKind::Iris) => {
-            builder.iris_blade_rgba = Some(inline_value_to::<[f32; 4], E>(value)?);
+        "rotate-radians" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_rotate_radians = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "direction" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_direction = Some(inline_value_to::<IrisDirection, E>(value)?);
         }
         _ => {
             return Err(de::Error::unknown_field(
@@ -2889,7 +2919,8 @@ fn apply_transition_inline_field<E: de::Error>(
                     "stripe-count",
                     "flash-color",
                     "blades",
-                    "blade-rgba",
+                    "rotate-radians",
+                    "direction",
                 ],
             ));
         }

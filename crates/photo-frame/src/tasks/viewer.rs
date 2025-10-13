@@ -3,7 +3,7 @@ pub mod scenes;
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
-    MattingConfig, MattingMode, MattingOptions, TransitionConfig, SelectedTransition,
+    IrisDirection, MattingConfig, MattingMode, MattingOptions, TransitionConfig, SelectedTransition,
     TransitionKind, TransitionMode,
 };
 use crate::events::{
@@ -47,7 +47,8 @@ pub(super) enum ActiveTransition {
     },
     Iris {
         blades: u32,
-        blade_rgba: [f32; 4],
+        rotate_radians: f32,
+        direction: IrisDirection,
     },
 }
 
@@ -123,7 +124,8 @@ impl TransitionState {
             },
             TransitionMode::Iris(cfg) => ActiveTransition::Iris {
                 blades: cfg.blades.max(1),
-                blade_rgba: cfg.blade_rgba,
+                rotate_radians: cfg.rotate_radians,
+                direction: cfg.direction,
             },
         };
 
@@ -684,6 +686,13 @@ pub fn run_windowed(
         params1: [f32; 4],
         params2: [f32; 4],
         params3: [f32; 4],
+        t: f32,
+        aspect: f32,
+        iris_rotate_rad: f32,
+        iris_pad0: f32,
+        iris_blades: u32,
+        iris_direction: u32,
+        iris_pad1: [u32; 2],
     }
 
     struct GpuCtx {
@@ -2017,6 +2026,11 @@ pub fn run_windowed(
                             rpass.set_pipeline(&gpu.pipeline);
                             let screen_w = gpu.config.width as f32;
                             let screen_h = gpu.config.height as f32;
+                            let aspect = if screen_h > 0.0 {
+                                screen_w / screen_h
+                            } else {
+                                1.0
+                            };
                             let mut uniforms = TransitionUniforms {
                                 screen_size: [screen_w, screen_h],
                                 progress: 0.0,
@@ -2027,6 +2041,13 @@ pub fn run_windowed(
                                 params1: [0.0; 4],
                                 params2: [0.0; 4],
                                 params3: [0.0; 4],
+                                t: 0.0,
+                                aspect,
+                                iris_rotate_rad: 0.0,
+                                iris_pad0: 0.0,
+                                iris_blades: 0,
+                                iris_direction: 0,
+                                iris_pad1: [0, 0],
                             };
                             let mut current_bind = &gpu.blank_plane.bind;
                             let mut next_bind = &gpu.blank_plane.bind;
@@ -2056,13 +2077,14 @@ pub fn run_windowed(
                                     have_draw = true;
                                 }
                                 let base_progress = state.progress();
-                                let cubic_progress =
+                                let eased_progress =
                                     base_progress * base_progress * (3.0 - 2.0 * base_progress);
                                 let progress = match state.variant() {
                                     ActiveTransition::Iris { .. } => base_progress,
-                                    _ => cubic_progress,
+                                    _ => eased_progress,
                                 };
                                 uniforms.progress = progress;
+                                uniforms.t = eased_progress;
                                 uniforms.kind = state.kind().as_index();
                                 match state.variant() {
                                     ActiveTransition::Fade { through_black } => {
@@ -2102,19 +2124,16 @@ pub fn run_windowed(
                                         uniforms.params1[2] = flash_color[1].clamp(0.0, 1.0);
                                         uniforms.params1[3] = flash_color[2].clamp(0.0, 1.0);
                                     }
-                                    ActiveTransition::Iris { blades, blade_rgba } => {
-                                        let blades_f = (*blades).max(1) as f32;
-                                        uniforms.params0[0] = blades_f;
-                                        uniforms.params0[1] = 0.0;
-                                        uniforms.params0[2] = 0.0;
-                                        uniforms.params0[3] = 0.0;
-                                        let blade = *blade_rgba;
-                                        uniforms.params1[0] = blade[0].clamp(0.0, 1.0);
-                                        uniforms.params1[1] = blade[1].clamp(0.0, 1.0);
-                                        uniforms.params1[2] = blade[2].clamp(0.0, 1.0);
-                                        uniforms.params1[3] = blade[3].clamp(0.0, 1.0);
-                                        uniforms.params2 = [0.0; 4];
-                                        uniforms.params3 = [0.0; 4];
+                                    ActiveTransition::Iris {
+                                        blades,
+                                        rotate_radians,
+                                        direction,
+                                    } => {
+                                        let blades = (*blades).clamp(3, 12);
+                                        uniforms.iris_blades = blades;
+                                        uniforms.iris_rotate_rad = *rotate_radians;
+                                        uniforms.iris_direction = direction.as_flag();
+                                        uniforms.t = eased_progress;
                                     }
                                 }
                             } else if let Some(cur) = wake.current() {
