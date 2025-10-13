@@ -19,7 +19,6 @@ use image::{Rgba, RgbaImage, imageops};
 use rand::Rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
-use std::env;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -306,27 +305,6 @@ impl SurfaceReadyGate {
         } else {
             None
         }
-    }
-
-    fn force_ready(&mut self, ready: bool) {
-        self.awaiting_initial_report = false;
-        self.ready = ready;
-    }
-}
-
-fn should_wait_for_wayland_configure() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        let session_type_is_wayland = env::var("XDG_SESSION_TYPE")
-            .map(|value| value.eq_ignore_ascii_case("wayland"))
-            .unwrap_or(false);
-        session_type_is_wayland
-            || env::var_os("WAYLAND_DISPLAY").is_some()
-            || env::var_os("WAYLAND_SOCKET").is_some()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        false
     }
 }
 
@@ -1130,7 +1108,6 @@ pub fn run_windowed(
         window: Option<Arc<Window>>,
         gpu: Option<GpuCtx>,
         surface_gate: SurfaceReadyGate,
-        wait_for_wayland_configure: bool,
         mode: Option<ViewerMode>,
         preload_count: usize,
         oversample: f32,
@@ -1634,9 +1611,7 @@ pub fn run_windowed(
                 desired_maximum_frame_latency: 2,
             };
             surface.configure(&device, &config);
-            if self.wait_for_wayland_configure {
-                self.surface_gate.arm_for_initial_report();
-            }
+            self.surface_gate.arm_for_initial_report();
             self.update_surface_ready(size.width, size.height, SurfaceReport::InitialConfig);
             debug!(
                 width = config.width,
@@ -2361,7 +2336,6 @@ pub fn run_windowed(
         window: None,
         gpu: None,
         surface_gate: SurfaceReadyGate::default(),
-        wait_for_wayland_configure: should_wait_for_wayland_configure(),
         mode: Some(ViewerMode::new(ViewerModeKind::Greeting, initial_wake)),
         preload_count: cfg.viewer_preload_count,
         oversample: cfg.oversample,
@@ -2887,8 +2861,20 @@ pub mod testkit {
             });
         }
 
-        pub fn set_surface_ready(&mut self, ready: bool) {
-            self.surface_gate.force_ready(ready);
+        pub fn arm_surface_gate(&mut self) {
+            self.surface_gate.arm_for_initial_report();
+        }
+
+        pub fn report_surface_initial_config(&mut self, width: u32, height: u32) {
+            let _ = self
+                .surface_gate
+                .update(width, height, SurfaceReport::InitialConfig);
+        }
+
+        pub fn report_surface_configured(&mut self, width: u32, height: u32) {
+            let _ = self
+                .surface_gate
+                .update(width, height, SurfaceReport::ConfigureEvent);
         }
 
         pub fn push_deferred(&mut self, image: PreparedImageCpu, priority: bool) {

@@ -14,7 +14,8 @@ async fn viewer_defers_matting_until_surface_ready_event() {
     let mut harness = MattingQueueHarness::new(1, 1.0, matting, 5_000, TransitionConfig::default());
 
     harness.update_surface_state(Some((800, 600, 4096)));
-    harness.set_surface_ready(false);
+    harness.arm_surface_gate();
+    harness.report_surface_initial_config(800, 600);
 
     harness.push_deferred(
         PreparedImageCpu {
@@ -41,7 +42,7 @@ async fn viewer_defers_matting_until_surface_ready_event() {
     );
 
     harness.update_surface_state(Some((1920, 1080, 4096)));
-    harness.set_surface_ready(true);
+    harness.report_surface_configured(1920, 1080);
 
     harness.queue_once();
     harness.wait_for_ready_results(Duration::from_secs(2)).await;
