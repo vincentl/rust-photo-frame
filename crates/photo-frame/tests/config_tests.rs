@@ -538,7 +538,8 @@ transition:
   types: [iris]
   duration-ms: 880
   blades: 9
-  blade-rgba: [0.2, 0.22, 0.24, 0.85]
+  rotate-radians: 1.25
+  direction: close
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -557,7 +558,11 @@ transition:
     match selected.option.mode() {
         rust_photo_frame::config::TransitionMode::Iris(cfg) => {
             assert_eq!(cfg.blades, 9);
-            assert_eq!(cfg.blade_rgba, [0.2, 0.22, 0.24, 0.85]);
+            assert!((cfg.rotate_radians - 1.25).abs() < f32::EPSILON);
+            assert_eq!(
+                cfg.direction,
+                rust_photo_frame::config::IrisDirection::Close
+            );
         }
         _ => panic!("expected iris transition"),
     }
@@ -837,7 +842,7 @@ transition:
     assert_eq!(selected.entry.kind, TransitionKind::Iris);
     match selected.option.mode() {
         rust_photo_frame::config::TransitionMode::Iris(cfg) => {
-            assert_eq!(cfg.blades, 5);
+            assert_eq!(cfg.blades, 3);
         }
         _ => panic!("expected iris transition"),
     }

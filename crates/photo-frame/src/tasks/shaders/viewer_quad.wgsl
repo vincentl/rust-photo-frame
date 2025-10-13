@@ -8,6 +8,13 @@ struct TransitionUniforms {
   params1: vec4<f32>,
   params2: vec4<f32>,
   params3: vec4<f32>,
+  t: f32,
+  aspect: f32,
+  iris_rotate_rad: f32,
+  iris_pad0: f32,
+  iris_blades: u32,
+  iris_direction: u32,
+  iris_pad1: vec2<u32>,
 };
 
 @group(0) @binding(0)
@@ -63,41 +70,40 @@ fn sample_plane(
   return vec4<f32>(c.rgb, 1.0);
 }
 
-fn rotate_point(p: vec2<f32>, cos_a: f32, sin_a: f32) -> vec2<f32> {
-  return vec2<f32>(
-    p.x * cos_a - p.y * sin_a,
-    p.x * sin_a + p.y * cos_a,
-  );
+fn rot2(p: vec2<f32>, a: f32) -> vec2<f32> {
+  let c = cos(a);
+  let s = sin(a);
+  return vec2<f32>(c * p.x - s * p.y, s * p.x + c * p.y);
 }
 
-fn arc_diff(angle: f32, sweep_flag: f32) -> f32 {
-  let two_pi = 6.28318530718;
-  var diff = angle;
-  if (sweep_flag > 0.5) {
-    if (diff < 0.0) {
-      diff = diff + two_pi;
-    }
-  } else {
-    if (diff > 0.0) {
-      diff = diff - two_pi;
-    }
-  }
-  return diff;
+fn sd_ngon(p: vec2<f32>, n: i32, r: f32) -> f32 {
+  let pi = 3.141592653589793;
+  let nn = max(n, 3);
+  let an = pi / f32(nn);
+  let ang = atan2(p.y, p.x);
+  let m = floor(0.5 + ang / (2.0 * an));
+  let a = ang - (m * 2.0 * an);
+  return length(p) * cos(an) - r * cos(a - an);
 }
 
-fn angle_in_arc(
-  angle: f32,
-  start_angle: f32,
-  end_angle: f32,
-  sweep_flag: f32,
-) -> bool {
-  let tolerance = 1e-3;
-  let diff = arc_diff(end_angle - start_angle, sweep_flag);
-  let rel = arc_diff(angle - start_angle, sweep_flag);
-  if (sweep_flag > 0.5) {
-    return rel >= -tolerance && rel <= diff + tolerance;
-  }
-  return rel <= tolerance && rel >= diff - tolerance;
+fn iris_mask(
+  uv: vec2<f32>,
+  aspect: f32,
+  blades: u32,
+  rotate_rad: f32,
+  t_eased: f32,
+  direction: u32,
+) -> f32 {
+  let tt = select(t_eased, 1.0 - t_eased, direction == 1u);
+  let r_min = 0.001;
+  let r_max = 1.2;
+  let R = mix(r_min, r_max, clamp(tt, 0.0, 1.0));
+  let p0 = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(aspect, 1.0);
+  let p = rot2(p0, rotate_rad * tt);
+  let sd = sd_ngon(p, i32(blades), R);
+  let w = fwidth(sd);
+  let aa = max(w, 1e-4);
+  return smoothstep(0.0, aa, -sd);
 }
 
 @fragment
@@ -186,119 +192,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       }
     }
     case 5u: {
-      let blade_rgb_base = clamp(U.params1.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
-      let blade_alpha = clamp(U.params1.w, 0.0, 1.0);
-      let aspect = U.screen_size.x / max(U.screen_size.y, 1.0);
-      let rel = vec2<f32>((in.screen_uv.x - 0.5) * aspect, in.screen_uv.y - 0.5);
-      let dist = length(rel);
-      var dir = rel / max(dist, 1e-4);
-      if (dist < 1e-4) {
-        dir = vec2<f32>(0.0, 1.0);
-      }
-      let angle = atan2(rel.y, rel.x);
-      let max_radius = length(vec2<f32>(aspect * 0.5, 0.5));
-      let clamped_progress = clamp(U.progress, 0.0, 1.0);
-      let phase = clamped_progress * 2.0;
-      let close_phase = clamp(phase, 0.0, 1.0);
-      let open_phase = clamp(phase - 1.0, 0.0, 1.0);
-      let close_curve = close_phase * close_phase * (3.0 - 2.0 * close_phase);
-      let open_curve = open_phase * open_phase * (3.0 - 2.0 * open_phase);
-      let is_opening = step(1.0, phase);
-      let aperture_ratio = mix(1.0 - close_curve, open_curve, is_opening);
-      let blade_count_f = max(U.params0.x, 3.0);
-      let blade_count = max(3u, min(24u, u32(floor(blade_count_f + 0.5))));
-      let blade_count_f32 = f32(blade_count);
-      let two_pi = 6.28318530718;
-      let sector = two_pi / blade_count_f32;
-      let half_sector = 0.5 * sector;
-      // Map aperture progress onto the Stack Overflow solution's rotation angle.
-      // The blades fully close when the rotation reaches π/3.
-      let closure = clamp(1.0 - aperture_ratio, 0.0, 1.0);
-      let blade_rotation = closure * 1.0471975512;
-      let step = 3.14159265359 * (0.5 + 2.0 / blade_count_f32);
-      let cos_step = cos(step);
-      let sin_step = sin(step);
-      let r = max_radius;
-      let p1 = vec2<f32>(cos_step * r, sin_step * r);
-      let anchor = vec2<f32>(0.0, r);
-      let sin_rot = sin(blade_rotation);
-      let cos_rot = cos(blade_rotation);
-      // The iris aperture follows the polygonal arc construction described in
-      // https://stackoverflow.com/a/57571325, which closes the diaphragm by
-      // sweeping each blade's circular edge around fixed anchor points.
-      let center_base = vec2<f32>(
-        p1.x * (1.0 - cos_rot) + p1.y * sin_rot,
-        p1.y * (1.0 - cos_rot) - p1.x * sin_rot,
+      let eased_t = clamp(U.t, 0.0, 1.0);
+      let mask = iris_mask(
+        in.screen_uv,
+        U.aspect,
+        max(U.iris_blades, 3u),
+        U.iris_rotate_rad,
+        eased_t,
+        U.iris_direction,
       );
-      let dx = sin_rot * r - center_base.x;
-      let dy = r - cos_rot * r - center_base.y;
-      let dc = sqrt(max(dx * dx + dy * dy, 0.0));
-      let arc_term = clamp(dc / (2.0 * r), -1.0, 1.0);
-      let a = atan2(dy, dx) - acos(arc_term);
-      let p2 = center_base + vec2<f32>(cos(a), sin(a)) * r;
-      var boundary = r;
-      for (var i = 0u; i < blade_count; i = i + 1u) {
-        let angle_i = f32(i) * sector;
-        let cos_i = cos(angle_i);
-        let sin_i = sin(angle_i);
-        let p1_rot = rotate_point(p1, cos_i, sin_i);
-        let anchor_rot = rotate_point(anchor, cos_i, sin_i);
-        let center = rotate_point(center_base, cos_i, sin_i);
-        let p2_rot = rotate_point(p2, cos_i, sin_i);
-        let arc1_start = atan2(p1_rot.y, p1_rot.x);
-        let arc1_end = atan2(anchor_rot.y, anchor_rot.x);
-        let arc2_start = atan2(anchor_rot.y - center.y, anchor_rot.x - center.x);
-        let arc2_end = atan2(p2_rot.y - center.y, p2_rot.x - center.x);
-        let point_arc1 = dir * r;
-        let arc1_angle = atan2(point_arc1.y, point_arc1.x);
-        if (angle_in_arc(arc1_angle, arc1_start, arc1_end, 0.0)) {
-          boundary = min(boundary, r);
-        }
-        let proj = dot(dir, center);
-        let center_len_sq = dot(center, center);
-        let disc = proj * proj - (center_len_sq - r * r);
-        if (disc >= 0.0) {
-          let root = sqrt(disc);
-          var t = proj - root;
-          if (t <= 0.0) {
-            t = proj + root;
-          }
-          if (t > 0.0) {
-            let point_arc2 = dir * t;
-            let arc2_angle = atan2(
-              point_arc2.y - center.y,
-              point_arc2.x - center.x,
-            );
-            if (angle_in_arc(arc2_angle, arc2_start, arc2_end, 1.0)) {
-              boundary = min(boundary, t);
-            }
-          }
-        }
-      }
-      let edge_softness = max(r * 0.02, 0.001);
-      let mask = 1.0 - smoothstep(-edge_softness, 0.0, dist - boundary);
-      var stage_color = current;
-      if (phase >= 1.0) {
-        stage_color = next;
-      }
-      let wrapped = fract((angle + half_sector) / sector);
-      let local_angle = (wrapped - 0.5) * sector;
-      let blade_center = clamp(1.0 - abs(local_angle) / half_sector, 0.0, 1.0);
-      let radial = clamp(dist / max_radius, 0.0, 1.0);
-      let highlight = pow(blade_center, 2.4) * 0.28;
-      let radial_shadow = mix(1.05, 0.55, radial);
-      let edge_highlight = smoothstep(-edge_softness * 6.0, 0.0, boundary - dist) * 0.32;
-      let noise = fract(
-        sin(dot(screen_pos, vec2<f32>(12.9898, 78.233))) * 43758.5453
-      );
-      let noise_term = (noise - 0.5) * 0.05;
-      var blade_rgb = blade_rgb_base * radial_shadow + highlight + edge_highlight + noise_term;
-      blade_rgb = clamp(blade_rgb, vec3<f32>(0.0), vec3<f32>(1.0));
-      let blade_strength = clamp(blade_alpha, 0.0, 1.0);
-      blade_rgb = mix(vec3<f32>(0.0), blade_rgb, blade_strength);
-      let blade_color = vec4<f32>(blade_rgb, 1.0);
-      color = mix(blade_color, stage_color, mask);
-      color.a = mix(blade_color.a, stage_color.a, mask);
+      color = mix(current, next, mask);
     }
     default: {
       color = current;
