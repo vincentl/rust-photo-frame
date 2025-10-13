@@ -41,25 +41,26 @@ fn parse_with_studio_matting() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  types: [studio]
-  options:
-    studio:
+  active:
+    - kind: studio
       bevel-width-px: 5.0
       bevel-color: [200, 210, 220]
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
 
-    let options = cfg.matting.options();
     assert!(matches!(
         cfg.matting.selection(),
         MattingSelection::Fixed(entry)
             if entry.kind == MattingKind::Studio && entry.index == 0
     ));
-    let mat = options
-        .get(&MattingKind::Studio)
+    let selected = cfg
+        .matting
+        .primary_selected()
         .expect("expected studio matting option");
-    match &mat.style {
+    assert_eq!(selected.entry.kind, MattingKind::Studio);
+    assert_eq!(selected.entry.index, 0);
+    match &selected.option.style {
         rust_photo_frame::config::MattingMode::Studio {
             colors,
             bevel_width_px,
@@ -85,17 +86,18 @@ fn parse_studio_with_custom_texture_strength() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  types: [studio]
-  texture-strength: 0.35
+  active:
+    - kind: studio
+      texture-strength: 0.35
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
 
-    let mat = cfg
+    let selected = cfg
         .matting
-        .primary_option()
+        .primary_selected()
         .expect("expected primary matting option");
-    match mat.style {
+    match selected.option.style {
         rust_photo_frame::config::MattingMode::Studio {
             texture_strength, ..
         } => {
@@ -110,18 +112,19 @@ fn parse_studio_with_custom_weave_periods() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  types: [studio]
-  warp-period-px: 8.5
-  weft-period-px: 4.25
+  active:
+    - kind: studio
+      warp-period-px: 8.5
+      weft-period-px: 4.25
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
 
-    let mat = cfg
+    let selected = cfg
         .matting
-        .primary_option()
+        .primary_selected()
         .expect("expected primary matting option");
-    match mat.style {
+    match selected.option.style {
         rust_photo_frame::config::MattingMode::Studio {
             warp_period_px,
             weft_period_px,
@@ -139,14 +142,13 @@ fn parse_random_matting_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  types: [fixed-color, blur]
-  options:
-    fixed-color:
+  active:
+    - kind: fixed-color
       colors:
         - [10, 20, 30]
         - [5, 15, 25]
       color-selection: random
-    blur:
+    - kind: blur
       minimum-mat-percentage: 7.5
       sigma: 12.0
 "#;
@@ -160,27 +162,23 @@ matting:
     assert_eq!(entries[0].kind, MattingKind::FixedColor);
     assert_eq!(entries[1].index, 1);
     assert_eq!(entries[1].kind, MattingKind::Blur);
-    let options = cfg.matting.options();
-    assert_eq!(options.len(), 2);
-    let fixed = options
-        .get(&MattingKind::FixedColor)
-        .expect("expected fixed-color mat option");
+    let selected: Vec<_> = cfg.matting.iter_selected().collect();
+    assert_eq!(selected.len(), 2);
+    let fixed = &selected[0];
     if let rust_photo_frame::config::MattingMode::FixedColor {
         colors,
         color_selection,
-    } = &fixed.style
+    } = &fixed.option.style
     {
         assert_eq!(colors.as_slice(), &[[10, 20, 30], [5, 15, 25]]);
         assert_eq!(*color_selection, ColorSelection::Random);
     } else {
         panic!("expected fixed-color matting");
     }
-    let blur = options
-        .get(&MattingKind::Blur)
-        .expect("expected blur mat option");
-    if let rust_photo_frame::config::MattingMode::Blur { sigma, .. } = blur.style {
+    let blur = &selected[1];
+    if let rust_photo_frame::config::MattingMode::Blur { sigma, .. } = blur.option.style {
         assert!((sigma - 12.0).abs() < f32::EPSILON);
-        assert!((blur.minimum_mat_percentage - 7.5).abs() < f32::EPSILON);
+        assert!((blur.option.minimum_mat_percentage - 7.5).abs() < f32::EPSILON);
     } else {
         panic!("expected blur matting");
     }
@@ -191,18 +189,18 @@ fn parse_fixed_color_single_color_alias() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  types: [fixed-color]
-  options:
-    fixed-color:
+  active:
+    - kind: fixed-color
       color: [17, 34, 51]
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    let options = cfg.matting.options();
-    let fixed = options
-        .get(&MattingKind::FixedColor)
+    let selected = cfg
+        .matting
+        .primary_selected()
         .expect("expected fixed-color mat option");
-    if let rust_photo_frame::config::MattingMode::FixedColor { colors, .. } = &fixed.style {
+    assert_eq!(selected.entry.kind, MattingKind::FixedColor);
+    if let rust_photo_frame::config::MattingMode::FixedColor { colors, .. } = &selected.option.style {
         assert_eq!(colors.as_slice(), &[[17, 34, 51]]);
     } else {
         panic!("expected fixed-color matting");
@@ -214,36 +212,46 @@ fn parse_sequential_matting_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  types: [fixed-color, blur]
-  type-selection: sequential
-  options:
-    fixed-color:
+  selection: sequential
+  active:
+    - kind: fixed-color
       colors:
         - [10, 20, 30]
         - [40, 50, 60]
-    blur:
+      color-selection: sequential
+    - kind: blur
       sigma: 12.0
       minimum-mat-percentage: 7.5
+    - kind: fixed-color
+      colors:
+        - [10, 20, 30]
+        - [40, 50, 60]
+      color-selection: sequential
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     match cfg.matting.selection() {
         MattingSelection::Sequential { entries, .. } => {
-            assert_eq!(entries.len(), 2);
+            assert_eq!(entries.len(), 3);
             assert_eq!(entries[0].index, 0);
             assert_eq!(entries[0].kind, MattingKind::FixedColor);
             assert_eq!(entries[1].index, 1);
             assert_eq!(entries[1].kind, MattingKind::Blur);
+            assert_eq!(entries[2].index, 2);
+            assert_eq!(entries[2].kind, MattingKind::FixedColor);
         }
         other => panic!("expected sequential matting selection, got {other:?}"),
     }
 
     let mut rng = StdRng::seed_from_u64(1);
-    let first = cfg.matting.choose_option(&mut rng);
-    let second = cfg.matting.choose_option(&mut rng);
-    let third = cfg.matting.choose_option(&mut rng);
+    let first = cfg.matting.select_active(&mut rng);
+    let second = cfg.matting.select_active(&mut rng);
+    let third = cfg.matting.select_active(&mut rng);
+    let fourth = cfg.matting.select_active(&mut rng);
 
-    match &first.style {
+    assert_eq!(first.entry.index, 0);
+    assert_eq!(first.entry.kind, MattingKind::FixedColor);
+    match &first.option.style {
         rust_photo_frame::config::MattingMode::FixedColor {
             color_selection, ..
         } => {
@@ -251,14 +259,20 @@ matting:
         }
         _ => panic!("expected first matting option to be fixed-color"),
     }
-    match second.style {
+    assert_eq!(second.entry.index, 1);
+    assert_eq!(second.entry.kind, MattingKind::Blur);
+    match second.option.style {
         rust_photo_frame::config::MattingMode::Blur { .. } => {}
         _ => panic!("expected second matting option to be blur"),
     }
-    match third.style {
+    assert_eq!(third.entry.index, 2);
+    assert_eq!(third.entry.kind, MattingKind::FixedColor);
+    match third.option.style {
         rust_photo_frame::config::MattingMode::FixedColor { .. } => {}
         _ => panic!("expected third matting option to repeat fixed-color"),
     }
+    assert_eq!(fourth.entry.index, 0);
+    assert_eq!(fourth.entry.kind, MattingKind::FixedColor);
 }
 
 #[test]
@@ -280,9 +294,8 @@ fn parse_fixed_image_with_multiple_paths() {
         r#"
 photo-library-path: "/photos"
 matting:
-  types: [fixed-image]
-  options:
-    fixed-image:
+  active:
+    - kind: fixed-image
       path: ["{first}", "{second}"]
       path-selection: sequential
       fit: contain
@@ -292,12 +305,12 @@ matting:
     );
 
     let cfg: Configuration = serde_yaml::from_str(&yaml).unwrap();
-    let option = cfg
+    let selected = cfg
         .matting
-        .primary_option()
+        .primary_selected()
         .expect("expected fixed-image matting");
 
-    match &option.style {
+    match &selected.option.style {
         MattingMode::FixedImage {
             paths,
             path_selection,
@@ -313,7 +326,7 @@ matting:
         other => panic!("expected fixed-image matting, got {other:?}"),
     }
 
-    let mut mat = option.clone();
+    let mut mat = selected.option.clone();
     mat.prepare_runtime().unwrap();
     let mut rng = StdRng::seed_from_u64(1);
     let bg0 = mat
@@ -351,28 +364,27 @@ fn parse_fixed_image_with_single_string_path() {
         r#"
 photo-library-path: "/photos"
 matting:
-  types: [fixed-image]
-  options:
-    fixed-image:
+  active:
+    - kind: fixed-image
       path: "{only}"
 "#,
         only = only.display()
     );
 
     let cfg: Configuration = serde_yaml::from_str(&yaml).unwrap();
-    let option = cfg
+    let selected = cfg
         .matting
-        .primary_option()
+        .primary_selected()
         .expect("expected fixed-image matting");
 
-    match &option.style {
+    match &selected.option.style {
         MattingMode::FixedImage { paths, .. } => {
             assert_eq!(paths, &vec![only.clone()]);
         }
         other => panic!("expected fixed-image matting, got {other:?}"),
     }
 
-    let mut mat = option.clone();
+    let mut mat = selected.option.clone();
     mat.prepare_runtime().unwrap();
     let mut rng = StdRng::seed_from_u64(3);
     let bg = mat
@@ -387,17 +399,17 @@ fn fixed_image_with_empty_paths_is_disabled() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  types: [fixed-image]
-  options:
-    fixed-image:
+  active:
+    - kind: fixed-image
       path: []
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     let mut mat = cfg
         .matting
-        .primary_option()
+        .primary_selected()
         .expect("expected fixed-image matting")
+        .option
         .clone();
 
     mat.prepare_runtime().unwrap();
@@ -406,35 +418,33 @@ matting:
 }
 
 #[test]
-fn random_matting_without_options_is_rejected() {
+fn matting_entry_without_required_fields_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  types: [fixed-color, blur]
+  active:
+    - kind: fixed-image
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
     assert!(
         err.to_string()
-            .contains("matting.types entry fixed-color must match a key")
+            .contains("matting.active entry for fixed-image must include a path")
     );
 }
 
 #[test]
-fn selecting_missing_option_is_rejected() {
+fn matting_with_empty_active_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
-  types: [studio]
-  options:
-    blur:
-      sigma: 12.0
+  active: []
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
     assert!(
         err.to_string()
-            .contains("matting.types entry studio must match a key")
+            .contains("matting configuration must include at least one active entry")
     );
 }
 
@@ -444,16 +454,16 @@ fn matting_type_field_is_rejected() {
 photo-library-path: "/photos"
 matting:
   type: random
-  options:
-    fixed-color:
+  active:
+    - kind: fixed-color
       colors: [[5, 15, 25]]
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("matting.type is no longer supported")
-    );
+    let err_msg = err.to_string();
+    assert!(err_msg.contains("unknown field `type`"));
+    assert!(err_msg.contains("selection"));
+    assert!(err_msg.contains("active"));
 }
 
 #[test]
@@ -461,9 +471,10 @@ fn parse_inline_fade_transition() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  types: [fade]
-  duration-ms: 750
-  through-black: true
+  active:
+    - kind: fade
+      duration-ms: 750
+      through-black: true
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -472,12 +483,14 @@ transition:
         TransitionSelection::Fixed(entry)
             if entry.kind == TransitionKind::Fade && entry.index == 0
     ));
-    let options = cfg.transition.options();
-    let fade = options
-        .get(&TransitionKind::Fade)
+    let selected = cfg
+        .transition
+        .primary_selected()
         .expect("expected fade transition option");
-    assert_eq!(fade.duration().as_millis(), 750);
-    match fade.mode() {
+    assert_eq!(selected.entry.kind, TransitionKind::Fade);
+    assert_eq!(selected.entry.index, 0);
+    assert_eq!(selected.option.duration().as_millis(), 750);
+    match selected.option.mode() {
         rust_photo_frame::config::TransitionMode::Fade(cfg) => {
             assert!(cfg.through_black);
         }
@@ -502,12 +515,14 @@ transition:
         TransitionSelection::Fixed(entry)
             if entry.kind == TransitionKind::Iris && entry.index == 0
     ));
-    let options = cfg.transition.options();
-    let iris = options
-        .get(&TransitionKind::Iris)
+    let selected = cfg
+        .transition
+        .primary_selected()
         .expect("expected iris transition option");
-    assert_eq!(iris.duration().as_millis(), 880);
-    match iris.mode() {
+    assert_eq!(selected.entry.kind, TransitionKind::Iris);
+    assert_eq!(selected.entry.index, 0);
+    assert_eq!(selected.option.duration().as_millis(), 880);
+    match selected.option.mode() {
         rust_photo_frame::config::TransitionMode::Iris(cfg) => {
             assert_eq!(cfg.blades, 9);
             assert_eq!(cfg.blade_rgba, [0.2, 0.22, 0.24, 0.85]);
@@ -521,15 +536,14 @@ fn parse_random_transition_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  types: [fade, wipe, push]
-  options:
-    fade:
+  active:
+    - kind: fade
       duration-ms: 450
-    wipe:
+    - kind: wipe
       duration-ms: 600
       angle-list-degrees: [90.0]
       softness: 0.1
-    push:
+    - kind: push
       duration-ms: 640
       angle-list-degrees: [0.0, 180.0]
       angle-selection: sequential
@@ -546,13 +560,11 @@ transition:
     assert_eq!(entries[1].kind, TransitionKind::Wipe);
     assert_eq!(entries[2].index, 2);
     assert_eq!(entries[2].kind, TransitionKind::Push);
-    let options = cfg.transition.options();
-    assert_eq!(options.len(), 3);
-    let wipe = options
-        .get(&TransitionKind::Wipe)
-        .expect("expected wipe transition option");
-    assert_eq!(wipe.duration().as_millis(), 600);
-    match wipe.mode() {
+    let selected: Vec<_> = cfg.transition.iter_selected().collect();
+    assert_eq!(selected.len(), 3);
+    let wipe = &selected[1];
+    assert_eq!(wipe.option.duration().as_millis(), 600);
+    match wipe.option.mode() {
         rust_photo_frame::config::TransitionMode::Wipe(cfg) => {
             assert_eq!(cfg.angles.angles_deg.as_ref(), &[90.0]);
             assert_eq!(
@@ -564,10 +576,8 @@ transition:
         _ => panic!("expected wipe transition"),
     }
 
-    let push = options
-        .get(&TransitionKind::Push)
-        .expect("expected push transition option");
-    match push.mode() {
+    let push = &selected[2];
+    match push.option.mode() {
         rust_photo_frame::config::TransitionMode::Push(cfg) => {
             assert_eq!(cfg.angles.angles_deg.as_ref(), &[0.0, 180.0]);
             assert_eq!(
@@ -584,61 +594,75 @@ fn parse_sequential_transition_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  types: [push, wipe]
-  type-selection: sequential
-  options:
-    push:
+  selection: sequential
+  active:
+    - kind: push
       duration-ms: 640
       angle-list-degrees: [0.0, 180.0]
       angle-selection: sequential
-    wipe:
+    - kind: wipe
       duration-ms: 520
       angle-list-degrees: [90.0]
+    - kind: push
+      duration-ms: 640
+      angle-list-degrees: [0.0, 180.0]
+      angle-selection: sequential
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     match cfg.transition.selection() {
         TransitionSelection::Sequential { entries, .. } => {
-            assert_eq!(entries.len(), 2);
+            assert_eq!(entries.len(), 3);
             assert_eq!(entries[0].index, 0);
             assert_eq!(entries[0].kind, TransitionKind::Push);
             assert_eq!(entries[1].index, 1);
             assert_eq!(entries[1].kind, TransitionKind::Wipe);
+            assert_eq!(entries[2].index, 2);
+            assert_eq!(entries[2].kind, TransitionKind::Push);
         }
         other => panic!("expected sequential transition selection, got {other:?}"),
     }
 
     let mut rng = StdRng::seed_from_u64(42);
-    let first = cfg.transition.choose_option(&mut rng);
-    let second = cfg.transition.choose_option(&mut rng);
-    let third = cfg.transition.choose_option(&mut rng);
+    let first = cfg.transition.select_active(&mut rng);
+    let second = cfg.transition.select_active(&mut rng);
+    let third = cfg.transition.select_active(&mut rng);
+    let fourth = cfg.transition.select_active(&mut rng);
 
-    match first.mode() {
+    assert_eq!(first.entry.index, 0);
+    assert_eq!(first.entry.kind, TransitionKind::Push);
+    match first.option.mode() {
         rust_photo_frame::config::TransitionMode::Push(_) => {}
         _ => panic!("expected first transition to be push"),
     }
-    match second.mode() {
+    assert_eq!(second.entry.index, 1);
+    assert_eq!(second.entry.kind, TransitionKind::Wipe);
+    match second.option.mode() {
         rust_photo_frame::config::TransitionMode::Wipe(_) => {}
         _ => panic!("expected second transition to be wipe"),
     }
-    match third.mode() {
+    assert_eq!(third.entry.index, 2);
+    assert_eq!(third.entry.kind, TransitionKind::Push);
+    match third.option.mode() {
         rust_photo_frame::config::TransitionMode::Push(_) => {}
         _ => panic!("expected third transition to return to push"),
     }
+    assert_eq!(fourth.entry.index, 0);
+    assert_eq!(fourth.entry.kind, TransitionKind::Push);
 }
 
 #[test]
-fn random_transition_without_options_is_rejected() {
+fn transition_with_empty_active_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  types: [fade, wipe]
+  active: []
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
     assert!(
         err.to_string()
-            .contains("transition.types entry fade must match a key")
+            .contains("transition configuration must include at least one active entry")
     );
 }
 
@@ -648,16 +672,16 @@ fn transition_type_field_is_rejected() {
 photo-library-path: "/photos"
 transition:
   type: random
-  options:
-    fade:
+  active:
+    - kind: fade
       duration-ms: 520
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("transition.type is no longer supported")
-    );
+    let err_msg = err.to_string();
+    assert!(err_msg.contains("unknown field `type`"));
+    assert!(err_msg.contains("selection"));
+    assert!(err_msg.contains("active"));
 }
 
 #[test]
@@ -689,8 +713,9 @@ fn wipe_transition_rejects_negative_jitter() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  types: [wipe]
-  angle-jitter-degrees: -15.0
+  active:
+    - kind: wipe
+      angle-jitter-degrees: -15.0
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
@@ -705,8 +730,9 @@ fn push_transition_rejects_negative_jitter() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  types: [push]
-  angle-jitter-degrees: -30.0
+  active:
+    - kind: push
+      angle-jitter-degrees: -30.0
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
@@ -721,17 +747,18 @@ fn iris_transition_clamps_blade_count() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  types: [iris]
-  blades: 0
+  active:
+    - kind: iris
+      blades: 0
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    let iris = cfg
+    let selected = cfg
         .transition
-        .options()
-        .get(&TransitionKind::Iris)
+        .primary_selected()
         .expect("expected iris transition option");
-    match iris.mode() {
+    assert_eq!(selected.entry.kind, TransitionKind::Iris);
+    match selected.option.mode() {
         rust_photo_frame::config::TransitionMode::Iris(cfg) => {
             assert_eq!(cfg.blades, 5);
         }
@@ -744,20 +771,21 @@ fn push_transition_configures_multiple_angles() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  types: [push]
-  duration-ms: 725
-  angle-list-degrees: [90.0, 270.0]
-  angle-selection: sequential
+  active:
+    - kind: push
+      duration-ms: 725
+      angle-list-degrees: [90.0, 270.0]
+      angle-selection: sequential
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    let option = cfg
+    let selected = cfg
         .transition
-        .options()
-        .get(&TransitionKind::Push)
+        .primary_selected()
         .expect("expected push transition option");
-    assert_eq!(option.duration().as_millis(), 725);
-    match option.mode() {
+    assert_eq!(selected.entry.kind, TransitionKind::Push);
+    assert_eq!(selected.option.duration().as_millis(), 725);
+    match selected.option.mode() {
         rust_photo_frame::config::TransitionMode::Push(push) => {
             assert_eq!(push.angles.angles_deg.as_ref(), &[90.0, 270.0]);
             assert_eq!(
