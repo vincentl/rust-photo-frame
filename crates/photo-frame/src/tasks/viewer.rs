@@ -1550,6 +1550,7 @@ pub fn run_windowed(
                 desired_maximum_frame_latency: 2,
             };
             surface.configure(&device, &config);
+            self.update_surface_ready(size.width, size.height);
             debug!(
                 width = config.width,
                 height = config.height,
