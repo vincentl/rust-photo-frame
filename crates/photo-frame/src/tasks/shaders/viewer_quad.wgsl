@@ -164,16 +164,18 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let close_curve = close_phase * close_phase * (3.0 - 2.0 * close_phase);
       let open_curve = open_phase * open_phase * (3.0 - 2.0 * open_phase);
       let is_opening = step(1.0, phase);
-      let aperture_ratio = (1.0 - is_opening) * (1.0 - close_curve) + is_opening * open_curve;
-      let rotation = (phase - 1.0) * 0.75;
+      let aperture_ratio = mix(1.0 - close_curve, open_curve, is_opening);
+      let inradius = aperture_ratio * max_radius;
+      // The iris aperture follows the polygonal solution described in
+      // https://stackoverflow.com/a/57571325, mapping the ray angle into the
+      // current blade sector and projecting against the blade edge.
       let two_pi = 6.28318530718;
       let sector = two_pi / blades;
       let half_sector = 0.5 * sector;
-      let wrapped = (angle + rotation + half_sector) / sector;
-      let local_angle = (fract(wrapped) - 0.5) * sector;
-      let cos_local = max(cos(local_angle), 0.0005);
-      let inscribed = max_radius * aperture_ratio;
-      let boundary = min(inscribed / cos_local, max_radius);
+      let wrapped = fract((angle + half_sector) / sector);
+      let local_angle = (wrapped - 0.5) * sector;
+      let cos_local = max(cos(local_angle), 1e-4);
+      let boundary = min(inradius / cos_local, max_radius);
       let edge_softness = max(max_radius * 0.02, 0.001);
       let mask = 1.0 - smoothstep(-edge_softness, 0.0, dist - boundary);
       var stage_color = current;
@@ -184,7 +186,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let radial = clamp(dist / max_radius, 0.0, 1.0);
       let highlight = pow(blade_center, 2.4) * 0.28;
       let radial_shadow = mix(1.05, 0.55, radial);
-      let edge_highlight = smoothstep(-edge_softness * 5.0, 0.0, boundary - dist) * 0.32;
+      let edge_highlight = smoothstep(-edge_softness * 6.0, 0.0, boundary - dist) * 0.32;
       let noise = fract(
         sin(dot(screen_pos, vec2<f32>(12.9898, 78.233))) * 43758.5453
       );
