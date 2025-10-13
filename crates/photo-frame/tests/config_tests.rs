@@ -41,6 +41,7 @@ fn parse_with_studio_matting() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
+  selection: fixed
   active:
     - kind: studio
       bevel-width-px: 5.0
@@ -86,6 +87,7 @@ fn parse_studio_with_custom_texture_strength() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
+  selection: fixed
   active:
     - kind: studio
       texture-strength: 0.35
@@ -112,6 +114,7 @@ fn parse_studio_with_custom_weave_periods() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
+  selection: fixed
   active:
     - kind: studio
       warp-period-px: 8.5
@@ -142,6 +145,7 @@ fn parse_random_matting_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
+  selection: random
   active:
     - kind: fixed-color
       colors:
@@ -189,6 +193,7 @@ fn parse_fixed_color_single_color_alias() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
+  selection: fixed
   active:
     - kind: fixed-color
       color: [17, 34, 51]
@@ -294,6 +299,7 @@ fn parse_fixed_image_with_multiple_paths() {
         r#"
 photo-library-path: "/photos"
 matting:
+  selection: fixed
   active:
     - kind: fixed-image
       path: ["{first}", "{second}"]
@@ -364,6 +370,7 @@ fn parse_fixed_image_with_single_string_path() {
         r#"
 photo-library-path: "/photos"
 matting:
+  selection: fixed
   active:
     - kind: fixed-image
       path: "{only}"
@@ -399,6 +406,7 @@ fn fixed_image_with_empty_paths_is_disabled() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
+  selection: fixed
   active:
     - kind: fixed-image
       path: []
@@ -422,6 +430,7 @@ fn matting_entry_without_required_fields_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
+  selection: fixed
   active:
     - kind: fixed-image
 "#;
@@ -438,6 +447,7 @@ fn matting_with_empty_active_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
+  selection: random
   active: []
 "#;
 
@@ -449,10 +459,31 @@ matting:
 }
 
 #[test]
+fn matting_fixed_selection_requires_single_entry() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  selection: fixed
+  active:
+    - kind: fixed-color
+      color: [1, 2, 3]
+    - kind: blur
+      sigma: 4.0
+"#;
+
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("matting selection 'fixed' requires exactly one active entry")
+    );
+}
+
+#[test]
 fn matting_type_field_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
 matting:
+  selection: random
   type: random
   active:
     - kind: fixed-color
@@ -471,6 +502,7 @@ fn parse_inline_fade_transition() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
+  selection: fixed
   active:
     - kind: fade
       duration-ms: 750
@@ -536,6 +568,7 @@ fn parse_random_transition_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
+  selection: random
   active:
     - kind: fade
       duration-ms: 450
@@ -656,6 +689,7 @@ fn transition_with_empty_active_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
+  selection: random
   active: []
 "#;
 
@@ -667,10 +701,32 @@ transition:
 }
 
 #[test]
+fn transition_fixed_selection_requires_single_entry() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  selection: fixed
+  active:
+    - kind: fade
+      duration-ms: 250
+    - kind: wipe
+      duration-ms: 400
+      angle-list-degrees: [0.0]
+"#;
+
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("transition selection 'fixed' requires exactly one active entry")
+    );
+}
+
+#[test]
 fn transition_type_field_is_rejected() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
+  selection: random
   type: random
   active:
     - kind: fade
@@ -713,6 +769,7 @@ fn wipe_transition_rejects_negative_jitter() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
+  selection: fixed
   active:
     - kind: wipe
       angle-jitter-degrees: -15.0
@@ -726,10 +783,29 @@ transition:
 }
 
 #[test]
+fn wipe_transition_requires_angles() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  selection: fixed
+  active:
+    - kind: wipe
+      angle-list-degrees: []
+"#;
+
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("transition option wipe requires angle-list-degrees to include at least one entry")
+    );
+}
+
+#[test]
 fn push_transition_rejects_negative_jitter() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
+  selection: fixed
   active:
     - kind: push
       angle-jitter-degrees: -30.0
@@ -747,6 +823,7 @@ fn iris_transition_clamps_blade_count() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
+  selection: fixed
   active:
     - kind: iris
       blades: 0
@@ -771,6 +848,7 @@ fn push_transition_configures_multiple_angles() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
+  selection: fixed
   active:
     - kind: push
       duration-ms: 725
