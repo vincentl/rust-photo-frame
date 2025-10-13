@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use rust_photo_frame::config::{MattingConfig, TransitionConfig};
 use rust_photo_frame::events::PreparedImageCpu;
-use rust_photo_frame::tasks::viewer::testkit::{MattingQueueHarness, compute_canvas_size_for_test};
+use rust_photo_frame::tasks::viewer::testkit::{compute_canvas_size_for_test, MattingQueueHarness};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn viewer_defers_matting_until_surface_ready_event() {
@@ -48,6 +48,71 @@ async fn viewer_defers_matting_until_surface_ready_event() {
     harness.wait_for_ready_results(Duration::from_secs(2)).await;
     let ready = harness.take_ready_canvases();
     assert_eq!(ready.len(), 1, "expected one matting result once ready");
+    let expected = compute_canvas_size_for_test(1920, 1080, 1.0, 4096);
+    assert_eq!((ready[0].width, ready[0].height), expected);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn viewer_waits_for_fullscreen_configure_after_smaller_report() {
+    let mut matting = MattingConfig::default();
+    matting.prepare_runtime().expect("matting config ready");
+
+    let mut harness = MattingQueueHarness::new(1, 1.0, matting, 5_000, TransitionConfig::default());
+
+    harness.set_surface_expected_minimum(Some((1920, 1080)));
+    harness.update_surface_state(Some((800, 600, 4096)));
+    harness.arm_surface_gate();
+    harness.report_surface_initial_config(800, 600);
+
+    harness.push_deferred(
+        PreparedImageCpu {
+            path: PathBuf::from("/photos/startup.jpg"),
+            width: 1600,
+            height: 1067,
+            pixels: vec![180; (1600 * 1067 * 4) as usize],
+        },
+        false,
+    );
+
+    harness.queue_once();
+    harness
+        .wait_for_ready_results(Duration::from_millis(100))
+        .await;
+    assert!(
+        harness.take_ready_canvases().is_empty(),
+        "matting must stay deferred until fullscreen dimensions are confirmed",
+    );
+    assert_eq!(
+        harness.deferred_queue_len(),
+        1,
+        "deferred queue should retain the pending image after initial configure"
+    );
+
+    harness.report_surface_configured(800, 600);
+    harness.queue_once();
+    harness
+        .wait_for_ready_results(Duration::from_millis(100))
+        .await;
+    assert!(
+        harness.take_ready_canvases().is_empty(),
+        "a smaller configure event should not release deferred matting",
+    );
+    assert_eq!(
+        harness.deferred_queue_len(),
+        1,
+        "deferred queue should still hold the image until fullscreen configure"
+    );
+
+    harness.update_surface_state(Some((1920, 1080, 4096)));
+    harness.report_surface_configured(1920, 1080);
+    harness.queue_once();
+    harness.wait_for_ready_results(Duration::from_secs(2)).await;
+    let ready = harness.take_ready_canvases();
+    assert_eq!(
+        ready.len(),
+        1,
+        "expected one matting result once fullscreen ready"
+    );
     let expected = compute_canvas_size_for_test(1920, 1080, 1.0, 4096);
     assert_eq!((ready[0].width, ready[0].height), expected);
 }
