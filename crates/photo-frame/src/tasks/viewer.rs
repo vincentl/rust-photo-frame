@@ -12,6 +12,7 @@ use crate::events::{
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
+use crate::renderer::iris_tess::{IrisDrawParams, IrisRenderer, IrisStage};
 use crate::tasks::greeting_screen::GreetingScreen;
 use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
 use futures::executor::block_on;
@@ -49,6 +50,10 @@ pub(super) enum ActiveTransition {
         blades: u32,
         rotate_radians: f32,
         direction: IrisDirection,
+        fill_rgba: [f32; 4],
+        stroke_rgba: [f32; 4],
+        stroke_width: f32,
+        tolerance: f32,
     },
 }
 
@@ -126,6 +131,10 @@ impl TransitionState {
                 blades: cfg.blades.max(1),
                 rotate_radians: cfg.rotate_radians,
                 direction: cfg.direction,
+                fill_rgba: cfg.fill_rgba,
+                stroke_rgba: cfg.stroke_rgba,
+                stroke_width: cfg.stroke_width,
+                tolerance: cfg.tolerance,
             },
         };
 
@@ -760,6 +769,7 @@ pub fn run_windowed(
         sampler: wgpu::Sampler,
         pipeline: wgpu::RenderPipeline,
         blank_plane: TexturePlane,
+        iris: IrisRenderer,
     }
 
     fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
@@ -1772,6 +1782,8 @@ pub fn run_windowed(
 
             let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
 
+            let iris = IrisRenderer::new(&device, format, &img_bind_layout);
+
             let greeting = GreetingScene::new(GreetingScreen::new(
                 &device,
                 &queue,
@@ -1799,6 +1811,7 @@ pub fn run_windowed(
                 sampler,
                 pipeline,
                 blank_plane,
+                iris,
             };
             if let Some(mode) = self.mode.as_mut() {
                 mode.set_overlays(Some(greeting), Some(sleep));
@@ -2067,23 +2080,6 @@ pub fn run_windowed(
                         ViewerModeKind::Wake => {
                             let wake = mode.wake();
                             encoder.push_debug_group("wake-draw");
-                            let mut rpass =
-                                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                    label: Some("draw-pass"),
-                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                        view: &view,
-                                        depth_slice: None,
-                                        resolve_target: None,
-                                        ops: wgpu::Operations {
-                                            load: wgpu::LoadOp::Clear(self.clear_color),
-                                            store: wgpu::StoreOp::Store,
-                                        },
-                                    })],
-                                    depth_stencil_attachment: None,
-                                    occlusion_query_set: None,
-                                    timestamp_writes: None,
-                                });
-                            rpass.set_pipeline(&gpu.pipeline);
                             let screen_w = gpu.config.width as f32;
                             let screen_h = gpu.config.height as f32;
                             let aspect = if screen_h > 0.0 {
@@ -2111,118 +2107,230 @@ pub fn run_windowed(
                             };
                             let mut current_bind = &gpu.blank_plane.bind;
                             let mut next_bind = &gpu.blank_plane.bind;
-                            let mut have_draw = false;
+                            let mut current_rect = [0.0f32; 4];
+                            let mut next_rect = [0.0f32; 4];
+                            let mut have_current = false;
+                            let mut have_next = false;
 
-                            if let Some(state) = wake.transition_state() {
-                                if let Some(cur) = wake.current() {
-                                    let rect = compute_cover_rect(
-                                        cur.plane.w,
-                                        cur.plane.h,
-                                        gpu.config.width,
-                                        gpu.config.height,
-                                    );
-                                    uniforms.current_dest = rect_to_uniform(rect);
-                                    current_bind = &cur.plane.bind;
-                                    have_draw = true;
-                                }
-                                if let Some(next) = wake.next() {
-                                    let rect = compute_cover_rect(
-                                        next.plane.w,
-                                        next.plane.h,
-                                        gpu.config.width,
-                                        gpu.config.height,
-                                    );
-                                    uniforms.next_dest = rect_to_uniform(rect);
-                                    next_bind = &next.plane.bind;
-                                    have_draw = true;
-                                }
-                                let base_progress = state.progress();
-                                let eased_progress =
-                                    base_progress * base_progress * (3.0 - 2.0 * base_progress);
-                                let progress = match state.variant() {
-                                    ActiveTransition::Iris { .. } => base_progress,
-                                    _ => eased_progress,
-                                };
-                                uniforms.progress = progress;
-                                uniforms.t = eased_progress;
-                                uniforms.kind = state.kind().as_index();
-                                match state.variant() {
-                                    ActiveTransition::Fade { through_black } => {
-                                        uniforms.params0[0] =
-                                            if *through_black { 1.0 } else { 0.0 };
-                                    }
-                                    ActiveTransition::Wipe { normal, softness } => {
-                                        let normal = *normal;
-                                        let (min_proj, inv_span) =
-                                            compute_wipe_span(normal, screen_w, screen_h);
-                                        uniforms.params0 =
-                                            [normal[0], normal[1], min_proj, inv_span];
-                                        uniforms.params1[0] = *softness;
-                                    }
-                                    ActiveTransition::Push { direction } => {
-                                        let direction = *direction;
-                                        let diag =
-                                            (screen_w * screen_w + screen_h * screen_h).sqrt();
-                                        uniforms.params0[0] = direction[0] * diag;
-                                        uniforms.params0[1] = direction[1] * diag;
-                                    }
-                                    ActiveTransition::EInk {
-                                        flash_count,
-                                        reveal_portion,
-                                        stripe_count,
-                                        flash_color,
-                                        noise_seed,
-                                    } => {
-                                        let noise_seed = *noise_seed;
-                                        let flash_color = *flash_color;
-                                        uniforms.params0[0] = (*flash_count).min(6) as f32;
-                                        uniforms.params0[1] = *reveal_portion;
-                                        uniforms.params0[2] = (*stripe_count).max(1) as f32;
-                                        uniforms.params0[3] = noise_seed[0];
-                                        uniforms.params1[0] = noise_seed[1];
-                                        uniforms.params1[1] = flash_color[0].clamp(0.0, 1.0);
-                                        uniforms.params1[2] = flash_color[1].clamp(0.0, 1.0);
-                                        uniforms.params1[3] = flash_color[2].clamp(0.0, 1.0);
-                                    }
-                                    ActiveTransition::Iris {
-                                        blades,
-                                        rotate_radians,
-                                        direction,
-                                    } => {
-                                        let blades = (*blades).clamp(3, 12);
-                                        uniforms.iris_blades = blades;
-                                        uniforms.iris_rotate_rad = *rotate_radians;
-                                        uniforms.iris_direction = direction.as_flag();
-                                        uniforms.t = eased_progress;
-                                    }
-                                }
-                            } else if let Some(cur) = wake.current() {
+                            if let Some(cur) = wake.current() {
                                 let rect = compute_cover_rect(
                                     cur.plane.w,
                                     cur.plane.h,
                                     gpu.config.width,
                                     gpu.config.height,
                                 );
-                                uniforms.current_dest = rect_to_uniform(rect);
+                                current_rect = rect_to_uniform(rect);
+                                uniforms.current_dest = current_rect;
                                 current_bind = &cur.plane.bind;
-                                have_draw = true;
+                                have_current = true;
                             }
-                            if have_draw {
+                            if let Some(next) = wake.next() {
+                                let rect = compute_cover_rect(
+                                    next.plane.w,
+                                    next.plane.h,
+                                    gpu.config.width,
+                                    gpu.config.height,
+                                );
+                                next_rect = rect_to_uniform(rect);
+                                uniforms.next_dest = next_rect;
+                                next_bind = &next.plane.bind;
+                                have_next = true;
+                            }
+
+                            let mut iris_rendered = false;
+                            let mut should_draw_quad = false;
+
+                            if let Some(state) = wake.transition_state() {
+                                match state.variant() {
+                                    ActiveTransition::Iris {
+                                        blades,
+                                        rotate_radians,
+                                        direction,
+                                        fill_rgba,
+                                        stroke_rgba,
+                                        stroke_width,
+                                        tolerance,
+                                    } => {
+                                        let blades = (*blades).max(3);
+                                        let rotate_radians = *rotate_radians;
+                                        let direction = *direction;
+                                        let fill_rgba = *fill_rgba;
+                                        let stroke_rgba = *stroke_rgba;
+                                        let stroke_width = *stroke_width;
+                                        let tolerance = *tolerance;
+                                        if have_current && have_next {
+                                            let base_progress = state.progress();
+                                            let timeline =
+                                                if matches!(direction, IrisDirection::Close) {
+                                                    1.0 - base_progress
+                                                } else {
+                                                    base_progress
+                                                };
+                                            let ease = |value: f32| {
+                                                let clamped = value.clamp(0.0, 1.0);
+                                                clamped * clamped * (3.0 - 2.0 * clamped)
+                                            };
+                                            let closeness = if timeline < 0.5 {
+                                                ease(timeline * 2.0)
+                                            } else {
+                                                1.0 - ease((timeline - 0.5) * 2.0)
+                                            };
+                                            let stage = if timeline < 0.5 {
+                                                IrisStage::Closing
+                                            } else {
+                                                IrisStage::Opening
+                                            };
+                                            {
+                                                let clear_pass = encoder.begin_render_pass(
+                                                    &wgpu::RenderPassDescriptor {
+                                                        label: Some("iris-clear-pass"),
+                                                        color_attachments: &[Some(
+                                                            wgpu::RenderPassColorAttachment {
+                                                                view: &view,
+                                                                depth_slice: None,
+                                                                resolve_target: None,
+                                                                ops: wgpu::Operations {
+                                                                    load: wgpu::LoadOp::Clear(
+                                                                        self.clear_color,
+                                                                    ),
+                                                                    store: wgpu::StoreOp::Store,
+                                                                },
+                                                            },
+                                                        )],
+                                                        depth_stencil_attachment: None,
+                                                        occlusion_query_set: None,
+                                                        timestamp_writes: None,
+                                                    },
+                                                );
+                                                drop(clear_pass);
+                                            }
+                                            let rotation_sign =
+                                                if matches!(direction, IrisDirection::Close) {
+                                                    -1.0
+                                                } else {
+                                                    1.0
+                                                };
+                                            let params = IrisDrawParams {
+                                                screen_size: [screen_w, screen_h],
+                                                blades,
+                                                closeness,
+                                                tolerance,
+                                                stroke_width,
+                                                rotation: rotate_radians
+                                                    * base_progress
+                                                    * rotation_sign,
+                                                fill_color: fill_rgba,
+                                                stroke_color: stroke_rgba,
+                                                stage,
+                                                current_rect,
+                                                next_rect,
+                                                current_bind,
+                                                next_bind,
+                                            };
+                                            iris_rendered = gpu.iris.draw(
+                                                &gpu.device,
+                                                &gpu.queue,
+                                                &mut encoder,
+                                                &view,
+                                                params,
+                                            );
+                                            if !iris_rendered {
+                                                should_draw_quad = have_current;
+                                            }
+                                        } else {
+                                            should_draw_quad = have_current;
+                                        }
+                                    }
+                                    _ => {
+                                        should_draw_quad = have_current || have_next;
+                                        let base_progress = state.progress();
+                                        let eased_progress = base_progress
+                                            * base_progress
+                                            * (3.0 - 2.0 * base_progress);
+                                        uniforms.progress = eased_progress;
+                                        uniforms.t = eased_progress;
+                                        uniforms.kind = state.kind().as_index();
+                                        match state.variant() {
+                                            ActiveTransition::Fade { through_black } => {
+                                                uniforms.params0[0] =
+                                                    if *through_black { 1.0 } else { 0.0 };
+                                            }
+                                            ActiveTransition::Wipe { normal, softness } => {
+                                                let normal = *normal;
+                                                let (min_proj, inv_span) =
+                                                    compute_wipe_span(normal, screen_w, screen_h);
+                                                uniforms.params0 =
+                                                    [normal[0], normal[1], min_proj, inv_span];
+                                                uniforms.params1[0] = *softness;
+                                            }
+                                            ActiveTransition::Push { direction } => {
+                                                let direction = *direction;
+                                                let diag = (screen_w * screen_w
+                                                    + screen_h * screen_h)
+                                                    .sqrt();
+                                                uniforms.params0[0] = direction[0] * diag;
+                                                uniforms.params0[1] = direction[1] * diag;
+                                            }
+                                            ActiveTransition::EInk {
+                                                flash_count,
+                                                reveal_portion,
+                                                stripe_count,
+                                                flash_color,
+                                                noise_seed,
+                                            } => {
+                                                let noise_seed = *noise_seed;
+                                                let flash_color = *flash_color;
+                                                uniforms.params0[0] = (*flash_count).min(6) as f32;
+                                                uniforms.params0[1] = *reveal_portion;
+                                                uniforms.params0[2] = (*stripe_count).max(1) as f32;
+                                                uniforms.params0[3] = noise_seed[0];
+                                                uniforms.params1[0] = noise_seed[1];
+                                                uniforms.params1[1] =
+                                                    flash_color[0].clamp(0.0, 1.0);
+                                                uniforms.params1[2] =
+                                                    flash_color[1].clamp(0.0, 1.0);
+                                                uniforms.params1[3] =
+                                                    flash_color[2].clamp(0.0, 1.0);
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            } else if have_current {
+                                should_draw_quad = true;
+                            }
+
+                            if !iris_rendered && should_draw_quad {
                                 gpu.queue.write_buffer(
                                     &gpu.uniform_buf,
                                     0,
                                     bytemuck::bytes_of(&uniforms),
                                 );
+                                let mut rpass =
+                                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                        label: Some("draw-pass"),
+                                        color_attachments: &[Some(
+                                            wgpu::RenderPassColorAttachment {
+                                                view: &view,
+                                                depth_slice: None,
+                                                resolve_target: None,
+                                                ops: wgpu::Operations {
+                                                    load: wgpu::LoadOp::Clear(self.clear_color),
+                                                    store: wgpu::StoreOp::Store,
+                                                },
+                                            },
+                                        )],
+                                        depth_stencil_attachment: None,
+                                        occlusion_query_set: None,
+                                        timestamp_writes: None,
+                                    });
+                                rpass.set_pipeline(&gpu.pipeline);
                                 rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
                                 rpass.set_bind_group(1, current_bind, &[]);
                                 rpass.set_bind_group(2, next_bind, &[]);
                                 rpass.draw(0..6, 0..1);
                             }
-                            drop(rpass);
                             encoder.pop_debug_group();
-
-                            gpu.queue.submit(Some(encoder.finish()));
-                            frame.present();
                         }
                     }
                 }

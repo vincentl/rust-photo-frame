@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Args;
 use fontdb::{Database, Family, Query, Source};
 use softbuffer::{Context as SoftContext, Surface};
@@ -17,7 +17,7 @@ use winit::window::{Window, WindowButtons, WindowId};
 #[derive(Args, Debug)]
 #[command(
     name = "overlay",
-    about = "Show Wi-Fi recovery instructions in a kiosk overlay window.",
+    about = "Show Wi-Fi recovery instructions in a kiosk overlay window."
 )]
 pub struct OverlayCli {
     /// Hotspot SSID to display in the overlay.
@@ -101,10 +101,7 @@ fn load_face(db: &Database, id: fontdb::ID) -> Result<Option<FontArc>> {
         Source::File(path) => {
             let data = fs::read(path)
                 .with_context(|| format!("failed to read font at {}", path.display()))?;
-            Some(
-                FontArc::try_from_vec(data)
-                    .context("failed to decode font face from file data")?,
-            )
+            Some(FontArc::try_from_vec(data).context("failed to decode font face from file data")?)
         }
         Source::SharedFile(_, data) => {
             let bytes = data.as_ref().as_ref();
@@ -184,8 +181,10 @@ impl OverlayApp {
         window.set_min_inner_size(Some(Size::Physical(PhysicalSize::new(640, 480))));
         let window = WindowHandle::new(window);
 
-        let context = SoftContext::new(window.clone()).expect("failed to create softbuffer context");
-        let surface = Surface::new(&context, window.clone()).expect("failed to create softbuffer surface");
+        let context =
+            SoftContext::new(window.clone()).expect("failed to create softbuffer context");
+        let surface =
+            Surface::new(&context, window.clone()).expect("failed to create softbuffer surface");
 
         self.context = Some(context);
         self.surface = Some(surface);
@@ -588,15 +587,7 @@ fn draw_paragraph(
     let mut cursor_y = top + metrics.ascent;
     for line in wrap_text(text, font, scale, max_width) {
         draw_text(
-            buffer,
-            width,
-            height,
-            font,
-            &line,
-            color,
-            left,
-            cursor_y,
-            scale,
+            buffer, width, height, font, &line, color, left, cursor_y, scale,
         );
         cursor_y += metrics.descent + metrics.line_gap + line_gap;
     }
@@ -655,12 +646,7 @@ fn draw_highlight(
     cursor_y
 }
 
-fn wrap_text<'a>(
-    text: &'a str,
-    font: &FontArc,
-    scale: PxScale,
-    max_width: f32,
-) -> Vec<String> {
+fn wrap_text<'a>(text: &'a str, font: &FontArc, scale: PxScale, max_width: f32) -> Vec<String> {
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut lines = Vec::new();
     let mut current_line = String::new();
@@ -755,11 +741,47 @@ fn draw_rounded_rect(
         return;
     }
 
-    fill_rect(buffer, width, height, left + radius, top, right - radius, bottom, color);
-    fill_rect(buffer, width, height, left, top + radius, left + radius, bottom - radius, color);
-    fill_rect(buffer, width, height, right - radius, top + radius, right, bottom - radius, color);
+    fill_rect(
+        buffer,
+        width,
+        height,
+        left + radius,
+        top,
+        right - radius,
+        bottom,
+        color,
+    );
+    fill_rect(
+        buffer,
+        width,
+        height,
+        left,
+        top + radius,
+        left + radius,
+        bottom - radius,
+        color,
+    );
+    fill_rect(
+        buffer,
+        width,
+        height,
+        right - radius,
+        top + radius,
+        right,
+        bottom - radius,
+        color,
+    );
 
-    draw_corner(buffer, width, height, left + radius, top + radius, radius, color, Corner::TopLeft);
+    draw_corner(
+        buffer,
+        width,
+        height,
+        left + radius,
+        top + radius,
+        radius,
+        color,
+        Corner::TopLeft,
+    );
     draw_corner(
         buffer,
         width,

@@ -2,7 +2,7 @@ pub mod ui;
 
 use crate::config::{Config, OverlayConfig};
 use crate::hotspot;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};

@@ -2470,6 +2470,10 @@ impl TransitionOptions {
                         .iris_rotate_radians
                         .unwrap_or(defaults.rotate_radians),
                     direction: builder.iris_direction.unwrap_or(defaults.direction),
+                    fill_rgba: builder.iris_fill_rgba.unwrap_or(defaults.fill_rgba),
+                    stroke_rgba: builder.iris_stroke_rgba.unwrap_or(defaults.stroke_rgba),
+                    stroke_width: builder.iris_stroke_width.unwrap_or(defaults.stroke_width),
+                    tolerance: builder.iris_tolerance.unwrap_or(defaults.tolerance),
                 })
             }
         };
@@ -2690,15 +2694,6 @@ pub enum IrisDirection {
     Close,
 }
 
-impl IrisDirection {
-    pub const fn as_flag(self) -> u32 {
-        match self {
-            Self::Open => 0,
-            Self::Close => 1,
-        }
-    }
-}
-
 impl Default for IrisDirection {
     fn default() -> Self {
         Self::Open
@@ -2710,6 +2705,10 @@ pub struct IrisTransition {
     pub blades: u32,
     pub rotate_radians: f32,
     pub direction: IrisDirection,
+    pub fill_rgba: [f32; 4],
+    pub stroke_rgba: [f32; 4],
+    pub stroke_width: f32,
+    pub tolerance: f32,
 }
 
 impl Default for IrisTransition {
@@ -2718,6 +2717,10 @@ impl Default for IrisTransition {
             blades: 7,
             rotate_radians: 0.9,
             direction: IrisDirection::Open,
+            fill_rgba: [0.85, 0.85, 0.85, 1.0],
+            stroke_rgba: [0.10, 0.10, 0.10, 1.0],
+            stroke_width: 1.5,
+            tolerance: 0.25,
         }
     }
 }
@@ -2739,6 +2742,41 @@ impl IrisTransition {
         );
         let max_rotation = std::f32::consts::TAU;
         self.rotate_radians = self.rotate_radians.clamp(0.0, max_rotation);
+        for (idx, channel) in self.fill_rgba.iter_mut().enumerate() {
+            ensure!(
+                channel.is_finite(),
+                format!(
+                    "transition option {} has non-finite iris.fill-rgba channel {}",
+                    kind, idx
+                )
+            );
+            *channel = channel.clamp(0.0, 1.0);
+        }
+        for (idx, channel) in self.stroke_rgba.iter_mut().enumerate() {
+            ensure!(
+                channel.is_finite(),
+                format!(
+                    "transition option {} has non-finite iris.stroke-rgba channel {}",
+                    kind, idx
+                )
+            );
+            *channel = channel.clamp(0.0, 1.0);
+        }
+        ensure!(
+            self.stroke_width.is_finite(),
+            format!(
+                "transition option {} has non-finite iris.stroke-width",
+                kind
+            )
+        );
+        if self.stroke_width < 0.0 {
+            self.stroke_width = 0.0;
+        }
+        ensure!(
+            self.tolerance.is_finite(),
+            format!("transition option {} has non-finite iris.tolerance", kind)
+        );
+        self.tolerance = self.tolerance.clamp(0.01, 2.0);
         Ok(())
     }
 }
@@ -2841,6 +2879,10 @@ struct TransitionOptionBuilder {
     iris_blades: Option<u32>,
     iris_rotate_radians: Option<f32>,
     iris_direction: Option<IrisDirection>,
+    iris_fill_rgba: Option<[f32; 4]>,
+    iris_stroke_rgba: Option<[f32; 4]>,
+    iris_stroke_width: Option<f32>,
+    iris_tolerance: Option<f32>,
 }
 
 fn apply_transition_inline_field<E: de::Error>(
@@ -2904,6 +2946,18 @@ fn apply_transition_inline_field<E: de::Error>(
         "direction" if matches!(kind, TransitionKind::Iris) => {
             builder.iris_direction = Some(inline_value_to::<IrisDirection, E>(value)?);
         }
+        "fill-rgba" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_fill_rgba = Some(inline_value_to::<[f32; 4], E>(value)?);
+        }
+        "stroke-rgba" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_stroke_rgba = Some(inline_value_to::<[f32; 4], E>(value)?);
+        }
+        "stroke-width" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_stroke_width = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "tolerance" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_tolerance = Some(inline_value_to::<f32, E>(value)?);
+        }
         _ => {
             return Err(de::Error::unknown_field(
                 field,
@@ -2921,6 +2975,10 @@ fn apply_transition_inline_field<E: de::Error>(
                     "blades",
                     "rotate-radians",
                     "direction",
+                    "fill-rgba",
+                    "stroke-rgba",
+                    "stroke-width",
+                    "tolerance",
                 ],
             ));
         }

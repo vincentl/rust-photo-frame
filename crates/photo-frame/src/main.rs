@@ -2,6 +2,7 @@ mod config;
 mod events;
 mod gpu;
 mod processing;
+mod renderer;
 mod schedule;
 mod tasks {
     pub mod files;

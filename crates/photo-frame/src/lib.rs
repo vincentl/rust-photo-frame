@@ -2,6 +2,7 @@ pub mod config;
 pub mod events;
 pub mod gpu;
 pub mod processing;
+pub mod renderer;
 pub mod schedule;
 pub mod tasks {
     pub mod files;
