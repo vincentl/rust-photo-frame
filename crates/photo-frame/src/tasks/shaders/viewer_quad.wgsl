@@ -63,6 +63,43 @@ fn sample_plane(
   return vec4<f32>(c.rgb, 1.0);
 }
 
+fn rotate_point(p: vec2<f32>, cos_a: f32, sin_a: f32) -> vec2<f32> {
+  return vec2<f32>(
+    p.x * cos_a - p.y * sin_a,
+    p.x * sin_a + p.y * cos_a,
+  );
+}
+
+fn arc_diff(angle: f32, sweep_flag: f32) -> f32 {
+  let two_pi = 6.28318530718;
+  var diff = angle;
+  if (sweep_flag > 0.5) {
+    if (diff < 0.0) {
+      diff = diff + two_pi;
+    }
+  } else {
+    if (diff > 0.0) {
+      diff = diff - two_pi;
+    }
+  }
+  return diff;
+}
+
+fn angle_in_arc(
+  angle: f32,
+  start_angle: f32,
+  end_angle: f32,
+  sweep_flag: f32,
+) -> bool {
+  let tolerance = 1e-3;
+  let diff = arc_diff(end_angle - start_angle, sweep_flag);
+  let rel = arc_diff(angle - start_angle, sweep_flag);
+  if (sweep_flag > 0.5) {
+    return rel >= -tolerance && rel <= diff + tolerance;
+  }
+  return rel <= tolerance && rel >= diff - tolerance;
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let screen_pos = in.screen_uv * U.screen_size;
@@ -154,7 +191,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let aspect = U.screen_size.x / max(U.screen_size.y, 1.0);
       let rel = vec2<f32>((in.screen_uv.x - 0.5) * aspect, in.screen_uv.y - 0.5);
       let dist = length(rel);
-      let dir = rel / max(dist, 1e-4);
+      var dir = rel / max(dist, 1e-4);
+      if (dist < 1e-4) {
+        dir = vec2<f32>(0.0, 1.0);
+      }
       let angle = atan2(rel.y, rel.x);
       let max_radius = length(vec2<f32>(aspect * 0.5, 0.5));
       let clamped_progress = clamp(U.progress, 0.0, 1.0);
@@ -180,24 +220,40 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let sin_step = sin(step);
       let r = max_radius;
       let p1 = vec2<f32>(cos_step * r, sin_step * r);
+      let anchor = vec2<f32>(0.0, r);
       let sin_rot = sin(blade_rotation);
       let cos_rot = cos(blade_rotation);
       // The iris aperture follows the polygonal arc construction described in
       // https://stackoverflow.com/a/57571325, which closes the diaphragm by
-      // sweeping each blade's circular edge around the focal point.
+      // sweeping each blade's circular edge around fixed anchor points.
       let center_base = vec2<f32>(
         p1.x * (1.0 - cos_rot) + p1.y * sin_rot,
         p1.y * (1.0 - cos_rot) - p1.x * sin_rot,
       );
+      let dx = sin_rot * r - center_base.x;
+      let dy = r - cos_rot * r - center_base.y;
+      let dc = sqrt(max(dx * dx + dy * dy, 0.0));
+      let arc_term = clamp(dc / (2.0 * r), -1.0, 1.0);
+      let a = atan2(dy, dx) - acos(arc_term);
+      let p2 = center_base + vec2<f32>(cos(a), sin(a)) * r;
       var boundary = r;
       for (var i = 0u; i < blade_count; i = i + 1u) {
         let angle_i = f32(i) * sector;
         let cos_i = cos(angle_i);
         let sin_i = sin(angle_i);
-        let center = vec2<f32>(
-          center_base.x * cos_i - center_base.y * sin_i,
-          center_base.x * sin_i + center_base.y * cos_i,
-        );
+        let p1_rot = rotate_point(p1, cos_i, sin_i);
+        let anchor_rot = rotate_point(anchor, cos_i, sin_i);
+        let center = rotate_point(center_base, cos_i, sin_i);
+        let p2_rot = rotate_point(p2, cos_i, sin_i);
+        let arc1_start = atan2(p1_rot.y, p1_rot.x);
+        let arc1_end = atan2(anchor_rot.y, anchor_rot.x);
+        let arc2_start = atan2(anchor_rot.y - center.y, anchor_rot.x - center.x);
+        let arc2_end = atan2(p2_rot.y - center.y, p2_rot.x - center.x);
+        let point_arc1 = dir * r;
+        let arc1_angle = atan2(point_arc1.y, point_arc1.x);
+        if (angle_in_arc(arc1_angle, arc1_start, arc1_end, 0.0)) {
+          boundary = min(boundary, r);
+        }
         let proj = dot(dir, center);
         let center_len_sq = dot(center, center);
         let disc = proj * proj - (center_len_sq - r * r);
@@ -208,7 +264,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             t = proj + root;
           }
           if (t > 0.0) {
-            boundary = min(boundary, t);
+            let point_arc2 = dir * t;
+            let arc2_angle = atan2(
+              point_arc2.y - center.y,
+              point_arc2.x - center.x,
+            );
+            if (angle_in_arc(arc2_angle, arc2_start, arc2_end, 1.0)) {
+              boundary = min(boundary, t);
+            }
           }
         }
       }
