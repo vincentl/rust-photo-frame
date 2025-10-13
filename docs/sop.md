@@ -40,4 +40,25 @@ sudo systemctl start greetd.service
 - **Start**: `sudo systemctl start greetd.service` - brings greetd back on tty1, which in turn launches Sway and the photo frame.
 - **Restart**: `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service` - give logind a moment to release the seat before greetd grabs it again.
 
-If you prefer a reusable helper, wrap the sequence in a shell alias or script (e.g. `restart-greetd()`); just keep the pause in place when you need to refresh the viewer.
+## Manual Debug Launch (Advanced)
+
+In normal operation, the `rust-photo-frame` application is started automatically by **greetd** via the `photoframe-session` wrapper. However, for debugging or development purposes, you may wish to launch it manually under the `kiosk` account within a Wayland session.
+
+### Prerequisites
+
+Ensure the `kiosk` user is permitted to run lingering user sessions (so its runtime directory is preserved):
+
+```bash
+sudo loginctl enable-linger kiosk
+```
+
+### Launch Command
+
+Use the following command to start a standalone Sway session and run the photo-frame stack manually:
+
+```bash
+sudo -u kiosk \
+  XDG_RUNTIME_DIR="/run/user/$(id -u kiosk)" \
+  dbus-run-session \
+  sway -c /usr/local/share/photoframe/sway/config
+```
