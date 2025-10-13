@@ -2,6 +2,8 @@
 
 The repository ships with a sample [`config.yaml`](../config.yaml) that you can copy or edit directly. Place a YAML file alongside the binary (or somewhere readable) and pass its path as the CLI argument.
 
+> **Breaking change:** The `transition` and `matting` blocks now expect `selection` + `active` entries. Configurations that still rely on the legacy `types`/`options` layout will fail to load until they are migrated.
+
 ## Starter configuration
 
 The example below targets a Pi driving a 4K portrait display backed by a NAS-mounted photo library. Inline comments explain why each value matters and what to tweak for common scenarios.
@@ -13,8 +15,10 @@ photo-library-path: /var/lib/photo-frame/photos
 
 # Render/transition settings
 transition:
-  types: [fade] # List one entry for a fixed transition or multiple to randomize
-  duration-ms: 400 # Duration for the selected transition
+  selection: random # fixed, random, or sequential
+  active:
+    - kind: fade
+      duration-ms: 400
 dwell-ms: 2000 # Time an image remains fully visible (ms)
 viewer-preload-count: 3 # Images the viewer preloads; also sets viewer channel capacity
 loader-max-concurrent-decodes: 4 # Concurrent decodes in the loader
@@ -33,14 +37,14 @@ playlist:
   half-life: 3 days # How quickly that multiplicity decays back toward 1
 
 matting:
-  types: [fixed-color, blur] # Single entry = fixed mat, multiple entries = random rotation
-  options:
-    fixed-color:
+  selection: random
+  active:
+    - kind: fixed-color
       minimum-mat-percentage: 0.0 # % of each screen edge reserved for the mat border
       max-upscale-factor: 1.0 # Limit for enlarging images when applying mats
       colors: [[0, 0, 0], [32, 32, 32]]
       color-selection: sequential
-    blur:
+    - kind: blur
       minimum-mat-percentage: 3.5
       sigma: 32.0
       sample-scale: 0.125
@@ -86,7 +90,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 
 - **Purpose:** Controls how the viewer blends between photos.
 - **Required?** Optional; when omitted the frame uses a 400 ms fade.
-- **Accepted values & defaults:** Provide a mapping with the keys documented in [Transition configuration](#transition-configuration). Defaults to `types: [fade]` with the standard fade options.
+- **Accepted values & defaults:** Provide a mapping with the keys documented in [Transition configuration](#transition-configuration). When omitted the runtime behaves as `{ selection: fixed, active: [{ kind: fade }] }` with the standard fade options.
 - **Effect on behavior:** Adjust the duration, direction, randomness, or transition family to match the feel you want—from subtle fades to bold pushes or e‑ink style reveals.
 
 ### `dwell-ms`
@@ -243,7 +247,7 @@ Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/i
 
 - **Purpose:** Chooses the mat/background style rendered behind every photo.
 - **Required?** Optional.
-- **Accepted values & defaults:** Mapping described in [Matting configuration](#matting-configuration); defaults to a black fixed-color mat.
+- **Accepted values & defaults:** Mapping described in [Matting configuration](#matting-configuration). When omitted the runtime behaves as `{ selection: fixed, active: [{ kind: fixed-color }] }` with a black swatch.
 - **Effect on behavior:** Selecting different mat types changes the visual framing—from gallery-style solids to soft blurs or custom imagery.
 
 ## Playlist weighting
@@ -313,56 +317,22 @@ photo-effect:
 
 ## Transition configuration
 
-The `transition` block controls how the viewer blends between photos. List one or more transition kinds under `transition.types`. A single entry locks the viewer to that transition, while multiple entries tell the app to pick a new one for each slide. Every type mentioned in `transition.types` must have matching settings either inline (when only one type is listed) or within `transition.options`. Legacy configs that still use `transition.type` continue to work; `type: random` now randomizes across the entries in `transition.options`.
+The `transition` block controls how the viewer blends between photos. Supply one or more entries under `transition.active`; each entry begins with a required `kind` tag (`fade`, `wipe`, `push`, `e-ink`, or `iris`) followed by the fields that customise that transition. Use `transition.selection` to describe how the viewer steps through that list.
 
-### Transition top-level configuration
+| Key         | Required? | Default                                                       | Accepted values                           | Effect |
+| ----------- | --------- | ------------------------------------------------------------- | ----------------------------------------- | ------ |
+| `selection` | Optional  | `fixed` when `active` has one entry, otherwise `random`       | `fixed`, `random`, or `sequential`        | Controls how the viewer iterates through `active`. `fixed` locks to the first entry, `random` chooses independently per slide, and `sequential` advances in order and loops. |
+| `active`    | Yes       | —                                                             | Array of transition entry maps            | Declares the transition variants that are eligible. Repeat entries—including duplicates of the same `kind`—to weight the random picker or to alternate presets in sequential mode. |
 
-| Key              | Required?                                                       | Default                        | Accepted values                                                 | Effect                                                                                                                                                              |
-| ---------------- | --------------------------------------------------------------- | ------------------------------ | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `types`          | Yes                                                             | `['fade']`                     | Array containing one or more of `fade`, `wipe`, `push`, `e-ink`, `iris` | Determines which transition families are in play. Duplicates are ignored; at least one entry must be supplied.                                                      |
-| `type-selection` | Optional (only valid when `types` has multiple entries)         | `random`                       | `random` or `sequential`                                        | Picks whether the app draws a new type randomly each slide or cycles through the list in order. Ignored when only one type is listed.                               |
-| `options`        | Required when `types` has multiple entries (optional otherwise) | Defaults per transition family | Mapping keyed by transition kind                                | Provides per-type overrides for duration and mode-specific fields. When only one type is listed you can specify the same fields inline instead of creating the map. |
+> Legacy `transition.types` and `transition.options` keys are no longer supported. Migrate by copying each old option into the `active` list and moving the former map key into a `kind` field.
 
-> **Note:** Reserve the word `random` for `type-selection`; adding it to `types` triggers a validation error.
+When `selection` is omitted, the runtime infers it: a single entry becomes `fixed`; multiple entries default to `random`. `selection: fixed` requires exactly one entry, while `selection: sequential` or `selection: random` accept any list length greater than zero.
 
-Each transition option accepts the shared setting below:
+Each active entry accepts the shared setting below:
 
 - **`duration-ms`** (integer, default `400` for `fade`, `wipe`, `push`; `1600` for `e-ink`): Total runtime of the transition. Validation enforces values greater than zero; longer durations slow the hand-off between photos.
 
 The remaining knobs depend on the transition family.
-
-### Example: wipe with a single angle
-
-```yaml
-transition:
-  types: [wipe]
-  duration-ms: 600
-  angle-list-degrees: [120.0]
-  softness: 0.12
-```
-
-When the list contains only one entry the viewer always uses that direction, so an explicit `angle-selection` strategy is unnecessary.
-
-### Example: randomized transition mix
-
-```yaml
-transition:
-  types: [fade, wipe, push]
-  type-selection: sequential
-  options:
-    fade:
-      duration-ms: 500
-    wipe:
-      duration-ms: 600
-      angle-list-degrees: [45.0, 225.0]
-      angle-selection: sequential
-      angle-jitter-degrees: 30.0
-    push:
-      duration-ms: 650
-      angle-list-degrees: [0.0, 180.0]
-```
-
-Each transition exposes a focused set of fields:
 
 - **`fade`**
   - **`through-black`** (boolean, default `false`): When `true`, fades to black completely before revealing the next image. Keeps cuts discreet at the cost of a slightly longer blackout.
@@ -390,83 +360,143 @@ Each transition exposes a focused set of fields:
   - **`vignette`** (float `0.0–1.0`, default `0.2`): Strength of the subtle darkening toward the screen corners to emphasize the circular aperture.
   - **`easing`** (`linear` or `cubic`, default `cubic`): Selects the easing curve applied to the shutter progress. `cubic` matches the default smooth ease-in-out, while `linear` sticks to the raw transition timeline.
 
+### Example: single inline fade
+
+```yaml
+transition:
+  active:
+    - kind: fade
+      duration-ms: 600
+      through-black: true
+```
+
+Omitting `selection` with one entry locks the viewer to that transition.
+
+### Example: weighted random mix
+
+```yaml
+transition:
+  selection: random
+  active:
+    - kind: fade
+      duration-ms: 450
+    - kind: push
+      duration-ms: 520
+      angle-list-degrees: [0.0, 180.0]
+      angle-selection: sequential
+    - kind: push
+      duration-ms: 520
+      angle-list-degrees: [90.0, 270.0]
+```
+
+Repeating the `push` entry gives that family twice the draw weight versus `fade`, while still allowing different presets for horizontal and vertical motion.
+
+### Example: sequential rotation with duplicates
+
+```yaml
+transition:
+  selection: sequential
+  active:
+    - kind: push
+      duration-ms: 520
+      angle-list-degrees: [0.0, 180.0]
+    - kind: wipe
+      duration-ms: 520
+      angle-list-degrees: [90.0]
+    - kind: push
+      duration-ms: 520
+      angle-list-degrees: [0.0, 180.0]
+```
+
+Sequential mode loops through the entries exactly as written, so repeating `push` forces a push → wipe → push cadence before returning to the first entry.
+
+
 ## Matting configuration
 
-The `matting` table chooses how the background behind each photo is prepared. Each entry lives under `matting.options` and is keyed by the mat type (`fixed-color`, `blur`, `studio`, or `fixed-image`). Supply one or more entries in `matting.types`. A single entry locks the viewer to that mat, while multiple entries cause the app to pick a new mat for each slide. Every listed type must either be configured inline (when only one type is present) or provided inside `matting.options`. Older `matting.type` configurations are still accepted, and `type: random` rotates through the mats listed under `matting.options`.
+The `matting` block prepares the background behind each photo. Populate `matting.active` with one or more entries; every entry must include a `kind` (`fixed-color`, `blur`, `studio`, or `fixed-image`) and the fields that tune that style. `matting.selection` controls how the viewer chooses among those entries.
 
-### Matting top-level configuration
+| Key         | Required? | Default                                                       | Accepted values                           | Effect |
+| ----------- | --------- | ------------------------------------------------------------- | ----------------------------------------- | ------ |
+| `selection` | Optional  | `fixed` when `active` has one entry, otherwise `random`       | `fixed`, `random`, or `sequential`        | Governs how the viewer iterates through the mats. `fixed` locks to the first entry, `random` draws independently for each slide, and `sequential` steps through the list in order before looping. |
+| `active`    | Yes       | —                                                             | Array of mat entry maps                   | Declares the mat variants to render. Duplicate entries are allowed—repeat a `kind` to weight the random selector or to alternate presets in sequential mode. |
 
-| Key              | Required?                                                       | Default               | Accepted values                                                                | Effect                                                                                                                  |
-| ---------------- | --------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| `types`          | Yes                                                             | `['fixed-color']`     | Array containing one or more of `fixed-color`, `blur`, `studio`, `fixed-image` | Chooses which mat styles are eligible. Duplicates are ignored; at least one entry must be supplied.                     |
-| `type-selection` | Optional (only valid when `types` has multiple entries)         | `random`              | `random` or `sequential`                                                       | Switches between drawing mats randomly or cycling through them in order. Ignored when only one type is listed.          |
-| `options`        | Required when `types` has multiple entries (optional otherwise) | Defaults per mat type | Mapping keyed by mat type                                                      | Provides per-style settings. When only one type is listed, you may set the same fields inline instead of using the map. |
+> Legacy `matting.types` and `matting.options` keys are no longer accepted. Copy each prior option into the `active` list with an explicit `kind` field to migrate.
 
-> **Note:** Reserve the word `random` for `type-selection`; adding it to `types` triggers a validation error.
+When `selection` is omitted, the runtime infers it: a single entry becomes `fixed`; multiple entries default to `random`. `selection: fixed` requires exactly one entry; the other modes accept any non-empty list.
 
-Every mat entry accepts the shared settings below:
+Each active entry understands the shared settings below:
 
-- **`minimum-mat-percentage`** (float, default `0.0`): Fraction of each screen edge reserved for the mat border. The renderer clamps values to `0–45%` to maintain a visible photo area.
-- **`max-upscale-factor`** (float, default `1.0`): Maximum enlargement applied to the photo when fitting inside the mat. Values below `1.0` are elevated to `1.0` to avoid shrinking detail; higher values allow the frame to gently zoom when extra border space is available.
+- **`minimum-mat-percentage`** (float, default `0.0`): Fraction of each screen edge reserved for the mat border. The renderer clamps values to `0–45%`.
+- **`max-upscale-factor`** (float, default `1.0`): Maximum enlargement applied to the photo when fitting inside the mat.
 
-A single studio mat:
+The remaining controls depend on the mat `kind`:
+
+- **`fixed-color`**
+  - **`colors`** (array of `[r, g, b]` triples, default `[[0, 0, 0]]`): One or more RGB swatches (0–255 per channel) to rotate through. Channels outside the valid range are clamped before rendering.
+  - **`color`** (`[r, g, b]` triple): Convenience alias for `colors` when only one swatch is needed.
+  - **`color-selection`** (`sequential` or `random`; default `sequential`): Chooses how the viewer advances through the configured swatches.
+- **`blur`**
+  - **`sigma`** (float, default `32.0`): Gaussian blur radius applied to a scaled copy of the photo.
+  - **`sample-scale`** (float, default `0.125`): Ratio between the canvas resolution and the intermediate blur buffer. Raising it toward `1.0` sharpens the backdrop at higher cost.
+  - **`backend`** (`cpu` or `neon`, default `neon`): Blur implementation to use. `neon` opts into the vector-accelerated path on 64-bit ARM and gracefully falls back to `cpu` when unavailable.
+- **`studio`**
+  - **`colors`** (array containing `[r, g, b]` triples and/or the string `photo-average`; default `[photo-average]`): Palette entries used for the mat base. Plain RGB swatches render exactly as specified, while `photo-average` reuses the current slide’s average color.
+  - **`color-selection`** (`sequential` or `random`; default `sequential`): Governs how the mat palette advances between slides.
+  - **`bevel-width-px`** (float, default `3.0`): Visible width of the bevel band in pixels.
+  - **`bevel-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB values used for the bevel band.
+  - **`texture-strength`** (float, default `1.0`): Strength of the simulated paper weave (`0.0` yields a flat matte).
+  - **`warp-period-px`** (float, default `5.6`): Horizontal spacing between vertical warp threads, in pixels.
+  - **`weft-period-px`** (float, default `5.2`): Vertical spacing between horizontal weft threads, in pixels.
+- **`fixed-image`**
+  - **`path`** (string or string array, required): One or more filesystem paths to the backdrop image(s). The renderer loads referenced files at startup; an empty array disables the entry without error.
+  - **`path-selection`** (`sequential` or `random`; default `sequential`): Chooses how to rotate through the configured backgrounds.
+  - **`fit`** (`cover`, `contain`, or `stretch`; default `cover`): Controls how the background scales to the canvas.
+
+### Example: single studio mat
 
 ```yaml
 matting:
-  types: [studio]
-  options:
-    studio:
+  active:
+    - kind: studio
       minimum-mat-percentage: 3.5
       bevel-width-px: 4.0
 ```
 
-Random rotation between two mats:
+### Example: weighted random palette with duplicates
 
 ```yaml
 matting:
-  types: [fixed-color, blur]
-  options:
-    fixed-color:
-      minimum-mat-percentage: 0.0
-      colors: [[0, 0, 0], [32, 32, 32]]
+  selection: random
+  active:
+    - kind: fixed-color
+      colors:
+        - [0, 0, 0]
+        - [32, 32, 32]
       color-selection: sequential
-    blur:
+    - kind: fixed-color
+      colors:
+        - [200, 200, 200]
       minimum-mat-percentage: 6.0
-      sigma: 32.0
+    - kind: blur
+      minimum-mat-percentage: 7.5
+      sigma: 18.0
 ```
 
-Every entry inside `matting.options` accepts the shared settings below:
+The second `fixed-color` entry doubles the odds of drawing a solid mat versus blur while allowing a separate light palette.
 
-- **map key** (string): Mat style to render. Use `fixed-color`, `blur`, `studio`, or `fixed-image`.
+### Example: sequential rotation with duplicates
 
-### `fixed-color`
+```yaml
+matting:
+  selection: sequential
+  active:
+    - kind: studio
+      minimum-mat-percentage: 6.0
+    - kind: fixed-image
+      path: [/opt/photo-frame/share/backgrounds/linen.png]
+      fit: contain
+    - kind: studio
+      minimum-mat-percentage: 4.0
+```
 
-- **`colors`** (array of `[r, g, b]` triples, default `[[0, 0, 0]]`): One or more RGB swatches (0–255 per channel) to rotate through. Channels outside the valid range are clamped before rendering. Supply multiple entries to keep the frame palette fresh or stick with a single swatch for a consistent backdrop.
-- **`color`** (`[r, g, b]` triple): Convenience alias for `colors` when you only want to specify a single swatch.
-- **`color-selection`** (`sequential` or `random`; default `sequential`): Chooses how the viewer advances through the configured swatches. Sequential mode cycles in order, while random selects a new color for each slide.
-
-### `blur`
-
-- **`sigma`** (float, default `32.0`): Gaussian blur radius applied to a scaled copy of the photo that covers the screen. Larger values yield softer backgrounds; zero disables the blur but keeps the scaled image.
-- **`sample-scale`** (float, default `0.125`): Ratio between the canvas resolution and the intermediate blur buffer. The renderer first scales the photo to the canvas at 1:1, then optionally downsamples by this factor before blurring. Raising the value toward `1.0` sharpens the backdrop at the expense of more GPU/CPU work.
-- **`backend`** (`cpu` or `neon`, default `neon`): Blur implementation to use. `neon` opts into the vector-accelerated path on 64-bit ARM; if unsupported at runtime the app gracefully falls back to the CPU renderer.
-
-### `studio`
-
-- **`colors`** (array containing `[r, g, b]` triples and/or the string `photo-average`; default `[photo-average]`): Palette entries used for the mat base. Plain RGB swatches render exactly as specified, while `photo-average` reuses the current slide’s average color. Provide multiple entries to mix custom hues with adaptive tones.
-- **`color-selection`** (`sequential` or `random`; default `sequential`): Governs how the mat palette advances between slides. Sequential mode steps through the configured colors, and random picks one each time.
-- **`bevel-width-px`** (float, default `3.0`): Visible width of the bevel band in pixels. The renderer clamps the bevel if the mat border is thinner than the requested width.
-- **`bevel-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB values (0–255) used for the bevel band.
-- **`texture-strength`** (float, default `1.0`): Strength of the simulated paper weave. `0.0` yields a flat matte; values above `1.0` exaggerate the texture.
-- **`warp-period-px`** (float, default `5.6`): Horizontal spacing between vertical warp threads, in pixels.
-- **`weft-period-px`** (float, default `5.2`): Vertical spacing between horizontal weft threads, in pixels.
-
-The studio mat shades a mitred bevel band and textured paper surface using the selected palette entry, blends a hint of pigment along the outer lip, and lights the bevel from a fixed direction so it reads as a cut paper core. The photo then sits flush against that inner frame.
-
-### `fixed-image`
-
-- **`path`** (string or string array, required): One or more filesystem paths to the backdrop image(s). All referenced files are loaded and cached at startup. Supplying an empty array disables the `fixed-image` mat without raising an error.
-- **`path-selection`** (`sequential` or `random`; default `sequential`): Chooses how to rotate through the configured backgrounds when more than one path is supplied.
-- **`fit`** (`cover`, `contain`, or `stretch`; default `cover`): Chooses how the background scales to the canvas—fill while cropping (`cover`), letterbox without cropping (`contain`), or distort to fit exactly (`stretch`).
-
-Selecting `fixed-image` keeps the backdrop perfectly consistent across slides when only one path is listed, or rotates through a curated set of branded backgrounds when multiple paths are available.
+Sequential mode walks the list in order and loops, so repeating `studio` enforces a studio → fixed-image → studio cadence.
