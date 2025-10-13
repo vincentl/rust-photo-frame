@@ -154,9 +154,9 @@ mod tests {
     #[tokio::test]
     async fn applies_print_simulation_when_enabled() {
         let yaml = r#"
-types: [print-simulation]
-options:
-  print-simulation:
+selection: random
+active:
+  - kind: print-simulation
     relief-strength: 1.0
     sheen-strength: 0.5
 "#;

@@ -12,32 +12,31 @@ control-socket-path: /run/photo-frame/control.sock
 
 # Render/transition settings
 transition:
-  # List one or more transition kinds to rotate between.
-  types: [fade, wipe, push, e-ink, iris]
-  # Choose how to iterate through the transition types: random or sequential.
-  type-selection: random
-  options:
-    fade:
+  # Choose how the viewer advances through the entries below: fixed, random, or sequential.
+  selection: random
+  # Declare one or more transition entries. Repeat a kind to weight it more heavily.
+  active:
+    - kind: fade
       duration-ms: 450
       through-black: false
-    wipe:
+    - kind: wipe
       duration-ms: 600
       angle-list-degrees: [45.0, 225.0]
       angle-selection: sequential
       angle-jitter-degrees: 12.0
       softness: 0.08
-    push:
+    - kind: push
       duration-ms: 520
       angle-list-degrees: [0.0, 180.0]
       angle-selection: random
       angle-jitter-degrees: 8.0
-    e-ink:
+    - kind: e-ink
       duration-ms: 1600
       flash-count: 0
       reveal-portion: 0.55
       stripe-count: 24
       flash-color: [0, 0, 0]
-    iris:
+    - kind: iris
       duration-ms: 900
       blades: 7
       blade-rgba: [0.12, 0.12, 0.12, 1.0]
@@ -95,18 +94,19 @@ loader-max-concurrent-decodes: 4
 startup-shuffle-seed: null
 
 photo-effect:
-  # List zero or more effect types; set to [] to disable the stage entirely.
-  types: []
-  # Choose how to iterate through effects when multiple are configured.
-  type-selection: random
-  options:
-    print-simulation:
-      light-angle-degrees: 135.0
-      relief-strength: 0.35
-      ink-spread: 0.18
-      sheen-strength: 0.22
-      paper-color: [245, 244, 240]
-      debug: false # Set true to only treat the left half for side-by-side comparison
+  # Choose how the viewer advances through the entries below when enabled.
+  selection: random
+  # Provide zero or more effect entries; leave empty to disable the stage.
+  active: []
+  # Example configuration:
+  # active:
+  #   - kind: print-simulation
+  #     light-angle-degrees: 135.0
+  #     relief-strength: 0.35
+  #     ink-spread: 0.18
+  #     sheen-strength: 0.22
+  #     paper-color: [245, 244, 240]
+  #     debug: false # Set true to only treat the left half for side-by-side comparison
 
 playlist:
   new-multiplicity: 3
@@ -114,23 +114,23 @@ playlist:
 
 # Matting settings
 matting:
-  types: [fixed-color, blur, studio, fixed-image]
-  # Choose how to iterate through the matting types: random or sequential.
-  type-selection: random
-  options:
-    fixed-color:
+  # Choose how the viewer advances through the mats below: fixed, random, or sequential.
+  selection: random
+  # Provide one or more mat definitions. Repeat a kind to weight or alternate variants.
+  active:
+    - kind: fixed-color
       colors:
         - [0, 0, 0]
         - [32, 32, 32]
       color-selection: sequential # or random
       minimum-mat-percentage: 0.0
       max-upscale-factor: 1.0
-    blur:
+    - kind: blur
       minimum-mat-percentage: 3.5
       sigma: 32.0
       sample-scale: 0.125 # raise toward 1.0 for sharper mats at higher cost
       backend: neon # options: cpu, neon (auto-falls back to cpu if unsupported)
-    studio:
+    - kind: studio
       colors:
         - [24, 24, 24]
         - photo-average
@@ -142,7 +142,7 @@ matting:
       texture-strength: 1.0 # 0.0 for smooth paper, 1.0 default weave
       warp-period-px: 5.6 # spacing between vertical warp threads in px
       weft-period-px: 5.2 # spacing between horizontal weft threads in px
-    fixed-image:
+    - kind: fixed-image
       minimum-mat-percentage: 6.0
       path:
         [
