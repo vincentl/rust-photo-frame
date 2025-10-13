@@ -110,6 +110,7 @@ See [assets/backgrounds/Credits.md](assets/backgrounds/Credits.md) for image att
 
 - **Procedural studio mat weave texture.** Our weave shading is adapted from Mike Cauchi’s breakdown of tillable cloth shading, which layers sine-profiled warp/weft threads with randomized grain to keep the pattern from banding. See ["Research – Tillable Images and Cloth Shading"](https://www.mikecauchiart.com/single-post/2017/01/23/research-tillable-images-and-cloth-shading).
 - **Print simulation shading.** The gallery-lighting and relief model follows guidance from Rohit A. Patil, Mark D. Fairchild, and Garrett M. Johnson’s paper ["3D Simulation of Prints for Improved Soft Proofing"](https://doi.org/10.1117/12.813471).
+- **Iris transition geometry.** Our polygonal iris closure uses the trigonometric projection technique described in ["How to calculate polygons for camera aperture animation?"](https://stackoverflow.com/a/57571325), which maps fragment angles into blade sectors for precise aperture radii.
 
 ## AI Statement
 
