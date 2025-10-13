@@ -63,6 +63,43 @@ fn sample_plane(
   return vec4<f32>(c.rgb, 1.0);
 }
 
+fn rotate_point(p: vec2<f32>, cos_a: f32, sin_a: f32) -> vec2<f32> {
+  return vec2<f32>(
+    p.x * cos_a - p.y * sin_a,
+    p.x * sin_a + p.y * cos_a,
+  );
+}
+
+fn arc_diff(angle: f32, sweep_flag: f32) -> f32 {
+  let two_pi = 6.28318530718;
+  var diff = angle;
+  if (sweep_flag > 0.5) {
+    if (diff < 0.0) {
+      diff = diff + two_pi;
+    }
+  } else {
+    if (diff > 0.0) {
+      diff = diff - two_pi;
+    }
+  }
+  return diff;
+}
+
+fn angle_in_arc(
+  angle: f32,
+  start_angle: f32,
+  end_angle: f32,
+  sweep_flag: f32,
+) -> bool {
+  let tolerance = 1e-3;
+  let diff = arc_diff(end_angle - start_angle, sweep_flag);
+  let rel = arc_diff(angle - start_angle, sweep_flag);
+  if (sweep_flag > 0.5) {
+    return rel >= -tolerance && rel <= diff + tolerance;
+  }
+  return rel <= tolerance && rel >= diff - tolerance;
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let screen_pos = in.screen_uv * U.screen_size;
@@ -149,12 +186,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       }
     }
     case 5u: {
-      let blades = max(U.params0.x, 3.0);
       let blade_rgb_base = clamp(U.params1.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
       let blade_alpha = clamp(U.params1.w, 0.0, 1.0);
       let aspect = U.screen_size.x / max(U.screen_size.y, 1.0);
       let rel = vec2<f32>((in.screen_uv.x - 0.5) * aspect, in.screen_uv.y - 0.5);
       let dist = length(rel);
+      var dir = rel / max(dist, 1e-4);
+      if (dist < 1e-4) {
+        dir = vec2<f32>(0.0, 1.0);
+      }
       let angle = atan2(rel.y, rel.x);
       let max_radius = length(vec2<f32>(aspect * 0.5, 0.5));
       let clamped_progress = clamp(U.progress, 0.0, 1.0);
@@ -165,23 +205,84 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let open_curve = open_phase * open_phase * (3.0 - 2.0 * open_phase);
       let is_opening = step(1.0, phase);
       let aperture_ratio = mix(1.0 - close_curve, open_curve, is_opening);
-      let inradius = aperture_ratio * max_radius;
-      // The iris aperture follows the polygonal solution described in
-      // https://stackoverflow.com/a/57571325, mapping the ray angle into the
-      // current blade sector and projecting against the blade edge.
+      let blade_count_f = max(U.params0.x, 3.0);
+      let blade_count = max(3u, min(24u, u32(floor(blade_count_f + 0.5))));
+      let blade_count_f32 = f32(blade_count);
       let two_pi = 6.28318530718;
-      let sector = two_pi / blades;
+      let sector = two_pi / blade_count_f32;
       let half_sector = 0.5 * sector;
-      let wrapped = fract((angle + half_sector) / sector);
-      let local_angle = (wrapped - 0.5) * sector;
-      let cos_local = max(cos(local_angle), 1e-4);
-      let boundary = min(inradius / cos_local, max_radius);
-      let edge_softness = max(max_radius * 0.02, 0.001);
+      // Map aperture progress onto the Stack Overflow solution's rotation angle.
+      // The blades fully close when the rotation reaches π/3.
+      let closure = clamp(1.0 - aperture_ratio, 0.0, 1.0);
+      let blade_rotation = closure * 1.0471975512;
+      let step = 3.14159265359 * (0.5 + 2.0 / blade_count_f32);
+      let cos_step = cos(step);
+      let sin_step = sin(step);
+      let r = max_radius;
+      let p1 = vec2<f32>(cos_step * r, sin_step * r);
+      let anchor = vec2<f32>(0.0, r);
+      let sin_rot = sin(blade_rotation);
+      let cos_rot = cos(blade_rotation);
+      // The iris aperture follows the polygonal arc construction described in
+      // https://stackoverflow.com/a/57571325, which closes the diaphragm by
+      // sweeping each blade's circular edge around fixed anchor points.
+      let center_base = vec2<f32>(
+        p1.x * (1.0 - cos_rot) + p1.y * sin_rot,
+        p1.y * (1.0 - cos_rot) - p1.x * sin_rot,
+      );
+      let dx = sin_rot * r - center_base.x;
+      let dy = r - cos_rot * r - center_base.y;
+      let dc = sqrt(max(dx * dx + dy * dy, 0.0));
+      let arc_term = clamp(dc / (2.0 * r), -1.0, 1.0);
+      let a = atan2(dy, dx) - acos(arc_term);
+      let p2 = center_base + vec2<f32>(cos(a), sin(a)) * r;
+      var boundary = r;
+      for (var i = 0u; i < blade_count; i = i + 1u) {
+        let angle_i = f32(i) * sector;
+        let cos_i = cos(angle_i);
+        let sin_i = sin(angle_i);
+        let p1_rot = rotate_point(p1, cos_i, sin_i);
+        let anchor_rot = rotate_point(anchor, cos_i, sin_i);
+        let center = rotate_point(center_base, cos_i, sin_i);
+        let p2_rot = rotate_point(p2, cos_i, sin_i);
+        let arc1_start = atan2(p1_rot.y, p1_rot.x);
+        let arc1_end = atan2(anchor_rot.y, anchor_rot.x);
+        let arc2_start = atan2(anchor_rot.y - center.y, anchor_rot.x - center.x);
+        let arc2_end = atan2(p2_rot.y - center.y, p2_rot.x - center.x);
+        let point_arc1 = dir * r;
+        let arc1_angle = atan2(point_arc1.y, point_arc1.x);
+        if (angle_in_arc(arc1_angle, arc1_start, arc1_end, 0.0)) {
+          boundary = min(boundary, r);
+        }
+        let proj = dot(dir, center);
+        let center_len_sq = dot(center, center);
+        let disc = proj * proj - (center_len_sq - r * r);
+        if (disc >= 0.0) {
+          let root = sqrt(disc);
+          var t = proj - root;
+          if (t <= 0.0) {
+            t = proj + root;
+          }
+          if (t > 0.0) {
+            let point_arc2 = dir * t;
+            let arc2_angle = atan2(
+              point_arc2.y - center.y,
+              point_arc2.x - center.x,
+            );
+            if (angle_in_arc(arc2_angle, arc2_start, arc2_end, 1.0)) {
+              boundary = min(boundary, t);
+            }
+          }
+        }
+      }
+      let edge_softness = max(r * 0.02, 0.001);
       let mask = 1.0 - smoothstep(-edge_softness, 0.0, dist - boundary);
       var stage_color = current;
       if (phase >= 1.0) {
         stage_color = next;
       }
+      let wrapped = fract((angle + half_sector) / sector);
+      let local_angle = (wrapped - 0.5) * sector;
       let blade_center = clamp(1.0 - abs(local_angle) / half_sector, 0.0, 1.0);
       let radial = clamp(dist / max_radius, 0.0, 1.0);
       let highlight = pow(blade_center, 2.4) * 0.28;
