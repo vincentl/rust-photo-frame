@@ -14,11 +14,8 @@ use chrono_tz::Tz;
 use rand::Rng;
 use rand::seq::IteratorRandom;
 use serde::Deserialize;
-use serde::de::{
-    self, DeserializeOwned, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Unexpected,
-    Visitor,
-};
-use serde_yaml::Value as YamlValue;
+use serde::de::{self, DeserializeOwned, Deserializer, MapAccess, SeqAccess, Unexpected, Visitor};
+use serde_yaml::{Mapping, Value as YamlValue};
 
 use crate::processing::fixed_image::FixedImageBackground;
 
@@ -552,13 +549,6 @@ pub struct MattingConfig {
 #[serde(rename_all = "kebab-case")]
 enum PipelineSelection {
     Fixed,
-    Random,
-    Sequential,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TypeSelection {
     Random,
     Sequential,
 }
@@ -1268,17 +1258,6 @@ impl MattingOptions {
     }
 }
 
-impl MattingMode {
-    fn kind(&self) -> MattingKind {
-        match self {
-            MattingMode::FixedColor { .. } => MattingKind::FixedColor,
-            MattingMode::Blur { .. } => MattingKind::Blur,
-            MattingMode::Studio { .. } => MattingKind::Studio,
-            MattingMode::FixedImage { .. } => MattingKind::FixedImage,
-        }
-    }
-}
-
 impl MattingOptions {
     fn with_kind(kind: MattingKind, base: MattingOptionBuilder) -> Self {
         let style = match kind {
@@ -1336,8 +1315,14 @@ impl MattingOptions {
         }
     }
 
+    #[allow(dead_code)]
     fn kind(&self) -> MattingKind {
-        self.style.kind()
+        match &self.style {
+            MattingMode::FixedColor { .. } => MattingKind::FixedColor,
+            MattingMode::Blur { .. } => MattingKind::Blur,
+            MattingMode::Studio { .. } => MattingKind::Studio,
+            MattingMode::FixedImage { .. } => MattingKind::FixedImage,
+        }
     }
 }
 
@@ -1703,6 +1688,7 @@ impl MattingConfig {
         self.iter_selected().next()
     }
 
+    #[allow(dead_code)]
     pub fn selected_by_index(&self, index: usize) -> Option<SelectedMatting<'_>> {
         self.iter_selected()
             .find(|selected| selected.entry.index == index)
@@ -1745,6 +1731,7 @@ impl MattingConfig {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> MattingOptions {
         self.select_active(rng).option.clone()
     }
@@ -1949,10 +1936,10 @@ impl PhotoEffectOptions {
 #[derive(Debug, Clone)]
 pub enum PhotoEffectSelection {
     Disabled,
-    Fixed(PhotoEffectKind),
-    Random(Vec<PhotoEffectKind>),
+    Fixed(SelectionEntry<PhotoEffectKind>),
+    Random(Arc<[SelectionEntry<PhotoEffectKind>]>),
     Sequential {
-        kinds: Vec<PhotoEffectKind>,
+        entries: Arc<[SelectionEntry<PhotoEffectKind>]>,
         runtime: SequentialState,
     },
 }
@@ -1962,11 +1949,13 @@ impl PartialEq for PhotoEffectSelection {
         match (self, other) {
             (PhotoEffectSelection::Disabled, PhotoEffectSelection::Disabled) => true,
             (PhotoEffectSelection::Fixed(a), PhotoEffectSelection::Fixed(b)) => a == b,
-            (PhotoEffectSelection::Random(a), PhotoEffectSelection::Random(b)) => a == b,
+            (PhotoEffectSelection::Random(a), PhotoEffectSelection::Random(b)) => {
+                a.as_ref() == b.as_ref()
+            }
             (
-                PhotoEffectSelection::Sequential { kinds: a, .. },
-                PhotoEffectSelection::Sequential { kinds: b, .. },
-            ) => a == b,
+                PhotoEffectSelection::Sequential { entries: a, .. },
+                PhotoEffectSelection::Sequential { entries: b, .. },
+            ) => a.as_ref() == b.as_ref(),
             _ => false,
         }
     }
@@ -1997,19 +1986,19 @@ impl PhotoEffectConfig {
     pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> Option<PhotoEffectOptions> {
         match &self.selection {
             PhotoEffectSelection::Disabled => None,
-            PhotoEffectSelection::Fixed(kind) => self.options.get(kind).cloned(),
-            PhotoEffectSelection::Random(kinds) => kinds
+            PhotoEffectSelection::Fixed(entry) => self.options.get(&entry.kind).cloned(),
+            PhotoEffectSelection::Random(entries) => entries
                 .iter()
                 .copied()
                 .choose(rng)
-                .and_then(|kind| self.options.get(&kind).cloned()),
-            PhotoEffectSelection::Sequential { kinds, runtime } => {
-                if kinds.is_empty() {
+                .and_then(|entry| self.options.get(&entry.kind).cloned()),
+            PhotoEffectSelection::Sequential { entries, runtime } => {
+                if entries.is_empty() {
                     None
                 } else {
-                    let index = runtime.next(kinds.len());
-                    let kind = kinds[index];
-                    self.options.get(&kind).cloned()
+                    let index = runtime.next(entries.len());
+                    let entry = entries[index];
+                    self.options.get(&entry.kind).cloned()
                 }
             }
         }
@@ -2017,23 +2006,27 @@ impl PhotoEffectConfig {
 
     pub fn prepare_runtime(&mut self) -> Result<()> {
         match &self.selection {
-            PhotoEffectSelection::Disabled => {}
-            PhotoEffectSelection::Fixed(kind) => {
+            PhotoEffectSelection::Disabled => return Ok(()),
+            PhotoEffectSelection::Fixed(entry) => {
                 ensure!(
-                    self.options.contains_key(kind),
-                    "photo-effect.types entry {kind} must match a key in photo-effect.options"
+                    self.options.contains_key(&entry.kind),
+                    "photo-effect.active entry {} must define options for {}",
+                    entry.index,
+                    entry.kind,
                 );
             }
-            PhotoEffectSelection::Random(kinds)
-            | PhotoEffectSelection::Sequential { kinds, .. } => {
+            PhotoEffectSelection::Random(entries)
+            | PhotoEffectSelection::Sequential { entries, .. } => {
                 ensure!(
-                    !kinds.is_empty(),
-                    "photo-effect.types must include at least one entry"
+                    !entries.is_empty(),
+                    "photo-effect configuration must include at least one active entry",
                 );
-                for kind in kinds {
+                for entry in entries.iter() {
                     ensure!(
-                        self.options.contains_key(kind),
-                        "photo-effect.types entry {kind} must match a key in photo-effect.options"
+                        self.options.contains_key(&entry.kind),
+                        "photo-effect.active entry {} must define options for {}",
+                        entry.index,
+                        entry.kind,
                     );
                 }
             }
@@ -2069,164 +2062,90 @@ impl<'de> Visitor<'de> for PhotoEffectConfigVisitor {
     where
         A: MapAccess<'de>,
     {
-        let mut types: Option<Vec<PhotoEffectKind>> = None;
-        let mut type_selection: Option<TypeSelection> = None;
-        let mut options: Option<BTreeMap<PhotoEffectKind, PhotoEffectOptions>> = None;
+        let mut selection: Option<PipelineSelection> = None;
+        let mut active: Option<Vec<PipelineEntry<PhotoEffectKind>>> = None;
 
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                "types" => {
-                    if types.is_some() {
-                        return Err(de::Error::duplicate_field("types"));
+                "selection" => {
+                    if selection.is_some() {
+                        return Err(de::Error::duplicate_field("selection"));
                     }
-                    let raw: Vec<PhotoEffectKind> = map.next_value()?;
-                    let mut unique = Vec::new();
-                    for kind in raw {
-                        if unique.contains(&kind) {
-                            return Err(de::Error::custom(format!(
-                                "photo-effect.types cannot repeat the entry {}",
-                                kind
-                            )));
-                        }
-                        unique.push(kind);
-                    }
-                    types = Some(unique);
+                    selection = Some(map.next_value()?);
                 }
-                "type-selection" => {
-                    if type_selection.is_some() {
-                        return Err(de::Error::duplicate_field("type-selection"));
+                "active" => {
+                    if active.is_some() {
+                        return Err(de::Error::duplicate_field("active"));
                     }
-                    type_selection = Some(map.next_value()?);
-                }
-                "options" => {
-                    if options.is_some() {
-                        return Err(de::Error::duplicate_field("options"));
-                    }
-                    options = Some(map.next_value_seed(PhotoEffectOptionsMapSeed)?);
+                    active = Some(map.next_value()?);
                 }
                 other => {
-                    return Err(de::Error::unknown_field(
-                        other,
-                        &["types", "type-selection", "options"],
-                    ));
+                    return Err(de::Error::unknown_field(other, &["selection", "active"]));
                 }
             }
         }
 
-        let mut options = options.unwrap_or_default();
-        let types = types.unwrap_or_default();
-        let type_selection = if types.is_empty() {
-            None
-        } else {
-            type_selection
-        };
-
-        let selection = if types.is_empty() {
-            PhotoEffectSelection::Disabled
-        } else if types.len() == 1 {
-            PhotoEffectSelection::Fixed(types[0])
-        } else {
-            match type_selection.unwrap_or(TypeSelection::Random) {
-                TypeSelection::Random => PhotoEffectSelection::Random(types.clone()),
-                TypeSelection::Sequential => PhotoEffectSelection::Sequential {
-                    kinds: types.clone(),
-                    runtime: SequentialState::default(),
-                },
-            }
-        };
-
-        if !matches!(selection, PhotoEffectSelection::Disabled) {
-            match &selection {
-                PhotoEffectSelection::Fixed(kind) => {
-                    if !options.contains_key(kind) {
-                        options.insert(
-                            *kind,
-                            PhotoEffectOptions::PrintSimulation(PrintSimulationOptions::default()),
-                        );
-                    }
-                }
-                PhotoEffectSelection::Random(kinds)
-                | PhotoEffectSelection::Sequential { kinds, .. } => {
-                    for kind in kinds {
-                        if !options.contains_key(kind) {
-                            return Err(de::Error::custom(format!(
-                                "photo-effect.types entry {} must match a key in photo-effect.options",
-                                kind
-                            )));
-                        }
-                    }
-                }
-                PhotoEffectSelection::Disabled => {}
-            }
+        let active_entries = active.unwrap_or_default();
+        if active_entries.is_empty() {
+            return Ok(PhotoEffectConfig {
+                selection: PhotoEffectSelection::Disabled,
+                options: BTreeMap::new(),
+            });
         }
+
+        let resolved_selection = resolve_pipeline_selection::<A::Error>(
+            selection,
+            active_entries.len(),
+            "photo-effect",
+        )?;
+
+        let mut options = BTreeMap::new();
+        let mut entries = Vec::with_capacity(active_entries.len());
+        for (index, entry) in active_entries.into_iter().enumerate() {
+            let kind = entry.kind;
+            let option = build_photo_effect_option::<A::Error>(kind, entry.fields)?;
+            options.insert(kind, option);
+            entries.push(SelectionEntry { index, kind });
+        }
+
+        let entries: Arc<[SelectionEntry<PhotoEffectKind>]> = entries.into();
+
+        let selection = match resolved_selection {
+            PipelineSelection::Fixed => PhotoEffectSelection::Fixed(entries[0]),
+            PipelineSelection::Random => PhotoEffectSelection::Random(entries.clone()),
+            PipelineSelection::Sequential => PhotoEffectSelection::Sequential {
+                entries: entries.clone(),
+                runtime: SequentialState::default(),
+            },
+        };
 
         Ok(PhotoEffectConfig { selection, options })
     }
 }
 
-struct PhotoEffectOptionsMapSeed;
-
-impl<'de> DeserializeSeed<'de> for PhotoEffectOptionsMapSeed {
-    type Value = BTreeMap<PhotoEffectKind, PhotoEffectOptions>;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_map(PhotoEffectOptionsMapVisitor)
-    }
-}
-
-struct PhotoEffectOptionsMapVisitor;
-
-impl<'de> Visitor<'de> for PhotoEffectOptionsMapVisitor {
-    type Value = BTreeMap<PhotoEffectKind, PhotoEffectOptions>;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a map of photo effect options keyed by effect type")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut options = BTreeMap::new();
-        while let Some(kind) = map.next_key::<PhotoEffectKind>()? {
-            if options.contains_key(&kind) {
-                return Err(de::Error::custom(format!(
-                    "duplicate photo-effect option for type {}",
-                    kind
-                )));
-            }
-            let option = map.next_value_seed(PhotoEffectOptionSeed { kind })?;
-            if option.kind() != kind {
-                return Err(de::Error::custom(format!(
-                    "photo-effect option for key {} does not match its configuration",
-                    kind
-                )));
-            }
-            options.insert(kind, option);
-        }
-        Ok(options)
-    }
-}
-
-struct PhotoEffectOptionSeed {
+fn build_photo_effect_option<E>(
     kind: PhotoEffectKind,
-}
+    fields: Vec<(String, YamlValue)>,
+) -> Result<PhotoEffectOptions, E>
+where
+    E: de::Error,
+{
+    let mut mapping = Mapping::new();
+    for (field, value) in fields {
+        let key = YamlValue::String(field.clone());
+        if mapping.insert(key, value).is_some() {
+            return Err(de::Error::custom(format!(
+                "duplicate photo-effect field {}",
+                field
+            )));
+        }
+    }
 
-impl<'de> DeserializeSeed<'de> for PhotoEffectOptionSeed {
-    type Value = PhotoEffectOptions;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        match self.kind {
-            PhotoEffectKind::PrintSimulation => {
-                let options = PrintSimulationOptions::deserialize(deserializer)?;
-                Ok(PhotoEffectOptions::PrintSimulation(options))
-            }
+    let value = YamlValue::Mapping(mapping);
+    match kind {
+        PhotoEffectKind::PrintSimulation => {
+            let options = inline_value_to::<PrintSimulationOptions, E>(value)?;
+            Ok(PhotoEffectOptions::PrintSimulation(options))
         }
     }
 }
@@ -2344,6 +2263,7 @@ impl TransitionConfig {
         &self.selection
     }
 
+    #[allow(dead_code)]
     pub fn options(&self) -> &BTreeMap<TransitionKind, TransitionOptions> {
         &self.options
     }
@@ -2366,6 +2286,7 @@ impl TransitionConfig {
         self.iter_selected().next()
     }
 
+    #[allow(dead_code)]
     pub fn selected_by_index(&self, index: usize) -> Option<SelectedTransition<'_>> {
         self.iter_selected()
             .find(|selected| selected.entry.index == index)
@@ -2391,10 +2312,12 @@ impl TransitionConfig {
         SelectedOption { entry, option }
     }
 
+    #[allow(dead_code)]
     pub fn primary_option(&self) -> Option<&TransitionOptions> {
         self.primary_selected().map(|selected| selected.option)
     }
 
+    #[allow(dead_code)]
     pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> TransitionOptions {
         self.select_active(rng).option.clone()
     }
