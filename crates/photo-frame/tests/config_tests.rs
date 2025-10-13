@@ -256,6 +256,37 @@ matting:
 }
 
 #[test]
+fn sequential_matting_duplicates_rotate() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  types: [fixed-color, fixed-color, blur]
+  type-selection: sequential
+  options:
+    fixed-color:
+      colors:
+        - [1, 2, 3]
+    blur:
+      sigma: 4.0
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let mut rng = StdRng::seed_from_u64(33);
+
+    let first = cfg.matting.choose_entry(&mut rng);
+    let second = cfg.matting.choose_entry(&mut rng);
+    let third = cfg.matting.choose_entry(&mut rng);
+    let fourth = cfg.matting.choose_entry(&mut rng);
+
+    assert_eq!(first.kind, MattingKind::FixedColor);
+    assert_eq!(second.kind, MattingKind::FixedColor);
+    assert_eq!(third.kind, MattingKind::Blur);
+    assert_eq!(fourth.kind, MattingKind::FixedColor);
+
+    assert_ne!(first.index, third.index);
+}
+
+#[test]
 fn parse_fixed_image_with_multiple_paths() {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
@@ -614,6 +645,36 @@ transition:
         rust_photo_frame::config::TransitionMode::Push(_) => {}
         _ => panic!("expected third transition to return to push"),
     }
+}
+
+#[test]
+fn sequential_transition_duplicates_rotate() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  types: [push, push, wipe]
+  type-selection: sequential
+  options:
+    push:
+      duration-ms: 500
+    wipe:
+      duration-ms: 400
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let mut rng = StdRng::seed_from_u64(7);
+
+    let first = cfg.transition.choose_entry(&mut rng);
+    let second = cfg.transition.choose_entry(&mut rng);
+    let third = cfg.transition.choose_entry(&mut rng);
+    let fourth = cfg.transition.choose_entry(&mut rng);
+
+    assert_eq!(first.kind, TransitionKind::Push);
+    assert_eq!(second.kind, TransitionKind::Push);
+    assert_eq!(third.kind, TransitionKind::Wipe);
+    assert_eq!(fourth.kind, TransitionKind::Push);
+
+    assert_ne!(first.index, third.index);
 }
 
 #[test]

@@ -280,10 +280,12 @@ pub(super) struct WakeScene {
 impl WakeScene {
     /// Creates a new [`WakeScene`] configured with the slideshow dwell and transition settings.
     pub(super) fn new(dwell_ms: u64, transition_cfg: TransitionConfig) -> Self {
-        if let Some(option) = transition_cfg.primary_option() {
+        if let Some(entry) = transition_cfg.primary_entry() {
+            let duration_ms = entry.option.duration().as_millis();
             tracing::debug!(
-                transition_kind = ?option.kind(),
-                duration_ms = option.duration().as_millis(),
+                transition_index = entry.index,
+                transition_kind = ?entry.kind,
+                duration_ms,
                 "wake_scene_primary_transition_loaded"
             );
         }
@@ -447,12 +449,14 @@ impl WakeScene {
             }
         }
         if self.next.is_some() && self.current.is_some() {
-            let option = self.transition_cfg.choose_option(rng);
-            let kind = option.kind();
-            let state = TransitionState::new(option, Instant::now(), rng);
+            let selection = self.transition_cfg.choose_entry(rng);
+            let kind = selection.kind;
+            let index = selection.index;
+            let state = TransitionState::new(selection, Instant::now(), rng);
             if let Some(next) = &self.next {
                 tracing::debug!(
-                    "transition_start kind={} path={} queue_depth={}",
+                    "transition_start index={} kind={} path={} queue_depth={}",
+                    index,
                     kind,
                     next.path.display(),
                     self.pending.len()

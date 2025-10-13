@@ -3,8 +3,8 @@ pub mod scenes;
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
-    IrisDirection, IrisEasing, MattingConfig, MattingMode, MattingOptions, TransitionConfig,
-    TransitionKind, TransitionMode, TransitionOptions,
+    MattingConfig, MattingMode, MattingOptions, TransitionConfig, TransitionKind, TransitionMode,
+    TransitionSelectionEntry,
 };
 use crate::events::{
     Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
@@ -71,12 +71,16 @@ pub(super) struct TransitionState {
 
 impl TransitionState {
     pub(super) fn new(
-        option: TransitionOptions,
+        selection: TransitionSelectionEntry,
         started_at: std::time::Instant,
         rng: &mut impl Rng,
     ) -> Self {
+        let TransitionSelectionEntry {
+            index: _,
+            kind,
+            option,
+        } = selection;
         let duration = option.duration();
-        let kind = option.kind();
         let mode = option.mode().clone();
         let variant = match mode {
             TransitionMode::Fade(cfg) => ActiveTransition::Fade {
@@ -313,7 +317,10 @@ impl<'a> MattingBridge<'a> {
                 break;
             }
             let mut rng = rand::rng();
-            let matting = self.matting.choose_option(&mut rng);
+            let selection = self.matting.choose_entry(&mut rng);
+            let matting_index = selection.index;
+            let matting_kind = selection.kind;
+            let matting = selection.option;
             let params = MatParams {
                 screen_w: surface.width.max(1),
                 screen_h: surface.height.max(1),
@@ -332,6 +339,12 @@ impl<'a> MattingBridge<'a> {
             };
             match self.mat_pipeline.try_submit(task) {
                 Ok(()) => {
+                    tracing::trace!(
+                        matting_index,
+                        matting_kind = ?matting_kind,
+                        priority,
+                        "matting_task_submitted"
+                    );
                     *self.mat_inflight += 1;
                 }
                 Err(MatTask {
@@ -1111,7 +1124,7 @@ pub fn run_windowed(
             let Some(mut mode) = self.mode.take() else {
                 return None;
             };
-            let surface = gface();
+            let surface = self.active_surface();
             let mut bridge = MattingBridge {
                 preload_count: self.preload_count,
                 mat_inflight: &mut self.mat_inflight,
@@ -2222,10 +2235,17 @@ pub fn run_windowed(
         .max(1);
     let pipeline_capacity = cfg.viewer_preload_count.max(2);
     let mat_pipeline = MattingPipeline::new(worker_count, pipeline_capacity);
-    let clear_color = cfg
-        .matting
-        .primary_option()
-        .and_then(MattingOptions::fixed_color)
+    let matting_entry = cfg.matting.primary_entry();
+    if let Some(entry) = &matting_entry {
+        debug!(
+            matting_index = entry.index,
+            matting_kind = ?entry.kind,
+            "viewer_primary_matting_loaded"
+        );
+    }
+    let clear_color = matting_entry
+        .as_ref()
+        .and_then(|entry| MattingOptions::fixed_color(&entry.option))
         .map(|color| wgpu::Color {
             r: (color[0] as f64) / 255.0,
             g: (color[1] as f64) / 255.0,
