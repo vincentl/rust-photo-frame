@@ -3,8 +3,8 @@ pub mod scenes;
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
-    IrisDirection, MattingConfig, MattingMode, MattingOptions, TransitionConfig, SelectedTransition,
-    TransitionKind, TransitionMode,
+    IrisDirection, MattingConfig, MattingMode, MattingOptions, SelectedTransition,
+    TransitionConfig, TransitionKind, TransitionMode,
 };
 use crate::events::{
     Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
@@ -19,6 +19,7 @@ use image::{Rgba, RgbaImage, imageops};
 use rand::Rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::env;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -252,6 +253,80 @@ impl SurfaceState {
             height,
             max_texture_dimension,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SurfaceReport {
+    InitialConfig,
+    ConfigureEvent,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SurfaceReadyGate {
+    ready: bool,
+    awaiting_initial_report: bool,
+}
+
+impl SurfaceReadyGate {
+    fn reset(&mut self) {
+        self.ready = false;
+        self.awaiting_initial_report = false;
+    }
+
+    fn arm_for_initial_report(&mut self) {
+        self.awaiting_initial_report = true;
+        self.ready = false;
+    }
+
+    fn update(&mut self, width: u32, height: u32, report: SurfaceReport) -> Option<bool> {
+        match report {
+            SurfaceReport::InitialConfig => {
+                if self.awaiting_initial_report {
+                    return self.set_ready(false);
+                }
+            }
+            SurfaceReport::ConfigureEvent => {
+                self.awaiting_initial_report = false;
+            }
+        }
+
+        let ready = width > 1 && height > 1 && !self.awaiting_initial_report;
+        self.set_ready(ready)
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready
+    }
+
+    fn set_ready(&mut self, ready: bool) -> Option<bool> {
+        if self.ready != ready {
+            self.ready = ready;
+            Some(ready)
+        } else {
+            None
+        }
+    }
+
+    fn force_ready(&mut self, ready: bool) {
+        self.awaiting_initial_report = false;
+        self.ready = ready;
+    }
+}
+
+fn should_wait_for_wayland_configure() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let session_type_is_wayland = env::var("XDG_SESSION_TYPE")
+            .map(|value| value.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false);
+        session_type_is_wayland
+            || env::var_os("WAYLAND_DISPLAY").is_some()
+            || env::var_os("WAYLAND_SOCKET").is_some()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
     }
 }
 
@@ -1054,7 +1129,8 @@ pub fn run_windowed(
         cancel: CancellationToken,
         window: Option<Arc<Window>>,
         gpu: Option<GpuCtx>,
-        surface_ready: bool,
+        surface_gate: SurfaceReadyGate,
+        wait_for_wayland_configure: bool,
         mode: Option<ViewerMode>,
         preload_count: usize,
         oversample: f32,
@@ -1082,18 +1158,16 @@ pub fn run_windowed(
                 .gpu
                 .as_ref()
                 .map(|gpu| SurfaceState::from_config(&gpu.config, &gpu.limits));
-            surface_state_for_queue(self.surface_ready, surface)
+            surface_state_for_queue(self.surface_gate.is_ready(), surface)
         }
 
-        fn update_surface_ready(&mut self, width: u32, height: u32) {
-            let ready = width > 1 && height > 1;
-            if ready != self.surface_ready {
+        fn update_surface_ready(&mut self, width: u32, height: u32, report: SurfaceReport) {
+            if let Some(ready) = self.surface_gate.update(width, height, report) {
                 debug!(
                     surface_ready = ready,
                     width, height, "viewer_surface_ready_state_changed"
                 );
             }
-            self.surface_ready = ready;
         }
 
         fn with_active_scene<R>(
@@ -1240,7 +1314,7 @@ pub fn run_windowed(
                 self.enter_greeting();
             }
             self.mat_inflight = 0;
-            self.surface_ready = false;
+            self.surface_gate.reset();
             self.log_event_loop_state("reset_for_resume");
         }
 
@@ -1269,7 +1343,7 @@ pub fn run_windowed(
                 viewer_mode = ?self.mode_kind(),
                 has_window = self.window.is_some(),
                 has_gpu = self.gpu.is_some(),
-                surface_ready = self.surface_ready,
+                surface_ready = self.surface_gate.is_ready(),
                 pending_queue_len = wake.pending().len(),
                 ready_results_len = self.ready_results.len(),
                 deferred_queue_len = self.deferred_images.len(),
@@ -1329,7 +1403,7 @@ pub fn run_windowed(
                 mode.set_overlays(None, None);
             }
             self.gpu = None;
-            self.surface_ready = false;
+            self.surface_gate.reset();
             self.log_event_loop_state("teardown_gpu");
         }
 
@@ -1560,7 +1634,10 @@ pub fn run_windowed(
                 desired_maximum_frame_latency: 2,
             };
             surface.configure(&device, &config);
-            self.update_surface_ready(size.width, size.height);
+            if self.wait_for_wayland_configure {
+                self.surface_gate.arm_for_initial_report();
+            }
+            self.update_surface_ready(size.width, size.height, SurfaceReport::InitialConfig);
             debug!(
                 width = config.width,
                 height = config.height,
@@ -1797,7 +1874,11 @@ pub fn run_windowed(
                         gpu.config.height = new_size.height.max(1);
                         gpu.surface.configure(&gpu.device, &gpu.config);
                     }
-                    self.update_surface_ready(new_size.width, new_size.height);
+                    self.update_surface_ready(
+                        new_size.width,
+                        new_size.height,
+                        SurfaceReport::ConfigureEvent,
+                    );
                     let scale_factor = self
                         .window
                         .as_ref()
@@ -1823,7 +1904,11 @@ pub fn run_windowed(
                         gpu.config.width = size.width.max(1);
                         gpu.config.height = size.height.max(1);
                         gpu.surface.configure(&gpu.device, &gpu.config);
-                        self.update_surface_ready(size.width, size.height);
+                        self.update_surface_ready(
+                            size.width,
+                            size.height,
+                            SurfaceReport::ConfigureEvent,
+                        );
                         let _ = self.with_active_scene(|scene, ctx| {
                             scene.handle_scale_factor_changed(ctx, size, scale_factor);
                         });
@@ -2275,7 +2360,8 @@ pub fn run_windowed(
         cancel,
         window: None,
         gpu: None,
-        surface_ready: false,
+        surface_gate: SurfaceReadyGate::default(),
+        wait_for_wayland_configure: should_wait_for_wayland_configure(),
         mode: Some(ViewerMode::new(ViewerModeKind::Greeting, initial_wake)),
         preload_count: cfg.viewer_preload_count,
         oversample: cfg.oversample,
@@ -2753,7 +2839,7 @@ pub mod testkit {
         wake: scenes::WakeScene,
         oversample: f32,
         matting: MattingConfig,
-        surface_ready: bool,
+        surface_gate: SurfaceReadyGate,
         surface: Option<SurfaceState>,
     }
 
@@ -2784,7 +2870,7 @@ pub mod testkit {
                 wake: scenes::WakeScene::new(dwell_ms, transition_cfg),
                 oversample,
                 matting,
-                surface_ready: false,
+                surface_gate: SurfaceReadyGate::default(),
                 surface: None,
             }
         }
@@ -2802,7 +2888,7 @@ pub mod testkit {
         }
 
         pub fn set_surface_ready(&mut self, ready: bool) {
-            self.surface_ready = ready;
+            self.surface_gate.force_ready(ready);
         }
 
         pub fn push_deferred(&mut self, image: PreparedImageCpu, priority: bool) {
@@ -2817,7 +2903,7 @@ pub mod testkit {
                 deferred_images: &mut self.deferred_images,
                 ready_results: &mut self.ready_results,
                 from_loader: &mut self.from_loader_rx,
-                surface: surface_state_for_queue(self.surface_ready, self.surface),
+                surface: surface_state_for_queue(self.surface_gate.is_ready(), self.surface),
                 matting: &self.matting,
                 oversample: self.oversample,
                 mat_pipeline: &self.mat_pipeline,
