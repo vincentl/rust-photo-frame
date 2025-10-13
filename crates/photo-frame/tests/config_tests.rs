@@ -205,7 +205,8 @@ matting:
         .primary_selected()
         .expect("expected fixed-color mat option");
     assert_eq!(selected.entry.kind, MattingKind::FixedColor);
-    if let rust_photo_frame::config::MattingMode::FixedColor { colors, .. } = &selected.option.style {
+    if let rust_photo_frame::config::MattingMode::FixedColor { colors, .. } = &selected.option.style
+    {
         assert_eq!(colors.as_slice(), &[[17, 34, 51]]);
     } else {
         panic!("expected fixed-color matting");
@@ -535,11 +536,17 @@ fn parse_inline_iris_transition() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  types: [iris]
-  duration-ms: 880
-  blades: 9
-  rotate-radians: 1.25
-  direction: close
+  selection: fixed
+  active:
+    - kind: iris
+      duration-ms: 880
+      blades: 9
+      rotate-radians: 1.25
+      direction: close
+      fill-rgba: [0.75, 0.8, 0.85, 1.0]
+      stroke-rgba: [0.2, 0.25, 0.3, 1.0]
+      stroke-width: 2.0
+      tolerance: 0.2
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -563,6 +570,10 @@ transition:
                 cfg.direction,
                 rust_photo_frame::config::IrisDirection::Close
             );
+            assert_eq!(cfg.fill_rgba, [0.75, 0.8, 0.85, 1.0]);
+            assert_eq!(cfg.stroke_rgba, [0.2, 0.25, 0.3, 1.0]);
+            assert!((cfg.stroke_width - 2.0).abs() < f32::EPSILON);
+            assert!((cfg.tolerance - 0.2).abs() < f32::EPSILON);
         }
         _ => panic!("expected iris transition"),
     }
@@ -799,10 +810,9 @@ transition:
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("transition option wipe requires angle-list-degrees to include at least one entry")
-    );
+    assert!(err.to_string().contains(
+        "transition option wipe requires angle-list-degrees to include at least one entry"
+    ));
 }
 
 #[test]

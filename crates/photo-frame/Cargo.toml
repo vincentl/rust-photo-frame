@@ -32,7 +32,7 @@ wgpu = { version = "27.0.0", features = ["wgsl"] }
 winit = "0.30.12"
 glyphon = { git = "https://github.com/grovesNL/glyphon.git", rev = "de4b5b8d4e52310be8df56d82a759593920acc04" }
 fontdb = "0.23.0"
-lyon = "1.0.1"
+lyon = { version = "1.0.1", features = ["extra"] }
 palette = "0.7.6"
 
 [dev-dependencies]
