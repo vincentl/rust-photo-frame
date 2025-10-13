@@ -96,6 +96,8 @@ flowchart LR
 
 All configuration options—from playlist weighting and greeting screens to transition tuning—are documented in depth, including starter YAML examples and per-key reference tables. [Full details →](docs/configuration.md)
 
+> **Breaking change:** The `transition` and `matting` blocks now use a `selection` + `active` schema. Older `types`/`options` layouts no longer parse—recreate those entries with explicit `kind` fields as shown in the updated configuration guide.
+
 Need help wiring the sleep schedule to Raspberry Pi + Dell HDMI hardware? The dedicated power guide covers DPMS commands, troubleshooting, and verification steps. [Power & sleep details →](docs/power-and-sleep.md)
 
 ## Fabrication
