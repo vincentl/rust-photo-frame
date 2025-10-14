@@ -603,7 +603,7 @@ impl IrisRenderer {
 
         // Mask pass
         {
-            self.write_blade_uniforms(queue, params.screen_size, 0.0, [0.0; 4]);
+            self.write_blade_uniforms(queue, params.screen_size, 1.0, [0.0; 4]);
             let mask_view = &self.mask_target.as_ref().unwrap().view;
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("iris-mask-pass"),
@@ -612,7 +612,7 @@ impl IrisRenderer {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
