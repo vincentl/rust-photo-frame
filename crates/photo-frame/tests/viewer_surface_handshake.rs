@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use rust_photo_frame::config::{MattingConfig, TransitionConfig};
 use rust_photo_frame::events::PreparedImageCpu;
-use rust_photo_frame::tasks::viewer::testkit::{compute_canvas_size_for_test, MattingQueueHarness};
+use rust_photo_frame::tasks::viewer::testkit::{MattingQueueHarness, compute_canvas_size_for_test};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn viewer_defers_matting_until_surface_ready_event() {

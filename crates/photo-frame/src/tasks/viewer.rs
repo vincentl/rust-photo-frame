@@ -14,9 +14,9 @@ use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
 use crate::renderer::iris_tess::{IrisDrawParams, IrisRenderer, IrisStage};
 use crate::tasks::greeting_screen::GreetingScreen;
-use crossbeam_channel::{bounded, Receiver as CbReceiver, Sender as CbSender, TrySendError};
+use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
 use futures::executor::block_on;
-use image::{imageops, Rgba, RgbaImage};
+use image::{Rgba, RgbaImage, imageops};
 use rand::Rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -24,9 +24,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn, Level};
+use tracing::{Level, debug, info, warn};
 
 pub(super) enum ActiveTransition {
     Fade {
@@ -363,11 +363,7 @@ fn surface_state_for_queue(
     surface_ready: bool,
     surface: Option<SurfaceState>,
 ) -> Option<SurfaceState> {
-    if surface_ready {
-        surface
-    } else {
-        None
-    }
+    if surface_ready { surface } else { None }
 }
 
 impl<'a> MattingBridge<'a> {
@@ -1163,6 +1159,7 @@ pub fn run_windowed(
         clear_color: wgpu::Color,
         rng: rand::rngs::ThreadRng,
         full_config: Arc<crate::config::Configuration>,
+        surface_timeout_streak: u32,
     }
 
     impl App {
@@ -1322,6 +1319,324 @@ pub fn run_windowed(
             }
         }
 
+        fn ensure_gpu_ready(&mut self, event_loop: &ActiveEventLoop, reason: &'static str) -> bool {
+            let Some(window) = self.ensure_window(event_loop) else {
+                debug!(context = reason, "viewer_gpu_ensure_no_window");
+                return false;
+            };
+            let window_log = format!("{reason}_window_ready");
+            self.log_event_loop_state(&window_log);
+
+            if self.gpu.is_some() {
+                debug!(context = reason, "viewer_gpu_ensure_already_initialized");
+                return true;
+            }
+
+            let instance = wgpu::Instance::default();
+            debug!(context = reason, "viewer_gpu_instance_ready");
+            let surface = match instance.create_surface(window.clone()) {
+                Ok(surface) => {
+                    debug!(context = reason, "viewer_gpu_surface_created");
+                    surface
+                }
+                Err(err) => {
+                    warn!(
+                        context = reason,
+                        error = %err,
+                        "failed to create surface; exiting viewer"
+                    );
+                    event_loop.exit();
+                    return false;
+                }
+            };
+            let adapter =
+                match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: false,
+                })) {
+                    Ok(adapter) => {
+                        let info = adapter.get_info();
+                        debug!(context = reason, ?info, "viewer_gpu_adapter_acquired");
+                        adapter
+                    }
+                    Err(err) => {
+                        warn!(
+                            context = reason,
+                            error = %err,
+                            "failed to acquire GPU adapter; exiting viewer"
+                        );
+                        event_loop.exit();
+                        return false;
+                    }
+                };
+            let limits = adapter.limits();
+            debug!(
+                context = reason,
+                max_texture_dimension_2d = limits.max_texture_dimension_2d,
+                max_buffer_size = limits.max_buffer_size,
+                "viewer_gpu_limits"
+            );
+            let (device, queue) =
+                match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                    label: Some("viewer-device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: limits.clone(),
+                    experimental_features: wgpu::ExperimentalFeatures::default(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                    trace: wgpu::Trace::default(),
+                })) {
+                    Ok(pair) => {
+                        debug!(context = reason, "viewer_gpu_device_ready");
+                        pair
+                    }
+                    Err(err) => {
+                        warn!(
+                            context = reason,
+                            error = %err,
+                            "failed to acquire GPU device; exiting viewer"
+                        );
+                        event_loop.exit();
+                        return false;
+                    }
+                };
+            let caps = surface.get_capabilities(&adapter);
+            let format = caps
+                .formats
+                .iter()
+                .copied()
+                .find(|f| f.is_srgb())
+                .unwrap_or(caps.formats[0]);
+            let size = window.inner_size();
+            debug!(
+                context = reason,
+                surface_width = size.width,
+                surface_height = size.height,
+                format = ?format,
+                present_modes = ?caps.present_modes,
+                "viewer_gpu_surface_caps"
+            );
+            let config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format,
+                width: size.width.max(1),
+                height: size.height.max(1),
+                present_mode: wgpu::PresentMode::AutoVsync,
+                alpha_mode: caps.alpha_modes[0],
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+            };
+            surface.configure(&device, &config);
+            self.surface_gate.arm_for_initial_report();
+            self.update_surface_ready(size.width, size.height, SurfaceReport::InitialConfig);
+            debug!(
+                context = reason,
+                width = config.width,
+                height = config.height,
+                present_mode = ?config.present_mode,
+                "viewer_gpu_surface_configured"
+            );
+            // Resources for quad
+            let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("viewer-uniforms"),
+                size: std::mem::size_of::<TransitionUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let uniform_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("uniform-layout"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                });
+            let uniform_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("uniform-bind"),
+                layout: &uniform_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buf.as_entire_binding(),
+                }],
+            });
+            let img_bind_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("image-bind-layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                    ],
+                });
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("linear-clamp"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            });
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("viewer-quad"),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                    "shaders/viewer_quad.wgsl"
+                ))),
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("pipeline-layout"),
+                bind_group_layouts: &[&uniform_layout, &img_bind_layout, &img_bind_layout],
+                push_constant_ranges: &[],
+            });
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("quad-pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview: None,
+                cache: None,
+            });
+            let make_plane = |label: &str, width: u32, height: u32, data: &[u8]| -> TexturePlane {
+                let w = width.max(1);
+                let h = height.max(1);
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * w),
+                        rows_per_image: Some(h),
+                    },
+                    wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(label),
+                    layout: &img_bind_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&sampler),
+                        },
+                    ],
+                });
+                TexturePlane { bind, w, h }
+            };
+
+            let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
+
+            let iris = IrisRenderer::new(&device, format, &img_bind_layout);
+
+            let greeting = GreetingScene::new(GreetingScreen::new(
+                &device,
+                &queue,
+                format,
+                self.full_config.greeting_screen.screen(),
+            ));
+
+            let sleep = SleepScene::new(GreetingScreen::new(
+                &device,
+                &queue,
+                format,
+                self.full_config.sleep_screen.screen(),
+            ));
+
+            self.window = Some(window);
+            let gpu = GpuCtx {
+                device,
+                queue,
+                surface,
+                config,
+                limits,
+                uniform_buf,
+                uniform_bind,
+                img_bind_layout,
+                sampler,
+                pipeline,
+                blank_plane,
+                iris,
+            };
+            if let Some(mode) = self.mode.as_mut() {
+                mode.set_overlays(Some(greeting), Some(sleep));
+            }
+            self.gpu = Some(gpu);
+            let _ = self.with_active_scene(|scene, ctx| {
+                scene.enter(ctx);
+            });
+            let wake = self.mode_mut().wake_mut();
+            wake.set_current(None);
+            wake.set_next(None);
+            wake.set_transition_state(None);
+            wake.set_displayed_at(None);
+            let ready_log = format!("{reason}_gpu_ready");
+            self.log_event_loop_state(&ready_log);
+            true
+        }
+
         fn reset_for_resume(&mut self) {
             self.mode_mut().wake_mut().reset();
             self.ready_results.clear();
@@ -1336,6 +1651,7 @@ pub fn run_windowed(
             }
             self.mat_inflight = 0;
             self.surface_gate.reset();
+            self.surface_timeout_streak = 0;
             self.log_event_loop_state("reset_for_resume");
         }
 
@@ -1588,6 +1904,31 @@ pub fn run_windowed(
             self.set_mode(ViewerModeKind::Greeting);
             self.log_event_loop_state("enter_greeting");
         }
+
+        fn handle_surface_timeout(&mut self, event_loop: &ActiveEventLoop) {
+            const MAX_CONSECUTIVE_TIMEOUTS: u32 = 6;
+
+            self.surface_timeout_streak = self.surface_timeout_streak.saturating_add(1);
+            if self.surface_timeout_streak < MAX_CONSECUTIVE_TIMEOUTS {
+                return;
+            }
+
+            warn!(
+                streak = self.surface_timeout_streak,
+                "viewer_surface_timeout_recovering"
+            );
+            self.surface_timeout_streak = 0;
+
+            self.teardown_gpu();
+            self.reset_for_resume();
+            if self.ensure_gpu_ready(event_loop, "surface_timeout_recover") {
+                debug!("viewer_surface_timeout_recovered");
+            }
+        }
+
+        fn record_frame_presented(&mut self) {
+            self.surface_timeout_streak = 0;
+        }
     }
 
     impl ApplicationHandler<ViewerEvent> for App {
@@ -1596,303 +1937,7 @@ pub fn run_windowed(
             self.reset_for_resume();
             self.log_event_loop_state("resumed_post_reset");
 
-            let Some(window) = self.ensure_window(event_loop) else {
-                debug!("viewer_app_resumed_no_window");
-                return;
-            };
-            self.log_event_loop_state("resumed_window_ready");
-
-            if self.gpu.is_some() {
-                debug!("viewer_app_resumed_gpu_already_initialized");
-                return;
-            }
-
-            let instance = wgpu::Instance::default();
-            debug!("viewer_app_resumed_instance_ready");
-            let surface = match instance.create_surface(window.clone()) {
-                Ok(surface) => {
-                    debug!("viewer_app_resumed_surface_created");
-                    surface
-                }
-                Err(err) => {
-                    warn!(error = %err, "failed to create surface; exiting viewer");
-                    event_loop.exit();
-                    return;
-                }
-            };
-            let adapter =
-                match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    compatible_surface: Some(&surface),
-                    force_fallback_adapter: false,
-                })) {
-                    Ok(adapter) => {
-                        let info = adapter.get_info();
-                        debug!(?info, "viewer_app_resumed_adapter_acquired");
-                        adapter
-                    }
-                    Err(err) => {
-                        warn!(error = %err, "failed to acquire GPU adapter; exiting viewer");
-                        event_loop.exit();
-                        return;
-                    }
-                };
-            let limits = adapter.limits();
-            debug!(
-                max_texture_dimension_2d = limits.max_texture_dimension_2d,
-                max_buffer_size = limits.max_buffer_size,
-                "viewer_app_resumed_limits"
-            );
-            let (device, queue) =
-                match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                    label: Some("viewer-device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: limits.clone(),
-                    experimental_features: wgpu::ExperimentalFeatures::default(),
-                    memory_hints: wgpu::MemoryHints::default(),
-                    trace: wgpu::Trace::default(),
-                })) {
-                    Ok(pair) => {
-                        debug!("viewer_app_resumed_device_ready");
-                        pair
-                    }
-                    Err(err) => {
-                        warn!(error = %err, "failed to acquire GPU device; exiting viewer");
-                        event_loop.exit();
-                        return;
-                    }
-                };
-            let caps = surface.get_capabilities(&adapter);
-            let format = caps
-                .formats
-                .iter()
-                .copied()
-                .find(|f| f.is_srgb())
-                .unwrap_or(caps.formats[0]);
-            let size = window.inner_size();
-            debug!(
-                surface_width = size.width,
-                surface_height = size.height,
-                format = ?format,
-                present_modes = ?caps.present_modes,
-                "viewer_app_resumed_surface_caps"
-            );
-            let config = wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format,
-                width: size.width.max(1),
-                height: size.height.max(1),
-                present_mode: wgpu::PresentMode::AutoVsync,
-                alpha_mode: caps.alpha_modes[0],
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
-            };
-            surface.configure(&device, &config);
-            self.surface_gate.arm_for_initial_report();
-            self.update_surface_ready(size.width, size.height, SurfaceReport::InitialConfig);
-            debug!(
-                width = config.width,
-                height = config.height,
-                present_mode = ?config.present_mode,
-                "viewer_app_resumed_surface_configured"
-            );
-            // Resources for quad
-            let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("viewer-uniforms"),
-                size: std::mem::size_of::<TransitionUniforms>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let uniform_layout =
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("uniform-layout"),
-                    entries: &[wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    }],
-                });
-            let uniform_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("uniform-bind"),
-                layout: &uniform_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buf.as_entire_binding(),
-                }],
-            });
-            let img_bind_layout =
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("image-bind-layout"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                    ],
-                });
-            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("linear-clamp"),
-                address_mode_u: wgpu::AddressMode::ClampToEdge,
-                address_mode_v: wgpu::AddressMode::ClampToEdge,
-                address_mode_w: wgpu::AddressMode::ClampToEdge,
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Linear,
-                mipmap_filter: wgpu::FilterMode::Linear,
-                ..Default::default()
-            });
-            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("viewer-quad"),
-                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                    "shaders/viewer_quad.wgsl"
-                ))),
-            });
-            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("pipeline-layout"),
-                bind_group_layouts: &[&uniform_layout, &img_bind_layout, &img_bind_layout],
-                push_constant_ranges: &[],
-            });
-            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("quad-pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                multiview: None,
-                cache: None,
-            });
-            let make_plane = |label: &str, width: u32, height: u32, data: &[u8]| -> TexturePlane {
-                let w = width.max(1);
-                let h = height.max(1);
-                let tex = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size: wgpu::Extent3d {
-                        width: w,
-                        height: h,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &tex,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    data,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4 * w),
-                        rows_per_image: Some(h),
-                    },
-                    wgpu::Extent3d {
-                        width: w,
-                        height: h,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout: &img_bind_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&sampler),
-                        },
-                    ],
-                });
-                TexturePlane { bind, w, h }
-            };
-
-            let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
-
-            let iris = IrisRenderer::new(&device, format, &img_bind_layout);
-
-            let greeting = GreetingScene::new(GreetingScreen::new(
-                &device,
-                &queue,
-                format,
-                self.full_config.greeting_screen.screen(),
-            ));
-
-            let sleep = SleepScene::new(GreetingScreen::new(
-                &device,
-                &queue,
-                format,
-                self.full_config.sleep_screen.screen(),
-            ));
-
-            self.window = Some(window);
-            let gpu = GpuCtx {
-                device,
-                queue,
-                surface,
-                config,
-                limits,
-                uniform_buf,
-                uniform_bind,
-                img_bind_layout,
-                sampler,
-                pipeline,
-                blank_plane,
-                iris,
-            };
-            if let Some(mode) = self.mode.as_mut() {
-                mode.set_overlays(Some(greeting), Some(sleep));
-            }
-            self.gpu = Some(gpu);
-            let _ = self.with_active_scene(|scene, ctx| {
-                scene.enter(ctx);
-            });
-            let wake = self.mode_mut().wake_mut();
-            wake.set_current(None);
-            wake.set_next(None);
-            wake.set_transition_state(None);
-            wake.set_displayed_at(None);
-            self.log_event_loop_state("resumed_gpu_ready");
+            let _ = self.ensure_gpu_ready(event_loop, "resumed");
         }
 
         fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
@@ -1980,28 +2025,38 @@ pub fn run_windowed(
                 }
                 WindowEvent::RedrawRequested => {
                     let mode_kind = self.mode_kind();
-                    let (Some(gpu), Some(mode)) = (self.gpu.as_mut(), self.mode.as_mut()) else {
+                    let Some(_) = self.gpu.as_ref() else {
                         return;
                     };
                     let overlay_pending = match mode_kind {
-                        ViewerModeKind::Greeting => mode
+                        ViewerModeKind::Greeting => self
+                            .mode()
                             .greeting()
                             .map(GreetingScene::needs_redraw)
                             .unwrap_or(false),
-                        ViewerModeKind::Sleep => {
-                            mode.sleep().map(SleepScene::needs_redraw).unwrap_or(false)
-                        }
+                        ViewerModeKind::Sleep => self
+                            .mode()
+                            .sleep()
+                            .map(SleepScene::needs_redraw)
+                            .unwrap_or(false),
                         ViewerModeKind::Wake => false,
                     };
-                    let wake = mode.wake();
+                    let (pending_redraw, queue_depth, has_transition) = {
+                        let wake = self.mode().wake();
+                        (
+                            wake.needs_redraw(),
+                            wake.pending().len(),
+                            wake.transition_state().is_some(),
+                        )
+                    };
                     debug!(
                         viewer_mode = ?mode_kind,
                         overlay_pending,
-                        pending_redraw = wake.needs_redraw(),
-                        queue_depth = wake.pending().len(),
+                        pending_redraw,
+                        queue_depth,
                         ready_results = self.ready_results.len(),
                         mat_inflight = self.mat_inflight,
-                        has_transition = wake.transition_state().is_some(),
+                        has_transition,
                         "viewer_window_redraw_requested"
                     );
                     if matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep)
@@ -2012,38 +2067,43 @@ pub fn run_windowed(
                     if matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep) {
                         let size = window.inner_size();
                         let scale_factor = window.scale_factor();
-                        let layout_ready = match mode_kind {
-                            ViewerModeKind::Greeting => {
-                                if let Some(screen) = mode.greeting_mut() {
-                                    let message = self
-                                        .full_config
-                                        .greeting_screen
-                                        .screen()
-                                        .message_or_default()
-                                        .into_owned();
-                                    screen.resize(size, scale_factor);
-                                    screen.set_message(message);
-                                    screen.ensure_layout_ready()
-                                } else {
-                                    false
+                        let layout_ready = {
+                            let Some(mode) = self.mode.as_mut() else {
+                                return;
+                            };
+                            match mode_kind {
+                                ViewerModeKind::Greeting => {
+                                    if let Some(screen) = mode.greeting_mut() {
+                                        let message = self
+                                            .full_config
+                                            .greeting_screen
+                                            .screen()
+                                            .message_or_default()
+                                            .into_owned();
+                                        screen.resize(size, scale_factor);
+                                        screen.set_message(message);
+                                        screen.ensure_layout_ready()
+                                    } else {
+                                        false
+                                    }
                                 }
-                            }
-                            ViewerModeKind::Sleep => {
-                                if let Some(screen) = mode.sleep_mut() {
-                                    let message = self
-                                        .full_config
-                                        .sleep_screen
-                                        .screen()
-                                        .message_or_default()
-                                        .into_owned();
-                                    screen.resize(size, scale_factor);
-                                    screen.set_message(message);
-                                    screen.ensure_layout_ready()
-                                } else {
-                                    false
+                                ViewerModeKind::Sleep => {
+                                    if let Some(screen) = mode.sleep_mut() {
+                                        let message = self
+                                            .full_config
+                                            .sleep_screen
+                                            .screen()
+                                            .message_or_default()
+                                            .into_owned();
+                                        screen.resize(size, scale_factor);
+                                        screen.set_message(message);
+                                        screen.ensure_layout_ready()
+                                    } else {
+                                        false
+                                    }
                                 }
+                                ViewerModeKind::Wake => true,
                             }
-                            ViewerModeKind::Wake => true,
                         };
                         if !layout_ready {
                             debug!(
@@ -2057,45 +2117,62 @@ pub fn run_windowed(
                     }
 
                     let mut frame = None;
-                    for attempt in 0..2 {
-                        match gpu.surface.get_current_texture() {
-                            Ok(current) => {
-                                frame = Some(current);
-                                break;
-                            }
-                            Err(err) => {
-                                match err {
-                                    wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
-                                        warn!(
-                                            attempt = attempt,
-                                            error = ?err,
-                                            "viewer_surface_reconfigure"
-                                        );
-                                        gpu.surface.configure(&gpu.device, &gpu.config);
-                                    }
-                                    wgpu::SurfaceError::Timeout => {
-                                        warn!("viewer_surface_timeout");
-                                        return;
-                                    }
-                                    wgpu::SurfaceError::OutOfMemory => {
-                                        warn!("viewer_surface_out_of_memory");
-                                        event_loop.exit();
-                                        return;
-                                    }
-                                    wgpu::SurfaceError::Other => {
-                                        warn!(?err, "viewer_surface_error");
-                                        return;
-                                    }
+                    let mut encountered_timeout = false;
+                    {
+                        let Some(gpu) = self.gpu.as_mut() else {
+                            return;
+                        };
+                        for attempt in 0..2 {
+                            match gpu.surface.get_current_texture() {
+                                Ok(current) => {
+                                    frame = Some(current);
+                                    break;
                                 }
-                                if attempt == 0 {
-                                    continue;
-                                } else {
-                                    return;
+                                Err(err) => {
+                                    match err {
+                                        wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+                                            warn!(
+                                                attempt = attempt,
+                                                error = ?err,
+                                                "viewer_surface_reconfigure"
+                                            );
+                                            gpu.surface.configure(&gpu.device, &gpu.config);
+                                        }
+                                        wgpu::SurfaceError::Timeout => {
+                                            warn!("viewer_surface_timeout");
+                                            encountered_timeout = true;
+                                            if attempt == 0 {
+                                                continue;
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        wgpu::SurfaceError::OutOfMemory => {
+                                            warn!("viewer_surface_out_of_memory");
+                                            event_loop.exit();
+                                            return;
+                                        }
+                                        wgpu::SurfaceError::Other => {
+                                            warn!(?err, "viewer_surface_error");
+                                            return;
+                                        }
+                                    }
+                                    if attempt == 0 {
+                                        continue;
+                                    } else {
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
                     let Some(frame) = frame else {
+                        if encountered_timeout {
+                            self.handle_surface_timeout(event_loop);
+                        }
+                        return;
+                    };
+                    let (Some(gpu), Some(mode)) = (self.gpu.as_mut(), self.mode.as_mut()) else {
                         return;
                     };
                     let view = frame
@@ -2124,6 +2201,7 @@ pub fn run_windowed(
                             gpu.queue.submit(Some(encoder.finish()));
                             frame.present();
                             screen.after_submit();
+                            self.record_frame_presented();
                             return;
                         }
                         ViewerModeKind::Greeting => {
@@ -2142,6 +2220,7 @@ pub fn run_windowed(
                             gpu.queue.submit(Some(encoder.finish()));
                             frame.present();
                             screen.after_submit();
+                            self.record_frame_presented();
                             return;
                         }
                         ViewerModeKind::Wake => {
@@ -2398,6 +2477,7 @@ pub fn run_windowed(
                                 rpass.draw(0..6, 0..1);
                             }
                             encoder.pop_debug_group();
+                            self.record_frame_presented();
                         }
                     }
                 }
@@ -2521,7 +2601,8 @@ pub fn run_windowed(
         deferred_images: VecDeque::new(),
         clear_color,
         rng: rand::rng(),
-        full_config: Arc::new(cfg.clone()),
+        full_config: Arc::new(cfg),
+        surface_timeout_streak: 0,
     };
     app.enter_greeting();
     event_loop.run_app(&mut app)?;
