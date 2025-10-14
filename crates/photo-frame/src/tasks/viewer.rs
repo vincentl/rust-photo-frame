@@ -272,93 +272,6 @@ impl SurfaceState {
     }
 }
 
-#[derive(Clone, Copy)]
-enum SurfaceReport {
-    InitialConfig,
-    ConfigureEvent,
-}
-
-#[derive(Clone, Copy, Default)]
-struct SurfaceReadyGate {
-    ready: bool,
-    awaiting_initial_report: bool,
-    expected_minimum: Option<(u32, u32)>,
-    last_reported_size: Option<(u32, u32)>,
-}
-
-impl SurfaceReadyGate {
-    fn set_expected_minimum(&mut self, expected_minimum: Option<(u32, u32)>) -> Option<bool> {
-        self.expected_minimum = expected_minimum;
-
-        if self.awaiting_initial_report {
-            return None;
-        }
-
-        match (self.last_reported_size, self.expected_minimum) {
-            (Some((width, height)), _) => {
-                let ready = self.meets_expectation(width, height);
-                self.set_ready(ready)
-            }
-            (None, Some(_)) => self.set_ready(false),
-            (None, None) => None,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.ready = false;
-        self.awaiting_initial_report = false;
-        self.last_reported_size = None;
-    }
-
-    fn arm_for_initial_report(&mut self) {
-        self.awaiting_initial_report = true;
-        self.ready = false;
-    }
-
-    fn update(&mut self, width: u32, height: u32, report: SurfaceReport) -> Option<bool> {
-        self.last_reported_size = Some((width, height));
-        match report {
-            SurfaceReport::InitialConfig => {
-                if self.awaiting_initial_report {
-                    if self.meets_expectation(width, height) {
-                        self.awaiting_initial_report = false;
-                    } else {
-                        return self.set_ready(false);
-                    }
-                }
-            }
-            SurfaceReport::ConfigureEvent => {
-                self.awaiting_initial_report = false;
-            }
-        }
-
-        let ready = !self.awaiting_initial_report && self.meets_expectation(width, height);
-        self.set_ready(ready)
-    }
-
-    fn is_ready(&self) -> bool {
-        self.ready
-    }
-
-    fn set_ready(&mut self, ready: bool) -> Option<bool> {
-        if self.ready != ready {
-            self.ready = ready;
-            Some(ready)
-        } else {
-            None
-        }
-    }
-
-    fn meets_expectation(&self, width: u32, height: u32) -> bool {
-        match self.expected_minimum {
-            Some((expected_width, expected_height)) => {
-                width >= expected_width && height >= expected_height
-            }
-            None => width > 1 && height > 1,
-        }
-    }
-}
-
 struct MattingBridge<'a> {
     preload_count: usize,
     mat_inflight: &'a mut usize,
@@ -372,10 +285,10 @@ struct MattingBridge<'a> {
 }
 
 fn surface_state_for_queue(
-    surface_ready: bool,
+    surface_configured: bool,
     surface: Option<SurfaceState>,
 ) -> Option<SurfaceState> {
-    if surface_ready { surface } else { None }
+    if surface_configured { surface } else { None }
 }
 
 impl<'a> MattingBridge<'a> {
@@ -924,7 +837,7 @@ pub fn run_windowed(
         },
     }
 
-    #[derive(Copy, Clone)]
+    #[derive(Copy, Clone, Debug)]
     enum SceneHook {
         Enter,
         Exit,
@@ -1159,7 +1072,8 @@ pub fn run_windowed(
         cancel: CancellationToken,
         window: Option<Arc<Window>>,
         gpu: Option<GpuCtx>,
-        surface_gate: SurfaceReadyGate,
+        surface_configured: bool,
+        pending_scene_enter: bool,
         mode: Option<ViewerMode>,
         preload_count: usize,
         oversample: f32,
@@ -1184,26 +1098,22 @@ pub fn run_windowed(
         }
 
         fn active_surface(&self) -> Option<SurfaceState> {
-            let surface = self
-                .gpu
-                .as_ref()
-                .map(|gpu| SurfaceState::from_config(&gpu.config, &gpu.limits));
-            surface_state_for_queue(self.surface_gate.is_ready(), surface)
-        }
-
-        fn update_surface_ready(&mut self, width: u32, height: u32, report: SurfaceReport) {
-            if let Some(ready) = self.surface_gate.update(width, height, report) {
-                debug!(
-                    surface_ready = ready,
-                    width, height, "viewer_surface_ready_state_changed"
-                );
+            if !self.surface_configured {
+                return None;
             }
+            self.gpu
+                .as_ref()
+                .map(|gpu| SurfaceState::from_config(&gpu.config, &gpu.limits))
         }
 
         fn with_active_scene<R>(
             &mut self,
             f: impl FnOnce(&mut dyn Scene, SceneContext<'_>) -> R,
         ) -> Option<R> {
+            if !self.surface_configured {
+                debug!("viewer_scene_waiting_for_surface_configuration");
+                return None;
+            }
             let window_handle = self.window.as_ref().map(Arc::clone);
             let window_ref = window_handle.as_deref();
             let mut request_redraw = {
@@ -1278,6 +1188,13 @@ pub fn run_windowed(
         }
 
         fn dispatch_scene_hook(&mut self, mode: &mut ViewerMode, hook: SceneHook) {
+            if !self.surface_configured {
+                if matches!(hook, SceneHook::Enter) {
+                    self.pending_scene_enter = true;
+                }
+                debug!(hook = ?hook, "viewer_scene_hook_deferred_until_surface_configured");
+                return;
+            }
             let window_handle = self.window.as_ref().map(Arc::clone);
             let window_ref = window_handle.as_deref();
             let mut request_redraw = {
@@ -1322,6 +1239,9 @@ pub fn run_windowed(
                     Self::run_scene_hook(scene, hook, ctx);
                 },
             );
+            if matches!(hook, SceneHook::Enter) {
+                self.pending_scene_enter = false;
+            }
         }
 
         fn run_scene_hook(scene: &mut dyn Scene, hook: SceneHook, ctx: SceneContext<'_>) {
@@ -1438,16 +1358,6 @@ pub fn run_windowed(
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
             };
-            surface.configure(&device, &config);
-            self.surface_gate.arm_for_initial_report();
-            self.update_surface_ready(size.width, size.height, SurfaceReport::InitialConfig);
-            debug!(
-                context = reason,
-                width = config.width,
-                height = config.height,
-                present_mode = ?config.present_mode,
-                "viewer_gpu_surface_configured"
-            );
             // Resources for quad
             let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("viewer-uniforms"),
@@ -1636,9 +1546,9 @@ pub fn run_windowed(
                 mode.set_overlays(Some(greeting), Some(sleep));
             }
             self.gpu = Some(gpu);
-            let _ = self.with_active_scene(|scene, ctx| {
-                scene.enter(ctx);
-            });
+            self.surface_configured = false;
+            self.pending_scene_enter = true;
+            debug!(context = reason, "viewer_gpu_surface_configuration_pending");
             let wake = self.mode_mut().wake_mut();
             wake.set_current(None);
             wake.set_next(None);
@@ -1662,7 +1572,8 @@ pub fn run_windowed(
                 self.enter_greeting();
             }
             self.mat_inflight = 0;
-            self.surface_gate.reset();
+            self.surface_configured = false;
+            self.pending_scene_enter = true;
             self.surface_timeout_streak = 0;
             self.log_event_loop_state("reset_for_resume");
         }
@@ -1692,7 +1603,7 @@ pub fn run_windowed(
                 viewer_mode = ?self.mode_kind(),
                 has_window = self.window.is_some(),
                 has_gpu = self.gpu.is_some(),
-                surface_ready = self.surface_gate.is_ready(),
+                surface_configured = self.surface_configured,
                 pending_queue_len = wake.pending().len(),
                 ready_results_len = self.ready_results.len(),
                 deferred_queue_len = self.deferred_images.len(),
@@ -1714,7 +1625,6 @@ pub fn run_windowed(
 
         fn ensure_window(&mut self, event_loop: &ActiveEventLoop) -> Option<Arc<Window>> {
             if let Some(window) = self.window.as_ref().cloned() {
-                self.update_surface_gate_expectation(window.as_ref(), event_loop);
                 self.log_event_loop_state("ensure_window_cached");
                 return Some(window);
             }
@@ -1732,7 +1642,6 @@ pub fn run_windowed(
             let fullscreen_monitor = window
                 .current_monitor()
                 .or_else(|| event_loop.primary_monitor());
-            self.update_surface_gate_expectation(window.as_ref(), event_loop);
             window.set_fullscreen(Some(match fullscreen_monitor {
                 Some(m) => Fullscreen::Borderless(Some(m)),
                 None => Fullscreen::Borderless(None),
@@ -1741,37 +1650,6 @@ pub fn run_windowed(
             self.window = Some(window.clone());
             self.log_event_loop_state("ensure_window_created");
             Some(window)
-        }
-
-        fn update_surface_gate_expectation(
-            &mut self,
-            window: &Window,
-            event_loop: &ActiveEventLoop,
-        ) {
-            let fullscreen_monitor = window
-                .current_monitor()
-                .or_else(|| event_loop.primary_monitor());
-            if let Some(monitor) = fullscreen_monitor.as_ref() {
-                let size = monitor.size();
-                if let Some(ready) = self
-                    .surface_gate
-                    .set_expected_minimum(Some((size.width, size.height)))
-                {
-                    debug!(
-                        surface_ready = ready,
-                        expected_width = size.width,
-                        expected_height = size.height,
-                        "viewer_surface_ready_state_changed"
-                    );
-                }
-            } else if let Some(ready) = self.surface_gate.set_expected_minimum(None) {
-                debug!(
-                    surface_ready = ready,
-                    expected_width = 0u32,
-                    expected_height = 0u32,
-                    "viewer_surface_ready_state_changed"
-                );
-            }
         }
 
         fn teardown_gpu(&mut self) {
@@ -1785,7 +1663,8 @@ pub fn run_windowed(
                 mode.set_overlays(None, None);
             }
             self.gpu = None;
-            self.surface_gate.reset();
+            self.surface_configured = false;
+            self.pending_scene_enter = true;
             self.log_event_loop_state("teardown_gpu");
         }
 
@@ -1963,7 +1842,7 @@ pub fn run_windowed(
             window_id: WindowId,
             event: WindowEvent,
         ) {
-            let Some(window) = self.window.as_ref() else {
+            let Some(window) = self.window.as_ref().cloned() else {
                 return;
             };
             if window.id() != window_id {
@@ -1982,22 +1861,32 @@ pub fn run_windowed(
                             height = new_size.height,
                             "viewer_window_resized"
                         );
-                        gpu.config.width = new_size.width.max(1);
-                        gpu.config.height = new_size.height.max(1);
+                        if new_size.width == 0 || new_size.height == 0 {
+                            gpu.config.width = 0;
+                            gpu.config.height = 0;
+                            self.surface_configured = false;
+                            self.pending_scene_enter = true;
+                            debug!("viewer_surface_configuration_waiting_for_non_zero_size");
+                            return;
+                        }
+                        gpu.config.width = new_size.width;
+                        gpu.config.height = new_size.height;
                         gpu.surface.configure(&gpu.device, &gpu.config);
+                        self.surface_configured = true;
+                        if self.pending_scene_enter {
+                            self.pending_scene_enter = false;
+                            let _ = self.with_active_scene(|scene, ctx| {
+                                scene.enter(ctx);
+                            });
+                        }
+                        let scale_factor = window.scale_factor();
+                        let _ = self.with_active_scene(|scene, ctx| {
+                            scene.handle_resize(ctx, new_size, scale_factor);
+                        });
+                    } else {
+                        self.surface_configured = false;
+                        self.pending_scene_enter = true;
                     }
-                    self.update_surface_ready(
-                        new_size.width,
-                        new_size.height,
-                        SurfaceReport::ConfigureEvent,
-                    );
-                    let scale_factor = self
-                        .window
-                        .as_ref()
-                        .map_or(1.0, |window| window.scale_factor());
-                    let _ = self.with_active_scene(|scene, ctx| {
-                        scene.handle_resize(ctx, new_size, scale_factor);
-                    });
                 }
                 WindowEvent::ScaleFactorChanged {
                     mut inner_size_writer,
@@ -2013,14 +1902,24 @@ pub fn run_windowed(
                             "viewer_window_scale_factor_changed"
                         );
                         let _ = inner_size_writer.request_inner_size(size);
-                        gpu.config.width = size.width.max(1);
-                        gpu.config.height = size.height.max(1);
+                        if size.width == 0 || size.height == 0 {
+                            gpu.config.width = 0;
+                            gpu.config.height = 0;
+                            self.surface_configured = false;
+                            self.pending_scene_enter = true;
+                            debug!("viewer_surface_configuration_waiting_for_non_zero_size");
+                            return;
+                        }
+                        gpu.config.width = size.width;
+                        gpu.config.height = size.height;
                         gpu.surface.configure(&gpu.device, &gpu.config);
-                        self.update_surface_ready(
-                            size.width,
-                            size.height,
-                            SurfaceReport::ConfigureEvent,
-                        );
+                        self.surface_configured = true;
+                        if self.pending_scene_enter {
+                            self.pending_scene_enter = false;
+                            let _ = self.with_active_scene(|scene, ctx| {
+                                scene.enter(ctx);
+                            });
+                        }
                         let _ = self.with_active_scene(|scene, ctx| {
                             scene.handle_scale_factor_changed(ctx, size, scale_factor);
                         });
@@ -2040,6 +1939,10 @@ pub fn run_windowed(
                     let Some(_) = self.gpu.as_ref() else {
                         return;
                     };
+                    if !self.surface_configured {
+                        debug!("viewer_redraw_waiting_for_surface_configuration");
+                        return;
+                    }
                     let overlay_pending = match mode_kind {
                         ViewerModeKind::Greeting => self
                             .mode()
@@ -2130,6 +2033,7 @@ pub fn run_windowed(
 
                     let mut frame = None;
                     let mut encountered_timeout = false;
+                    let mut need_scene_enter = false;
                     {
                         let Some(gpu) = self.gpu.as_mut() else {
                             return;
@@ -2140,42 +2044,65 @@ pub fn run_windowed(
                                     frame = Some(current);
                                     break;
                                 }
-                                Err(err) => {
-                                    match err {
-                                        wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
-                                            warn!(
-                                                attempt = attempt,
-                                                error = ?err,
-                                                "viewer_surface_reconfigure"
-                                            );
-                                            gpu.surface.configure(&gpu.device, &gpu.config);
+                                Err(err) => match err {
+                                    wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+                                        let size = window.inner_size();
+                                        warn!(
+                                            attempt = attempt,
+                                            error = ?err,
+                                            width = size.width,
+                                            height = size.height,
+                                            "viewer_surface_reconfigure"
+                                        );
+                                        if size.width == 0 || size.height == 0 {
+                                            gpu.config.width = 0;
+                                            gpu.config.height = 0;
+                                            self.surface_configured = false;
+                                            self.pending_scene_enter = true;
+                                            break;
                                         }
-                                        wgpu::SurfaceError::Timeout => {
-                                            warn!("viewer_surface_timeout");
-                                            encountered_timeout = true;
-                                            if attempt == 0 {
-                                                continue;
-                                            } else {
-                                                break;
-                                            }
+                                        gpu.config.width = size.width;
+                                        gpu.config.height = size.height;
+                                        gpu.surface.configure(&gpu.device, &gpu.config);
+                                        self.surface_configured = true;
+                                        if self.pending_scene_enter {
+                                            need_scene_enter = true;
                                         }
-                                        wgpu::SurfaceError::OutOfMemory => {
-                                            warn!("viewer_surface_out_of_memory");
-                                            event_loop.exit();
-                                            return;
-                                        }
-                                        wgpu::SurfaceError::Other => {
-                                            warn!(?err, "viewer_surface_error");
-                                            return;
+                                        if attempt == 0 {
+                                            continue;
+                                        } else {
+                                            break;
                                         }
                                     }
-                                    if attempt == 0 {
-                                        continue;
-                                    } else {
-                                        break;
+                                    wgpu::SurfaceError::Timeout => {
+                                        warn!("viewer_surface_timeout");
+                                        encountered_timeout = true;
+                                        if attempt == 0 {
+                                            continue;
+                                        } else {
+                                            break;
+                                        }
                                     }
-                                }
+                                    wgpu::SurfaceError::OutOfMemory => {
+                                        warn!("viewer_surface_out_of_memory");
+                                        event_loop.exit();
+                                        return;
+                                    }
+                                    wgpu::SurfaceError::Other => {
+                                        warn!(?err, "viewer_surface_error");
+                                        return;
+                                    }
+                                },
                             }
+                        }
+                    }
+                    if need_scene_enter {
+                        self.pending_scene_enter = false;
+                        let _ = self.with_active_scene(|scene, ctx| {
+                            scene.enter(ctx);
+                        });
+                        if !self.surface_configured {
+                            return;
                         }
                     }
                     let Some(frame) = frame else {
@@ -2600,7 +2527,8 @@ pub fn run_windowed(
         cancel,
         window: None,
         gpu: None,
-        surface_gate: SurfaceReadyGate::default(),
+        surface_configured: false,
+        pending_scene_enter: true,
         mode: Some(ViewerMode::new(ViewerModeKind::Greeting, initial_wake)),
         preload_count: cfg.viewer_preload_count,
         oversample: cfg.oversample,
@@ -3079,7 +3007,7 @@ pub mod testkit {
         wake: scenes::WakeScene,
         oversample: f32,
         matting: MattingConfig,
-        surface_gate: SurfaceReadyGate,
+        surface_configured: bool,
         surface: Option<SurfaceState>,
     }
 
@@ -3110,7 +3038,7 @@ pub mod testkit {
                 wake: scenes::WakeScene::new(dwell_ms, transition_cfg),
                 oversample,
                 matting,
-                surface_gate: SurfaceReadyGate::default(),
+                surface_configured: false,
                 surface: None,
             }
         }
@@ -3127,24 +3055,8 @@ pub mod testkit {
             });
         }
 
-        pub fn set_surface_expected_minimum(&mut self, expected: Option<(u32, u32)>) {
-            let _ = self.surface_gate.set_expected_minimum(expected);
-        }
-
-        pub fn arm_surface_gate(&mut self) {
-            self.surface_gate.arm_for_initial_report();
-        }
-
-        pub fn report_surface_initial_config(&mut self, width: u32, height: u32) {
-            let _ = self
-                .surface_gate
-                .update(width, height, SurfaceReport::InitialConfig);
-        }
-
-        pub fn report_surface_configured(&mut self, width: u32, height: u32) {
-            let _ = self
-                .surface_gate
-                .update(width, height, SurfaceReport::ConfigureEvent);
+        pub fn set_surface_configured(&mut self, configured: bool) {
+            self.surface_configured = configured;
         }
 
         pub fn push_deferred(&mut self, image: PreparedImageCpu, priority: bool) {
@@ -3159,7 +3071,7 @@ pub mod testkit {
                 deferred_images: &mut self.deferred_images,
                 ready_results: &mut self.ready_results,
                 from_loader: &mut self.from_loader_rx,
-                surface: surface_state_for_queue(self.surface_gate.is_ready(), self.surface),
+                surface: surface_state_for_queue(self.surface_configured, self.surface),
                 matting: &self.matting,
                 oversample: self.oversample,
                 mat_pipeline: &self.mat_pipeline,
@@ -3280,25 +3192,6 @@ mod tests {
     }
 
     #[test]
-    fn surface_gate_accepts_large_initial_config() {
-        let mut gate = SurfaceReadyGate::default();
-        gate.set_expected_minimum(Some((1920, 1080)));
-        gate.arm_for_initial_report();
-
-        let changed = gate.update(3840, 2160, SurfaceReport::InitialConfig);
-        assert_eq!(changed, Some(true));
-        assert!(gate.is_ready());
-
-        let mut tiny_gate = SurfaceReadyGate::default();
-        tiny_gate.set_expected_minimum(Some((1920, 1080)));
-        tiny_gate.arm_for_initial_report();
-
-        let tiny_changed = tiny_gate.update(320, 200, SurfaceReport::InitialConfig);
-        assert!(tiny_changed.is_none());
-        assert!(!tiny_gate.is_ready());
-    }
-
-    #[test]
     fn matting_bridge_defers_until_surface_configured() {
         let mut mat_inflight = 0usize;
         let mut deferred_images = VecDeque::new();
@@ -3347,9 +3240,7 @@ mod tests {
             TransitionConfig::default(),
         );
         harness.update_surface_state(Some((3840, 2160, 4096)));
-        harness.set_surface_expected_minimum(Some((1920, 1080)));
-        harness.arm_surface_gate();
-        harness.report_surface_initial_config(3840, 2160);
+        harness.set_surface_configured(true);
 
         let gradient = make_gradient(800, 600).into_raw();
         harness.push_deferred(

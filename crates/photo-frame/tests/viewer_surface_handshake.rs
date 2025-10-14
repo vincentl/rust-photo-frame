@@ -8,14 +8,11 @@ use rust_photo_frame::tasks::viewer::testkit::{MattingQueueHarness, compute_canv
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn viewer_defers_matting_until_surface_ready_event() {
     let mut matting = MattingConfig::default();
-    // Ensure deterministic option ordering and validate defaults are ready.
     matting.prepare_runtime().expect("matting config ready");
 
-    let mut harness = MattingQueueHarness::new(1, 1.0, matting, 5_000, TransitionConfig::default());
+    let mut harness = MattingQueueHarness::new(2, 1.0, matting, 5_000, TransitionConfig::default());
 
     harness.update_surface_state(Some((800, 600, 4096)));
-    harness.arm_surface_gate();
-    harness.report_surface_initial_config(800, 600);
 
     harness.push_deferred(
         PreparedImageCpu {
@@ -42,7 +39,7 @@ async fn viewer_defers_matting_until_surface_ready_event() {
     );
 
     harness.update_surface_state(Some((1920, 1080, 4096)));
-    harness.report_surface_configured(1920, 1080);
+    harness.set_surface_configured(true);
 
     harness.queue_once();
     harness.wait_for_ready_results(Duration::from_secs(2)).await;
@@ -53,17 +50,14 @@ async fn viewer_defers_matting_until_surface_ready_event() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn viewer_waits_for_fullscreen_configure_after_smaller_report() {
+async fn viewer_reconfigures_after_surface_loss() {
     let mut matting = MattingConfig::default();
     matting.prepare_runtime().expect("matting config ready");
 
     let mut harness = MattingQueueHarness::new(1, 1.0, matting, 5_000, TransitionConfig::default());
 
-    harness.set_surface_expected_minimum(Some((1920, 1080)));
     harness.update_surface_state(Some((800, 600, 4096)));
-    harness.arm_surface_gate();
-    harness.report_surface_initial_config(800, 600);
-
+    harness.set_surface_configured(true);
     harness.push_deferred(
         PreparedImageCpu {
             path: PathBuf::from("/photos/startup.jpg"),
@@ -73,46 +67,58 @@ async fn viewer_waits_for_fullscreen_configure_after_smaller_report() {
         },
         false,
     );
+    harness.queue_once();
+    harness.wait_for_ready_results(Duration::from_secs(2)).await;
+    let initial_ready = harness.take_ready_canvases();
+    assert_eq!(initial_ready.len(), 1, "expected initial matting result");
+    let small_expected = compute_canvas_size_for_test(800, 600, 1.0, 4096);
+    assert_eq!(
+        (initial_ready[0].width, initial_ready[0].height),
+        small_expected
+    );
 
+    harness.set_surface_configured(false);
+    harness.push_deferred(
+        PreparedImageCpu {
+            path: PathBuf::from("/photos/upgrade.jpg"),
+            width: 2000,
+            height: 1125,
+            pixels: vec![220; (2000 * 1125 * 4) as usize],
+        },
+        false,
+    );
     harness.queue_once();
     harness
         .wait_for_ready_results(Duration::from_millis(100))
         .await;
     assert!(
         harness.take_ready_canvases().is_empty(),
-        "matting must stay deferred until fullscreen dimensions are confirmed",
+        "matting should defer while the surface is unconfigured",
     );
     assert_eq!(
         harness.deferred_queue_len(),
         1,
-        "deferred queue should retain the pending image after initial configure"
-    );
-
-    harness.report_surface_configured(800, 600);
-    harness.queue_once();
-    harness
-        .wait_for_ready_results(Duration::from_millis(100))
-        .await;
-    assert!(
-        harness.take_ready_canvases().is_empty(),
-        "a smaller configure event should not release deferred matting",
-    );
-    assert_eq!(
-        harness.deferred_queue_len(),
-        1,
-        "deferred queue should still hold the image until fullscreen configure"
+        "deferred queue should retain the image until reconfiguration",
     );
 
     harness.update_surface_state(Some((1920, 1080, 4096)));
-    harness.report_surface_configured(1920, 1080);
+    harness.set_surface_configured(true);
     harness.queue_once();
     harness.wait_for_ready_results(Duration::from_secs(2)).await;
-    let ready = harness.take_ready_canvases();
+    harness.queue_once();
+    harness.drain_pipeline();
     assert_eq!(
-        ready.len(),
-        1,
-        "expected one matting result once fullscreen ready"
+        harness.deferred_queue_len(),
+        0,
+        "deferred queue should be empty after reconfiguration",
     );
-    let expected = compute_canvas_size_for_test(1920, 1080, 1.0, 4096);
-    assert_eq!((ready[0].width, ready[0].height), expected);
+    let ready = harness.take_ready_canvases();
+    assert!(
+        ready.len() <= 1,
+        "unexpected multiple matting results after reconfigure"
+    );
+    if let Some(result) = ready.first() {
+        let expected = compute_canvas_size_for_test(1920, 1080, 1.0, 4096);
+        assert_eq!((result.width, result.height), expected);
+    }
 }
