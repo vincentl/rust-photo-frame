@@ -272,7 +272,7 @@ impl SurfaceState {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum SurfaceReport {
     InitialConfig,
     ConfigureEvent,
@@ -1156,6 +1156,7 @@ pub fn run_windowed(
         window: Option<Arc<Window>>,
         gpu: Option<GpuCtx>,
         surface_configured: bool,
+        surface_gate: SurfaceReadyGate,
         pending_scene_enter: bool,
         mode: Option<ViewerMode>,
         preload_count: usize,
@@ -1187,6 +1188,28 @@ pub fn run_windowed(
             self.gpu
                 .as_ref()
                 .map(|gpu| SurfaceState::from_config(&gpu.config, &gpu.limits))
+        }
+
+        fn update_surface_ready(&mut self, width: u32, height: u32, report: SurfaceReport) -> bool {
+            if let Some(ready) = self.surface_gate.update(width, height, report) {
+                let report_label = match report {
+                    SurfaceReport::InitialConfig => "initial_config",
+                    SurfaceReport::ConfigureEvent => "configure_event",
+                };
+                debug!(
+                    surface_ready = ready,
+                    width,
+                    height,
+                    report = report_label,
+                    "viewer_surface_ready_state_changed"
+                );
+            }
+            let ready = self.surface_gate.is_ready();
+            self.surface_configured = ready;
+            if !ready {
+                self.pending_scene_enter = true;
+            }
+            ready
         }
 
         fn with_active_scene<R>(
@@ -1629,7 +1652,9 @@ pub fn run_windowed(
                 mode.set_overlays(Some(greeting), Some(sleep));
             }
             self.gpu = Some(gpu);
-            self.surface_configured = false;
+            self.surface_gate.reset();
+            self.surface_gate.arm_for_initial_report();
+            self.update_surface_ready(size.width, size.height, SurfaceReport::InitialConfig);
             self.pending_scene_enter = true;
             debug!(context = reason, "viewer_gpu_surface_configuration_pending");
             let wake = self.mode_mut().wake_mut();
@@ -1655,6 +1680,7 @@ pub fn run_windowed(
                 self.enter_greeting();
             }
             self.mat_inflight = 0;
+            self.surface_gate.reset();
             self.surface_configured = false;
             self.pending_scene_enter = true;
             self.surface_timeout_streak = 0;
@@ -1708,6 +1734,7 @@ pub fn run_windowed(
 
         fn ensure_window(&mut self, event_loop: &ActiveEventLoop) -> Option<Arc<Window>> {
             if let Some(window) = self.window.as_ref().cloned() {
+                self.update_surface_gate_expectation(window.as_ref(), event_loop);
                 self.log_event_loop_state("ensure_window_cached");
                 return Some(window);
             }
@@ -1736,6 +1763,31 @@ pub fn run_windowed(
             Some(window)
         }
 
+        fn update_surface_gate_expectation(
+            &mut self,
+            window: &Window,
+            event_loop: &ActiveEventLoop,
+        ) {
+            let fullscreen_monitor = window
+                .current_monitor()
+                .or_else(|| event_loop.primary_monitor());
+            let expected = fullscreen_monitor
+                .as_ref()
+                .map(|monitor| (monitor.size().width, monitor.size().height));
+            if let Some(ready) = self.surface_gate.set_expected_minimum(expected) {
+                let (expected_width, expected_height) = expected.unwrap_or((0u32, 0u32));
+                debug!(
+                    surface_ready = ready,
+                    expected_width, expected_height, "viewer_surface_ready_state_changed"
+                );
+            }
+            let ready = self.surface_gate.is_ready();
+            self.surface_configured = ready;
+            if !ready {
+                self.pending_scene_enter = true;
+            }
+        }
+
         fn teardown_gpu(&mut self) {
             let current_kind = self.mode_kind();
             {
@@ -1747,6 +1799,7 @@ pub fn run_windowed(
                 mode.set_overlays(None, None);
             }
             self.gpu = None;
+            self.surface_gate.reset();
             self.surface_configured = false;
             self.pending_scene_enter = true;
             self.log_event_loop_state("teardown_gpu");
@@ -1948,26 +2001,43 @@ pub fn run_windowed(
                         if new_size.width == 0 || new_size.height == 0 {
                             gpu.config.width = 0;
                             gpu.config.height = 0;
-                            self.surface_configured = false;
-                            self.pending_scene_enter = true;
+                            self.surface_gate.arm_for_initial_report();
+                            self.update_surface_ready(
+                                new_size.width,
+                                new_size.height,
+                                SurfaceReport::ConfigureEvent,
+                            );
                             debug!("viewer_surface_configuration_waiting_for_non_zero_size");
                             return;
                         }
                         gpu.config.width = new_size.width;
                         gpu.config.height = new_size.height;
                         gpu.surface.configure(&gpu.device, &gpu.config);
-                        self.surface_configured = true;
-                        if self.pending_scene_enter {
+                        let ready = self.update_surface_ready(
+                            new_size.width,
+                            new_size.height,
+                            SurfaceReport::ConfigureEvent,
+                        );
+                        if ready && self.pending_scene_enter {
                             self.pending_scene_enter = false;
                             let _ = self.with_active_scene(|scene, ctx| {
                                 scene.enter(ctx);
                             });
                         }
-                        let scale_factor = window.scale_factor();
-                        let _ = self.with_active_scene(|scene, ctx| {
-                            scene.handle_resize(ctx, new_size, scale_factor);
-                        });
+                        if ready {
+                            let scale_factor = window.scale_factor();
+                            let _ = self.with_active_scene(|scene, ctx| {
+                                scene.handle_resize(ctx, new_size, scale_factor);
+                            });
+                        } else {
+                            debug!(
+                                width = new_size.width,
+                                height = new_size.height,
+                                "viewer_surface_configuration_waiting_for_expectation"
+                            );
+                        }
                     } else {
+                        self.surface_gate.reset();
                         self.surface_configured = false;
                         self.pending_scene_enter = true;
                     }
@@ -1989,24 +2059,40 @@ pub fn run_windowed(
                         if size.width == 0 || size.height == 0 {
                             gpu.config.width = 0;
                             gpu.config.height = 0;
-                            self.surface_configured = false;
-                            self.pending_scene_enter = true;
+                            self.surface_gate.arm_for_initial_report();
+                            self.update_surface_ready(
+                                size.width,
+                                size.height,
+                                SurfaceReport::ConfigureEvent,
+                            );
                             debug!("viewer_surface_configuration_waiting_for_non_zero_size");
                             return;
                         }
                         gpu.config.width = size.width;
                         gpu.config.height = size.height;
                         gpu.surface.configure(&gpu.device, &gpu.config);
-                        self.surface_configured = true;
-                        if self.pending_scene_enter {
+                        let ready = self.update_surface_ready(
+                            size.width,
+                            size.height,
+                            SurfaceReport::ConfigureEvent,
+                        );
+                        if ready && self.pending_scene_enter {
                             self.pending_scene_enter = false;
                             let _ = self.with_active_scene(|scene, ctx| {
                                 scene.enter(ctx);
                             });
                         }
-                        let _ = self.with_active_scene(|scene, ctx| {
-                            scene.handle_scale_factor_changed(ctx, size, scale_factor);
-                        });
+                        if ready {
+                            let _ = self.with_active_scene(|scene, ctx| {
+                                scene.handle_scale_factor_changed(ctx, size, scale_factor);
+                            });
+                        } else {
+                            debug!(
+                                width = size.width,
+                                height = size.height,
+                                "viewer_surface_configuration_waiting_for_expectation"
+                            );
+                        }
                     }
                 }
                 WindowEvent::Occluded(false) => {
@@ -2118,66 +2204,84 @@ pub fn run_windowed(
                     let mut frame = None;
                     let mut encountered_timeout = false;
                     let mut need_scene_enter = false;
-                    {
-                        let Some(gpu) = self.gpu.as_mut() else {
-                            return;
+                    for attempt in 0..2 {
+                        let surface_result = {
+                            let Some(gpu) = self.gpu.as_mut() else {
+                                return;
+                            };
+                            gpu.surface.get_current_texture()
                         };
-                        for attempt in 0..2 {
-                            match gpu.surface.get_current_texture() {
-                                Ok(current) => {
-                                    frame = Some(current);
-                                    break;
-                                }
-                                Err(err) => match err {
-                                    wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
-                                        let size = window.inner_size();
-                                        warn!(
-                                            attempt = attempt,
-                                            error = ?err,
-                                            width = size.width,
-                                            height = size.height,
-                                            "viewer_surface_reconfigure"
-                                        );
-                                        if size.width == 0 || size.height == 0 {
+                        match surface_result {
+                            Ok(current) => {
+                                frame = Some(current);
+                                break;
+                            }
+                            Err(err) => match err {
+                                wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+                                    let size = window.inner_size();
+                                    warn!(
+                                        attempt = attempt,
+                                        error = ?err,
+                                        width = size.width,
+                                        height = size.height,
+                                        "viewer_surface_reconfigure"
+                                    );
+                                    if size.width == 0 || size.height == 0 {
+                                        if let Some(gpu) = self.gpu.as_mut() {
                                             gpu.config.width = 0;
                                             gpu.config.height = 0;
-                                            self.surface_configured = false;
-                                            self.pending_scene_enter = true;
-                                            break;
                                         }
+                                        self.surface_gate.arm_for_initial_report();
+                                        self.update_surface_ready(
+                                            size.width,
+                                            size.height,
+                                            SurfaceReport::ConfigureEvent,
+                                        );
+                                        break;
+                                    }
+                                    if let Some(gpu) = self.gpu.as_mut() {
                                         gpu.config.width = size.width;
                                         gpu.config.height = size.height;
                                         gpu.surface.configure(&gpu.device, &gpu.config);
-                                        self.surface_configured = true;
-                                        if self.pending_scene_enter {
-                                            need_scene_enter = true;
-                                        }
-                                        if attempt == 0 {
-                                            continue;
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                    wgpu::SurfaceError::Timeout => {
-                                        warn!("viewer_surface_timeout");
-                                        encountered_timeout = true;
-                                        if attempt == 0 {
-                                            continue;
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                    wgpu::SurfaceError::OutOfMemory => {
-                                        warn!("viewer_surface_out_of_memory");
-                                        event_loop.exit();
+                                    } else {
                                         return;
                                     }
-                                    wgpu::SurfaceError::Other => {
-                                        warn!(?err, "viewer_surface_error");
-                                        return;
+                                    let ready = self.update_surface_ready(
+                                        size.width,
+                                        size.height,
+                                        SurfaceReport::ConfigureEvent,
+                                    );
+                                    if ready && self.pending_scene_enter {
+                                        need_scene_enter = true;
                                     }
-                                },
-                            }
+                                    if !ready {
+                                        break;
+                                    }
+                                    if attempt == 0 {
+                                        continue;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                wgpu::SurfaceError::Timeout => {
+                                    warn!("viewer_surface_timeout");
+                                    encountered_timeout = true;
+                                    if attempt == 0 {
+                                        continue;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                wgpu::SurfaceError::OutOfMemory => {
+                                    warn!("viewer_surface_out_of_memory");
+                                    event_loop.exit();
+                                    return;
+                                }
+                                wgpu::SurfaceError::Other => {
+                                    warn!(?err, "viewer_surface_error");
+                                    return;
+                                }
+                            },
                         }
                     }
                     if need_scene_enter {
@@ -2612,6 +2716,7 @@ pub fn run_windowed(
         window: None,
         gpu: None,
         surface_configured: false,
+        surface_gate: SurfaceReadyGate::default(),
         pending_scene_enter: true,
         mode: Some(ViewerMode::new(ViewerModeKind::Greeting, initial_wake)),
         preload_count: cfg.viewer_preload_count,
