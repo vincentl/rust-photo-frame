@@ -312,7 +312,11 @@ impl SurfaceReadyGate {
         match report {
             SurfaceReport::InitialConfig => {
                 if self.awaiting_initial_report {
-                    return self.set_ready(false);
+                    if self.meets_expectation(width, height) {
+                        self.awaiting_initial_report = false;
+                    } else {
+                        return self.set_ready(false);
+                    }
                 }
             }
             SurfaceReport::ConfigureEvent => {
@@ -3207,6 +3211,7 @@ pub mod testkit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::testkit::MattingQueueHarness;
     use crate::config::TransitionConfig;
     use image::{Rgba, RgbaImage};
     use std::collections::VecDeque;
@@ -3269,6 +3274,25 @@ mod tests {
     }
 
     #[test]
+    fn surface_gate_accepts_large_initial_config() {
+        let mut gate = SurfaceReadyGate::default();
+        gate.set_expected_minimum(Some((1920, 1080)));
+        gate.arm_for_initial_report();
+
+        let changed = gate.update(3840, 2160, SurfaceReport::InitialConfig);
+        assert_eq!(changed, Some(true));
+        assert!(gate.is_ready());
+
+        let mut tiny_gate = SurfaceReadyGate::default();
+        tiny_gate.set_expected_minimum(Some((1920, 1080)));
+        tiny_gate.arm_for_initial_report();
+
+        let tiny_changed = tiny_gate.update(320, 200, SurfaceReport::InitialConfig);
+        assert!(tiny_changed.is_none());
+        assert!(!tiny_gate.is_ready());
+    }
+
+    #[test]
     fn matting_bridge_defers_until_surface_configured() {
         let mut mat_inflight = 0usize;
         let mut deferred_images = VecDeque::new();
@@ -3305,5 +3329,40 @@ mod tests {
         assert_eq!(mat_inflight, 0);
         assert!(wake.pending().is_empty());
         assert_eq!(deferred_images.len(), 1);
+    }
+
+    #[test]
+    fn matting_queue_starts_after_initial_surface_config() {
+        let mut harness = MattingQueueHarness::new(
+            1,
+            1.0,
+            MattingConfig::default(),
+            5_000,
+            TransitionConfig::default(),
+        );
+        harness.update_surface_state(Some((3840, 2160, 4096)));
+        harness.set_surface_expected_minimum(Some((1920, 1080)));
+        harness.arm_surface_gate();
+        harness.report_surface_initial_config(3840, 2160);
+
+        let gradient = make_gradient(800, 600).into_raw();
+        harness.push_deferred(
+            PreparedImageCpu {
+                path: PathBuf::from("/tmp/photo.jpg"),
+                width: 800,
+                height: 600,
+                pixels: gradient,
+            },
+            false,
+        );
+
+        harness.queue_once();
+
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime for test");
+        runtime.block_on(harness.wait_for_ready_results(std::time::Duration::from_secs(2)));
+        harness.drain_pipeline();
+        let canvases = harness.take_ready_canvases();
+        assert!(!canvases.is_empty(), "expected matting to start after initial config");
+        assert_eq!(harness.deferred_queue_len(), 0);
     }
 }
