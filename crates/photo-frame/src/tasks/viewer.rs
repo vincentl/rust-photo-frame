@@ -282,55 +282,54 @@ enum SurfaceReport {
 #[derive(Clone, Copy, Default)]
 struct SurfaceReadyGate {
     ready: bool,
-    awaiting_initial_report: bool,
-    expected_minimum: Option<(u32, u32)>,
-    last_reported_size: Option<(u32, u32)>,
+    awaiting: bool,
+    last_size: Option<(u32, u32)>,
+    same_count: u8,
 }
 
 impl SurfaceReadyGate {
-    fn set_expected_minimum(&mut self, expected_minimum: Option<(u32, u32)>) -> Option<bool> {
-        self.expected_minimum = expected_minimum;
-
-        if self.awaiting_initial_report {
-            return None;
-        }
-
-        match (self.last_reported_size, self.expected_minimum) {
-            (Some((width, height)), _) => {
-                let ready = self.meets_expectation(width, height);
-                self.set_ready(ready)
-            }
-            (None, Some(_)) => self.set_ready(false),
-            (None, None) => None,
-        }
-    }
-
     fn reset(&mut self) {
         self.ready = false;
-        self.awaiting_initial_report = false;
-        self.last_reported_size = None;
+        self.awaiting = false;
+        self.last_size = None;
+        self.same_count = 0;
     }
 
     fn arm_for_initial_report(&mut self) {
-        self.awaiting_initial_report = true;
+        self.awaiting = true;
         self.ready = false;
+        self.last_size = None;
+        self.same_count = 0;
     }
 
     fn update(&mut self, width: u32, height: u32, report: SurfaceReport) -> Option<bool> {
-        self.last_reported_size = Some((width, height));
-        match report {
-            SurfaceReport::InitialConfig => {
-                if self.awaiting_initial_report {
-                    return self.set_ready(false);
-                }
+        // Ignore bootstrap config; wait for compositor configure events
+        if matches!(report, SurfaceReport::InitialConfig) {
+            return self.set_ready(false);
+        }
+
+        if width == 0 || height == 0 {
+            self.last_size = Some((0, 0));
+            self.same_count = 0;
+            return self.set_ready(false);
+        }
+
+        match self.last_size {
+            Some((w, h)) if w == width && h == height => {
+                self.same_count = self.same_count.saturating_add(1);
             }
-            SurfaceReport::ConfigureEvent => {
-                self.awaiting_initial_report = false;
+            _ => {
+                self.last_size = Some((width, height));
+                self.same_count = 1;
             }
         }
 
-        let ready = !self.awaiting_initial_report && self.meets_expectation(width, height);
-        self.set_ready(ready)
+        // Require two consecutive identical, non-zero reports
+        let now_ready = self.awaiting && self.same_count >= 2;
+        if now_ready {
+            self.awaiting = false;
+        }
+        self.set_ready(now_ready || self.ready)
     }
 
     fn is_ready(&self) -> bool {
@@ -343,15 +342,6 @@ impl SurfaceReadyGate {
             Some(ready)
         } else {
             None
-        }
-    }
-
-    fn meets_expectation(&self, width: u32, height: u32) -> bool {
-        match self.expected_minimum {
-            Some((expected_width, expected_height)) => {
-                width >= expected_width && height >= expected_height
-            }
-            None => width > 1 && height > 1,
         }
     }
 }
@@ -1735,7 +1725,6 @@ pub fn run_windowed(
 
         fn ensure_window(&mut self, event_loop: &ActiveEventLoop) -> Option<Arc<Window>> {
             if let Some(window) = self.window.as_ref().cloned() {
-                self.update_surface_gate_expectation(window.as_ref(), event_loop);
                 self.log_event_loop_state("ensure_window_cached");
                 return Some(window);
             }
@@ -1757,36 +1746,10 @@ pub fn run_windowed(
                 Some(m) => Fullscreen::Borderless(Some(m)),
                 None => Fullscreen::Borderless(None),
             }));
-            self.update_surface_gate_expectation(window.as_ref(), event_loop);
             window.set_cursor_visible(false);
             self.window = Some(window.clone());
             self.log_event_loop_state("ensure_window_created");
             Some(window)
-        }
-
-        fn update_surface_gate_expectation(
-            &mut self,
-            window: &Window,
-            event_loop: &ActiveEventLoop,
-        ) {
-            let fullscreen_monitor = window
-                .current_monitor()
-                .or_else(|| event_loop.primary_monitor());
-            let expected = fullscreen_monitor
-                .as_ref()
-                .map(|monitor| (monitor.size().width, monitor.size().height));
-            if let Some(ready) = self.surface_gate.set_expected_minimum(expected) {
-                let (expected_width, expected_height) = expected.unwrap_or((0u32, 0u32));
-                debug!(
-                    surface_ready = ready,
-                    expected_width, expected_height, "viewer_surface_ready_state_changed"
-                );
-            }
-            let ready = self.surface_gate.is_ready();
-            self.surface_configured = ready;
-            if !ready {
-                self.pending_scene_enter = true;
-            }
         }
 
         fn teardown_gpu(&mut self) {
