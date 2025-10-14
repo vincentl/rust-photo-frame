@@ -2370,9 +2370,7 @@ pub fn run_windowed(
                                                 closeness,
                                                 tolerance,
                                                 stroke_width,
-                                                rotation: rotate_radians
-                                                    * base_progress
-                                                    * rotation_sign,
+                                                rotation: rotate_radians * timeline * rotation_sign,
                                                 fill_color: fill_rgba,
                                                 stroke_color: stroke_rgba,
                                                 stage,

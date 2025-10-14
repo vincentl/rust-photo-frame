@@ -99,11 +99,7 @@ fn fs_composite(in: FullscreenOut) -> @location(0) vec4<f32> {
   let current = sample_plane(cur_tex, cur_samp, Comp.current_dest, screen_pos);
   let next = sample_plane(next_tex, next_samp, Comp.next_dest, screen_pos);
   let coverage = clamp(textureSample(mask_tex, mask_samp, in.screen_uv).r, 0.0, 1.0);
-  var color = current;
-  if (Comp.stage == 1u) {
-    let aperture = 1.0 - coverage;
-    color = mix(current, next, aperture);
-  }
+  let color = mix(current, next, coverage);
   let alpha = max(max(current.a, next.a), color.a);
   return vec4<f32>(color.rgb, clamp(alpha, 0.0, 1.0));
 }
