@@ -361,6 +361,11 @@ impl WakeScene {
         std::mem::take(&mut self.pending_redraw)
     }
 
+    /// Clears any serviced redraw request after the frame has been presented.
+    pub(super) fn after_present(&mut self) {
+        let _ = self.take_redraw_needed();
+    }
+
     /// Returns the timestamp when the current image started displaying.
     pub(super) fn displayed_at(&self) -> Option<Instant> {
         self.displayed_at

@@ -2228,7 +2228,7 @@ pub fn run_windowed(
                             return;
                         }
                         ViewerModeKind::Wake => {
-                            let wake = mode.wake();
+                            let wake = mode.wake_mut();
                             encoder.push_debug_group("wake-draw");
                             let screen_w = gpu.config.width as f32;
                             let screen_h = gpu.config.height as f32;
@@ -2481,7 +2481,11 @@ pub fn run_windowed(
                                 rpass.draw(0..6, 0..1);
                             }
                             encoder.pop_debug_group();
+                            gpu.queue.submit(Some(encoder.finish()));
+                            frame.present();
+                            wake.after_present();
                             self.record_frame_presented();
+                            return;
                         }
                     }
                 }
@@ -3210,8 +3214,8 @@ pub mod testkit {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::testkit::MattingQueueHarness;
+    use super::*;
     use crate::config::TransitionConfig;
     use image::{Rgba, RgbaImage};
     use std::collections::VecDeque;
@@ -3362,7 +3366,10 @@ mod tests {
         runtime.block_on(harness.wait_for_ready_results(std::time::Duration::from_secs(2)));
         harness.drain_pipeline();
         let canvases = harness.take_ready_canvases();
-        assert!(!canvases.is_empty(), "expected matting to start after initial config");
+        assert!(
+            !canvases.is_empty(),
+            "expected matting to start after initial config"
+        );
         assert_eq!(harness.deferred_queue_len(), 0);
     }
 }
