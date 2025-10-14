@@ -291,7 +291,7 @@ impl IrisRenderer {
                 entry_point: Some("fs_color"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -603,7 +603,7 @@ impl IrisRenderer {
 
         // Mask pass
         {
-            self.write_blade_uniforms(queue, params.screen_size, 1.0, [1.0; 4]);
+            self.write_blade_uniforms(queue, params.screen_size, 1.0, [0.0; 4]);
             let mask_view = &self.mask_target.as_ref().unwrap().view;
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("iris-mask-pass"),

@@ -165,11 +165,12 @@ impl TransitionState {
     }
 }
 
-fn iris_stage_for_progress(progress: f32) -> IrisStage {
-    if progress < 0.5 {
-        IrisStage::Closing
-    } else {
-        IrisStage::Opening
+// Smooth iris timeline across both stages (0→1 regardless of Closing/Opening)
+#[inline]
+fn iris_timeline(base_progress: f32, stage: IrisStage) -> f32 {
+    match stage {
+        IrisStage::Closing => 1.0 - base_progress,
+        IrisStage::Opening => base_progress,
     }
 }
 
@@ -2448,7 +2449,11 @@ pub fn run_windowed(
                                             } else {
                                                 1.0 - ease((timeline - 0.5) * 2.0)
                                             };
-                                            let stage = iris_stage_for_progress(base_progress);
+                                            let stage = if timeline < 0.5 {
+                                                IrisStage::Closing
+                                            } else {
+                                                IrisStage::Opening
+                                            };
                                             {
                                                 let clear_pass = encoder.begin_render_pass(
                                                     &wgpu::RenderPassDescriptor {
@@ -2485,7 +2490,9 @@ pub fn run_windowed(
                                                 closeness,
                                                 tolerance,
                                                 stroke_width,
-                                                rotation: rotate_radians * timeline * rotation_sign,
+                                                rotation: rotate_radians
+                                                    * base_progress
+                                                    * rotation_sign,
                                                 fill_color: fill_rgba,
                                                 stroke_color: stroke_rgba,
                                                 stage,
