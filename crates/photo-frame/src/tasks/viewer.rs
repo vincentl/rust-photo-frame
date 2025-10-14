@@ -165,6 +165,14 @@ impl TransitionState {
     }
 }
 
+fn iris_stage_for_progress(progress: f32) -> IrisStage {
+    if progress < 0.5 {
+        IrisStage::Closing
+    } else {
+        IrisStage::Opening
+    }
+}
+
 #[derive(Clone)]
 struct MatParams {
     screen_w: u32,
@@ -2325,11 +2333,7 @@ pub fn run_windowed(
                                             } else {
                                                 1.0 - ease((timeline - 0.5) * 2.0)
                                             };
-                                            let stage = if timeline < 0.5 {
-                                                IrisStage::Closing
-                                            } else {
-                                                IrisStage::Opening
-                                            };
+                                            let stage = iris_stage_for_progress(base_progress);
                                             {
                                                 let clear_pass = encoder.begin_render_pass(
                                                     &wgpu::RenderPassDescriptor {
@@ -3371,5 +3375,16 @@ mod tests {
             "expected matting to start after initial config"
         );
         assert_eq!(harness.deferred_queue_len(), 0);
+    }
+
+    #[test]
+    fn iris_close_direction_remains_in_closing_stage_first_half() {
+        let stage_start = iris_stage_for_progress(0.0);
+        let stage_mid = iris_stage_for_progress(0.25);
+        let stage_transition = iris_stage_for_progress(0.5);
+
+        assert_eq!(stage_start, IrisStage::Closing);
+        assert_eq!(stage_mid, IrisStage::Closing);
+        assert_eq!(stage_transition, IrisStage::Opening);
     }
 }
