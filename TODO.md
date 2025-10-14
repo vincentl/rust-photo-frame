@@ -2,6 +2,12 @@
 
 ## Work On
 
+[ ] initial aspect ratio
+[ ] iris
+
+
+
+
 [ ] Validate Wifi Manager
 
 [ ] New install

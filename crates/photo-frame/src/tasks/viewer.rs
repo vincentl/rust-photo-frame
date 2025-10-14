@@ -272,6 +272,89 @@ impl SurfaceState {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SurfaceReport {
+    InitialConfig,
+    ConfigureEvent,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SurfaceReadyGate {
+    ready: bool,
+    awaiting_initial_report: bool,
+    expected_minimum: Option<(u32, u32)>,
+    last_reported_size: Option<(u32, u32)>,
+}
+
+impl SurfaceReadyGate {
+    fn set_expected_minimum(&mut self, expected_minimum: Option<(u32, u32)>) -> Option<bool> {
+        self.expected_minimum = expected_minimum;
+
+        if self.awaiting_initial_report {
+            return None;
+        }
+
+        match (self.last_reported_size, self.expected_minimum) {
+            (Some((width, height)), _) => {
+                let ready = self.meets_expectation(width, height);
+                self.set_ready(ready)
+            }
+            (None, Some(_)) => self.set_ready(false),
+            (None, None) => None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.ready = false;
+        self.awaiting_initial_report = false;
+        self.last_reported_size = None;
+    }
+
+    fn arm_for_initial_report(&mut self) {
+        self.awaiting_initial_report = true;
+        self.ready = false;
+    }
+
+    fn update(&mut self, width: u32, height: u32, report: SurfaceReport) -> Option<bool> {
+        self.last_reported_size = Some((width, height));
+        match report {
+            SurfaceReport::InitialConfig => {
+                if self.awaiting_initial_report {
+                    return self.set_ready(false);
+                }
+            }
+            SurfaceReport::ConfigureEvent => {
+                self.awaiting_initial_report = false;
+            }
+        }
+
+        let ready = !self.awaiting_initial_report && self.meets_expectation(width, height);
+        self.set_ready(ready)
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready
+    }
+
+    fn set_ready(&mut self, ready: bool) -> Option<bool> {
+        if self.ready != ready {
+            self.ready = ready;
+            Some(ready)
+        } else {
+            None
+        }
+    }
+
+    fn meets_expectation(&self, width: u32, height: u32) -> bool {
+        match self.expected_minimum {
+            Some((expected_width, expected_height)) => {
+                width >= expected_width && height >= expected_height
+            }
+            None => width > 1 && height > 1,
+        }
+    }
+}
+
 struct MattingBridge<'a> {
     preload_count: usize,
     mat_inflight: &'a mut usize,
@@ -1646,6 +1729,7 @@ pub fn run_windowed(
                 Some(m) => Fullscreen::Borderless(Some(m)),
                 None => Fullscreen::Borderless(None),
             }));
+            self.update_surface_gate_expectation(window.as_ref(), event_loop);
             window.set_cursor_visible(false);
             self.window = Some(window.clone());
             self.log_event_loop_state("ensure_window_created");
