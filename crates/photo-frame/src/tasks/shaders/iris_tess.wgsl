@@ -94,10 +94,15 @@ fn sample_plane(tex: texture_2d<f32>, samp: sampler, dest: vec4<f32>, sample_pos
 }
 
 @fragment
-fn fs_composite(in: FullscreenOut) -> @location(0) vec4<f32> {    let current = textureSample(cur_tex, cur_samp, in.uv);
-    let next    = textureSample(next_tex, next_samp, in.uv);
-    let mask    = textureSample(mask_tex, mask_samp, in.uv).r;
-    let color   = mix(current, next, mask);
-    let alpha   = max(max(current.a, next.a), color.a);
-    return vec4<f32>(color.rgb, clamp(alpha, 0.0, 1.0));
+fn fs_composite(in: FullscreenOut) -> @location(0) vec4<f32> {
+  // Convert normalized screen UV into pixel-space position
+  let screen_pos = in.screen_uv * Comp.screen_size;
+  // Sample current/next planes with cover-rect mapping
+  let current = sample_plane(cur_tex, cur_samp, Comp.current_dest, screen_pos);
+  let next    = sample_plane(next_tex, next_samp, Comp.next_dest, screen_pos);
+  // Binary mask in screen UV space selects next over current
+  let mask    = textureSample(mask_tex, mask_samp, in.screen_uv).r;
+  let color   = mix(current, next, mask);
+  let alpha   = max(max(current.a, next.a), color.a);
+  return vec4<f32>(color.rgb, clamp(alpha, 0.0, 1.0));
 }

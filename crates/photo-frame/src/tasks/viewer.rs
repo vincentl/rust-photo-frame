@@ -1,14 +1,5 @@
 pub mod scenes;
 
-// Smooth iris timeline across both stages (0→1 regardless of Closing/Opening)
-#[inline]
-fn iris_timeline(base_progress: f32, stage: IrisStage) -> f32 {
-    match stage {
-        IrisStage::Closing => 1.0 - base_progress,
-        IrisStage::Opening => base_progress,
-    }
-}
-
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
