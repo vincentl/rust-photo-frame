@@ -409,16 +409,22 @@ Sequential mode loops through the entries exactly as written, so repeating `push
 
 ## Matting configuration
 
-The `matting` block prepares the background behind each photo. Populate `matting.active` with one or more entries; every entry must include a `kind` (`fixed-color`, `blur`, `studio`, or `fixed-image`) and the fields that tune that style. `matting.selection` controls how the viewer chooses among those entries.
+The `matting` block prepares the background behind each photo. During parsing the viewer normalizes the section into a canonical list:
 
-| Key         | Required? | Default                                                       | Accepted values                           | Effect |
-| ----------- | --------- | ------------------------------------------------------------- | ----------------------------------------- | ------ |
-| `selection` | Optional  | `fixed` when `active` has one entry, otherwise `random`       | `fixed`, `random`, or `sequential`        | Governs how the viewer iterates through the mats. `fixed` locks to the first entry, `random` draws independently for each slide, and `sequential` steps through the list in order before looping. |
-| `active`    | Yes       | —                                                             | Array of mat entry maps                   | Declares the mat variants to render. Duplicate entries are allowed—repeat a `kind` to weight the random selector or to alternate presets in sequential mode. |
+1. Read `matting.active` from top to bottom and record each entry’s `kind` plus its options.
+2. Expand inline collections in place. Every swatch in a `colors` array, every `photo-average` token, and every fixed-image `path` becomes its own canonical slot while preserving the entry’s original order.
+3. Attach the resulting slots to their underlying renderer (`fixed-color`, `blur`, `studio`, or `fixed-image`).
+
+`matting.selection` operates on that expanded list. `random` samples from every canonical slot—duplicates simply weight the draw—while `sequential` walks the expanded order before looping. Until the runtime supports per-slot overrides, repeating a `kind` only changes how often that preset appears; it does not yet alternate wholly different parameter sets for the same renderer.
+
+| Key         | Required? | Default                                               | Accepted values                | Effect |
+| ----------- | --------- | ----------------------------------------------------- | ------------------------------ | ------ |
+| `selection` | Optional  | `fixed` when the canonical list has one slot; otherwise `random` | `fixed`, `random`, or `sequential` | Governs how the viewer iterates through the canonical mat list. `fixed` locks to the first slot, `random` samples independently for each slide, and `sequential` steps through the list in order before looping. |
+| `active`    | Yes       | —                                                     | Array of mat entry maps        | Declares the mat variants that expand into the canonical slot list (including per-entry color or path arrays). Repeating a `kind` increases its weight in the random selector but still references the same preset until per-slot overrides arrive. |
 
 > Legacy `matting.types` and `matting.options` keys are no longer accepted. Copy each prior option into the `active` list with an explicit `kind` field to migrate.
 
-When `selection` is omitted, the runtime infers it: a single entry becomes `fixed`; multiple entries default to `random`. `selection: fixed` requires exactly one entry; the other modes accept any non-empty list.
+When `selection` is omitted, the runtime infers it: a single canonical slot becomes `fixed`; multiple slots default to `random`. `selection: fixed` requires exactly one slot; the other modes accept any non-empty list.
 
 Each active entry understands the shared settings below:
 
@@ -471,14 +477,16 @@ matting:
       color-selection: sequential
     - kind: fixed-color
       colors:
-        - [200, 200, 200]
+        - [210, 210, 210]
+        - [240, 240, 240]
+      color-selection: sequential
       minimum-mat-percentage: 6.0
     - kind: blur
       minimum-mat-percentage: 7.5
       sigma: 18.0
 ```
 
-The second `fixed-color` entry doubles the odds of drawing a solid mat versus blur while allowing a separate light palette.
+The first entry contributes two canonical slots (dark swatches), the second adds two more (light swatches), and the blur entry adds a single slot. With `selection: random`, four out of five draws land on a solid mat while blur shows roughly 20 % of the time. Sequential sampling would step through the expanded list—dark → dark → light → light → blur—before looping; because duplicates still reference the same preset, true alternation between wholly different fixed-color configurations will require future runtime support.
 
 ### Example: sequential rotation with duplicates
 
