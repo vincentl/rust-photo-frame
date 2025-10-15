@@ -751,6 +751,35 @@ transition:
 }
 
 #[test]
+fn multiple_transition_entries_preserve_all_options() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  selection: random
+  active:
+    - kind: fade
+      duration-ms: 500
+    - kind: fade
+      duration-ms: 750
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let TransitionSelection::Random(entries) = cfg.transition.selection() else {
+        panic!("expected random transition selection");
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].index, 0);
+    assert_eq!(entries[0].kind, TransitionKind::Fade);
+    assert_eq!(entries[1].index, 1);
+    assert_eq!(entries[1].kind, TransitionKind::Fade);
+
+    let selected: Vec<_> = cfg.transition.iter_selected().collect();
+    assert_eq!(selected.len(), 2);
+    assert_eq!(selected[0].option.duration().as_millis(), 500);
+    assert_eq!(selected[1].option.duration().as_millis(), 750);
+}
+
+#[test]
 fn parse_sequential_transition_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
