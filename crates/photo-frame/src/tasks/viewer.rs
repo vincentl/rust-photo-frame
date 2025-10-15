@@ -1221,12 +1221,11 @@ pub fn run_windowed(
         fn on_surface_size_settled(&mut self) {
             // Drop any precomputed canvases for the previous size and flush pending queue.
             self.ready_results.clear();
-            if let Some(mut mode) = self.mode.take() {
+            if let Some(mode) = self.mode.as_mut() {
                 let wake = mode.wake_mut();
                 wake.set_next(None);
                 wake.pending_mut().clear();
                 wake.set_transition_state(None);
-                self.mode = Some(mode);
             }
             // We cannot cancel inflight matting; mismatched results will be dropped on upload.
         }
