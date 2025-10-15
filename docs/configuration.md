@@ -43,7 +43,6 @@ matting:
       minimum-mat-percentage: 0.0 # % of each screen edge reserved for the mat border
       max-upscale-factor: 1.0 # Limit for enlarging images when applying mats
       colors: [[0, 0, 0], [32, 32, 32]]
-      color-selection: sequential
     - kind: blur
       minimum-mat-percentage: 3.5
       sigma: 32.0
@@ -415,12 +414,12 @@ The `matting` block prepares the background behind each photo. During parsing th
 2. Expand inline collections in place. Every swatch in a `colors` array, every `photo-average` token, and every fixed-image `path` becomes its own canonical slot while preserving the entry’s original order.
 3. Attach the resulting slots to their underlying renderer (`fixed-color`, `blur`, `studio`, or `fixed-image`).
 
-`matting.selection` operates on that expanded list. `random` samples from every canonical slot—duplicates simply weight the draw—while `sequential` walks the expanded order before looping. Until the runtime supports per-slot overrides, repeating a `kind` only changes how often that preset appears; it does not yet alternate wholly different parameter sets for the same renderer.
+`matting.selection` operates on that expanded list. `random` samples from every canonical slot—duplicates simply weight the draw—while `sequential` walks the expanded order before looping. There are no per-entry selection strategies anymore: duplicating colors, paths, or entire `active` entries is the way to bias rotation, and the outer `selection` controls traversal.
 
 | Key         | Required? | Default                                               | Accepted values                | Effect |
 | ----------- | --------- | ----------------------------------------------------- | ------------------------------ | ------ |
 | `selection` | Optional  | `fixed` when the canonical list has one slot; otherwise `random` | `fixed`, `random`, or `sequential` | Governs how the viewer iterates through the canonical mat list. `fixed` locks to the first slot, `random` samples independently for each slide, and `sequential` steps through the list in order before looping. |
-| `active`    | Yes       | —                                                     | Array of mat entry maps        | Declares the mat variants that expand into the canonical slot list (including per-entry color or path arrays). Repeating a `kind` increases its weight in the random selector but still references the same preset until per-slot overrides arrive. |
+| `active`    | Yes       | —                                                     | Array of mat entry maps        | Declares the mat variants that expand into the canonical slot list (including per-entry color or path arrays). Duplicate swatches or paths expand into multiple canonical slots, weighting the preset for `random` selection and repeating it when `sequential` mode loops. |
 
 > Legacy `matting.types` and `matting.options` keys are no longer accepted. Copy each prior option into the `active` list with an explicit `kind` field to migrate.
 
@@ -434,24 +433,21 @@ Each active entry understands the shared settings below:
 The remaining controls depend on the mat `kind`:
 
 - **`fixed-color`**
-  - **`colors`** (array of `[r, g, b]` triples, default `[[0, 0, 0]]`): One or more RGB swatches (0–255 per channel) to rotate through. Channels outside the valid range are clamped before rendering.
+  - **`colors`** (array of `[r, g, b]` triples, default `[[0, 0, 0]]`): One or more RGB swatches (0–255 per channel) to rotate through. Channels outside the valid range are clamped before rendering. Duplicate entries increase the swatch’s weight when `selection: random`.
   - **`color`** (`[r, g, b]` triple): Convenience alias for `colors` when only one swatch is needed.
-  - **`color-selection`** (`sequential` or `random`; default `sequential`): Chooses how the viewer advances through the configured swatches.
 - **`blur`**
   - **`sigma`** (float, default `32.0`): Gaussian blur radius applied to a scaled copy of the photo.
   - **`sample-scale`** (float, default `0.125`): Ratio between the canvas resolution and the intermediate blur buffer. Raising it toward `1.0` sharpens the backdrop at higher cost.
   - **`backend`** (`cpu` or `neon`, default `neon`): Blur implementation to use. `neon` opts into the vector-accelerated path on 64-bit ARM and gracefully falls back to `cpu` when unavailable.
 - **`studio`**
-  - **`colors`** (array containing `[r, g, b]` triples and/or the string `photo-average`; default `[photo-average]`): Palette entries used for the mat base. Plain RGB swatches render exactly as specified, while `photo-average` reuses the current slide’s average color.
-  - **`color-selection`** (`sequential` or `random`; default `sequential`): Governs how the mat palette advances between slides.
+  - **`colors`** (array containing `[r, g, b]` triples and/or the string `photo-average`; default `[photo-average]`): Palette entries used for the mat base. Plain RGB swatches render exactly as specified, while `photo-average` reuses the current slide’s average color. Provide duplicates to weight certain swatches more heavily.
   - **`bevel-width-px`** (float, default `3.0`): Visible width of the bevel band in pixels.
   - **`bevel-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB values used for the bevel band.
   - **`texture-strength`** (float, default `1.0`): Strength of the simulated paper weave (`0.0` yields a flat matte).
   - **`warp-period-px`** (float, default `5.6`): Horizontal spacing between vertical warp threads, in pixels.
   - **`weft-period-px`** (float, default `5.2`): Vertical spacing between horizontal weft threads, in pixels.
 - **`fixed-image`**
-  - **`path`** (string or string array, required): One or more filesystem paths to the backdrop image(s). The renderer loads referenced files at startup; an empty array disables the entry without error.
-  - **`path-selection`** (`sequential` or `random`; default `sequential`): Chooses how to rotate through the configured backgrounds.
+  - **`path`** (string or string array, required): One or more filesystem paths to the backdrop image(s). The renderer loads referenced files at startup; an empty array disables the entry without error. Provide multiple paths (or repeat a path) to weight backgrounds after canonical expansion.
   - **`fit`** (`cover`, `contain`, or `stretch`; default `cover`): Controls how the background scales to the canvas.
 
 ### Example: single studio mat
@@ -474,19 +470,17 @@ matting:
       colors:
         - [0, 0, 0]
         - [32, 32, 32]
-      color-selection: sequential
     - kind: fixed-color
       colors:
         - [210, 210, 210]
         - [240, 240, 240]
-      color-selection: sequential
       minimum-mat-percentage: 6.0
     - kind: blur
       minimum-mat-percentage: 7.5
       sigma: 18.0
 ```
 
-The first entry contributes two canonical slots (dark swatches), the second adds two more (light swatches), and the blur entry adds a single slot. With `selection: random`, four out of five draws land on a solid mat while blur shows roughly 20 % of the time. Sequential sampling would step through the expanded list—dark → dark → light → light → blur—before looping; because duplicates still reference the same preset, true alternation between wholly different fixed-color configurations will require future runtime support.
+The first entry contributes two canonical slots (dark swatches), the second adds two more (light swatches), and the blur entry adds a single slot. With `selection: random`, four out of five draws land on a solid mat while blur shows roughly 20 % of the time. Sequential sampling would step through the expanded list—dark → dark → light → light → blur—before looping.
 
 ### Example: sequential rotation with duplicates
 
