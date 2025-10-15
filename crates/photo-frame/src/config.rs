@@ -1943,14 +1943,14 @@ impl Eq for PhotoEffectSelection {}
 #[derive(Debug, Clone)]
 pub struct PhotoEffectConfig {
     selection: PhotoEffectSelection,
-    options: BTreeMap<PhotoEffectKind, PhotoEffectOptions>,
+    options: Vec<PhotoEffectOptions>,
 }
 
 impl Default for PhotoEffectConfig {
     fn default() -> Self {
         Self {
             selection: PhotoEffectSelection::Disabled,
-            options: BTreeMap::new(),
+            options: Vec::new(),
         }
     }
 }
@@ -1963,19 +1963,19 @@ impl PhotoEffectConfig {
     pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> Option<PhotoEffectOptions> {
         match &self.selection {
             PhotoEffectSelection::Disabled => None,
-            PhotoEffectSelection::Fixed(entry) => self.options.get(&entry.kind).cloned(),
+            PhotoEffectSelection::Fixed(entry) => self.option_for_entry(*entry).cloned(),
             PhotoEffectSelection::Random(entries) => entries
                 .iter()
                 .copied()
                 .choose(rng)
-                .and_then(|entry| self.options.get(&entry.kind).cloned()),
+                .and_then(|entry| self.option_for_entry(entry).cloned()),
             PhotoEffectSelection::Sequential { entries, runtime } => {
                 if entries.is_empty() {
                     None
                 } else {
                     let index = runtime.next(entries.len());
                     let entry = entries[index];
-                    self.options.get(&entry.kind).cloned()
+                    self.option_for_entry(entry).cloned()
                 }
             }
         }
@@ -1986,7 +1986,7 @@ impl PhotoEffectConfig {
             PhotoEffectSelection::Disabled => return Ok(()),
             PhotoEffectSelection::Fixed(entry) => {
                 ensure!(
-                    self.options.contains_key(&entry.kind),
+                    self.option_for_entry(*entry).is_some(),
                     "photo-effect.active entry {} must define options for {}",
                     entry.index,
                     entry.kind,
@@ -2000,7 +2000,7 @@ impl PhotoEffectConfig {
                 );
                 for entry in entries.iter() {
                     ensure!(
-                        self.options.contains_key(&entry.kind),
+                        self.option_for_entry(*entry).is_some(),
                         "photo-effect.active entry {} must define options for {}",
                         entry.index,
                         entry.kind,
@@ -2009,11 +2009,20 @@ impl PhotoEffectConfig {
             }
         }
 
-        for option in self.options.values() {
+        for option in &self.options {
             option.validate()?;
         }
 
         Ok(())
+    }
+
+    fn option_for_entry(
+        &self,
+        entry: SelectionEntry<PhotoEffectKind>,
+    ) -> Option<&PhotoEffectOptions> {
+        self.options
+            .get(entry.index)
+            .filter(|option| option.kind() == entry.kind)
     }
 }
 
@@ -2066,24 +2075,25 @@ impl<'de> Visitor<'de> for PhotoEffectConfigVisitor {
         if active_entries.is_empty() {
             return Ok(PhotoEffectConfig {
                 selection: PhotoEffectSelection::Disabled,
-                options: BTreeMap::new(),
+                options: Vec::new(),
             });
         }
 
-        let resolved_selection = resolve_pipeline_selection::<A::Error>(
-            selection,
-            active_entries.len(),
-            "photo-effect",
-        )?;
-
-        let mut options = BTreeMap::new();
+        let mut options = Vec::new();
         let mut entries = Vec::with_capacity(active_entries.len());
-        for (index, entry) in active_entries.into_iter().enumerate() {
+        for entry in active_entries.into_iter() {
             let kind = entry.kind;
             let option = build_photo_effect_option::<A::Error>(kind, entry.fields)?;
-            options.insert(kind, option);
-            entries.push(SelectionEntry { index, kind });
+            let canonical_index = options.len();
+            options.push(option);
+            entries.push(SelectionEntry {
+                index: canonical_index,
+                kind,
+            });
         }
+
+        let resolved_selection =
+            resolve_pipeline_selection::<A::Error>(selection, options.len(), "photo-effect")?;
 
         let entries: Arc<[SelectionEntry<PhotoEffectKind>]> = entries.into();
 
