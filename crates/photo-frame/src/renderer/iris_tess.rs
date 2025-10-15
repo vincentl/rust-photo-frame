@@ -460,6 +460,10 @@ impl IrisRenderer {
                 max_y = y;
             }
         }
+        let max_index_fill = fill.indices.iter().copied().max().unwrap_or(0);
+        let max_index_stroke = stroke.indices.iter().copied().max().unwrap_or(0);
+        let oob_fill = max_index_fill as usize >= fill.vertices.len();
+        let oob_stroke = max_index_stroke as usize >= stroke.vertices.len();
         debug!(
             blades,
             closeness,
@@ -470,6 +474,10 @@ impl IrisRenderer {
             fill_indices = fill.indices.len(),
             stroke_vertices = stroke.vertices.len(),
             stroke_indices = stroke.indices.len(),
+            max_index_fill,
+            max_index_stroke,
+            oob_fill,
+            oob_stroke,
             bbox_min_x = min_x,
             bbox_min_y = min_y,
             bbox_max_x = max_x,
@@ -479,6 +487,11 @@ impl IrisRenderer {
             any_inf,
             "iris_mesh_rebuilt",
         );
+        if oob_fill || oob_stroke {
+            // If we ever see this, skip drawing to avoid undefined behavior.
+            self.fill_index_count = 0;
+            self.stroke_index_count = 0;
+        }
 
         if fill.vertices.is_empty() || fill.indices.is_empty() {
             self.fill_index_count = 0;
@@ -616,8 +629,11 @@ impl IrisRenderer {
             return false;
         }
 
-        let radius =
-            ((params.screen_size[0]).powi(2) + (params.screen_size[1]).powi(2)).sqrt() * 0.5;
+        // Use a conservative radius to keep geometry well inside the viewport.
+        // Diagonal-based radius can push vertices far outside clip space and
+        // exacerbate tessellation artifacts on thin blades.
+        let min_side = params.screen_size[0].min(params.screen_size[1]);
+        let radius = (min_side * 0.5) * 1.02; // small overfill to hide seams at edges
         let mesh_key = MeshKey {
             blades: params.blades,
             closeness: params.closeness,
