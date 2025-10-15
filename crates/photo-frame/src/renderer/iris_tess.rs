@@ -121,6 +121,8 @@ pub struct IrisRenderer {
     diag_range: Option<(f32, f32)>,
     diag_cooldown: Duration,
     last_diag: Option<Instant>,
+    long_edge_factor: f32,
+    large_area_fraction: f32,
 }
 
 impl IrisRenderer {
@@ -154,6 +156,16 @@ impl IrisRenderer {
             .and_then(|v| v.parse::<u64>().ok())
             .map(|ms| Duration::from_millis(ms))
             .unwrap_or(Duration::from_millis(200));
+        let long_edge_factor = env::var("PHOTOFRAME_IRIS_LONG_EDGE_FACTOR")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(1.25);
+        let large_area_fraction = env::var("PHOTOFRAME_IRIS_LARGE_AREA_FRACTION")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(0.2);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("iris-tessellation"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
@@ -399,6 +411,8 @@ impl IrisRenderer {
             diag_range,
             diag_cooldown,
             last_diag: None,
+            long_edge_factor,
+            large_area_fraction,
         }
     }
 
@@ -539,8 +553,8 @@ impl IrisRenderer {
         }
 
         // Heuristics for interesting events
-        let long_edge_flag = max_edge_len > radius * 1.25; // extremely long edge vs radius
-        let large_area_flag = max_area > (radius * radius) * 0.2; // unusually large triangle area
+        let long_edge_flag = max_edge_len > radius * self.long_edge_factor; // adjustable
+        let large_area_flag = max_area > (radius * radius) * self.large_area_fraction; // adjustable
         let near_flip = closeness > 0.48 && closeness < 0.52;
         let interesting = any_nan
             || any_inf
@@ -606,6 +620,20 @@ impl IrisRenderer {
                 "iris_mesh_rebuilt",
             );
             self.last_diag = Some(now);
+            if interesting {
+                debug!(
+                    closeness,
+                    long_edge = max_edge_len,
+                    long_edge_tri = ?max_edge_tri,
+                    large_area = max_area,
+                    large_area_tri = ?max_area_tri,
+                    oob_fill,
+                    oob_stroke,
+                    tri_mod_mismatch,
+                    acos_clamped = clamped,
+                    "iris_alert",
+                );
+            }
         }
         if self.diag_frames > 0 {
             self.diag_frames = self.diag_frames.saturating_sub(1);
