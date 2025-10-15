@@ -165,8 +165,6 @@ impl TransitionState {
     }
 }
 
-
-
 #[derive(Clone)]
 struct MatParams {
     screen_w: u32,
@@ -1863,7 +1861,8 @@ pub fn run_windowed(
                 gpu.config.height = size.height;
                 gpu.surface.configure(&gpu.device, &gpu.config);
             }
-            let _ = self.update_surface_ready(size.width, size.height, SurfaceReport::ConfigureEvent);
+            let _ =
+                self.update_surface_ready(size.width, size.height, SurfaceReport::ConfigureEvent);
         }
 
         fn drain_mat_results(&mut self) {
@@ -1878,20 +1877,21 @@ pub fn run_windowed(
         }
 
         fn upload_ready_results_for_wake(&mut self, wake: &mut scenes::WakeScene) {
+            if self.gpu.is_none() {
+                return;
+            }
+            let gpu = self.gpu.as_ref().unwrap();
+            let expected = compute_canvas_size(
+                gpu.config.width,
+                gpu.config.height,
+                self.oversample,
+                gpu.limits.max_texture_dimension_2d,
+            );
+
             while let Some(result) = self.ready_results.pop_front() {
                 let path = result.path.clone();
                 let priority = result.priority;
-                let Some(gpu) = self.gpu.as_ref() else {
-                    self.ready_results.push_front(result);
-                    break;
-                };
                 // Discard canvases that were prepared for a different surface size.
-                let expected = compute_canvas_size(
-                    gpu.config.width,
-                    gpu.config.height,
-                    self.oversample,
-                    gpu.limits.max_texture_dimension_2d,
-                );
                 if result.canvas.width != expected.0 || result.canvas.height != expected.1 {
                     debug!(
                         path = %path.display(),
