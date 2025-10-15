@@ -7,7 +7,7 @@ use lyon::path::Path;
 use lyon::path::builder::SvgPathBuilder;
 use lyon::tessellation::{
     BuffersBuilder, FillOptions, FillTessellator, FillVertex, StrokeOptions, StrokeTessellator,
-    StrokeVertex, VertexBuffers,
+    StrokeVertex, VertexBuffers, FillRule,
 };
 use wgpu::util::DeviceExt;
 
@@ -188,9 +188,9 @@ impl IrisRenderer {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
         let mask_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -291,7 +291,7 @@ impl IrisRenderer {
                 entry_point: Some("fs_color"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
-                    blend: None,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -772,20 +772,24 @@ fn tessellate_path(
     stroke_width: f32,
 ) -> (VertexBuffers<[f32; 2], u16>, VertexBuffers<[f32; 2], u16>) {
     let mut fill = VertexBuffers::new();
+    let fill_opts = FillOptions::tolerance(tolerance.clamp(0.05, 5.0))
+        .with_fill_rule(FillRule::EvenOdd);
     FillTessellator::new()
         .tessellate_path(
             path,
-            &FillOptions::tolerance(tolerance.max(0.01)),
+            &fill_opts,
             &mut BuffersBuilder::new(&mut fill, |v: FillVertex| v.position().to_array()),
         )
         .expect("fill tessellation");
 
     let mut stroke = VertexBuffers::new();
     if stroke_width > 0.0 {
+        let stroke_opts =
+            StrokeOptions::tolerance(tolerance.clamp(0.05, 5.0)).with_line_width(stroke_width);
         StrokeTessellator::new()
             .tessellate_path(
                 path,
-                &StrokeOptions::tolerance(tolerance.max(0.01)).with_line_width(stroke_width),
+                &stroke_opts,
                 &mut BuffersBuilder::new(&mut stroke, |v: StrokeVertex| v.position().to_array()),
             )
             .expect("stroke tessellation");
@@ -806,7 +810,9 @@ fn blade_points(count: usize, closeness: f32, radius: f32) -> ((f32, f32), (f32,
     let dx = -sinv * radius - c1x;
     let dy = radius - cosv * radius - c1y;
     let dc = (dx * dx + dy * dy).sqrt();
-    let a = dy.atan2(dx) - (dc / (2.0 * radius)).acos();
+    // Guard against numerical drift that can push the ratio just outside [-1, 1]
+    let cos_arg = (dc / (2.0 * radius)).clamp(-1.0, 1.0);
+    let a = dy.atan2(dx) - cos_arg.acos();
     let tipx = c1x + a.cos() * radius;
     let tipy = c1y + a.sin() * radius;
     ((p1x, p1y), (0.0, radius), (tipx, tipy))
