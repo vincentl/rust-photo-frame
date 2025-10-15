@@ -10,6 +10,7 @@ use lyon::tessellation::{
     StrokeVertex, VertexBuffers, FillRule,
 };
 use wgpu::util::DeviceExt;
+use tracing::debug;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -430,8 +431,54 @@ impl IrisRenderer {
             return;
         }
 
-        let path = build_blade_path(blades as usize, closeness, radius);
+        let (path, clamped) = build_blade_path(blades as usize, closeness, radius);
         let (fill, stroke) = tessellate_path(&path, tolerance, stroke_width.max(0.0));
+
+        // Compute diagnostics
+        let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+        let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        let mut any_nan = false;
+        let mut any_inf = false;
+        for v in &fill.vertices {
+            let x = v[0];
+            let y = v[1];
+            if !x.is_finite() || !y.is_finite() {
+                any_nan |= x.is_nan() || y.is_nan();
+                any_inf |= x.is_infinite() || y.is_infinite();
+                continue;
+            }
+            if x < min_x {
+                min_x = x;
+            }
+            if y < min_y {
+                min_y = y;
+            }
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+        }
+        debug!(
+            blades,
+            closeness,
+            radius,
+            tolerance,
+            stroke_width,
+            fill_vertices = fill.vertices.len(),
+            fill_indices = fill.indices.len(),
+            stroke_vertices = stroke.vertices.len(),
+            stroke_indices = stroke.indices.len(),
+            bbox_min_x = min_x,
+            bbox_min_y = min_y,
+            bbox_max_x = max_x,
+            bbox_max_y = max_y,
+            acos_clamped = clamped,
+            any_nan,
+            any_inf,
+            "iris_mesh_rebuilt",
+        );
 
         if fill.vertices.is_empty() || fill.indices.is_empty() {
             self.fill_index_count = 0;
@@ -603,6 +650,16 @@ impl IrisRenderer {
 
         // Mask pass
         {
+            debug!(
+                stage = ?params.stage,
+                closeness = params.closeness,
+                instance_count = self.instance_count,
+                screen_w = params.screen_size[0],
+                screen_h = params.screen_size[1],
+                mask_w = self.mask_target.as_ref().map(|m| m.size.0),
+                mask_h = self.mask_target.as_ref().map(|m| m.size.1),
+                "iris_draw_begin",
+            );
             self.write_blade_uniforms(queue, params.screen_size, 1.0, [0.0; 4]);
             let mask_view = &self.mask_target.as_ref().unwrap().view;
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -627,7 +684,7 @@ impl IrisRenderer {
                 rpass.set_vertex_buffer(1, self.instance_buf.as_ref().unwrap().slice(..));
                 rpass.set_index_buffer(
                     self.fill_index.as_ref().unwrap().slice(..),
-                    wgpu::IndexFormat::Uint16,
+                    wgpu::IndexFormat::Uint32,
                 );
                 rpass.draw_indexed(0..self.fill_index_count, 0, 0..self.instance_count);
             }
@@ -697,14 +754,14 @@ impl IrisRenderer {
                 self.write_blade_uniforms(
                     queue,
                     params.screen_size,
-                    params.closeness,
+                    1.0,
                     params.fill_color,
                 );
                 rpass.set_vertex_buffer(0, self.fill_vertex.as_ref().unwrap().slice(..));
                 rpass.set_vertex_buffer(1, self.instance_buf.as_ref().unwrap().slice(..));
                 rpass.set_index_buffer(
                     self.fill_index.as_ref().unwrap().slice(..),
-                    wgpu::IndexFormat::Uint16,
+                    wgpu::IndexFormat::Uint32,
                 );
                 rpass.draw_indexed(0..self.fill_index_count, 0, 0..self.instance_count);
             }
@@ -712,25 +769,32 @@ impl IrisRenderer {
                 self.write_blade_uniforms(
                     queue,
                     params.screen_size,
-                    params.closeness,
+                    1.0,
                     params.stroke_color,
                 );
                 rpass.set_vertex_buffer(0, self.stroke_vertex.as_ref().unwrap().slice(..));
                 rpass.set_vertex_buffer(1, self.instance_buf.as_ref().unwrap().slice(..));
                 rpass.set_index_buffer(
                     self.stroke_index.as_ref().unwrap().slice(..),
-                    wgpu::IndexFormat::Uint16,
+                    wgpu::IndexFormat::Uint32,
                 );
                 rpass.draw_indexed(0..self.stroke_index_count, 0, 0..self.instance_count);
             }
         }
 
+        debug!(
+            stage = ?params.stage,
+            closeness = params.closeness,
+            rendered = true,
+            "iris_draw_end",
+        );
+
         true
     }
 }
 
-fn build_blade_path(count: usize, closeness: f32, radius: f32) -> Path {
-    let (p1, mid, tip) = blade_points(count, closeness, radius);
+fn build_blade_path(count: usize, closeness: f32, radius: f32) -> (Path, bool) {
+    let (p1, mid, tip, clamped) = blade_points(count, closeness, radius);
     let mut builder = Path::builder().with_svg();
     let radii = vector(radius, radius);
     let zero = Angle::zero();
@@ -763,15 +827,15 @@ fn build_blade_path(count: usize, closeness: f32, radius: f32) -> Path {
         point(p1.0, p1.1),
     );
     builder.close();
-    builder.build()
+    (builder.build(), clamped)
 }
 
 fn tessellate_path(
     path: &Path,
     tolerance: f32,
     stroke_width: f32,
-) -> (VertexBuffers<[f32; 2], u16>, VertexBuffers<[f32; 2], u16>) {
-    let mut fill = VertexBuffers::new();
+) -> (VertexBuffers<[f32; 2], u32>, VertexBuffers<[f32; 2], u32>) {
+    let mut fill: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
     let fill_opts = FillOptions::tolerance(tolerance.clamp(0.05, 5.0))
         .with_fill_rule(FillRule::EvenOdd);
     FillTessellator::new()
@@ -782,7 +846,7 @@ fn tessellate_path(
         )
         .expect("fill tessellation");
 
-    let mut stroke = VertexBuffers::new();
+    let mut stroke: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
     if stroke_width > 0.0 {
         let stroke_opts =
             StrokeOptions::tolerance(tolerance.clamp(0.05, 5.0)).with_line_width(stroke_width);
@@ -798,7 +862,11 @@ fn tessellate_path(
     (fill, stroke)
 }
 
-fn blade_points(count: usize, closeness: f32, radius: f32) -> ((f32, f32), (f32, f32), (f32, f32)) {
+fn blade_points(
+    count: usize,
+    closeness: f32,
+    radius: f32,
+) -> ((f32, f32), (f32, f32), (f32, f32), bool) {
     let count = count.max(1) as f32;
     let step = std::f32::consts::PI * (0.5 + 2.0 / count);
     let p1x = step.cos() * radius;
@@ -811,9 +879,11 @@ fn blade_points(count: usize, closeness: f32, radius: f32) -> ((f32, f32), (f32,
     let dy = radius - cosv * radius - c1y;
     let dc = (dx * dx + dy * dy).sqrt();
     // Guard against numerical drift that can push the ratio just outside [-1, 1]
-    let cos_arg = (dc / (2.0 * radius)).clamp(-1.0, 1.0);
+    let raw = dc / (2.0 * radius);
+    let cos_arg = raw.clamp(-1.0, 1.0);
     let a = dy.atan2(dx) - cos_arg.acos();
     let tipx = c1x + a.cos() * radius;
     let tipy = c1y + a.sin() * radius;
-    ((p1x, p1y), (0.0, radius), (tipx, tipy))
+    let clamped = raw < -1.0 || raw > 1.0;
+    ((p1x, p1y), (0.0, radius), (tipx, tipy), clamped)
 }
