@@ -10,6 +10,9 @@ use lyon::tessellation::{
     StrokeVertex, VertexBuffers, FillRule,
 };
 use wgpu::util::DeviceExt;
+use std::env;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 #[repr(C)]
@@ -112,6 +115,12 @@ pub struct IrisRenderer {
     instance_buf: Option<wgpu::Buffer>,
     instance_count: u32,
     last_mesh: Option<MeshKey>,
+    diag_frames: u32,
+    only_interesting: bool,
+    diag_file: Option<PathBuf>,
+    diag_range: Option<(f32, f32)>,
+    diag_cooldown: Duration,
+    last_diag: Option<Instant>,
 }
 
 impl IrisRenderer {
@@ -120,6 +129,31 @@ impl IrisRenderer {
         surface_format: wgpu::TextureFormat,
         img_bind_layout: &wgpu::BindGroupLayout,
     ) -> Self {
+        let diag_frames = env::var("PHOTOFRAME_IRIS_DIAG_FRAMES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        let only_interesting = env::var("PHOTOFRAME_IRIS_INTERESTING_ONLY")
+            .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        let diag_file = env::var("PHOTOFRAME_IRIS_DIAG_FILE").ok().map(PathBuf::from);
+        let diag_range = env::var("PHOTOFRAME_IRIS_DIAG_CLOSENESS")
+            .ok()
+            .and_then(|s| {
+                let parts: Vec<_> = s.split(|c| c == '-' || c == ',').collect();
+                if parts.len() == 2 {
+                    let lo = parts[0].trim().parse::<f32>().ok()?;
+                    let hi = parts[1].trim().parse::<f32>().ok()?;
+                    Some((lo.min(hi), lo.max(hi)))
+                } else {
+                    None
+                }
+            });
+        let diag_cooldown = env::var("PHOTOFRAME_IRIS_DIAG_COOLDOWN_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|ms| Duration::from_millis(ms))
+            .unwrap_or(Duration::from_millis(200));
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("iris-tessellation"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
@@ -359,6 +393,12 @@ impl IrisRenderer {
             instance_buf: None,
             instance_count: 0,
             last_mesh: None,
+            diag_frames,
+            only_interesting,
+            diag_file,
+            diag_range,
+            diag_cooldown,
+            last_diag: None,
         }
     }
 
@@ -462,31 +502,114 @@ impl IrisRenderer {
         }
         let max_index_fill = fill.indices.iter().copied().max().unwrap_or(0);
         let max_index_stroke = stroke.indices.iter().copied().max().unwrap_or(0);
-        let oob_fill = max_index_fill as usize >= fill.vertices.len();
-        let oob_stroke = max_index_stroke as usize >= stroke.vertices.len();
-        debug!(
-            blades,
-            closeness,
-            radius,
-            tolerance,
-            stroke_width,
-            fill_vertices = fill.vertices.len(),
-            fill_indices = fill.indices.len(),
-            stroke_vertices = stroke.vertices.len(),
-            stroke_indices = stroke.indices.len(),
-            max_index_fill,
-            max_index_stroke,
-            oob_fill,
-            oob_stroke,
-            bbox_min_x = min_x,
-            bbox_min_y = min_y,
-            bbox_max_x = max_x,
-            bbox_max_y = max_y,
-            acos_clamped = clamped,
-            any_nan,
-            any_inf,
-            "iris_mesh_rebuilt",
-        );
+        let oob_fill = !fill.indices.is_empty() && (max_index_fill as usize >= fill.vertices.len());
+        let oob_stroke = !stroke.indices.is_empty() && (max_index_stroke as usize >= stroke.vertices.len());
+
+        // One-frame heavy diagnostics: longest edge and largest triangle area
+        let mut max_edge_len: f32 = 0.0;
+        let mut max_edge_tri: (u32, u32, u32) = (0, 0, 0);
+        let mut max_area: f32 = 0.0;
+        let mut max_area_tri: (u32, u32, u32) = (0, 0, 0);
+        let mut tri_mod_mismatch = false;
+        if fill.indices.len() % 3 != 0 { tri_mod_mismatch = true; }
+        for tri in (0..fill.indices.len()).step_by(3) {
+            if tri + 2 >= fill.indices.len() { break; }
+            let i0 = fill.indices[tri] as usize;
+            let i1 = fill.indices[tri + 1] as usize;
+            let i2 = fill.indices[tri + 2] as usize;
+            if i0 >= fill.vertices.len() || i1 >= fill.vertices.len() || i2 >= fill.vertices.len() {
+                continue;
+            }
+            let p0 = fill.vertices[i0];
+            let p1 = fill.vertices[i1];
+            let p2 = fill.vertices[i2];
+            let e01 = ((p1[0] - p0[0]).powi(2) + (p1[1] - p0[1]).powi(2)).sqrt();
+            let e12 = ((p2[0] - p1[0]).powi(2) + (p2[1] - p1[1]).powi(2)).sqrt();
+            let e20 = ((p0[0] - p2[0]).powi(2) + (p0[1] - p2[1]).powi(2)).sqrt();
+            let edge_max = e01.max(e12).max(e20);
+            if edge_max > max_edge_len {
+                max_edge_len = edge_max;
+                max_edge_tri = (fill.indices[tri], fill.indices[tri + 1], fill.indices[tri + 2]);
+            }
+            let area = ((p1[0] - p0[0]) * (p2[1] - p0[1]) - (p2[0] - p0[0]) * (p1[1] - p0[1])).abs() * 0.5;
+            if area > max_area {
+                max_area = area;
+                max_area_tri = (fill.indices[tri], fill.indices[tri + 1], fill.indices[tri + 2]);
+            }
+        }
+
+        // Heuristics for interesting events
+        let long_edge_flag = max_edge_len > radius * 1.25; // extremely long edge vs radius
+        let large_area_flag = max_area > (radius * radius) * 0.2; // unusually large triangle area
+        let near_flip = closeness > 0.48 && closeness < 0.52;
+        let interesting = any_nan
+            || any_inf
+            || oob_fill
+            || oob_stroke
+            || tri_mod_mismatch
+            || long_edge_flag
+            || large_area_flag
+            || near_flip
+            || clamped;
+
+        // External triggers
+        let mut diag_requested = self.diag_frames > 0;
+        if let Some((lo, hi)) = self.diag_range {
+            if closeness >= lo && closeness <= hi {
+                diag_requested = true;
+            }
+        }
+        if let Some(ref path) = self.diag_file {
+            if std::fs::metadata(path).is_ok() {
+                diag_requested = true;
+            }
+        }
+
+        // Rate limit heavy logs unless it's interesting
+        let now = Instant::now();
+        let within_cooldown = self
+            .last_diag
+            .map(|t| now.saturating_duration_since(t) < self.diag_cooldown)
+            .unwrap_or(false);
+
+        let should_log = (!self.only_interesting || interesting || diag_requested)
+            && (!within_cooldown || interesting);
+        if should_log {
+            debug!(
+                blades,
+                closeness,
+                radius,
+                tolerance,
+                stroke_width,
+                fill_vertices = fill.vertices.len(),
+                fill_indices = fill.indices.len(),
+                stroke_vertices = stroke.vertices.len(),
+                stroke_indices = stroke.indices.len(),
+                max_index_fill,
+                max_index_stroke,
+                oob_fill,
+                oob_stroke,
+                bbox_min_x = min_x,
+                bbox_min_y = min_y,
+                bbox_max_x = max_x,
+                bbox_max_y = max_y,
+                acos_clamped = clamped,
+                any_nan,
+                any_inf,
+                tri_mod_mismatch,
+                long_edge = max_edge_len,
+                long_edge_tri = ?max_edge_tri,
+                large_area = max_area,
+                large_area_tri = ?max_area_tri,
+                near_flip,
+                interesting,
+                "iris_mesh_rebuilt",
+            );
+            self.last_diag = Some(now);
+        }
+        if self.diag_frames > 0 {
+            self.diag_frames = self.diag_frames.saturating_sub(1);
+        }
         if oob_fill || oob_stroke {
             // If we ever see this, skip drawing to avoid undefined behavior.
             self.fill_index_count = 0;
@@ -629,11 +752,9 @@ impl IrisRenderer {
             return false;
         }
 
-        // Use a conservative radius to keep geometry well inside the viewport.
-        // Diagonal-based radius can push vertices far outside clip space and
-        // exacerbate tessellation artifacts on thin blades.
-        let min_side = params.screen_size[0].min(params.screen_size[1]);
-        let radius = (min_side * 0.5) * 1.02; // small overfill to hide seams at edges
+        // Oversize radius so the iris covers the entire screen; top/bottom may clip.
+        // Use half the screen diagonal which guarantees coverage in all rotations.
+        let radius = ((params.screen_size[0]).powi(2) + (params.screen_size[1]).powi(2)).sqrt() * 0.5;
         let mesh_key = MeshKey {
             blades: params.blades,
             closeness: params.closeness,
