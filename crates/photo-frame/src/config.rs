@@ -2215,16 +2215,13 @@ impl<'de> Deserialize<'de> for TransitionKind {
 #[derive(Debug, Clone)]
 pub struct TransitionConfig {
     selection: TransitionSelection,
-    options: BTreeMap<TransitionKind, TransitionOptions>,
+    options: Vec<TransitionOptions>,
 }
 
 impl Default for TransitionConfig {
     fn default() -> Self {
-        let mut options = BTreeMap::new();
-        options.insert(
-            TransitionKind::Fade,
-            TransitionOptions::default_for(TransitionKind::Fade),
-        );
+        let mut options = Vec::new();
+        options.push(TransitionOptions::default_for(TransitionKind::Fade));
         Self {
             selection: TransitionSelection::Fixed(SelectionEntry {
                 index: 0,
@@ -2241,7 +2238,7 @@ impl TransitionConfig {
     }
 
     #[allow(dead_code)]
-    pub fn options(&self) -> &BTreeMap<TransitionKind, TransitionOptions> {
+    pub fn options(&self) -> &[TransitionOptions] {
         &self.options
     }
 
@@ -2256,7 +2253,7 @@ impl TransitionConfig {
     }
 
     pub fn iter_selected(&self) -> impl Iterator<Item = SelectedTransition<'_>> {
-        SelectedIter::new(self.selection_entries(), &self.options)
+        SelectedIter::new(self.selection_entries(), self.options.as_slice())
     }
 
     pub fn primary_selected(&self) -> Option<SelectedTransition<'_>> {
@@ -2284,7 +2281,7 @@ impl TransitionConfig {
 
         let option = self
             .options
-            .get(&entry.kind)
+            .get(entry.index)
             .expect("validated transition selection should resolve to an option");
         SelectedOption { entry, option }
     }
@@ -2304,25 +2301,30 @@ impl TransitionConfig {
             !self.options.is_empty(),
             "transition configuration must include at least one active entry"
         );
-        for option in self.options.values_mut() {
+        for option in self.options.iter_mut() {
             option.normalize()?;
         }
-        match &self.selection {
-            TransitionSelection::Fixed(entry) => ensure!(
-                self.options.contains_key(&entry.kind),
+        let validate_entry = |entry: SelectionEntry<TransitionKind>| -> Result<()> {
+            let option = self.options.get(entry.index).with_context(|| {
                 format!(
-                    "transition.active entry {} must resolve to a configured option",
-                    entry.kind
+                    "transition.active entry {} references index {} which is out of bounds",
+                    entry.kind, entry.index
                 )
-            ),
+            })?;
+            ensure!(
+                option.kind == entry.kind,
+                "transition.active entry {} at index {} must resolve to a matching option",
+                entry.kind,
+                entry.index
+            );
+            Ok(())
+        };
+        match &self.selection {
+            TransitionSelection::Fixed(entry) => validate_entry(*entry)?,
             TransitionSelection::Random(entries)
             | TransitionSelection::Sequential { entries, .. } => {
                 for entry in entries.iter() {
-                    ensure!(
-                        self.options.contains_key(&entry.kind),
-                        "transition.active entry {} must resolve to a configured option",
-                        entry.kind
-                    );
+                    validate_entry(*entry)?;
                 }
             }
         }
@@ -2806,12 +2808,10 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
         }
 
         let active_entries = active.ok_or_else(|| de::Error::missing_field("active"))?;
-        let resolved_selection =
-            resolve_pipeline_selection::<A::Error>(selection, active_entries.len(), "transition")?;
 
-        let mut options = BTreeMap::new();
-        let mut entries = Vec::with_capacity(active_entries.len());
-        for (index, entry) in active_entries.into_iter().enumerate() {
+        let mut options = Vec::new();
+        let mut entries = Vec::new();
+        for entry in active_entries.into_iter() {
             let kind = entry.kind;
             let mut builder = TransitionOptionBuilder::default();
             for (field, value) in entry.fields {
@@ -2819,9 +2819,13 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
             }
             let option = TransitionOptions::with_kind(kind, builder)
                 .map_err(|err| de::Error::custom(err.to_string()))?;
-            options.insert(kind, option);
+            let index = options.len();
+            options.push(option);
             entries.push(SelectionEntry { index, kind });
         }
+
+        let resolved_selection =
+            resolve_pipeline_selection::<A::Error>(selection, options.len(), "transition")?;
 
         let entries: Arc<[SelectionEntry<TransitionKind>]> = entries.into();
 
