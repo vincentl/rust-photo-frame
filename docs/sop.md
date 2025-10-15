@@ -60,5 +60,39 @@ Use the following command to start a standalone Sway session and run the photo-f
 sudo -u kiosk \
   XDG_RUNTIME_DIR="/run/user/$(id -u kiosk)" \
   dbus-run-session \
+sway -c /usr/local/share/photoframe/sway/config
+```
+
+### Debugging without journald capture
+
+By default, the Sway config launches the app via `/usr/local/bin/photo-frame`, which pipes logs to journald using `systemd-cat`. For iterative debugging you can direct logs to stdout or a file without editing the binary:
+
+- To print logs to the terminal (stdout) and control verbosity with `RUST_LOG`:
+
+```bash
+sudo -u kiosk \
+  XDG_RUNTIME_DIR="/run/user/$(id -u kiosk)" \
+  dbus-run-session \
+  env PHOTOFRAME_LOG=stdout \
+  env RUST_LOG='rust_photo_frame::renderer::iris_tess=debug,info' \
   sway -c /usr/local/share/photoframe/sway/config
+```
+
+- To write logs to a file you can tail:
+
+```bash
+sudo -u kiosk \
+  XDG_RUNTIME_DIR="/run/user/$(id -u kiosk)" \
+  dbus-run-session \
+  env PHOTOFRAME_LOG='file:/var/tmp/photo-frame.log' \
+  env RUST_LOG='rust_photo_frame::renderer::iris_tess=debug,info' \
+  sway -c /usr/local/share/photoframe/sway/config
+
+sudo tail -f /var/tmp/photo-frame.log
+```
+
+When you’re done, remove the `PHOTOFRAME_LOG` override to return to the default journald capture. You can always watch the kiosk logs via:
+
+```bash
+sudo journalctl -t rust-photo-frame -f
 ```

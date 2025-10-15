@@ -93,8 +93,26 @@ if [[ ! -x "${APP}" ]]; then
     echo "[photo-frame] binary not found at ${APP}" >&2
     exit 127
 fi
-
-exec systemd-cat -t rust-photo-frame -- "${APP}" "$@"
+# Control where logs go via PHOTOFRAME_LOG (journal|stdout|file:/path)
+# Defaults to journald for kiosk stability.
+case "${PHOTOFRAME_LOG:-journal}" in
+  journal)
+    exec systemd-cat -t rust-photo-frame -- "${APP}" "$@"
+    ;;
+  stdout)
+    exec "${APP}" "$@"
+    ;;
+  file:*)
+    logfile="${PHOTOFRAME_LOG#file:}"
+    # Ensure parent dir exists; ignore failure
+    mkdir -p -- "$(dirname -- "$logfile")" 2>/dev/null || true
+    # Append and flush; caller can tail the file
+    exec "${APP}" "$@" >>"$logfile" 2>&1
+    ;;
+  *)
+    exec systemd-cat -t rust-photo-frame -- "${APP}" "$@"
+    ;;
+esac
 LAUNCHER
     chmod 0755 "${launcher}"
 }
@@ -146,4 +164,3 @@ install_photo_launcher
 install_session_wrapper
 
 log "greetd session provisioning complete"
-
