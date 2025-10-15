@@ -278,6 +278,7 @@ struct SurfaceReadyGate {
     awaiting: bool,
     last_size: Option<(u32, u32)>,
     same_count: u8,
+    stable_since: Option<Instant>,
 }
 
 impl SurfaceReadyGate {
@@ -286,6 +287,7 @@ impl SurfaceReadyGate {
         self.awaiting = false;
         self.last_size = None;
         self.same_count = 0;
+        self.stable_since = None;
     }
 
     fn arm_for_initial_report(&mut self) {
@@ -293,6 +295,7 @@ impl SurfaceReadyGate {
         self.ready = false;
         self.last_size = None;
         self.same_count = 0;
+        self.stable_since = None;
     }
 
     fn update(&mut self, width: u32, height: u32, report: SurfaceReport) -> Option<bool> {
@@ -304,6 +307,7 @@ impl SurfaceReadyGate {
         if width == 0 || height == 0 {
             self.last_size = Some((0, 0));
             self.same_count = 0;
+            self.stable_since = None;
             return self.set_ready(false);
         }
 
@@ -314,11 +318,16 @@ impl SurfaceReadyGate {
             _ => {
                 self.last_size = Some((width, height));
                 self.same_count = 1;
+                self.stable_since = Some(Instant::now());
             }
         }
 
-        // Require two consecutive identical, non-zero reports
-        let now_ready = self.awaiting && self.same_count >= 2;
+        // Require two consecutive identical, non-zero reports and a small dwell time
+        let dwell_met = self
+            .stable_since
+            .map(|t| Instant::now().saturating_duration_since(t) >= Duration::from_millis(120))
+            .unwrap_or(false);
+        let now_ready = self.awaiting && self.same_count >= 2 && dwell_met;
         if now_ready {
             self.awaiting = false;
         }
@@ -1154,6 +1163,8 @@ pub fn run_windowed(
         rng: rand::rngs::ThreadRng,
         full_config: Arc<crate::config::Configuration>,
         surface_timeout_streak: u32,
+        // Last surface size that we considered "configured" and stabilized
+        configured_surface_size: Option<(u32, u32)>,
     }
 
     impl App {
@@ -1189,11 +1200,35 @@ pub fn run_windowed(
                 );
             }
             let ready = self.surface_gate.is_ready();
+            // Detect stabilized size changes and purge stale queues/results
+            if ready {
+                let size_changed = match self.configured_surface_size {
+                    Some((w, h)) => w != width || h != height,
+                    None => true,
+                };
+                if size_changed {
+                    self.configured_surface_size = Some((width, height));
+                    self.on_surface_size_settled();
+                }
+            }
             self.surface_configured = ready;
             if !ready {
                 self.pending_scene_enter = true;
             }
             ready
+        }
+
+        fn on_surface_size_settled(&mut self) {
+            // Drop any precomputed canvases for the previous size and flush pending queue.
+            self.ready_results.clear();
+            if let Some(mut mode) = self.mode.take() {
+                let wake = mode.wake_mut();
+                wake.set_next(None);
+                wake.pending_mut().clear();
+                wake.set_transition_state(None);
+                self.mode = Some(mode);
+            }
+            // We cannot cancel inflight matting; mismatched results will be dropped on upload.
         }
 
         fn with_active_scene<R>(
@@ -1850,6 +1885,24 @@ pub fn run_windowed(
                     self.ready_results.push_front(result);
                     break;
                 };
+                // Discard canvases that were prepared for a different surface size.
+                let expected = compute_canvas_size(
+                    gpu.config.width,
+                    gpu.config.height,
+                    self.oversample,
+                    gpu.limits.max_texture_dimension_2d,
+                );
+                if result.canvas.width != expected.0 || result.canvas.height != expected.1 {
+                    debug!(
+                        path = %path.display(),
+                        canvas_w = result.canvas.width,
+                        canvas_h = result.canvas.height,
+                        expected_w = expected.0,
+                        expected_h = expected.1,
+                        "dropping_mismatched_canvas_after_resize"
+                    );
+                    continue;
+                }
                 if let Some(new_tex) = upload_mat_result(gpu, result) {
                     if priority {
                         let replace_next = wake.next().is_some_and(|stage| stage.path == path);
@@ -2723,6 +2776,7 @@ pub fn run_windowed(
         rng: rand::rng(),
         full_config: Arc::new(cfg),
         surface_timeout_streak: 0,
+        configured_surface_size: None,
     };
     app.enter_greeting();
     event_loop.run_app(&mut app)?;
