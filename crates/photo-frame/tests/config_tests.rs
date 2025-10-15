@@ -1,7 +1,7 @@
 use rand::{SeedableRng, rngs::StdRng};
 use rust_photo_frame::config::{
     ColorSelection, Configuration, FixedImagePathSelection, MattingKind, MattingMode,
-    MattingSelection, StudioMatColor, TransitionKind, TransitionSelection,
+    MattingSelection, PhotoEffectOptions, StudioMatColor, TransitionKind, TransitionSelection,
 };
 use std::path::PathBuf;
 
@@ -389,6 +389,71 @@ matting:
     } else {
         panic!("expected first matting option to be fixed-color");
     }
+}
+
+#[test]
+fn photo_effect_sequential_selection_cycles_canonical_entries() {
+    let yaml = r#"
+photo-library-path: "/photos"
+photo-effect:
+  selection: sequential
+  active:
+    - kind: print-simulation
+      light-angle-degrees: 45.0
+    - kind: print-simulation
+      light-angle-degrees: 135.0
+"#;
+
+    let mut cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    cfg = cfg.validated().unwrap();
+
+    let mut rng = StdRng::seed_from_u64(1234);
+    let first = cfg
+        .photo_effect
+        .choose_option(&mut rng)
+        .expect("first photo effect");
+    let second = cfg
+        .photo_effect
+        .choose_option(&mut rng)
+        .expect("second photo effect");
+    let third = cfg
+        .photo_effect
+        .choose_option(&mut rng)
+        .expect("third photo effect");
+
+    match first {
+        PhotoEffectOptions::PrintSimulation(options) => {
+            assert!((options.light_angle_degrees - 45.0).abs() < f32::EPSILON);
+        }
+    }
+    match second {
+        PhotoEffectOptions::PrintSimulation(options) => {
+            assert!((options.light_angle_degrees - 135.0).abs() < f32::EPSILON);
+        }
+    }
+    match third {
+        PhotoEffectOptions::PrintSimulation(options) => {
+            assert!((options.light_angle_degrees - 45.0).abs() < f32::EPSILON);
+        }
+    }
+}
+
+#[test]
+fn photo_effect_type_selection_field_is_rejected() {
+    let yaml = r#"
+photo-library-path: "/photos"
+photo-effect:
+  active:
+    - kind: print-simulation
+  type-selection: sequential
+"#;
+
+    let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("type-selection"),
+        "expected error mentioning type-selection, got {message}"
+    );
 }
 
 #[test]

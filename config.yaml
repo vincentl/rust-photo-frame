@@ -102,6 +102,8 @@ photo-effect:
   # Choose how the viewer advances through the entries below when enabled.
   selection: random
   # Provide zero or more effect entries; leave empty to disable the stage.
+  # Repeat entries (even with the same kind) to weight random selection or
+  # alternate presets when using sequential mode.
   active: []
   # Example configuration:
   # active:

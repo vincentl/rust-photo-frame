@@ -285,22 +285,27 @@ The command prints the multiplicity assigned to each discovered photo and the fi
 
 ## Photo effect configuration
 
-The optional `photo-effect` task sits between the loader and the viewer. When enabled it reconstructs the decoded RGBA pixels, applies any configured effects, and forwards the modified image downstream. Leave `types` empty (or omit the block entirely) to short-circuit the stage and pass photos through untouched. The sample configuration ships with the stage disabled by default.
+The optional `photo-effect` task sits between the loader and the viewer. When enabled it reconstructs the decoded RGBA pixels, applies any configured effects, and forwards the modified image downstream. Leave `photo-effect.active` empty (or omit the block entirely) to short-circuit the stage and pass photos through untouched. Duplicate entries in `photo-effect.active` to weight the random picker or to alternate presets when cycling sequentially.
 
 ### Scheduling effects
 
-- **`types`** — List the effect kinds to rotate through. Supported values today: `print-simulation`. Set to `[]` to keep the stage disabled while preserving the scaffold for future effects.
-- **`type-selection`** — Optional. `random` (default) or `sequential`. `random` draws an effect independently for each slide, while `sequential` walks the `types` list in order and loops back to the first entry after the last.
-- **`options`** — Map of per-effect controls. Every effect referenced in `types` must appear here so the runtime can look up its parameters.
+| Key         | Required? | Default                                                       | Accepted values            | Effect |
+| ----------- | --------- | ------------------------------------------------------------- | -------------------------- | ------ |
+| `selection` | Optional  | `fixed` when `active` has one entry, otherwise `random`       | `fixed`, `random`, `sequential` | Controls how the viewer iterates through `active`. `fixed` locks to the first entry, `random` chooses independently per slide, and `sequential` advances in order and loops. |
+| `active`    | Yes       | —                                                             | Array of effect entry maps | Declares the effect variants that are eligible. Repeat entries—including duplicates of the same `kind`—to weight the random picker or alternate presets in sequential mode. |
 
-Example: enable the print simulation effect (disabled by default) while keeping its debug split active for quick before/after checks.
+> Legacy `photo-effect.types` and `photo-effect.options` keys are no longer supported. Copy each prior option into the `active` list with an explicit `kind` field to migrate.
+
+Example: enable the print-simulation effect and alternate between two lighting presets when the stage runs in sequential mode.
 
 ```yaml
 photo-effect:
-  types: [print-simulation]
-  type-selection: sequential
-  options:
-    print-simulation:
+  selection: sequential
+  active:
+    - kind: print-simulation
+      light-angle-degrees: 110.0
+    - kind: print-simulation
+      light-angle-degrees: 60.0
       debug: true
 ```
 
