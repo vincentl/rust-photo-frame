@@ -707,44 +707,50 @@ transition:
     - kind: push
       duration-ms: 640
       angle-list-degrees: [0.0, 180.0]
-      angle-selection: sequential
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     let TransitionSelection::Random(entries) = cfg.transition.selection() else {
         panic!("expected random transition selection");
     };
-    assert_eq!(entries.len(), 3);
+    assert_eq!(entries.len(), 4);
     assert_eq!(entries[0].index, 0);
     assert_eq!(entries[0].kind, TransitionKind::Fade);
     assert_eq!(entries[1].index, 1);
     assert_eq!(entries[1].kind, TransitionKind::Wipe);
     assert_eq!(entries[2].index, 2);
     assert_eq!(entries[2].kind, TransitionKind::Push);
+    assert_eq!(entries[3].index, 3);
+    assert_eq!(entries[3].kind, TransitionKind::Push);
     let selected: Vec<_> = cfg.transition.iter_selected().collect();
-    assert_eq!(selected.len(), 3);
+    assert_eq!(selected.len(), 4);
     let wipe = &selected[1];
     assert_eq!(wipe.option.duration().as_millis(), 600);
     match wipe.option.mode() {
         rust_photo_frame::config::TransitionMode::Wipe(cfg) => {
-            assert_eq!(cfg.angles.angles_deg.as_ref(), &[90.0]);
-            assert_eq!(
-                cfg.angles.selection,
-                rust_photo_frame::config::AngleSelection::Random
-            );
+            assert!((cfg.angles.base_deg - 90.0).abs() < f32::EPSILON);
+            assert!(cfg.angles.jitter_deg.abs() < f32::EPSILON);
             assert!((cfg.softness - 0.1).abs() < f32::EPSILON);
         }
         _ => panic!("expected wipe transition"),
     }
 
-    let push = &selected[2];
-    match push.option.mode() {
+    let push_first = &selected[2];
+    match push_first.option.mode() {
         rust_photo_frame::config::TransitionMode::Push(cfg) => {
-            assert_eq!(cfg.angles.angles_deg.as_ref(), &[0.0, 180.0]);
-            assert_eq!(
-                cfg.angles.selection,
-                rust_photo_frame::config::AngleSelection::Sequential
-            );
+            assert!((cfg.angles.base_deg - 0.0).abs() < f32::EPSILON);
+            assert!(cfg.angles.jitter_deg.abs() < f32::EPSILON);
+            assert_eq!(push_first.option.duration().as_millis(), 640);
+        }
+        _ => panic!("expected push transition"),
+    }
+
+    let push_second = &selected[3];
+    match push_second.option.mode() {
+        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+            assert!((cfg.angles.base_deg - 180.0).abs() < f32::EPSILON);
+            assert!(cfg.angles.jitter_deg.abs() < f32::EPSILON);
+            assert_eq!(push_second.option.duration().as_millis(), 640);
         }
         _ => panic!("expected push transition"),
     }
@@ -789,26 +795,28 @@ transition:
     - kind: push
       duration-ms: 640
       angle-list-degrees: [0.0, 180.0]
-      angle-selection: sequential
     - kind: wipe
       duration-ms: 520
       angle-list-degrees: [90.0]
     - kind: push
       duration-ms: 640
       angle-list-degrees: [0.0, 180.0]
-      angle-selection: sequential
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     match cfg.transition.selection() {
         TransitionSelection::Sequential { entries, .. } => {
-            assert_eq!(entries.len(), 3);
+            assert_eq!(entries.len(), 5);
             assert_eq!(entries[0].index, 0);
             assert_eq!(entries[0].kind, TransitionKind::Push);
             assert_eq!(entries[1].index, 1);
-            assert_eq!(entries[1].kind, TransitionKind::Wipe);
+            assert_eq!(entries[1].kind, TransitionKind::Push);
             assert_eq!(entries[2].index, 2);
-            assert_eq!(entries[2].kind, TransitionKind::Push);
+            assert_eq!(entries[2].kind, TransitionKind::Wipe);
+            assert_eq!(entries[3].index, 3);
+            assert_eq!(entries[3].kind, TransitionKind::Push);
+            assert_eq!(entries[4].index, 4);
+            assert_eq!(entries[4].kind, TransitionKind::Push);
         }
         other => panic!("expected sequential transition selection, got {other:?}"),
     }
@@ -818,27 +826,57 @@ transition:
     let second = cfg.transition.select_active(&mut rng);
     let third = cfg.transition.select_active(&mut rng);
     let fourth = cfg.transition.select_active(&mut rng);
+    let fifth = cfg.transition.select_active(&mut rng);
+    let sixth = cfg.transition.select_active(&mut rng);
 
     assert_eq!(first.entry.index, 0);
     assert_eq!(first.entry.kind, TransitionKind::Push);
     match first.option.mode() {
-        rust_photo_frame::config::TransitionMode::Push(_) => {}
+        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+            assert!((cfg.angles.base_deg - 0.0).abs() < f32::EPSILON);
+        }
         _ => panic!("expected first transition to be push"),
     }
     assert_eq!(second.entry.index, 1);
-    assert_eq!(second.entry.kind, TransitionKind::Wipe);
+    assert_eq!(second.entry.kind, TransitionKind::Push);
     match second.option.mode() {
-        rust_photo_frame::config::TransitionMode::Wipe(_) => {}
-        _ => panic!("expected second transition to be wipe"),
+        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+            assert!((cfg.angles.base_deg - 180.0).abs() < f32::EPSILON);
+        }
+        _ => panic!("expected second transition to be push"),
     }
     assert_eq!(third.entry.index, 2);
-    assert_eq!(third.entry.kind, TransitionKind::Push);
+    assert_eq!(third.entry.kind, TransitionKind::Wipe);
     match third.option.mode() {
-        rust_photo_frame::config::TransitionMode::Push(_) => {}
-        _ => panic!("expected third transition to return to push"),
+        rust_photo_frame::config::TransitionMode::Wipe(cfg) => {
+            assert!((cfg.angles.base_deg - 90.0).abs() < f32::EPSILON);
+        }
+        _ => panic!("expected third transition to be wipe"),
     }
-    assert_eq!(fourth.entry.index, 0);
+    assert_eq!(fourth.entry.index, 3);
     assert_eq!(fourth.entry.kind, TransitionKind::Push);
+    match fourth.option.mode() {
+        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+            assert!((cfg.angles.base_deg - 0.0).abs() < f32::EPSILON);
+        }
+        _ => panic!("expected fourth transition to be push"),
+    }
+    assert_eq!(fifth.entry.index, 4);
+    assert_eq!(fifth.entry.kind, TransitionKind::Push);
+    match fifth.option.mode() {
+        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+            assert!((cfg.angles.base_deg - 180.0).abs() < f32::EPSILON);
+        }
+        _ => panic!("expected fifth transition to be push"),
+    }
+    assert_eq!(sixth.entry.index, 0);
+    assert_eq!(sixth.entry.kind, TransitionKind::Push);
+    match sixth.option.mode() {
+        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+            assert!((cfg.angles.base_deg - 0.0).abs() < f32::EPSILON);
+        }
+        _ => panic!("expected sixth transition to wrap to push"),
+    }
 }
 
 #[test]
@@ -1004,29 +1042,34 @@ fn push_transition_configures_multiple_angles() {
     let yaml = r#"
 photo-library-path: "/photos"
 transition:
-  selection: fixed
   active:
     - kind: push
       duration-ms: 725
       angle-list-degrees: [90.0, 270.0]
-      angle-selection: sequential
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    let selected = cfg
-        .transition
-        .primary_selected()
-        .expect("expected push transition option");
-    assert_eq!(selected.entry.kind, TransitionKind::Push);
-    assert_eq!(selected.option.duration().as_millis(), 725);
-    match selected.option.mode() {
+    let TransitionSelection::Random(entries) = cfg.transition.selection() else {
+        panic!("expected canonicalized random selection");
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].kind, TransitionKind::Push);
+    assert_eq!(entries[1].kind, TransitionKind::Push);
+
+    let selected: Vec<_> = cfg.transition.iter_selected().collect();
+    assert_eq!(selected.len(), 2);
+    assert_eq!(selected[0].option.duration().as_millis(), 725);
+    assert_eq!(selected[1].option.duration().as_millis(), 725);
+    match selected[0].option.mode() {
         rust_photo_frame::config::TransitionMode::Push(push) => {
-            assert_eq!(push.angles.angles_deg.as_ref(), &[90.0, 270.0]);
-            assert_eq!(
-                push.angles.selection,
-                rust_photo_frame::config::AngleSelection::Sequential
-            );
+            assert!((push.angles.base_deg - 90.0).abs() < f32::EPSILON);
         }
-        _ => panic!("expected push transition"),
+        _ => panic!("expected first push transition"),
+    }
+    match selected[1].option.mode() {
+        rust_photo_frame::config::TransitionMode::Push(push) => {
+            assert!((push.angles.base_deg - 270.0).abs() < f32::EPSILON);
+        }
+        _ => panic!("expected second push transition"),
     }
 }
