@@ -2467,29 +2467,88 @@ pub fn run_windowed(
                                         let stroke_rgba = *stroke_rgba;
                                         let stroke_width = *stroke_width;
                                         let tolerance = *tolerance;
-                                        let base_progress = state.progress();
-                                        let timeline = if matches!(direction, IrisDirection::Close) {
-                                            1.0 - base_progress
+                                        if have_current && have_next {
+                                            let base_progress = state.progress();
+                                            let timeline =
+                                                if matches!(direction, IrisDirection::Close) {
+                                                    1.0 - base_progress
+                                                } else {
+                                                    base_progress
+                                                };
+                                            let ease = |value: f32| {
+                                                let clamped = value.clamp(0.0, 1.0);
+                                                clamped * clamped * (3.0 - 2.0 * clamped)
+                                            };
+                                            let closeness = if timeline < 0.5 {
+                                                ease(timeline * 2.0)
+                                            } else {
+                                                1.0 - ease((timeline - 0.5) * 2.0)
+                                            };
+                                            let stage = if timeline < 0.5 {
+                                                IrisStage::Closing
+                                            } else {
+                                                IrisStage::Opening
+                                            };
+                                            {
+                                                let clear_pass = encoder.begin_render_pass(
+                                                    &wgpu::RenderPassDescriptor {
+                                                        label: Some("iris-clear-pass"),
+                                                        color_attachments: &[Some(
+                                                            wgpu::RenderPassColorAttachment {
+                                                                view: &view,
+                                                                depth_slice: None,
+                                                                resolve_target: None,
+                                                                ops: wgpu::Operations {
+                                                                    load: wgpu::LoadOp::Clear(
+                                                                        self.clear_color,
+                                                                    ),
+                                                                    store: wgpu::StoreOp::Store,
+                                                                },
+                                                            },
+                                                        )],
+                                                        depth_stencil_attachment: None,
+                                                        occlusion_query_set: None,
+                                                        timestamp_writes: None,
+                                                    },
+                                                );
+                                                drop(clear_pass);
+                                            }
+                                            let rotation_sign =
+                                                if matches!(direction, IrisDirection::Close) {
+                                                    -1.0
+                                                } else {
+                                                    1.0
+                                                };
+                                            let params = IrisDrawParams {
+                                                screen_size: [screen_w, screen_h],
+                                                blades,
+                                                closeness,
+                                                tolerance,
+                                                stroke_width,
+                                                rotation: rotate_radians
+                                                    * base_progress
+                                                    * rotation_sign,
+                                                fill_color: fill_rgba,
+                                                stroke_color: stroke_rgba,
+                                                stage,
+                                                current_rect,
+                                                next_rect,
+                                                current_bind,
+                                                next_bind,
+                                            };
+                                            iris_rendered = gpu.iris.draw(
+                                                &gpu.device,
+                                                &gpu.queue,
+                                                &mut encoder,
+                                                &view,
+                                                params,
+                                            );
+                                            if !iris_rendered {
+                                                should_draw_quad = have_current;
+                                            }
                                         } else {
-                                            base_progress
-                                        };
-                                        let ease = |value: f32| {
-                                            let clamped = value.clamp(0.0, 1.0);
-                                            clamped * clamped * (3.0 - 2.0 * clamped)
-                                        };
-                                        let closeness = if timeline < 0.5 {
-                                            ease(timeline * 2.0)
-                                        } else {
-                                            1.0 - ease((timeline - 0.5) * 2.0)
-                                        };
-                                        // Use analytic shader-based iris mask for composition to avoid tessellation artifacts.
-                                        uniforms.kind = TransitionKind::Iris.as_index();
-                                        uniforms.t = closeness;
-                                        uniforms.iris_blades = blades;
-                                        uniforms.iris_rotate_rad = rotate_radians;
-                                        uniforms.iris_direction = if matches!(direction, IrisDirection::Close) { 1 } else { 0 };
-                                        should_draw_quad = have_current || have_next;
-                                        iris_rendered = false;
+                                            should_draw_quad = have_current;
+                                        }
                                     }
                                     _ => {
                                         should_draw_quad = have_current || have_next;
