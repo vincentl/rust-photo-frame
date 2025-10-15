@@ -281,6 +281,9 @@ struct SurfaceReadyGate {
     stable_since: Option<Instant>,
 }
 
+// Enforces minimum stability before declaring the surface ready.
+const SURFACE_READY_DWELL: Duration = Duration::from_millis(120);
+
 impl SurfaceReadyGate {
     fn reset(&mut self) {
         self.ready = false;
@@ -325,7 +328,7 @@ impl SurfaceReadyGate {
         // Require two consecutive identical, non-zero reports and a small dwell time
         let dwell_met = self
             .stable_since
-            .map(|t| Instant::now().saturating_duration_since(t) >= Duration::from_millis(120))
+            .map(|t| Instant::now().saturating_duration_since(t) >= SURFACE_READY_DWELL)
             .unwrap_or(false);
         let now_ready = self.awaiting && self.same_count >= 2 && dwell_met;
         if now_ready {
