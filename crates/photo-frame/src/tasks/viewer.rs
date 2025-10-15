@@ -165,14 +165,7 @@ impl TransitionState {
     }
 }
 
-// Smooth iris timeline across both stages (0→1 regardless of Closing/Opening)
-#[inline]
-fn iris_timeline(base_progress: f32, stage: IrisStage) -> f32 {
-    match stage {
-        IrisStage::Closing => 1.0 - base_progress,
-        IrisStage::Opening => base_progress,
-    }
-}
+
 
 #[derive(Clone)]
 struct MatParams {
@@ -1788,6 +1781,16 @@ pub fn run_windowed(
                 return;
             }
 
+            // Keep surface configuration and readiness in sync even if winit
+            // doesn't deliver an explicit resize event (Wayland/Sway can do this).
+            self.refresh_surface_config_from_window();
+            if self.surface_configured && self.pending_scene_enter {
+                self.pending_scene_enter = false;
+                let _ = self.with_active_scene(|scene, ctx| {
+                    scene.enter(ctx);
+                });
+            }
+
             self.drain_mat_results();
 
             let mode_kind = self.mode_kind();
@@ -1806,6 +1809,26 @@ pub fn run_windowed(
                 scene.process_tick(ctx);
             });
             self.log_event_loop_state("process_tick_end");
+        }
+
+        fn refresh_surface_config_from_window(&mut self) {
+            let (Some(window), Some(gpu)) = (self.window.as_ref(), self.gpu.as_mut()) else {
+                return;
+            };
+            let size = window.inner_size();
+            if size.width == 0 || size.height == 0 {
+                gpu.config.width = 0;
+                gpu.config.height = 0;
+                self.surface_gate.arm_for_initial_report();
+                let _ = self.update_surface_ready(0, 0, SurfaceReport::ConfigureEvent);
+                return;
+            }
+            if gpu.config.width != size.width || gpu.config.height != size.height {
+                gpu.config.width = size.width;
+                gpu.config.height = size.height;
+                gpu.surface.configure(&gpu.device, &gpu.config);
+            }
+            let _ = self.update_surface_ready(size.width, size.height, SurfaceReport::ConfigureEvent);
         }
 
         fn drain_mat_results(&mut self) {
