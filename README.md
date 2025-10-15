@@ -98,6 +98,8 @@ All configuration options—from playlist weighting and greeting screens to tran
 
 > **Breaking change:** The `transition` and `matting` blocks now use a `selection` + `active` schema. Older `types`/`options` layouts no longer parse—recreate those entries with explicit `kind` fields as shown in the updated configuration guide.
 
+> **Matting at a glance:** The viewer walks `matting.active` from top to bottom, expanding inline palettes (such as `colors` arrays) into a canonical list of presets. Random and sequential selection both operate on that expanded list, so weighting or rotation happens after the inline swatches unfold. See the [full matting documentation](docs/configuration.md#matting-configuration) for details and examples.
+
 Need help wiring the sleep schedule to Raspberry Pi + Dell HDMI hardware? The dedicated power guide covers DPMS commands, troubleshooting, and verification steps. [Power & sleep details →](docs/power-and-sleep.md)
 
 ## Fabrication

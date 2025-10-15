@@ -121,7 +121,7 @@ playlist:
 matting:
   # Choose how the viewer advances through the mats below: fixed, random, or sequential.
   selection: random
-  # Provide one or more mat definitions. Repeat a kind to weight or alternate variants.
+  # Provide one or more mat definitions. Repeat a kind to weight it in the canonical slot list (sequential reuse still hits the same preset).
   active:
     - kind: fixed-color
       colors:
