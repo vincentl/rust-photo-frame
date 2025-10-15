@@ -539,10 +539,16 @@ pub struct MattingOptions {
     pub runtime: MattingRuntime,
 }
 
+/// Canonicalized matting configuration entries and their selection metadata.
+///
+/// Deserialization expands palette-based definitions (e.g. multiple
+/// `fixed-color` entries) into the concrete `options` stored here. Each entry
+/// in `selection` references these canonical slots by index so duplicates can
+/// coexist without clobbering configuration fields.
 #[derive(Debug, Clone)]
 pub struct MattingConfig {
     selection: MattingSelection,
-    options: BTreeMap<MattingKind, MattingOptions>,
+    options: Vec<MattingOptions>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -703,23 +709,54 @@ impl<'a, K: Copy> Iterator for SelectionEntries<'a, K> {
     }
 }
 
-struct SelectedIter<'a, K: Copy + Ord, O> {
-    entries: SelectionEntries<'a, K>,
-    options: &'a BTreeMap<K, O>,
+trait SelectedLookup<K: Copy, O> {
+    fn lookup(&self, entry: SelectionEntry<K>) -> Option<&O>;
 }
 
-impl<'a, K: Copy + Ord, O> SelectedIter<'a, K, O> {
-    fn new(entries: SelectionEntries<'a, K>, options: &'a BTreeMap<K, O>) -> Self {
-        Self { entries, options }
+impl<K: Copy, O> SelectedLookup<K, O> for [O] {
+    fn lookup(&self, entry: SelectionEntry<K>) -> Option<&O> {
+        self.get(entry.index)
     }
 }
 
-impl<'a, K: Copy + Ord, O> Iterator for SelectedIter<'a, K, O> {
+impl<K: Copy + Ord, O> SelectedLookup<K, O> for BTreeMap<K, O> {
+    fn lookup(&self, entry: SelectionEntry<K>) -> Option<&O> {
+        self.get(&entry.kind)
+    }
+}
+
+struct SelectedIter<'a, K: Copy, O, S>
+where
+    S: SelectedLookup<K, O> + ?Sized,
+{
+    entries: SelectionEntries<'a, K>,
+    options: &'a S,
+    marker: std::marker::PhantomData<&'a O>,
+}
+
+impl<'a, K: Copy, O, S> SelectedIter<'a, K, O, S>
+where
+    S: SelectedLookup<K, O> + ?Sized,
+{
+    fn new(entries: SelectionEntries<'a, K>, options: &'a S) -> Self {
+        Self {
+            entries,
+            options,
+            marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<'a, K: Copy, O, S> Iterator for SelectedIter<'a, K, O, S>
+where
+    O: 'a,
+    S: SelectedLookup<K, O> + ?Sized,
+{
     type Item = SelectedOption<'a, K, O>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(entry) = self.entries.next() {
-            if let Some(option) = self.options.get(&entry.kind) {
+            if let Some(option) = self.options.lookup(entry) {
                 return Some(SelectedOption { entry, option });
             }
         }
@@ -765,39 +802,6 @@ pub enum FixedImagePathSelection {
 impl Default for FixedImagePathSelection {
     fn default() -> Self {
         Self::Sequential
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct FixedImageRuntime {
-    backgrounds: Arc<[Arc<FixedImageBackground>]>,
-    selection: FixedImagePathSelection,
-    sequential: SequentialState,
-}
-
-impl FixedImageRuntime {
-    fn new(
-        backgrounds: Vec<Arc<FixedImageBackground>>,
-        selection: FixedImagePathSelection,
-    ) -> Self {
-        Self {
-            backgrounds: Arc::from(backgrounds),
-            selection,
-            sequential: SequentialState::default(),
-        }
-    }
-
-    fn select<R: Rng + ?Sized>(&self, rng: &mut R) -> Option<Arc<FixedImageBackground>> {
-        if self.backgrounds.is_empty() {
-            return None;
-        }
-        match self.selection {
-            FixedImagePathSelection::Sequential => {
-                let index = self.sequential.next(self.backgrounds.len());
-                Some(Arc::clone(&self.backgrounds[index]))
-            }
-            FixedImagePathSelection::Random => self.backgrounds.iter().choose(rng).cloned(),
-        }
     }
 }
 
@@ -885,106 +889,24 @@ impl<'de> Deserialize<'de> for StudioMatColor {
     }
 }
 
-#[derive(Debug, Clone)]
-struct FixedColorRuntime {
-    palette: Arc<[[u8; 3]]>,
-    selection: ColorSelection,
-    sequential: SequentialState,
-}
-
-impl FixedColorRuntime {
-    fn new(colors: Vec<[u8; 3]>, selection: ColorSelection) -> Self {
-        Self {
-            palette: colors.into(),
-            selection,
-            sequential: SequentialState::default(),
-        }
-    }
-
-    fn select<R: Rng + ?Sized>(&self, rng: &mut R) -> [u8; 3] {
-        if self.palette.is_empty() {
-            return [0, 0, 0];
-        }
-        match self.selection {
-            ColorSelection::Sequential => {
-                let index = self.sequential.next(self.palette.len());
-                self.palette[index]
-            }
-            ColorSelection::Random => self
-                .palette
-                .iter()
-                .copied()
-                .choose(rng)
-                .expect("non-empty fixed color palette"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct StudioRuntime {
-    palette: Arc<[StudioMatColor]>,
-    selection: ColorSelection,
-    sequential: SequentialState,
-}
-
-impl StudioRuntime {
-    fn new(colors: Vec<StudioMatColor>, selection: ColorSelection) -> Self {
-        Self {
-            palette: colors.into(),
-            selection,
-            sequential: SequentialState::default(),
-        }
-    }
-
-    fn select<R: Rng + ?Sized>(&self, rng: &mut R, fallback: [f32; 3]) -> [f32; 3] {
-        if self.palette.is_empty() {
-            return fallback;
-        }
-        let choice = match self.selection {
-            ColorSelection::Sequential => {
-                let index = self.sequential.next(self.palette.len());
-                self.palette[index]
-            }
-            ColorSelection::Random => self
-                .palette
-                .iter()
-                .copied()
-                .choose(rng)
-                .expect("non-empty studio color palette"),
-        };
-        choice.resolve(fallback)
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct MattingRuntime {
-    fixed_color: Option<FixedColorRuntime>,
-    studio: Option<StudioRuntime>,
-    fixed_image: Option<FixedImageRuntime>,
+    fixed_color: Option<[u8; 3]>,
+    studio_color: Option<StudioMatColor>,
+    fixed_image: Option<Arc<FixedImageBackground>>,
 }
 
 impl MattingRuntime {
-    pub fn select_fixed_color<R: Rng + ?Sized>(&self, rng: &mut R) -> Option<[u8; 3]> {
-        self.fixed_color.as_ref().map(|runtime| runtime.select(rng))
+    pub fn fixed_color(&self) -> Option<[u8; 3]> {
+        self.fixed_color
     }
 
-    pub fn select_studio_color<R: Rng + ?Sized>(
-        &self,
-        rng: &mut R,
-        fallback: [f32; 3],
-    ) -> Option<[f32; 3]> {
-        self.studio
-            .as_ref()
-            .map(|runtime| runtime.select(rng, fallback))
+    pub fn studio_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
+        self.studio_color.map(|color| color.resolve(fallback))
     }
 
-    pub fn select_fixed_image<R: Rng + ?Sized>(
-        &self,
-        rng: &mut R,
-    ) -> Option<Arc<FixedImageBackground>> {
-        self.fixed_image
-            .as_ref()
-            .and_then(|runtime| runtime.select(rng))
+    pub fn fixed_image(&self) -> Option<Arc<FixedImageBackground>> {
+        self.fixed_image.clone()
     }
 }
 
@@ -1193,14 +1115,15 @@ impl MattingOptions {
         if let MattingMode::FixedColor {
             colors,
             color_selection,
+            ..
         } = &self.style
         {
+            let _ = color_selection;
             ensure!(
                 !colors.is_empty(),
                 "matting.fixed-color.colors must include at least one entry",
             );
-            self.runtime.fixed_color =
-                Some(FixedColorRuntime::new(colors.clone(), *color_selection));
+            self.runtime.fixed_color = colors.first().copied();
         }
         if let MattingMode::Studio {
             colors,
@@ -1208,11 +1131,12 @@ impl MattingOptions {
             ..
         } = &self.style
         {
+            let _ = color_selection;
             ensure!(
                 !colors.is_empty(),
                 "matting.studio.colors must include at least one entry",
             );
-            self.runtime.studio = Some(StudioRuntime::new(colors.clone(), *color_selection));
+            self.runtime.studio_color = colors.first().copied();
         }
         if let MattingMode::FixedImage {
             paths,
@@ -1220,14 +1144,17 @@ impl MattingOptions {
             ..
         } = &self.style
         {
+            let _ = path_selection;
             if paths.is_empty() {
                 return Ok(());
             }
 
-            let mut backgrounds = Vec::with_capacity(paths.len());
             for path in paths {
                 match FixedImageBackground::new(path.clone()) {
-                    Ok(background) => backgrounds.push(Arc::new(background)),
+                    Ok(background) => {
+                        self.runtime.fixed_image = Some(Arc::new(background));
+                        break;
+                    }
                     Err(err) => {
                         tracing::warn!(
                             path = %path.display(),
@@ -1238,13 +1165,10 @@ impl MattingOptions {
                 }
             }
 
-            if backgrounds.is_empty() {
+            if self.runtime.fixed_image.is_none() {
                 tracing::warn!(
                     "all configured fixed-image backgrounds failed to load; disabling fixed-image matting"
                 );
-            } else {
-                self.runtime.fixed_image =
-                    Some(FixedImageRuntime::new(backgrounds, *path_selection));
             }
         }
         Ok(())
@@ -1326,7 +1250,7 @@ impl MattingOptions {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct MattingOptionBuilder {
     minimum_mat_percentage: Option<f32>,
     max_upscale_factor: Option<f32>,
@@ -1561,10 +1485,59 @@ where
     Ok(())
 }
 
+impl MattingOptionBuilder {
+    fn into_canonical_options(self, kind: MattingKind) -> Vec<MattingOptions> {
+        match kind {
+            MattingKind::FixedColor => {
+                if let Some(colors) = &self.fixed_colors {
+                    if colors.len() > 1 {
+                        let mut options = Vec::with_capacity(colors.len());
+                        for color in colors.iter().copied() {
+                            let mut builder = self.clone();
+                            builder.fixed_colors = Some(vec![color]);
+                            options.push(MattingOptions::with_kind(kind, builder));
+                        }
+                        return options;
+                    }
+                }
+            }
+            MattingKind::Studio => {
+                if let Some(colors) = &self.studio_colors {
+                    if colors.len() > 1 {
+                        let mut options = Vec::with_capacity(colors.len());
+                        for color in colors.iter().copied() {
+                            let mut builder = self.clone();
+                            builder.studio_colors = Some(vec![color]);
+                            options.push(MattingOptions::with_kind(kind, builder));
+                        }
+                        return options;
+                    }
+                }
+            }
+            MattingKind::FixedImage => {
+                if let Some(paths) = &self.fixed_image_paths {
+                    if paths.len() > 1 {
+                        let mut options = Vec::with_capacity(paths.len());
+                        for path in paths.iter().cloned() {
+                            let mut builder = self.clone();
+                            builder.fixed_image_paths = Some(vec![path]);
+                            options.push(MattingOptions::with_kind(kind, builder));
+                        }
+                        return options;
+                    }
+                }
+            }
+            MattingKind::Blur => {}
+        }
+
+        vec![MattingOptions::with_kind(kind, self)]
+    }
+}
+
 impl Default for MattingConfig {
     fn default() -> Self {
-        let mut options = BTreeMap::new();
-        options.insert(MattingKind::FixedColor, MattingOptions::default());
+        let mut options = Vec::new();
+        options.push(MattingOptions::default());
         Self {
             selection: MattingSelection::Fixed(SelectionEntry {
                 index: 0,
@@ -1623,12 +1596,9 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
         }
 
         let active_entries = active.ok_or_else(|| de::Error::missing_field("active"))?;
-        let resolved_selection =
-            resolve_pipeline_selection::<A::Error>(selection, active_entries.len(), "matting")?;
-
-        let mut options = BTreeMap::new();
-        let mut entries = Vec::with_capacity(active_entries.len());
-        for (index, entry) in active_entries.into_iter().enumerate() {
+        let mut options = Vec::new();
+        let mut entries = Vec::new();
+        for entry in active_entries.into_iter() {
             let kind = entry.kind;
             let mut builder = MattingOptionBuilder::default();
             for (field, value) in entry.fields {
@@ -1639,10 +1609,17 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
                     "matting.active entry for fixed-image must include a path",
                 ));
             }
-            let option = MattingOptions::with_kind(kind, builder);
-            options.insert(kind, option);
-            entries.push(SelectionEntry { index, kind });
+            let canonical = builder.into_canonical_options(kind);
+            for option in canonical {
+                let index = options.len();
+                let kind = option.kind();
+                options.push(option);
+                entries.push(SelectionEntry { index, kind });
+            }
         }
+
+        let resolved_selection =
+            resolve_pipeline_selection::<A::Error>(selection, options.len(), "matting")?;
 
         let entries: Arc<[SelectionEntry<MattingKind>]> = entries.into();
 
@@ -1666,7 +1643,7 @@ impl MattingConfig {
     }
 
     /// Exposed for integration tests to inspect the configured matting options.
-    pub fn options(&self) -> &BTreeMap<MattingKind, MattingOptions> {
+    pub fn options(&self) -> &[MattingOptions] {
         &self.options
     }
 
@@ -1681,7 +1658,7 @@ impl MattingConfig {
     }
 
     pub fn iter_selected(&self) -> impl Iterator<Item = SelectedMatting<'_>> {
-        SelectedIter::new(self.selection_entries(), &self.options)
+        SelectedIter::new(self.selection_entries(), self.options.as_slice())
     }
 
     pub fn primary_selected(&self) -> Option<SelectedMatting<'_>> {
@@ -1709,7 +1686,7 @@ impl MattingConfig {
 
         let option = self
             .options
-            .get(&entry.kind)
+            .get(entry.index)
             .expect("validated matting selection should resolve to an option");
         SelectedOption { entry, option }
     }
@@ -1723,7 +1700,7 @@ impl MattingConfig {
             !self.options().is_empty(),
             "matting configuration must include at least one active entry"
         );
-        for option in self.options.values_mut() {
+        for option in self.options.iter_mut() {
             option
                 .prepare_runtime()
                 .context("failed to prepare matting resources")?;

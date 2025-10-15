@@ -161,31 +161,130 @@ matting:
     let MattingSelection::Random(entries) = cfg.matting.selection() else {
         panic!("expected random matting selection");
     };
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].index, 0);
     assert_eq!(entries[0].kind, MattingKind::FixedColor);
     assert_eq!(entries[1].index, 1);
-    assert_eq!(entries[1].kind, MattingKind::Blur);
+    assert_eq!(entries[1].kind, MattingKind::FixedColor);
+    assert_eq!(entries[2].index, 2);
+    assert_eq!(entries[2].kind, MattingKind::Blur);
     let selected: Vec<_> = cfg.matting.iter_selected().collect();
-    assert_eq!(selected.len(), 2);
-    let fixed = &selected[0];
+    assert_eq!(selected.len(), 3);
+    let fixed_first = &selected[0];
     if let rust_photo_frame::config::MattingMode::FixedColor {
         colors,
         color_selection,
-    } = &fixed.option.style
+    } = &fixed_first.option.style
     {
-        assert_eq!(colors.as_slice(), &[[10, 20, 30], [5, 15, 25]]);
+        assert_eq!(colors.as_slice(), &[[10, 20, 30]]);
         assert_eq!(*color_selection, ColorSelection::Random);
     } else {
         panic!("expected fixed-color matting");
     }
-    let blur = &selected[1];
+    let fixed_second = &selected[1];
+    if let rust_photo_frame::config::MattingMode::FixedColor { colors, .. } =
+        &fixed_second.option.style
+    {
+        assert_eq!(colors.as_slice(), &[[5, 15, 25]]);
+    } else {
+        panic!("expected second fixed-color matting");
+    }
+    let blur = &selected[2];
     if let rust_photo_frame::config::MattingMode::Blur { sigma, .. } = blur.option.style {
         assert!((sigma - 12.0).abs() < f32::EPSILON);
         assert!((blur.option.minimum_mat_percentage - 7.5).abs() < f32::EPSILON);
     } else {
         panic!("expected blur matting");
     }
+}
+
+#[test]
+fn multiple_fixed_color_entries_preserve_all_options() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  selection: random
+  active:
+    - kind: fixed-color
+      colors:
+        - [1, 2, 3]
+    - kind: fixed-color
+      colors:
+        - [4, 5, 6]
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected: Vec<_> = cfg.matting.iter_selected().collect();
+    assert_eq!(selected.len(), 2);
+    assert_eq!(selected[0].entry.index, 0);
+    assert_eq!(selected[0].entry.kind, MattingKind::FixedColor);
+    assert_eq!(selected[1].entry.index, 1);
+    assert_eq!(selected[1].entry.kind, MattingKind::FixedColor);
+    let palettes: Vec<_> = selected
+        .iter()
+        .map(|selected| match &selected.option.style {
+            MattingMode::FixedColor { colors, .. } => colors.clone(),
+            other => panic!("expected fixed-color entry, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(palettes, vec![vec![[1, 2, 3]], vec![[4, 5, 6]]]);
+}
+
+#[test]
+fn inline_fixed_color_array_expands_to_multiple_entries() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting: { selection: random, active: [ { kind: fixed-color, colors: [[8, 16, 24], [32, 40, 48]], color-selection: random } ] }
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let MattingSelection::Random(entries) = cfg.matting.selection() else {
+        panic!("expected random matting selection");
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].index, 0);
+    assert_eq!(entries[1].index, 1);
+    let selected: Vec<_> = cfg.matting.iter_selected().collect();
+    assert_eq!(selected.len(), 2);
+    let first_colors = match &selected[0].option.style {
+        MattingMode::FixedColor { colors, .. } => colors.clone(),
+        other => panic!("expected fixed-color entry, got {other:?}"),
+    };
+    let second_colors = match &selected[1].option.style {
+        MattingMode::FixedColor { colors, .. } => colors.clone(),
+        other => panic!("expected fixed-color entry, got {other:?}"),
+    };
+    assert_eq!(first_colors, vec![[8, 16, 24]]);
+    assert_eq!(second_colors, vec![[32, 40, 48]]);
+}
+
+#[test]
+fn sequential_iteration_over_expanded_fixed_colors() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  selection: sequential
+  active:
+    - kind: fixed-color
+      colors:
+        - [10, 20, 30]
+        - [40, 50, 60]
+        - [70, 80, 90]
+"#;
+
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let MattingSelection::Sequential { entries, .. } = cfg.matting.selection() else {
+        panic!("expected sequential matting selection");
+    };
+    assert_eq!(entries.len(), 3);
+    let indices: Vec<_> = entries.iter().map(|entry| entry.index).collect();
+    assert_eq!(indices, vec![0, 1, 2]);
+
+    let mut rng = StdRng::seed_from_u64(42);
+    let cycle: Vec<_> = (0..5)
+        .map(|_| cfg.matting.select_active(&mut rng).entry.index)
+        .collect();
+    assert_eq!(cycle, vec![0, 1, 2, 0, 1]);
 }
 
 #[test]
@@ -238,47 +337,58 @@ matting:
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     match cfg.matting.selection() {
         MattingSelection::Sequential { entries, .. } => {
-            assert_eq!(entries.len(), 3);
-            assert_eq!(entries[0].index, 0);
-            assert_eq!(entries[0].kind, MattingKind::FixedColor);
-            assert_eq!(entries[1].index, 1);
-            assert_eq!(entries[1].kind, MattingKind::Blur);
-            assert_eq!(entries[2].index, 2);
-            assert_eq!(entries[2].kind, MattingKind::FixedColor);
+            assert_eq!(entries.len(), 5);
+            let kinds: Vec<_> = entries.iter().map(|entry| entry.kind).collect();
+            assert_eq!(
+                kinds,
+                vec![
+                    MattingKind::FixedColor,
+                    MattingKind::FixedColor,
+                    MattingKind::Blur,
+                    MattingKind::FixedColor,
+                    MattingKind::FixedColor,
+                ]
+            );
+            let indexes: Vec<_> = entries.iter().map(|entry| entry.index).collect();
+            assert_eq!(indexes, vec![0, 1, 2, 3, 4]);
         }
         other => panic!("expected sequential matting selection, got {other:?}"),
     }
 
     let mut rng = StdRng::seed_from_u64(1);
-    let first = cfg.matting.select_active(&mut rng);
-    let second = cfg.matting.select_active(&mut rng);
-    let third = cfg.matting.select_active(&mut rng);
-    let fourth = cfg.matting.select_active(&mut rng);
+    let sequence: Vec<_> = (0..7)
+        .map(|_| cfg.matting.select_active(&mut rng))
+        .collect();
 
-    assert_eq!(first.entry.index, 0);
-    assert_eq!(first.entry.kind, MattingKind::FixedColor);
-    match &first.option.style {
-        rust_photo_frame::config::MattingMode::FixedColor {
-            color_selection, ..
-        } => {
-            assert_eq!(*color_selection, ColorSelection::Sequential);
-        }
-        _ => panic!("expected first matting option to be fixed-color"),
+    let indices: Vec<_> = sequence
+        .iter()
+        .map(|selected| selected.entry.index)
+        .collect();
+    assert_eq!(indices, vec![0, 1, 2, 3, 4, 0, 1]);
+    let kinds: Vec<_> = sequence
+        .iter()
+        .map(|selected| selected.entry.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            MattingKind::FixedColor,
+            MattingKind::FixedColor,
+            MattingKind::Blur,
+            MattingKind::FixedColor,
+            MattingKind::FixedColor,
+            MattingKind::FixedColor,
+            MattingKind::FixedColor,
+        ]
+    );
+    if let rust_photo_frame::config::MattingMode::FixedColor {
+        color_selection, ..
+    } = &sequence[0].option.style
+    {
+        assert_eq!(*color_selection, ColorSelection::Sequential);
+    } else {
+        panic!("expected first matting option to be fixed-color");
     }
-    assert_eq!(second.entry.index, 1);
-    assert_eq!(second.entry.kind, MattingKind::Blur);
-    match second.option.style {
-        rust_photo_frame::config::MattingMode::Blur { .. } => {}
-        _ => panic!("expected second matting option to be blur"),
-    }
-    assert_eq!(third.entry.index, 2);
-    assert_eq!(third.entry.kind, MattingKind::FixedColor);
-    match third.option.style {
-        rust_photo_frame::config::MattingMode::FixedColor { .. } => {}
-        _ => panic!("expected third matting option to repeat fixed-color"),
-    }
-    assert_eq!(fourth.entry.index, 0);
-    assert_eq!(fourth.entry.kind, MattingKind::FixedColor);
 }
 
 #[test]
@@ -300,7 +410,7 @@ fn parse_fixed_image_with_multiple_paths() {
         r#"
 photo-library-path: "/photos"
 matting:
-  selection: fixed
+  selection: sequential
   active:
     - kind: fixed-image
       path: ["{first}", "{second}"]
@@ -312,46 +422,50 @@ matting:
     );
 
     let cfg: Configuration = serde_yaml::from_str(&yaml).unwrap();
-    let selected = cfg
-        .matting
-        .primary_selected()
-        .expect("expected fixed-image matting");
-
-    match &selected.option.style {
-        MattingMode::FixedImage {
-            paths,
-            path_selection,
-            fit,
-        } => {
-            assert_eq!(paths, &vec![first.clone(), second.clone()]);
-            assert_eq!(*path_selection, FixedImagePathSelection::Sequential);
-            assert!(matches!(
+    let selected: Vec<_> = cfg.matting.iter_selected().collect();
+    assert_eq!(selected.len(), 2);
+    for (entry, path) in selected.iter().zip([&first, &second]) {
+        match &entry.option.style {
+            MattingMode::FixedImage {
+                paths,
+                path_selection,
                 fit,
-                rust_photo_frame::config::FixedImageFit::Contain
-            ));
+            } => {
+                assert_eq!(paths, &vec![path.clone()]);
+                assert_eq!(*path_selection, FixedImagePathSelection::Sequential);
+                assert!(matches!(
+                    fit,
+                    rust_photo_frame::config::FixedImageFit::Contain
+                ));
+            }
+            other => panic!("expected fixed-image matting, got {other:?}"),
         }
-        other => panic!("expected fixed-image matting, got {other:?}"),
     }
 
-    let mut mat = selected.option.clone();
-    mat.prepare_runtime().unwrap();
-    let mut rng = StdRng::seed_from_u64(1);
-    let bg0 = mat
+    let prepared: Vec<_> = selected
+        .iter()
+        .map(|selected| {
+            let mut option = selected.option.clone();
+            option.prepare_runtime().unwrap();
+            option
+        })
+        .collect();
+    let bg0 = prepared[0]
         .runtime
-        .select_fixed_image(&mut rng)
+        .fixed_image()
         .expect("expected first fixed background");
-    let bg1 = mat
+    let bg1 = prepared[1]
         .runtime
-        .select_fixed_image(&mut rng)
+        .fixed_image()
         .expect("expected second fixed background");
-    let bg2 = mat
-        .runtime
-        .select_fixed_image(&mut rng)
-        .expect("expected rotation to repeat");
-
     assert_eq!(bg0.path(), first.as_path());
     assert_eq!(bg1.path(), second.as_path());
-    assert_eq!(bg2.path(), first.as_path());
+
+    let mut rng = StdRng::seed_from_u64(1);
+    let cycle: Vec<_> = (0..3)
+        .map(|_| cfg.matting.select_active(&mut rng).entry.index)
+        .collect();
+    assert_eq!(cycle, vec![0, 1, 0]);
 }
 
 #[test]
@@ -394,10 +508,9 @@ matting:
 
     let mut mat = selected.option.clone();
     mat.prepare_runtime().unwrap();
-    let mut rng = StdRng::seed_from_u64(3);
     let bg = mat
         .runtime
-        .select_fixed_image(&mut rng)
+        .fixed_image()
         .expect("expected fixed background");
     assert_eq!(bg.path(), only.as_path());
 }
@@ -422,8 +535,7 @@ matting:
         .clone();
 
     mat.prepare_runtime().unwrap();
-    let mut rng = StdRng::seed_from_u64(5);
-    assert!(mat.runtime.select_fixed_image(&mut rng).is_none());
+    assert!(mat.runtime.fixed_image().is_none());
 }
 
 #[test]

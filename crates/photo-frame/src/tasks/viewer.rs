@@ -501,11 +501,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         ..
     } = &matting.style
     {
-        let mut rng = rand::rng();
-        let mat_color = matting
-            .runtime
-            .select_studio_color(&mut rng, avg_color)
-            .unwrap_or(avg_color);
+        let mat_color = matting.runtime.studio_color(avg_color).unwrap_or(avg_color);
         let mut bevel_px = bevel_width_px.max(0.0);
         let margin_x = (canvas_w as f32 * margin).round();
         let margin_y = (canvas_h as f32 * margin).round();
@@ -595,10 +591,9 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
 
     let mut background = match &matting.style {
         MattingMode::FixedColor { colors, .. } => {
-            let mut rng = rand::rng();
             let color = matting
                 .runtime
-                .select_fixed_color(&mut rng)
+                .fixed_color()
                 .or_else(|| colors.first().copied())
                 .unwrap_or([0, 0, 0]);
             let px = Rgba([color[0], color[1], color[2], 255]);
@@ -650,8 +645,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         }
         MattingMode::Studio { .. } => unreachable!(),
         MattingMode::FixedImage { fit, .. } => {
-            let mut rng = rand::rng();
-            if let Some(bg) = matting.runtime.select_fixed_image(&mut rng) {
+            if let Some(bg) = matting.runtime.fixed_image() {
                 match bg.canvas_for(*fit, canvas_w, canvas_h, max_dim) {
                     Ok(prepared) => prepared.as_ref().clone(),
                     Err(err) => {
@@ -3466,6 +3460,14 @@ mod tests {
         assert_eq!(mat_inflight, 0);
         assert!(wake.pending().is_empty());
         assert_eq!(deferred_images.len(), 1);
+    }
+
+    fn iris_stage_for_progress(progress: f32) -> IrisStage {
+        if progress < 0.5 {
+            IrisStage::Closing
+        } else {
+            IrisStage::Opening
+        }
     }
 
     #[test]
