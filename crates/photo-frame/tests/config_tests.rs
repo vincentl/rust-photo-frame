@@ -1,7 +1,6 @@
 use rand::{SeedableRng, rngs::StdRng};
 use rust_photo_frame::config::{
-    Configuration, MattingKind, MattingMode, MattingSelection, StudioMatColor, TransitionKind,
-    TransitionSelection,
+    Configuration, MattingKind, MattingMode, MattingSelection, PhotoEffectOptions, StudioMatColor, TransitionKind, TransitionSelection
 };
 use std::path::PathBuf;
 

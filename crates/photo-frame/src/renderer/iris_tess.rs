@@ -893,7 +893,6 @@ impl IrisRenderer {
         }
         let mask_bind = self.mask_bind.as_ref().unwrap();
 
-        // Mask pass
         {
             debug!(
                 stage = ?params.stage,
@@ -905,6 +904,40 @@ impl IrisRenderer {
                 mask_h = self.mask_target.as_ref().map(|m| m.size.1),
                 "iris_draw_begin",
             );
+            // Mask pass - render blade geometry to mask texture
+            let mask_view = &self.mask_target.as_ref().unwrap().view;
+            {
+                let mut mask_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("iris-mask-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: mask_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), // 0.0 = show current
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                
+                mask_pass.set_pipeline(&self.mask_pipeline);
+                mask_pass.set_bind_group(0, &self.blade_uniform_bind, &[]);
+                
+                if let (Some(vbuf), Some(ibuf)) = (&self.fill_vertex, &self.fill_index) {
+                    if self.fill_index_count > 0 {
+                        mask_pass.set_vertex_buffer(0, vbuf.slice(..));
+                        if let Some(inst) = &self.instance_buf {
+                            mask_pass.set_vertex_buffer(1, inst.slice(..));
+                        }
+                        mask_pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                        mask_pass.draw_indexed(0..self.fill_index_count, 0, 0..self.instance_count);
+                    }
+                }
+            }
+
             self.write_blade_uniforms(queue, params.screen_size, 1.0, [0.0; 4]);
             let mask_view = &self.mask_target.as_ref().unwrap().view;
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -927,6 +960,7 @@ impl IrisRenderer {
                 rpass.set_bind_group(0, &self.blade_uniform_bind, &[]);
                 rpass.set_vertex_buffer(0, self.fill_vertex.as_ref().unwrap().slice(..));
                 rpass.set_vertex_buffer(1, self.instance_buf.as_ref().unwrap().slice(..));
+                rpass.set_bind_group(3, self.mask_bind.as_ref().unwrap(), &[]);
                 rpass.set_index_buffer(
                     self.fill_index.as_ref().unwrap().slice(..),
                     wgpu::IndexFormat::Uint32,
