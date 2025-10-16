@@ -1,7 +1,7 @@
 use rand::{SeedableRng, rngs::StdRng};
 use rust_photo_frame::config::{
-    ColorSelection, Configuration, FixedImagePathSelection, MattingKind, MattingMode,
-    MattingSelection, PhotoEffectOptions, StudioMatColor, TransitionKind, TransitionSelection,
+    Configuration, MattingKind, MattingMode, MattingSelection, StudioMatColor, TransitionKind,
+    TransitionSelection,
 };
 use std::path::PathBuf;
 
@@ -151,7 +151,6 @@ matting:
       colors:
         - [10, 20, 30]
         - [5, 15, 25]
-      color-selection: random
     - kind: blur
       minimum-mat-percentage: 7.5
       sigma: 12.0
@@ -171,13 +170,10 @@ matting:
     let selected: Vec<_> = cfg.matting.iter_selected().collect();
     assert_eq!(selected.len(), 3);
     let fixed_first = &selected[0];
-    if let rust_photo_frame::config::MattingMode::FixedColor {
-        colors,
-        color_selection,
-    } = &fixed_first.option.style
+    if let rust_photo_frame::config::MattingMode::FixedColor { colors, .. } =
+        &fixed_first.option.style
     {
         assert_eq!(colors.as_slice(), &[[10, 20, 30]]);
-        assert_eq!(*color_selection, ColorSelection::Random);
     } else {
         panic!("expected fixed-color matting");
     }
@@ -234,7 +230,7 @@ matting:
 fn inline_fixed_color_array_expands_to_multiple_entries() {
     let yaml = r#"
 photo-library-path: "/photos"
-matting: { selection: random, active: [ { kind: fixed-color, colors: [[8, 16, 24], [32, 40, 48]], color-selection: random } ] }
+matting: { selection: random, active: [ { kind: fixed-color, colors: [[8, 16, 24], [32, 40, 48]] } ] }
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -323,7 +319,6 @@ matting:
       colors:
         - [10, 20, 30]
         - [40, 50, 60]
-      color-selection: sequential
     - kind: blur
       sigma: 12.0
       minimum-mat-percentage: 7.5
@@ -331,7 +326,6 @@ matting:
       colors:
         - [10, 20, 30]
         - [40, 50, 60]
-      color-selection: sequential
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -381,14 +375,10 @@ matting:
             MattingKind::FixedColor,
         ]
     );
-    if let rust_photo_frame::config::MattingMode::FixedColor {
-        color_selection, ..
-    } = &sequence[0].option.style
-    {
-        assert_eq!(*color_selection, ColorSelection::Sequential);
-    } else {
-        panic!("expected first matting option to be fixed-color");
-    }
+    assert!(matches!(
+        sequence[0].option.style,
+        rust_photo_frame::config::MattingMode::FixedColor { .. }
+    ));
 }
 
 #[test]
@@ -479,7 +469,6 @@ matting:
   active:
     - kind: fixed-image
       path: ["{first}", "{second}"]
-      path-selection: sequential
       fit: contain
 "#,
         first = first.display(),
@@ -491,13 +480,8 @@ matting:
     assert_eq!(selected.len(), 2);
     for (entry, path) in selected.iter().zip([&first, &second]) {
         match &entry.option.style {
-            MattingMode::FixedImage {
-                paths,
-                path_selection,
-                fit,
-            } => {
+            MattingMode::FixedImage { paths, fit } => {
                 assert_eq!(paths, &vec![path.clone()]);
-                assert_eq!(*path_selection, FixedImagePathSelection::Sequential);
                 assert!(matches!(
                     fit,
                     rust_photo_frame::config::FixedImageFit::Contain

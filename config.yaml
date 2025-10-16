@@ -123,13 +123,13 @@ playlist:
 matting:
   # Choose how the viewer advances through the mats below: fixed, random, or sequential.
   selection: random
-  # Provide one or more mat definitions. Repeat a kind to weight it in the canonical slot list (sequential reuse still hits the same preset).
+  # Provide one or more mat definitions. Duplicate entries (or individual colors/paths) to weight them once expanded into the
+  # canonical list; matting.selection controls how that list is traversed.
   active:
     - kind: fixed-color
       colors:
         - [0, 0, 0]
         - [32, 32, 32]
-      color-selection: sequential # or random
       minimum-mat-percentage: 0.0
       max-upscale-factor: 1.0
     - kind: blur
@@ -142,7 +142,6 @@ matting:
         - [24, 24, 24]
         - photo-average
         - [210, 210, 210]
-      color-selection: random # or sequential
       minimum-mat-percentage: 8.0
       bevel-width-px: 4.0
       bevel-color: [255, 255, 255]
@@ -155,5 +154,4 @@ matting:
         [
           /opt/photo-frame/share/backgrounds/blue-textured-brick-wall-background.jpg,
         ]
-      path-selection: sequential # or random
       fit: cover # options: cover, contain, stretch

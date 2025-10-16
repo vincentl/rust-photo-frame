@@ -792,32 +792,6 @@ impl PartialEq for MattingSelection {
 
 impl Eq for MattingSelection {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum FixedImagePathSelection {
-    Sequential,
-    Random,
-}
-
-impl Default for FixedImagePathSelection {
-    fn default() -> Self {
-        Self::Sequential
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ColorSelection {
-    Sequential,
-    Random,
-}
-
-impl Default for ColorSelection {
-    fn default() -> Self {
-        Self::Sequential
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StudioMatColor {
     Rgb([u8; 3]),
@@ -959,8 +933,6 @@ pub enum MattingMode {
     FixedColor {
         #[serde(default = "MattingMode::default_fixed_color_palette")]
         colors: Vec<[u8; 3]>,
-        #[serde(default, rename = "color-selection")]
-        color_selection: ColorSelection,
     },
     Blur {
         #[serde(default = "MattingMode::default_blur_sigma")]
@@ -976,8 +948,6 @@ pub enum MattingMode {
     Studio {
         #[serde(default = "MattingMode::default_studio_colors")]
         colors: Vec<StudioMatColor>,
-        #[serde(default, rename = "color-selection")]
-        color_selection: ColorSelection,
         #[serde(
             default = "MattingMode::default_studio_bevel_width_px",
             rename = "bevel-width-px"
@@ -1011,8 +981,6 @@ pub enum MattingMode {
             deserialize_with = "deserialize_fixed_image_paths"
         )]
         paths: Vec<PathBuf>,
-        #[serde(default, rename = "path-selection")]
-        path_selection: FixedImagePathSelection,
         #[serde(default)]
         fit: FixedImageFit,
     },
@@ -1112,39 +1080,21 @@ impl MattingOptions {
             .max_upscale_factor
             .max(Self::default_max_upscale_factor());
         self.runtime = MattingRuntime::default();
-        if let MattingMode::FixedColor {
-            colors,
-            color_selection,
-            ..
-        } = &self.style
-        {
-            let _ = color_selection;
+        if let MattingMode::FixedColor { colors, .. } = &self.style {
             ensure!(
                 !colors.is_empty(),
                 "matting.fixed-color.colors must include at least one entry",
             );
             self.runtime.fixed_color = colors.first().copied();
         }
-        if let MattingMode::Studio {
-            colors,
-            color_selection,
-            ..
-        } = &self.style
-        {
-            let _ = color_selection;
+        if let MattingMode::Studio { colors, .. } = &self.style {
             ensure!(
                 !colors.is_empty(),
                 "matting.studio.colors must include at least one entry",
             );
             self.runtime.studio_color = colors.first().copied();
         }
-        if let MattingMode::FixedImage {
-            paths,
-            path_selection,
-            ..
-        } = &self.style
-        {
-            let _ = path_selection;
+        if let MattingMode::FixedImage { paths, .. } = &self.style {
             if paths.is_empty() {
                 return Ok(());
             }
@@ -1189,7 +1139,6 @@ impl MattingOptions {
                 colors: base
                     .fixed_colors
                     .unwrap_or_else(MattingMode::default_fixed_color_palette),
-                color_selection: base.color_selection.unwrap_or_default(),
             },
             MattingKind::Blur => MattingMode::Blur {
                 sigma: base.sigma.unwrap_or_else(MattingMode::default_blur_sigma),
@@ -1202,7 +1151,6 @@ impl MattingOptions {
                 colors: base
                     .studio_colors
                     .unwrap_or_else(MattingMode::default_studio_colors),
-                color_selection: base.color_selection.unwrap_or_default(),
                 bevel_width_px: base
                     .bevel_width_px
                     .unwrap_or_else(MattingMode::default_studio_bevel_width_px),
@@ -1223,7 +1171,6 @@ impl MattingOptions {
                 paths: base
                     .fixed_image_paths
                     .expect("fixed-image matting must supply a path"),
-                path_selection: base.fixed_image_path_selection.unwrap_or_default(),
                 fit: base.fixed_image_fit.unwrap_or_default(),
             },
         };
@@ -1255,7 +1202,6 @@ struct MattingOptionBuilder {
     minimum_mat_percentage: Option<f32>,
     max_upscale_factor: Option<f32>,
     fixed_colors: Option<Vec<[u8; 3]>>,
-    color_selection: Option<ColorSelection>,
     sigma: Option<f32>,
     sample_scale: Option<f32>,
     blur_backend: Option<BlurBackend>,
@@ -1266,7 +1212,6 @@ struct MattingOptionBuilder {
     weft_period_px: Option<f32>,
     studio_colors: Option<Vec<StudioMatColor>>,
     fixed_image_paths: Option<Vec<PathBuf>>,
-    fixed_image_path_selection: Option<FixedImagePathSelection>,
     fixed_image_fit: Option<FixedImageFit>,
 }
 
@@ -1335,19 +1280,12 @@ where
                     let color = inline_value_to::<[u8; 3], E>(value)?;
                     builder.fixed_colors = Some(vec![color]);
                 }
-                "color-selection" => {
-                    if builder.color_selection.is_some() {
-                        return Err(de::Error::duplicate_field("color-selection"));
-                    }
-                    builder.color_selection = Some(inline_value_to::<ColorSelection, E>(value)?);
-                }
                 _ => {
                     return Err(de::Error::unknown_field(
                         other,
                         &[
                             "colors",
                             "color",
-                            "color-selection",
                             "minimum-mat-percentage",
                             "max-upscale-factor",
                         ],
@@ -1393,12 +1331,6 @@ where
                     }
                     builder.studio_colors = Some(inline_value_to::<Vec<StudioMatColor>, E>(value)?);
                 }
-                "color-selection" => {
-                    if builder.color_selection.is_some() {
-                        return Err(de::Error::duplicate_field("color-selection"));
-                    }
-                    builder.color_selection = Some(inline_value_to::<ColorSelection, E>(value)?);
-                }
                 "bevel-width-px" => {
                     if builder.bevel_width_px.is_some() {
                         return Err(de::Error::duplicate_field("bevel-width-px"));
@@ -1434,7 +1366,6 @@ where
                         other,
                         &[
                             "colors",
-                            "color-selection",
                             "bevel-width-px",
                             "bevel-color",
                             "texture-strength",
@@ -1454,13 +1385,6 @@ where
                     builder.fixed_image_paths =
                         Some(inline_value_to_fixed_image_paths::<E>(value)?);
                 }
-                "path-selection" => {
-                    if builder.fixed_image_path_selection.is_some() {
-                        return Err(de::Error::duplicate_field("path-selection"));
-                    }
-                    builder.fixed_image_path_selection =
-                        Some(inline_value_to::<FixedImagePathSelection, E>(value)?);
-                }
                 "fit" => {
                     if builder.fixed_image_fit.is_some() {
                         return Err(de::Error::duplicate_field("fit"));
@@ -1472,7 +1396,6 @@ where
                         other,
                         &[
                             "path",
-                            "path-selection",
                             "fit",
                             "minimum-mat-percentage",
                             "max-upscale-factor",
@@ -1718,7 +1641,6 @@ impl Default for MattingMode {
     fn default() -> Self {
         Self::FixedColor {
             colors: Self::default_fixed_color_palette(),
-            color_selection: ColorSelection::default(),
         }
     }
 }
