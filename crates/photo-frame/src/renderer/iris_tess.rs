@@ -891,17 +891,49 @@ impl IrisRenderer {
         if self.instance_count == 0 {
             return false;
         }
-        // No mask pass is required anymore; the composite shader computes the
-        // aperture per-pixel. Keep the diagnostic begin log for parity.
-        debug!(
-            stage = ?params.stage,
-            closeness = params.closeness,
-            instance_count = self.instance_count,
-            screen_w = params.screen_size[0],
-            screen_h = params.screen_size[1],
-            "iris_draw_begin",
-        );
         let mask_bind = self.mask_bind.as_ref().unwrap();
+
+        // Mask pass
+        {
+            debug!(
+                stage = ?params.stage,
+                closeness = params.closeness,
+                instance_count = self.instance_count,
+                screen_w = params.screen_size[0],
+                screen_h = params.screen_size[1],
+                mask_w = self.mask_target.as_ref().map(|m| m.size.0),
+                mask_h = self.mask_target.as_ref().map(|m| m.size.1),
+                "iris_draw_begin",
+            );
+            self.write_blade_uniforms(queue, params.screen_size, 1.0, [0.0; 4]);
+            let mask_view = &self.mask_target.as_ref().unwrap().view;
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("iris-mask-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: mask_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            if self.fill_index_count > 0 {
+                rpass.set_pipeline(&self.mask_pipeline);
+                rpass.set_bind_group(0, &self.blade_uniform_bind, &[]);
+                rpass.set_vertex_buffer(0, self.fill_vertex.as_ref().unwrap().slice(..));
+                rpass.set_vertex_buffer(1, self.instance_buf.as_ref().unwrap().slice(..));
+                rpass.set_index_buffer(
+                    self.fill_index.as_ref().unwrap().slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                rpass.draw_indexed(0..self.fill_index_count, 0, 0..self.instance_count);
+            }
+        }
 
         // Composite pass
         let composite = CompositeUniforms {
@@ -936,19 +968,62 @@ impl IrisRenderer {
             rpass.set_bind_group(0, &self.composite_uniform_bind, &[]);
             rpass.set_bind_group(1, params.current_bind, &[]);
             rpass.set_bind_group(2, params.next_bind, &[]);
-            // Group(3) reserved for historical mask; still bound to satisfy layout.
             rpass.set_bind_group(3, mask_bind, &[]);
             rpass.draw(0..6, 0..1);
         }
 
-        // Overlay (decorative blades) intentionally disabled while we refine geometry.
-        // Returning here ensures no stray blade geometry leaks onto the color target.
+        if params.closeness <= 1e-4 {
+            return true;
+        }
+
+        // Overlay pass (fill + stroke)
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("iris-overlay-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            rpass.set_pipeline(&self.color_pipeline);
+            rpass.set_bind_group(0, &self.blade_uniform_bind, &[]);
+            if self.fill_index_count > 0 {
+                self.write_blade_uniforms(queue, params.screen_size, 1.0, params.fill_color);
+                rpass.set_vertex_buffer(0, self.fill_vertex.as_ref().unwrap().slice(..));
+                rpass.set_vertex_buffer(1, self.instance_buf.as_ref().unwrap().slice(..));
+                rpass.set_index_buffer(
+                    self.fill_index.as_ref().unwrap().slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                rpass.draw_indexed(0..self.fill_index_count, 0, 0..self.instance_count);
+            }
+            if self.stroke_index_count > 0 {
+                self.write_blade_uniforms(queue, params.screen_size, 1.0, params.stroke_color);
+                rpass.set_vertex_buffer(0, self.stroke_vertex.as_ref().unwrap().slice(..));
+                rpass.set_vertex_buffer(1, self.instance_buf.as_ref().unwrap().slice(..));
+                rpass.set_index_buffer(
+                    self.stroke_index.as_ref().unwrap().slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                rpass.draw_indexed(0..self.stroke_index_count, 0, 0..self.instance_count);
+            }
+        }
+
         debug!(
             stage = ?params.stage,
             closeness = params.closeness,
             rendered = true,
             "iris_draw_end",
         );
+
         true
     }
 }
