@@ -337,13 +337,11 @@ The remaining knobs depend on the transition family.
 - **`fade`**
   - **`through-black`** (boolean, default `false`): When `true`, fades to black completely before revealing the next image. Keeps cuts discreet at the cost of a slightly longer blackout.
 - **`wipe`**
-  - **`angle-list-degrees`** (array of floats, default `[0.0]`): Collection of wipe directions in degrees (`0°` sweeps left→right, `90°` sweeps top→bottom). At least one finite value is required.
-  - **`angle-selection`** (`random` or `sequential`, default `random`): Governs how the app chooses from the angle list—either independently each slide or cycling in order.
+  - **`angle-list-degrees`** (array of floats, default `[0.0]`): Collection of wipe directions in degrees (`0°` sweeps left→right, `90°` sweeps top→bottom). At least one finite value is required. The parser expands this list so each angle becomes its own canonical option; repeat values or duplicate the `active` entry to bias a particular direction.
   - **`angle-jitter-degrees`** (float ≥ 0, default `0.0`): Adds random jitter within ±the supplied degrees, preventing identical wipes.
   - **`softness`** (float, default `0.05`, clamped to `0.0–0.5`): Feathers the wipe edge; higher values create a softer blend.
 - **`push`**
-  - **`angle-list-degrees`** (array of floats, default `[0.0]`): Direction the new image pushes in from; the same rules as wipes apply.
-  - **`angle-selection`** (`random` or `sequential`, default `random`): Selection strategy for the angle list.
+  - **`angle-list-degrees`** (array of floats, default `[0.0]`): Direction the new image pushes in from; each value expands into its own canonical option, so repeating angles or duplicating the entry weights the draw odds.
   - **`angle-jitter-degrees`** (float ≥ 0, default `0.0`): Randomizes the push direction by ±the provided degrees.
 - **`e-ink`**
   - **`flash-count`** (integer, default `0`, capped at `6`): Number of alternating black/flash-color pulses before the reveal.
@@ -378,11 +376,10 @@ transition:
       duration-ms: 450
     - kind: push
       duration-ms: 520
-      angle-list-degrees: [0.0, 180.0]
-      angle-selection: sequential
+      angle-list-degrees: [0.0]
     - kind: push
       duration-ms: 520
-      angle-list-degrees: [90.0, 270.0]
+      angle-list-degrees: [180.0]
 ```
 
 Repeating the `push` entry gives that family twice the draw weight versus `fade`, while still allowing different presets for horizontal and vertical motion.
@@ -395,13 +392,13 @@ transition:
   active:
     - kind: push
       duration-ms: 520
-      angle-list-degrees: [0.0, 180.0]
+      angle-list-degrees: [0.0]
     - kind: wipe
       duration-ms: 520
       angle-list-degrees: [90.0]
     - kind: push
       duration-ms: 520
-      angle-list-degrees: [0.0, 180.0]
+      angle-list-degrees: [180.0]
 ```
 
 Sequential mode loops through the entries exactly as written, so repeating `push` forces a push → wipe → push cadence before returning to the first entry.
