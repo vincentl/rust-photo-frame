@@ -259,15 +259,14 @@ impl IrisRenderer {
                 resource: composite_uniform_buf.as_entire_binding(),
             }],
         });
-
         let mask_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("iris-mask-sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
         let mask_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -525,7 +524,7 @@ impl IrisRenderer {
 
         self.fill_geometry.vertices.clear();
         self.fill_geometry.indices.clear();
-        let fill_opts = FillOptions::tolerance(tolerance).with_fill_rule(FillRule::NonZero);
+        let fill_opts = FillOptions::tolerance(tolerance).with_fill_rule(FillRule::EvenOdd);
         self.fill_tessellator
             .tessellate_path(
                 &path,

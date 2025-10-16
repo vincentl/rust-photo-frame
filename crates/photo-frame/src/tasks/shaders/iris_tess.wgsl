@@ -103,6 +103,6 @@ fn fs_composite(in: FullscreenOut) -> @location(0) vec4<f32> {
   // Binary mask in screen UV space selects next over current
   let mask    = textureSample(mask_tex, mask_samp, in.screen_uv).r;
   let color   = mix(current, next, mask);
-  let alpha   = max(max(current.a, next.a), color.a);
+  let alpha   = mix(current.a, next.a, mask);
   return vec4<f32>(color.rgb, clamp(alpha, 0.0, 1.0));
 }
