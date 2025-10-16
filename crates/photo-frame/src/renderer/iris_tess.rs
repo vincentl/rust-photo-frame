@@ -5,15 +5,16 @@ use lyon::geom::{Angle, ArcFlags};
 use lyon::math::{point, vector};
 use lyon::path::Path;
 use lyon::path::builder::SvgPathBuilder;
+use lyon::tessellation::geometry_builder::{FillVertexConstructor, StrokeVertexConstructor};
 use lyon::tessellation::{
-    BuffersBuilder, FillOptions, FillTessellator, FillVertex, StrokeOptions, StrokeTessellator,
-    StrokeVertex, VertexBuffers, FillRule,
+    BuffersBuilder, FillOptions, FillRule, FillTessellator, FillVertex, StrokeOptions,
+    StrokeTessellator, StrokeVertex, VertexBuffers,
 };
-use wgpu::util::DeviceExt;
 use std::env;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::debug;
+use wgpu::util::DeviceExt;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -26,6 +27,25 @@ struct BladeVertex {
 struct BladeInstance {
     rotation: [f32; 2],
     _pad: [f32; 2],
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PositionCtor;
+
+impl FillVertexConstructor<BladeVertex> for PositionCtor {
+    fn new_vertex(&mut self, vertex: FillVertex) -> BladeVertex {
+        BladeVertex {
+            position: vertex.position().to_array(),
+        }
+    }
+}
+
+impl StrokeVertexConstructor<BladeVertex> for PositionCtor {
+    fn new_vertex(&mut self, vertex: StrokeVertex) -> BladeVertex {
+        BladeVertex {
+            position: vertex.position_on_path().to_array(),
+        }
+    }
 }
 
 #[repr(C)]
@@ -115,6 +135,10 @@ pub struct IrisRenderer {
     instance_buf: Option<wgpu::Buffer>,
     instance_count: u32,
     last_mesh: Option<MeshKey>,
+    fill_tessellator: FillTessellator,
+    stroke_tessellator: StrokeTessellator,
+    fill_geometry: VertexBuffers<BladeVertex, u32>,
+    stroke_geometry: VertexBuffers<BladeVertex, u32>,
     diag_frames: u32,
     only_interesting: bool,
     diag_file: Option<PathBuf>,
@@ -138,7 +162,9 @@ impl IrisRenderer {
         let only_interesting = env::var("PHOTOFRAME_IRIS_INTERESTING_ONLY")
             .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
-        let diag_file = env::var("PHOTOFRAME_IRIS_DIAG_FILE").ok().map(PathBuf::from);
+        let diag_file = env::var("PHOTOFRAME_IRIS_DIAG_FILE")
+            .ok()
+            .map(PathBuf::from);
         let diag_range = env::var("PHOTOFRAME_IRIS_DIAG_CLOSENESS")
             .ok()
             .and_then(|s| {
@@ -166,6 +192,10 @@ impl IrisRenderer {
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|v| v.is_finite() && *v > 0.0)
             .unwrap_or(0.2);
+        let fill_tessellator = FillTessellator::new();
+        let stroke_tessellator = StrokeTessellator::new();
+        let fill_geometry = VertexBuffers::new();
+        let stroke_geometry = VertexBuffers::new();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("iris-tessellation"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
@@ -405,6 +435,10 @@ impl IrisRenderer {
             instance_buf: None,
             instance_count: 0,
             last_mesh: None,
+            fill_tessellator,
+            stroke_tessellator,
+            fill_geometry,
+            stroke_geometry,
             diag_frames,
             only_interesting,
             diag_file,
@@ -486,16 +520,41 @@ impl IrisRenderer {
         }
 
         let (path, clamped) = build_blade_path(blades as usize, closeness, radius);
-        let (fill, stroke) = tessellate_path(&path, tolerance, stroke_width.max(0.0));
+        let tolerance = tolerance.clamp(0.05, 5.0);
+        let stroke_width = stroke_width.max(0.0);
+
+        self.fill_geometry.vertices.clear();
+        self.fill_geometry.indices.clear();
+        let fill_opts = FillOptions::tolerance(tolerance).with_fill_rule(FillRule::NonZero);
+        self.fill_tessellator
+            .tessellate_path(
+                &path,
+                &fill_opts,
+                &mut BuffersBuilder::new(&mut self.fill_geometry, PositionCtor),
+            )
+            .expect("fill tessellation");
+
+        self.stroke_geometry.vertices.clear();
+        self.stroke_geometry.indices.clear();
+        if stroke_width > 0.0 {
+            let stroke_opts = StrokeOptions::tolerance(tolerance).with_line_width(stroke_width);
+            self.stroke_tessellator
+                .tessellate_path(
+                    &path,
+                    &stroke_opts,
+                    &mut BuffersBuilder::new(&mut self.stroke_geometry, PositionCtor),
+                )
+                .expect("stroke tessellation");
+        }
 
         // Compute diagnostics
         let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
         let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
         let mut any_nan = false;
         let mut any_inf = false;
-        for v in &fill.vertices {
-            let x = v[0];
-            let y = v[1];
+        for v in &self.fill_geometry.vertices {
+            let x = v.position[0];
+            let y = v.position[1];
             if !x.is_finite() || !y.is_finite() {
                 any_nan |= x.is_nan() || y.is_nan();
                 any_inf |= x.is_infinite() || y.is_infinite();
@@ -514,10 +573,24 @@ impl IrisRenderer {
                 max_y = y;
             }
         }
-        let max_index_fill = fill.indices.iter().copied().max().unwrap_or(0);
-        let max_index_stroke = stroke.indices.iter().copied().max().unwrap_or(0);
-        let oob_fill = !fill.indices.is_empty() && (max_index_fill as usize >= fill.vertices.len());
-        let oob_stroke = !stroke.indices.is_empty() && (max_index_stroke as usize >= stroke.vertices.len());
+        let max_index_fill = self
+            .fill_geometry
+            .indices
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let max_index_stroke = self
+            .stroke_geometry
+            .indices
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let oob_fill = !self.fill_geometry.indices.is_empty()
+            && (max_index_fill as usize >= self.fill_geometry.vertices.len());
+        let oob_stroke = !self.stroke_geometry.indices.is_empty()
+            && (max_index_stroke as usize >= self.stroke_geometry.vertices.len());
 
         // One-frame heavy diagnostics: longest edge and largest triangle area
         let mut max_edge_len: f32 = 0.0;
@@ -525,30 +598,46 @@ impl IrisRenderer {
         let mut max_area: f32 = 0.0;
         let mut max_area_tri: (u32, u32, u32) = (0, 0, 0);
         let mut tri_mod_mismatch = false;
-        if fill.indices.len() % 3 != 0 { tri_mod_mismatch = true; }
-        for tri in (0..fill.indices.len()).step_by(3) {
-            if tri + 2 >= fill.indices.len() { break; }
-            let i0 = fill.indices[tri] as usize;
-            let i1 = fill.indices[tri + 1] as usize;
-            let i2 = fill.indices[tri + 2] as usize;
-            if i0 >= fill.vertices.len() || i1 >= fill.vertices.len() || i2 >= fill.vertices.len() {
+        if self.fill_geometry.indices.len() % 3 != 0 {
+            tri_mod_mismatch = true;
+        }
+        for tri in (0..self.fill_geometry.indices.len()).step_by(3) {
+            if tri + 2 >= self.fill_geometry.indices.len() {
+                break;
+            }
+            let i0 = self.fill_geometry.indices[tri] as usize;
+            let i1 = self.fill_geometry.indices[tri + 1] as usize;
+            let i2 = self.fill_geometry.indices[tri + 2] as usize;
+            if i0 >= self.fill_geometry.vertices.len()
+                || i1 >= self.fill_geometry.vertices.len()
+                || i2 >= self.fill_geometry.vertices.len()
+            {
                 continue;
             }
-            let p0 = fill.vertices[i0];
-            let p1 = fill.vertices[i1];
-            let p2 = fill.vertices[i2];
+            let p0 = self.fill_geometry.vertices[i0].position;
+            let p1 = self.fill_geometry.vertices[i1].position;
+            let p2 = self.fill_geometry.vertices[i2].position;
             let e01 = ((p1[0] - p0[0]).powi(2) + (p1[1] - p0[1]).powi(2)).sqrt();
             let e12 = ((p2[0] - p1[0]).powi(2) + (p2[1] - p1[1]).powi(2)).sqrt();
             let e20 = ((p0[0] - p2[0]).powi(2) + (p0[1] - p2[1]).powi(2)).sqrt();
             let edge_max = e01.max(e12).max(e20);
             if edge_max > max_edge_len {
                 max_edge_len = edge_max;
-                max_edge_tri = (fill.indices[tri], fill.indices[tri + 1], fill.indices[tri + 2]);
+                max_edge_tri = (
+                    self.fill_geometry.indices[tri],
+                    self.fill_geometry.indices[tri + 1],
+                    self.fill_geometry.indices[tri + 2],
+                );
             }
-            let area = ((p1[0] - p0[0]) * (p2[1] - p0[1]) - (p2[0] - p0[0]) * (p1[1] - p0[1])).abs() * 0.5;
+            let area =
+                ((p1[0] - p0[0]) * (p2[1] - p0[1]) - (p2[0] - p0[0]) * (p1[1] - p0[1])).abs() * 0.5;
             if area > max_area {
                 max_area = area;
-                max_area_tri = (fill.indices[tri], fill.indices[tri + 1], fill.indices[tri + 2]);
+                max_area_tri = (
+                    self.fill_geometry.indices[tri],
+                    self.fill_geometry.indices[tri + 1],
+                    self.fill_geometry.indices[tri + 2],
+                );
             }
         }
 
@@ -595,10 +684,10 @@ impl IrisRenderer {
                 radius,
                 tolerance,
                 stroke_width,
-                fill_vertices = fill.vertices.len(),
-                fill_indices = fill.indices.len(),
-                stroke_vertices = stroke.vertices.len(),
-                stroke_indices = stroke.indices.len(),
+                fill_vertices = self.fill_geometry.vertices.len(),
+                fill_indices = self.fill_geometry.indices.len(),
+                stroke_vertices = self.stroke_geometry.vertices.len(),
+                stroke_indices = self.stroke_geometry.indices.len(),
                 max_index_fill,
                 max_index_stroke,
                 oob_fill,
@@ -644,60 +733,51 @@ impl IrisRenderer {
             self.stroke_index_count = 0;
         }
 
-        if fill.vertices.is_empty() || fill.indices.is_empty() {
+        if self.fill_geometry.vertices.is_empty() || self.fill_geometry.indices.is_empty() {
             self.fill_index_count = 0;
             self.fill_vertex = None;
             self.fill_index = None;
         } else {
-            let fill_vertices: Vec<BladeVertex> = fill
-                .vertices
-                .iter()
-                .map(|pos| BladeVertex { position: *pos })
-                .collect();
-            let fill_indices = fill.indices;
             self.fill_vertex = Some(
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("iris-fill-vertices"),
-                    contents: bytemuck::cast_slice(&fill_vertices),
+                    contents: bytemuck::cast_slice(self.fill_geometry.vertices.as_slice()),
                     usage: wgpu::BufferUsages::VERTEX,
                 }),
             );
             self.fill_index = Some(
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("iris-fill-indices"),
-                    contents: bytemuck::cast_slice(&fill_indices),
+                    contents: bytemuck::cast_slice(self.fill_geometry.indices.as_slice()),
                     usage: wgpu::BufferUsages::INDEX,
                 }),
             );
-            self.fill_index_count = fill_indices.len() as u32;
+            self.fill_index_count = self.fill_geometry.indices.len() as u32;
         }
 
-        if stroke_width <= 0.0 || stroke.vertices.is_empty() || stroke.indices.is_empty() {
+        if stroke_width <= 0.0
+            || self.stroke_geometry.vertices.is_empty()
+            || self.stroke_geometry.indices.is_empty()
+        {
             self.stroke_index_count = 0;
             self.stroke_vertex = None;
             self.stroke_index = None;
         } else {
-            let stroke_vertices: Vec<BladeVertex> = stroke
-                .vertices
-                .iter()
-                .map(|pos| BladeVertex { position: *pos })
-                .collect();
-            let stroke_indices = stroke.indices;
             self.stroke_vertex = Some(device.create_buffer_init(
                 &wgpu::util::BufferInitDescriptor {
                     label: Some("iris-stroke-vertices"),
-                    contents: bytemuck::cast_slice(&stroke_vertices),
+                    contents: bytemuck::cast_slice(self.stroke_geometry.vertices.as_slice()),
                     usage: wgpu::BufferUsages::VERTEX,
                 },
             ));
             self.stroke_index = Some(device.create_buffer_init(
                 &wgpu::util::BufferInitDescriptor {
                     label: Some("iris-stroke-indices"),
-                    contents: bytemuck::cast_slice(&stroke_indices),
+                    contents: bytemuck::cast_slice(self.stroke_geometry.indices.as_slice()),
                     usage: wgpu::BufferUsages::INDEX,
                 },
             ));
-            self.stroke_index_count = stroke_indices.len() as u32;
+            self.stroke_index_count = self.stroke_geometry.indices.len() as u32;
         }
 
         self.last_mesh = Some(params);
@@ -782,7 +862,8 @@ impl IrisRenderer {
 
         // Oversize radius so the iris covers the entire screen; top/bottom may clip.
         // Use half the screen diagonal which guarantees coverage in all rotations.
-        let radius = ((params.screen_size[0]).powi(2) + (params.screen_size[1]).powi(2)).sqrt() * 0.5;
+        let radius =
+            ((params.screen_size[0]).powi(2) + (params.screen_size[1]).powi(2)).sqrt() * 0.5;
         let mesh_key = MeshKey {
             blades: params.blades,
             closeness: params.closeness,
@@ -916,12 +997,7 @@ impl IrisRenderer {
             rpass.set_pipeline(&self.color_pipeline);
             rpass.set_bind_group(0, &self.blade_uniform_bind, &[]);
             if self.fill_index_count > 0 {
-                self.write_blade_uniforms(
-                    queue,
-                    params.screen_size,
-                    1.0,
-                    params.fill_color,
-                );
+                self.write_blade_uniforms(queue, params.screen_size, 1.0, params.fill_color);
                 rpass.set_vertex_buffer(0, self.fill_vertex.as_ref().unwrap().slice(..));
                 rpass.set_vertex_buffer(1, self.instance_buf.as_ref().unwrap().slice(..));
                 rpass.set_index_buffer(
@@ -931,12 +1007,7 @@ impl IrisRenderer {
                 rpass.draw_indexed(0..self.fill_index_count, 0, 0..self.instance_count);
             }
             if self.stroke_index_count > 0 {
-                self.write_blade_uniforms(
-                    queue,
-                    params.screen_size,
-                    1.0,
-                    params.stroke_color,
-                );
+                self.write_blade_uniforms(queue, params.screen_size, 1.0, params.stroke_color);
                 rpass.set_vertex_buffer(0, self.stroke_vertex.as_ref().unwrap().slice(..));
                 rpass.set_vertex_buffer(1, self.instance_buf.as_ref().unwrap().slice(..));
                 rpass.set_index_buffer(
@@ -993,38 +1064,6 @@ fn build_blade_path(count: usize, closeness: f32, radius: f32) -> (Path, bool) {
     );
     builder.close();
     (builder.build(), clamped)
-}
-
-fn tessellate_path(
-    path: &Path,
-    tolerance: f32,
-    stroke_width: f32,
-) -> (VertexBuffers<[f32; 2], u32>, VertexBuffers<[f32; 2], u32>) {
-    let mut fill: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
-    let fill_opts = FillOptions::tolerance(tolerance.clamp(0.05, 5.0))
-        .with_fill_rule(FillRule::EvenOdd);
-    FillTessellator::new()
-        .tessellate_path(
-            path,
-            &fill_opts,
-            &mut BuffersBuilder::new(&mut fill, |v: FillVertex| v.position().to_array()),
-        )
-        .expect("fill tessellation");
-
-    let mut stroke: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
-    if stroke_width > 0.0 {
-        let stroke_opts =
-            StrokeOptions::tolerance(tolerance.clamp(0.05, 5.0)).with_line_width(stroke_width);
-        StrokeTessellator::new()
-            .tessellate_path(
-                path,
-                &stroke_opts,
-                &mut BuffersBuilder::new(&mut stroke, |v: StrokeVertex| v.position().to_array()),
-            )
-            .expect("stroke tessellation");
-    }
-
-    (fill, stroke)
 }
 
 fn blade_points(
