@@ -284,22 +284,27 @@ The command prints the multiplicity assigned to each discovered photo and the fi
 
 ## Photo effect configuration
 
-The optional `photo-effect` task sits between the loader and the viewer. When enabled it reconstructs the decoded RGBA pixels, applies any configured effects, and forwards the modified image downstream. Leave `types` empty (or omit the block entirely) to short-circuit the stage and pass photos through untouched. The sample configuration ships with the stage disabled by default.
+The optional `photo-effect` task sits between the loader and the viewer. When enabled it reconstructs the decoded RGBA pixels, applies any configured effects, and forwards the modified image downstream. Leave `photo-effect.active` empty (or omit the block entirely) to short-circuit the stage and pass photos through untouched. Duplicate entries in `photo-effect.active` to weight the random picker or to alternate presets when cycling sequentially.
 
 ### Scheduling effects
 
-- **`types`** — List the effect kinds to rotate through. Supported values today: `print-simulation`. Set to `[]` to keep the stage disabled while preserving the scaffold for future effects.
-- **`type-selection`** — Optional. `random` (default) or `sequential`. `random` draws an effect independently for each slide, while `sequential` walks the `types` list in order and loops back to the first entry after the last.
-- **`options`** — Map of per-effect controls. Every effect referenced in `types` must appear here so the runtime can look up its parameters.
+| Key         | Required? | Default                                                       | Accepted values            | Effect |
+| ----------- | --------- | ------------------------------------------------------------- | -------------------------- | ------ |
+| `selection` | Optional  | `fixed` when `active` has one entry, otherwise `random`       | `fixed`, `random`, `sequential` | Controls how the viewer iterates through `active`. `fixed` locks to the first entry, `random` chooses independently per slide, and `sequential` advances in order and loops. |
+| `active`    | Yes       | —                                                             | Array of effect entry maps | Declares the effect variants that are eligible. Repeat entries—including duplicates of the same `kind`—to weight the random picker or alternate presets in sequential mode. |
 
-Example: enable the print simulation effect (disabled by default) while keeping its debug split active for quick before/after checks.
+> Legacy `photo-effect.types` and `photo-effect.options` keys are no longer supported. Copy each prior option into the `active` list with an explicit `kind` field to migrate.
+
+Example: enable the print-simulation effect and alternate between two lighting presets when the stage runs in sequential mode.
 
 ```yaml
 photo-effect:
-  types: [print-simulation]
-  type-selection: sequential
-  options:
-    print-simulation:
+  selection: sequential
+  active:
+    - kind: print-simulation
+      light-angle-degrees: 110.0
+    - kind: print-simulation
+      light-angle-degrees: 60.0
       debug: true
 ```
 
@@ -336,13 +341,11 @@ The remaining knobs depend on the transition family.
 - **`fade`**
   - **`through-black`** (boolean, default `false`): When `true`, fades to black completely before revealing the next image. Keeps cuts discreet at the cost of a slightly longer blackout.
 - **`wipe`**
-  - **`angle-list-degrees`** (array of floats, default `[0.0]`): Collection of wipe directions in degrees (`0°` sweeps left→right, `90°` sweeps top→bottom). At least one finite value is required.
-  - **`angle-selection`** (`random` or `sequential`, default `random`): Governs how the app chooses from the angle list—either independently each slide or cycling in order.
+  - **`angle-list-degrees`** (array of floats, default `[0.0]`): Collection of wipe directions in degrees (`0°` sweeps left→right, `90°` sweeps top→bottom). At least one finite value is required. The parser expands this list so each angle becomes its own canonical option; repeat values or duplicate the `active` entry to bias a particular direction.
   - **`angle-jitter-degrees`** (float ≥ 0, default `0.0`): Adds random jitter within ±the supplied degrees, preventing identical wipes.
   - **`softness`** (float, default `0.05`, clamped to `0.0–0.5`): Feathers the wipe edge; higher values create a softer blend.
 - **`push`**
-  - **`angle-list-degrees`** (array of floats, default `[0.0]`): Direction the new image pushes in from; the same rules as wipes apply.
-  - **`angle-selection`** (`random` or `sequential`, default `random`): Selection strategy for the angle list.
+  - **`angle-list-degrees`** (array of floats, default `[0.0]`): Direction the new image pushes in from; each value expands into its own canonical option, so repeating angles or duplicating the entry weights the draw odds.
   - **`angle-jitter-degrees`** (float ≥ 0, default `0.0`): Randomizes the push direction by ±the provided degrees.
 - **`e-ink`**
   - **`flash-count`** (integer, default `0`, capped at `6`): Number of alternating black/flash-color pulses before the reveal.
@@ -377,11 +380,10 @@ transition:
       duration-ms: 450
     - kind: push
       duration-ms: 520
-      angle-list-degrees: [0.0, 180.0]
-      angle-selection: sequential
+      angle-list-degrees: [0.0]
     - kind: push
       duration-ms: 520
-      angle-list-degrees: [90.0, 270.0]
+      angle-list-degrees: [180.0]
 ```
 
 Repeating the `push` entry gives that family twice the draw weight versus `fade`, while still allowing different presets for horizontal and vertical motion.
@@ -394,13 +396,13 @@ transition:
   active:
     - kind: push
       duration-ms: 520
-      angle-list-degrees: [0.0, 180.0]
+      angle-list-degrees: [0.0]
     - kind: wipe
       duration-ms: 520
       angle-list-degrees: [90.0]
     - kind: push
       duration-ms: 520
-      angle-list-degrees: [0.0, 180.0]
+      angle-list-degrees: [180.0]
 ```
 
 Sequential mode loops through the entries exactly as written, so repeating `push` forces a push → wipe → push cadence before returning to the first entry.

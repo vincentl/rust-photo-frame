@@ -2347,21 +2347,51 @@ impl TransitionOptions {
             TransitionKind::Fade => TransitionMode::Fade(FadeTransition {
                 through_black: builder.fade_through_black.unwrap_or(false),
             }),
-            TransitionKind::Wipe => TransitionMode::Wipe(WipeTransition {
-                angles: AnglePicker::from_parts(
-                    builder.wipe_angle_list_deg,
-                    builder.wipe_angle_selection,
-                    builder.wipe_angle_jitter_deg,
-                ),
-                softness: builder.wipe_softness.unwrap_or(0.05),
-            }),
-            TransitionKind::Push => TransitionMode::Push(PushTransition {
-                angles: AnglePicker::from_parts(
-                    builder.push_angle_list_deg,
-                    builder.push_angle_selection,
-                    builder.push_angle_jitter_deg,
-                ),
-            }),
+            TransitionKind::Wipe => {
+                if let Some(angles) = builder
+                    .wipe_angle_list_deg
+                    .as_ref()
+                    .filter(|angles| angles.len() > 1)
+                {
+                    return Err(anyhow::anyhow!(
+                        "transition option {} expected canonicalized angle entries, got {} entries",
+                        kind,
+                        angles.len()
+                    ));
+                }
+                let base = builder
+                    .wipe_angle_list_deg
+                    .as_ref()
+                    .and_then(|angles| angles.first().copied())
+                    .unwrap_or(0.0);
+                let jitter = builder.wipe_angle_jitter_deg.unwrap_or(0.0);
+                TransitionMode::Wipe(WipeTransition {
+                    angles: AnglePicker::new(base, jitter),
+                    softness: builder.wipe_softness.unwrap_or(0.05),
+                })
+            }
+            TransitionKind::Push => {
+                if let Some(angles) = builder
+                    .push_angle_list_deg
+                    .as_ref()
+                    .filter(|angles| angles.len() > 1)
+                {
+                    return Err(anyhow::anyhow!(
+                        "transition option {} expected canonicalized angle entries, got {} entries",
+                        kind,
+                        angles.len()
+                    ));
+                }
+                let base = builder
+                    .push_angle_list_deg
+                    .as_ref()
+                    .and_then(|angles| angles.first().copied())
+                    .unwrap_or(0.0);
+                let jitter = builder.push_angle_jitter_deg.unwrap_or(0.0);
+                TransitionMode::Push(PushTransition {
+                    angles: AnglePicker::new(base, jitter),
+                })
+            }
             TransitionKind::EInk => {
                 let defaults = EInkTransition::default();
                 TransitionMode::EInk(EInkTransition {
@@ -2433,77 +2463,37 @@ pub enum TransitionMode {
     Iris(IrisTransition),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AngleSelection {
-    Random,
-    Sequential,
-}
-
-#[derive(Debug, Clone)]
-struct AngleSequenceState {
-    next_index: Arc<AtomicUsize>,
-}
-
-impl Default for AngleSequenceState {
-    fn default() -> Self {
-        Self {
-            next_index: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct AnglePicker {
-    pub angles_deg: Arc<[f32]>,
-    pub selection: AngleSelection,
+    pub base_deg: f32,
     pub jitter_deg: f32,
-    runtime: AngleSequenceState,
 }
 
 impl Default for AnglePicker {
     fn default() -> Self {
         Self {
-            angles_deg: Arc::from([0.0_f32]),
-            selection: AngleSelection::Random,
+            base_deg: 0.0_f32,
             jitter_deg: 0.0,
-            runtime: AngleSequenceState::default(),
         }
     }
 }
 
 impl AnglePicker {
-    fn from_parts(
-        angles_deg: Option<Vec<f32>>,
-        selection: Option<AngleSelection>,
-        jitter_deg: Option<f32>,
-    ) -> Self {
-        let picker = Self {
-            angles_deg: Arc::from(angles_deg.unwrap_or_else(|| vec![0.0])),
-            selection: selection.unwrap_or(AngleSelection::Random),
-            jitter_deg: jitter_deg.unwrap_or(0.0),
-            runtime: AngleSequenceState::default(),
-        };
-        picker
+    fn new(base_deg: f32, jitter_deg: f32) -> Self {
+        Self {
+            base_deg,
+            jitter_deg,
+        }
     }
 
     fn normalize(&mut self, kind: TransitionKind) -> Result<()> {
         ensure!(
-            !self.angles_deg.is_empty(),
+            self.base_deg.is_finite(),
             format!(
-                "transition option {} requires angle-list-degrees to include at least one entry",
+                "transition option {} has non-finite values in angle-list-degrees",
                 kind
             )
         );
-        for angle in self.angles_deg.iter() {
-            ensure!(
-                angle.is_finite(),
-                format!(
-                    "transition option {} has non-finite values in angle-list-degrees",
-                    kind
-                )
-            );
-        }
         ensure!(
             self.jitter_deg.is_finite(),
             format!(
@@ -2519,30 +2509,6 @@ impl AnglePicker {
             )
         );
         Ok(())
-    }
-
-    pub(crate) fn pick_angle(&self, rng: &mut impl Rng) -> f32 {
-        let base_angle = if self.angles_deg.len() == 1 {
-            self.angles_deg[0]
-        } else {
-            match self.selection {
-                AngleSelection::Random => {
-                    let index = rng.random_range(0..self.angles_deg.len());
-                    self.angles_deg[index]
-                }
-                AngleSelection::Sequential => {
-                    let index = self.runtime.next_index.fetch_add(1, Ordering::Relaxed)
-                        % self.angles_deg.len();
-                    self.angles_deg[index]
-                }
-            }
-        };
-        if self.jitter_deg.abs() > f32::EPSILON {
-            let jitter = rng.random_range(-self.jitter_deg..=self.jitter_deg);
-            base_angle + jitter
-        } else {
-            base_angle
-        }
     }
 }
 
@@ -2749,11 +2715,14 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
             for (field, value) in entry.fields {
                 apply_transition_inline_field::<A::Error>(&mut builder, kind, &field, value)?;
             }
-            let option = TransitionOptions::with_kind(kind, builder)
+            let canonical = builder
+                .into_canonical_options(kind)
                 .map_err(|err| de::Error::custom(err.to_string()))?;
-            let index = options.len();
-            options.push(option);
-            entries.push(SelectionEntry { index, kind });
+            for option in canonical {
+                let index = options.len();
+                options.push(option);
+                entries.push(SelectionEntry { index, kind });
+            }
         }
 
         let resolved_selection =
@@ -2774,16 +2743,14 @@ impl<'de> Visitor<'de> for TransitionConfigVisitor {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TransitionOptionBuilder {
     duration_ms: Option<u64>,
     fade_through_black: Option<bool>,
     wipe_angle_list_deg: Option<Vec<f32>>,
-    wipe_angle_selection: Option<AngleSelection>,
     wipe_angle_jitter_deg: Option<f32>,
     wipe_softness: Option<f32>,
     push_angle_list_deg: Option<Vec<f32>>,
-    push_angle_selection: Option<AngleSelection>,
     push_angle_jitter_deg: Option<f32>,
     eink_flash_count: Option<u32>,
     eink_reveal_portion: Option<f32>,
@@ -2796,6 +2763,79 @@ struct TransitionOptionBuilder {
     iris_stroke_rgba: Option<[f32; 4]>,
     iris_stroke_width: Option<f32>,
     iris_tolerance: Option<f32>,
+}
+
+impl TransitionOptionBuilder {
+    fn into_canonical_options(self, kind: TransitionKind) -> Result<Vec<TransitionOptions>> {
+        match kind {
+            TransitionKind::Wipe => {
+                let angles = self.wipe_angle_list_deg.clone();
+                let jitter = self.wipe_angle_jitter_deg;
+                self.into_canonical_with_angles(kind, angles, jitter, |builder, base| {
+                    builder.wipe_angle_list_deg = Some(vec![base])
+                })
+            }
+            TransitionKind::Push => {
+                let angles = self.push_angle_list_deg.clone();
+                let jitter = self.push_angle_jitter_deg;
+                self.into_canonical_with_angles(kind, angles, jitter, |builder, base| {
+                    builder.push_angle_list_deg = Some(vec![base])
+                })
+            }
+            _ => {
+                let option = TransitionOptions::with_kind(kind, self)?;
+                Ok(vec![option])
+            }
+        }
+    }
+
+    fn into_canonical_with_angles(
+        self,
+        kind: TransitionKind,
+        angles: Option<Vec<f32>>,
+        jitter: Option<f32>,
+        mut apply_base: impl FnMut(&mut TransitionOptionBuilder, f32),
+    ) -> Result<Vec<TransitionOptions>> {
+        let jitter_value = jitter.unwrap_or(0.0);
+        ensure!(
+            jitter_value.is_finite(),
+            format!(
+                "transition option {} has non-finite angle-jitter-degrees",
+                kind
+            )
+        );
+        ensure!(
+            jitter_value >= 0.0,
+            format!(
+                "transition option {} requires angle-jitter-degrees >= 0",
+                kind
+            )
+        );
+        let base_angles = angles.unwrap_or_else(|| vec![0.0]);
+        ensure!(
+            !base_angles.is_empty(),
+            format!(
+                "transition option {} requires angle-list-degrees to include at least one entry",
+                kind
+            )
+        );
+        let mut options = Vec::with_capacity(base_angles.len());
+        let builder_template = self;
+        for base in base_angles {
+            ensure!(
+                base.is_finite(),
+                format!(
+                    "transition option {} has non-finite values in angle-list-degrees",
+                    kind
+                )
+            );
+            let mut builder = builder_template.clone();
+            apply_base(&mut builder, base);
+            let option = TransitionOptions::with_kind(kind, builder)?;
+            options.push(option);
+        }
+        Ok(options)
+    }
 }
 
 fn apply_transition_inline_field<E: de::Error>(
@@ -2816,14 +2856,6 @@ fn apply_transition_inline_field<E: de::Error>(
             match kind {
                 TransitionKind::Wipe => builder.wipe_angle_list_deg = Some(angles),
                 TransitionKind::Push => builder.push_angle_list_deg = Some(angles),
-                _ => {}
-            }
-        }
-        "angle-selection" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
-            let selection = inline_value_to::<AngleSelection, E>(value)?;
-            match kind {
-                TransitionKind::Wipe => builder.wipe_angle_selection = Some(selection),
-                TransitionKind::Push => builder.push_angle_selection = Some(selection),
                 _ => {}
             }
         }

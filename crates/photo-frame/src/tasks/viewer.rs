@@ -90,7 +90,7 @@ impl TransitionState {
                 through_black: cfg.through_black,
             },
             TransitionMode::Wipe(cfg) => {
-                let angle = cfg.angles.pick_angle(rng);
+                let angle = jittered_angle(&cfg.angles, rng);
                 let (sin, cos) = angle.to_radians().sin_cos();
                 let mut normal = [cos, sin];
                 let len = (normal[0] * normal[0] + normal[1] * normal[1]).sqrt();
@@ -106,7 +106,7 @@ impl TransitionState {
                 }
             }
             TransitionMode::Push(cfg) => {
-                let angle = cfg.angles.pick_angle(rng);
+                let angle = jittered_angle(&cfg.angles, rng);
                 let (sin, cos) = angle.to_radians().sin_cos();
                 let mut direction = [cos, sin];
                 let len = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
@@ -162,6 +162,16 @@ impl TransitionState {
 
     pub(super) fn variant(&self) -> &ActiveTransition {
         &self.variant
+    }
+}
+
+fn jittered_angle(picker: &crate::config::AnglePicker, rng: &mut impl Rng) -> f32 {
+    let base = picker.base_deg;
+    let jitter = picker.jitter_deg;
+    if jitter.abs() > f32::EPSILON {
+        base + rng.random_range(-jitter..=jitter)
+    } else {
+        base
     }
 }
 
