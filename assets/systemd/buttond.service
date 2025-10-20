@@ -1,6 +1,6 @@
 # Managed by setup/system/modules/60-systemd.sh
 [Unit]
-Description=Photo Frame Power Button Monitor
+Description=Photo Frame Button Daemon
 After=multi-user.target
 Wants=multi-user.target
 
@@ -9,8 +9,7 @@ Type=simple
 User=kiosk
 Group=kiosk
 WorkingDirectory=/var/lib/photo-frame
-ExecStart=/opt/photo-frame/bin/photo-buttond --single-window-ms 250 --double-window-ms 400 --debounce-ms 20 \
-  --pidfile /run/photoframe/app.pid --procname rust-photo-frame --shutdown /opt/photo-frame/bin/photo-safe-shutdown
+ExecStart=/opt/photo-frame/bin/photo-buttond --config /var/lib/photo-frame/config/config.yaml --log-level info
 Restart=always
 RestartSec=1s
 CapabilityBoundingSet=CAP_KILL CAP_SYS_BOOT

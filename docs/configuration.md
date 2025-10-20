@@ -82,7 +82,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Purpose:** Selects where the application exposes its Unix domain control socket for runtime commands (sleep toggles, future remote controls).
 - **Required?** Optional; defaults to `/run/photo-frame/control.sock`.
 - **Accepted values & defaults:** Any filesystem path, typically under `/run`, `/run/user/<uid>`, or another writable runtime directory.
-- **Effect on behavior:** The path is created on startup and removed on shutdown, but the parent directory must already exist with permissions that allow the kiosk user to create the socket. External helpers such as `photo-buttond` connect to this socket to send JSON commands.
+- **Effect on behavior:** The path is created on startup and removed on shutdown, but the parent directory must already exist with permissions that allow the kiosk user to create the socket. External helpers such as `buttond` connect to this socket to send JSON commands.
 - **Notes:** The kiosk provisioning script creates `/run/photo-frame` (mode `0770`, owned by `kiosk:kiosk`) and installs an `/etc/tmpfiles.d/photo-frame.conf` entry so the directory exists after every boot. If you override the setting, make sure to pre-create the directory portion of the path with matching ownership, e.g. `sudo install -d -m 0770 -o kiosk -g kiosk /var/lib/photo-frame/runtime`. Systems running the frame under a different user should adjust the ownership in that command accordingly. Permission errors during startup mean the process could not create the socket—double-check the directory permissions or point `control-socket-path` at a writable location like `/run/user/1000/photo-frame/control.sock`.
 
 ### `transition`
@@ -221,26 +221,32 @@ The setup pipeline installs `/opt/photo-frame/bin/powerctl`, a thin wrapper arou
 
 ## Power button daemon
 
-`photo-buttond` watches the Raspberry Pi 5 power-pad button via evdev. The installer drops a systemd unit that starts the daemon as the `frame` user with the following defaults:
+`buttond` watches the Raspberry Pi power-pad button via evdev. Its behavior is controlled by the `buttond` block inside `config.yaml`:
 
 ```
-/opt/photo-frame/bin/photo-buttond \
-  --single-window-ms 250 \
-  --double-window-ms 400 \
-  --debounce-ms 20 \
-  --pidfile /run/photoframe/app.pid \
-  --procname rust-photo-frame \
-  --control-socket /run/photo-frame/control.sock \
-  --shutdown /opt/photo-frame/bin/photo-safe-shutdown
+buttond:
+  device: null
+  single-window-ms: 250
+  double-window-ms: 400
+  debounce-ms: 20
+  shutdown-command: /opt/photo-frame/bin/photo-safe-shutdown
+  # pidfile: /run/photo-frame/app.pid
+  # procname: rust-photo-frame
+  screen:
+    output: HDMI-A-1
+    off-delay-ms: 3500
+    wayland-display: wayland-1
 ```
 
-- **Short press:** writes `{ "command": "ToggleState" }` to `/run/photo-frame/control.sock`.
-- **Double press:** runs `/opt/photo-frame/bin/photo-safe-shutdown`, which wraps `shutdown -h now`.
-- **Long press:** bypassed so the Pi firmware can force power-off.
-- **System integration:** The provisioning script also installs a `systemd-logind` drop-in that sets `HandlePowerKey=ignore` so the desktop stack never interprets the press as a global poweroff request; only the daemon reacts to the event.
-- **Process guard:** When `--pidfile` and `--procname` are supplied the daemon verifies that the kiosk process listed in the PID file is running (and matches the expected name) before attempting to toggle playback. This avoids spurious log noise when the UI is offline.
+- **device** — Optional absolute path to the input device that emits `KEY_POWER`. Leave `null` to scan `/dev/input/by-path/*power*` first and fall back to `/dev/input/event*`.
+- **single-window-ms / double-window-ms / debounce-ms** — Timing windows (milliseconds) that determine which gesture fires. Adjust them to match the physical switch. Long presses are ignored so the firmware can still perform a hard power cut.
+- **shutdown-command** — Executable invoked on a double press. The setup pipeline installs `/opt/photo-frame/bin/photo-safe-shutdown`, which issues a `systemctl poweroff` via logind. A polkit rule grants the `kiosk` account permission to request the shutdown without interactive authentication.
+- **pidfile / procname** — Optional guard that verifies the kiosk PID file exists and, when `procname` is provided, that it still references the expected process. When the check fails `buttond` logs a warning and ignores the press.
+- **screen.output** — Connector name understood by `wlr-randr`. Leave `null` to pick the first connected non-internal output.
+- **screen.off-delay-ms** — Delay after issuing the sleep command so the Sleep Screen can render before the display powers down.
+- **screen.wayland-display** — Wayland display name passed to `wlr-randr`. Set it to match the compositor (`wayland-1` when launched by greetd).
 
-Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. If the wrong device is chosen, override it by editing the unit to pass `--device /dev/input/by-path/...-event`. Debounce, single-press, and double-press windows are configurable in milliseconds.
+On a **single press** the daemon writes `{ "command": "toggle-state" }` to the control socket declared by `control-socket-path`, then toggles the monitor power. If the display is asleep it is switched on immediately; otherwise `buttond` waits `screen.off-delay-ms` before sending `wlr-randr --output … --off` (with a `vcgencmd display_power` fallback). A **double press** runs `shutdown-command` for a clean power-off. The setup flow installs `buttond.service`, configures `HandlePowerKey=ignore` in `/etc/systemd/logind.conf`, and enables a polkit rule so the service can request shutdowns without prompting on the local console.
 
 ### `matting`
 

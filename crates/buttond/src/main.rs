@@ -3,13 +3,16 @@ use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use evdev::{Device, EventSummary, KeyCode};
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use serde::Deserialize;
+use serde_yaml::{Mapping, Value as YamlValue};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -19,29 +22,33 @@ use tracing_subscriber::EnvFilter;
     about = "Power button handler for the Rust photo frame"
 )]
 struct Args {
+    /// Path to the photo frame configuration file.
+    #[arg(long)]
+    config: Option<PathBuf>,
+
     /// Input device path (evdev). Auto-detects when omitted.
     #[arg(long)]
     device: Option<PathBuf>,
 
     /// Maximum press duration to treat as a short press (milliseconds).
-    #[arg(long, default_value_t = 250)]
-    single_window_ms: u64,
+    #[arg(long)]
+    single_window_ms: Option<u64>,
 
     /// Window to detect a second press and trigger shutdown (milliseconds).
-    #[arg(long, default_value_t = 400)]
-    double_window_ms: u64,
+    #[arg(long)]
+    double_window_ms: Option<u64>,
 
     /// Debounce window applied to press/release transitions (milliseconds).
-    #[arg(long, default_value_t = 20)]
-    debounce_ms: u64,
+    #[arg(long)]
+    debounce_ms: Option<u64>,
 
     /// Photo frame control socket.
-    #[arg(long, default_value = "/run/photo-frame/control.sock")]
-    control_socket: PathBuf,
+    #[arg(long)]
+    control_socket: Option<PathBuf>,
 
     /// Shutdown helper to execute on a double press.
-    #[arg(long, default_value = "/opt/photo-frame/bin/photo-safe-shutdown")]
-    shutdown: PathBuf,
+    #[arg(long)]
+    shutdown: Option<PathBuf>,
 
     /// Logging level (error|warn|info|debug|trace).
     #[arg(long, default_value = "info")]
@@ -54,24 +61,457 @@ struct Args {
     /// Expected process name for the kiosk PID (matches `/proc/<pid>/comm`).
     #[arg(long)]
     procname: Option<String>,
+
+    /// Override the display connector name reported by `wlr-randr`.
+    #[arg(long)]
+    screen_output: Option<String>,
+
+    /// Delay before powering the screen off after requesting sleep (milliseconds).
+    #[arg(long)]
+    screen_off_delay_ms: Option<u64>,
+
+    /// Wayland display name when invoking `wlr-randr`.
+    #[arg(long)]
+    wayland_display: Option<String>,
+}
+
+const DEFAULT_SINGLE_WINDOW_MS: u64 = 250;
+const DEFAULT_DOUBLE_WINDOW_MS: u64 = 400;
+const DEFAULT_DEBOUNCE_MS: u64 = 20;
+const DEFAULT_CONTROL_SOCKET: &str = "/run/photo-frame/control.sock";
+const DEFAULT_SHUTDOWN_PATH: &str = "/opt/photo-frame/bin/photo-safe-shutdown";
+const DEFAULT_SCREEN_OFF_DELAY_MS: u64 = 3500;
+
+#[derive(Debug, Clone)]
+struct Settings {
+    device: Option<PathBuf>,
+    durations: Durations,
+    control_socket: PathBuf,
+    shutdown: PathBuf,
+    pidfile: Option<PathBuf>,
+    procname: Option<String>,
+    screen: ScreenSettings,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+struct ButtondConfig {
+    device: Option<PathBuf>,
+    single_window_ms: Option<u64>,
+    double_window_ms: Option<u64>,
+    debounce_ms: Option<u64>,
+    shutdown_command: Option<PathBuf>,
+    pidfile: Option<PathBuf>,
+    procname: Option<String>,
+    #[serde(default)]
+    screen: ButtondScreenConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+struct ButtondScreenConfig {
+    output: Option<String>,
+    off_delay_ms: Option<u64>,
+    wayland_display: Option<String>,
+}
+
+struct ConfigFile {
+    control_socket_path: Option<PathBuf>,
+    buttond: ButtondConfig,
+}
+
+impl Settings {
+    fn from_args(args: Args) -> Result<Self> {
+        let config_file =
+            if let Some(path) = args.config.as_deref() {
+                Some(load_config_file(path).with_context(|| {
+                    format!("failed to load configuration from {}", path.display())
+                })?)
+            } else {
+                None
+            };
+
+        let buttond_config = config_file.as_ref().map(|file| &file.buttond);
+
+        let device = args
+            .device
+            .or_else(|| buttond_config.and_then(|cfg| cfg.device.clone()));
+
+        let single_window_ms = args
+            .single_window_ms
+            .or_else(|| buttond_config.and_then(|cfg| cfg.single_window_ms))
+            .unwrap_or(DEFAULT_SINGLE_WINDOW_MS);
+        ensure!(
+            single_window_ms > 0,
+            "single-window-ms must be greater than zero"
+        );
+
+        let double_window_ms = args
+            .double_window_ms
+            .or_else(|| buttond_config.and_then(|cfg| cfg.double_window_ms))
+            .unwrap_or(DEFAULT_DOUBLE_WINDOW_MS);
+        ensure!(
+            double_window_ms > 0,
+            "double-window-ms must be greater than zero"
+        );
+
+        let debounce_ms = args
+            .debounce_ms
+            .or_else(|| buttond_config.and_then(|cfg| cfg.debounce_ms))
+            .unwrap_or(DEFAULT_DEBOUNCE_MS);
+        ensure!(debounce_ms > 0, "debounce-ms must be greater than zero");
+
+        let durations = Durations::from_values(
+            Duration::from_millis(debounce_ms),
+            Duration::from_millis(single_window_ms),
+            Duration::from_millis(double_window_ms),
+        );
+
+        let control_socket = args
+            .control_socket
+            .or_else(|| {
+                config_file
+                    .as_ref()
+                    .and_then(|file| file.control_socket_path.clone())
+            })
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_CONTROL_SOCKET));
+        ensure!(
+            !control_socket.as_os_str().is_empty(),
+            "control-socket path must not be empty"
+        );
+        ensure!(
+            control_socket.file_name().is_some(),
+            "control-socket path must include a socket file name"
+        );
+
+        let shutdown = args
+            .shutdown
+            .or_else(|| buttond_config.and_then(|cfg| cfg.shutdown_command.clone()))
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_SHUTDOWN_PATH));
+
+        let pidfile = args
+            .pidfile
+            .or_else(|| buttond_config.and_then(|cfg| cfg.pidfile.clone()));
+
+        let procname = sanitize_string(
+            args.procname
+                .or_else(|| buttond_config.and_then(|cfg| cfg.procname.clone())),
+        );
+
+        let screen_output = sanitize_string(
+            args.screen_output
+                .or_else(|| buttond_config.and_then(|cfg| cfg.screen.output.clone())),
+        );
+        let screen_off_delay_ms = args
+            .screen_off_delay_ms
+            .or_else(|| buttond_config.and_then(|cfg| cfg.screen.off_delay_ms))
+            .unwrap_or(DEFAULT_SCREEN_OFF_DELAY_MS);
+        let wayland_display = sanitize_string(
+            args.wayland_display
+                .or_else(|| buttond_config.and_then(|cfg| cfg.screen.wayland_display.clone())),
+        );
+        let screen = ScreenSettings::new(screen_output, wayland_display, screen_off_delay_ms)?;
+
+        Ok(Self {
+            device,
+            durations,
+            control_socket,
+            shutdown,
+            pidfile,
+            procname,
+            screen,
+        })
+    }
+}
+
+fn sanitize_string(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn load_config_file(path: &Path) -> Result<ConfigFile> {
+    let contents = fs::read_to_string(path)?;
+    let root: YamlValue = serde_yaml::from_str(&contents)?;
+
+    let control_socket_path = root
+        .get("control-socket-path")
+        .and_then(|value| value.as_str())
+        .map(|s| PathBuf::from(s));
+
+    let buttond_value = root
+        .get("buttond")
+        .cloned()
+        .unwrap_or_else(|| YamlValue::Mapping(Mapping::new()));
+    let buttond: ButtondConfig =
+        serde_yaml::from_value(buttond_value).context("invalid buttond configuration block")?;
+
+    Ok(ConfigFile {
+        control_socket_path,
+        buttond,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct ScreenSettings {
+    output: Option<String>,
+    off_delay: Duration,
+    wayland_display: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenPowerState {
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone)]
+struct OutputInfo {
+    name: String,
+    connected: bool,
+    enabled: Option<bool>,
+    internal: bool,
+}
+
+#[derive(Debug, Default)]
+struct OutputBuilder {
+    name: String,
+    connected: Option<bool>,
+    enabled: Option<bool>,
+    internal: bool,
+}
+
+impl ScreenSettings {
+    fn new(
+        output: Option<String>,
+        wayland_display: Option<String>,
+        off_delay_ms: u64,
+    ) -> Result<Self> {
+        Ok(Self {
+            output,
+            off_delay: Duration::from_millis(off_delay_ms),
+            wayland_display,
+        })
+    }
+
+    fn toggle(&self) -> Result<()> {
+        let outputs = self.query_outputs()?;
+        if outputs.is_empty() {
+            bail!("wlr-randr did not report any outputs");
+        }
+
+        let (target, state) = self.resolve_target(&outputs)?;
+        debug!(target = %target.name, state = ?state, "resolved display state");
+
+        match state {
+            ScreenPowerState::On => {
+                let delay = self.off_delay;
+                let controller = self.clone();
+                let target_name = target.name.clone();
+                thread::spawn(move || {
+                    if !delay.is_zero() {
+                        thread::sleep(delay);
+                    }
+                    match controller.set_power(&target_name, ScreenPowerState::Off) {
+                        Ok(()) => info!(target = %target_name, "powered display off"),
+                        Err(err) => {
+                            warn!(target = %target_name, ?err, "failed to power display off")
+                        }
+                    }
+                });
+                Ok(())
+            }
+            ScreenPowerState::Off => {
+                self.set_power(&target.name, ScreenPowerState::On)?;
+                info!(target = %target.name, "powered display on");
+                Ok(())
+            }
+        }
+    }
+
+    fn resolve_target(&self, outputs: &[OutputInfo]) -> Result<(OutputInfo, ScreenPowerState)> {
+        let candidate = if let Some(requested) = &self.output {
+            outputs
+                .iter()
+                .find(|out| &out.name == requested)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("output '{}' not reported by wlr-randr", requested)
+                })?
+        } else {
+            outputs
+                .iter()
+                .find(|out| out.connected && !out.internal)
+                .or_else(|| outputs.iter().find(|out| out.connected))
+                .or_else(|| outputs.first())
+                .ok_or_else(|| anyhow::anyhow!("no display outputs discovered"))?
+        };
+
+        let enabled = candidate.enabled.unwrap_or(candidate.connected);
+        let state = if enabled {
+            ScreenPowerState::On
+        } else {
+            ScreenPowerState::Off
+        };
+
+        Ok((candidate.clone(), state))
+    }
+
+    fn query_outputs(&self) -> Result<Vec<OutputInfo>> {
+        let mut cmd = Command::new("wlr-randr");
+        if let Some(display) = &self.wayland_display {
+            cmd.env("WAYLAND_DISPLAY", display);
+        }
+        let output = cmd.output().context("failed to execute wlr-randr")?;
+        if !output.status.success() {
+            bail!("wlr-randr exited with status {}", output.status);
+        }
+        let stdout =
+            String::from_utf8(output.stdout).context("wlr-randr emitted non-UTF-8 output")?;
+        Ok(parse_wlr_randr_outputs(&stdout))
+    }
+
+    fn set_power(&self, target: &str, state: ScreenPowerState) -> Result<()> {
+        let mut cmd = Command::new("wlr-randr");
+        if let Some(display) = &self.wayland_display {
+            cmd.env("WAYLAND_DISPLAY", display);
+        }
+        cmd.arg("--output").arg(target);
+        match state {
+            ScreenPowerState::On => {
+                cmd.arg("--on");
+            }
+            ScreenPowerState::Off => {
+                cmd.arg("--off");
+            }
+        }
+
+        let status = cmd
+            .status()
+            .with_context(|| format!("failed to execute wlr-randr for output {target}"))?;
+        if status.success() {
+            return Ok(());
+        }
+
+        warn!(
+            target = target,
+            state = ?state,
+            %status,
+            "wlr-randr failed; attempting vcgencmd fallback"
+        );
+
+        let mut fallback = Command::new("vcgencmd");
+        fallback.arg("display_power");
+        match state {
+            ScreenPowerState::On => fallback.arg("1"),
+            ScreenPowerState::Off => fallback.arg("0"),
+        };
+
+        let fallback_status = fallback
+            .status()
+            .context("failed to execute vcgencmd fallback")?;
+        ensure!(
+            fallback_status.success(),
+            "vcgencmd fallback exited with status {fallback_status}"
+        );
+        Ok(())
+    }
+}
+
+fn parse_wlr_randr_outputs(raw: &str) -> Vec<OutputInfo> {
+    let mut outputs = Vec::new();
+    let mut builder: Option<OutputBuilder> = None;
+
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let is_header = line.chars().next().map_or(true, |ch| !ch.is_whitespace());
+        if is_header {
+            if let Some(prev) = builder.take() {
+                outputs.push(prev.finish());
+            }
+            let mut parts = line.split_whitespace();
+            let name = parts.next().unwrap_or_default().to_string();
+            let internal = name.starts_with("eDP") || name.starts_with("LVDS");
+            builder = Some(OutputBuilder {
+                name,
+                internal,
+                ..Default::default()
+            });
+            continue;
+        }
+
+        if let Some(active) = builder.as_mut() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("Enabled:") {
+                if let Some(value) = parse_bool(rest.trim()) {
+                    active.enabled = Some(value);
+                }
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("Status:") {
+                let normalized = rest.trim().to_ascii_lowercase();
+                if normalized.starts_with("connected") {
+                    active.connected = Some(true);
+                } else if normalized.starts_with("disconnected") {
+                    active.connected = Some(false);
+                }
+                continue;
+            }
+        }
+    }
+
+    if let Some(prev) = builder.take() {
+        outputs.push(prev.finish());
+    }
+
+    outputs
+}
+
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "yes" | "on" | "true" | "1" => Some(true),
+        "no" | "off" | "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+impl OutputBuilder {
+    fn finish(self) -> OutputInfo {
+        let enabled = self.enabled;
+        let connected = self.connected.unwrap_or_else(|| enabled.unwrap_or(false));
+        OutputInfo {
+            name: self.name,
+            connected,
+            enabled,
+            internal: self.internal,
+        }
+    }
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
     init_tracing(&args.log_level)?;
 
-    let durations = Durations::from_args(&args);
-    let (mut device, path) = open_device(&args)?;
+    let settings = Settings::from_args(args)?;
+
+    let (mut device, path) = open_device(&settings)?;
     set_nonblocking(&device)
         .with_context(|| format!("failed to set {} non-blocking", path.display()))?;
     info!(device = %path.display(), "listening for power button events");
 
-    let mut tracker = ButtonTracker::new(durations);
+    let mut tracker = ButtonTracker::new(settings.durations);
 
     loop {
         let now = Instant::now();
         if let Some(action) = tracker.handle_timeout(now) {
-            perform_action(action, &args);
+            perform_action(action, &settings);
             continue;
         }
 
@@ -87,7 +527,7 @@ fn main() -> Result<()> {
                             }
                             0 => {
                                 if let Some(action) = tracker.on_release(Instant::now()) {
-                                    perform_action(action, &args);
+                                    perform_action(action, &settings);
                                 }
                             }
                             _ => {}
@@ -128,8 +568,8 @@ fn init_tracing(level: &str) -> Result<()> {
     Ok(())
 }
 
-fn open_device(args: &Args) -> Result<(Device, PathBuf)> {
-    if let Some(path) = &args.device {
+fn open_device(settings: &Settings) -> Result<(Device, PathBuf)> {
+    if let Some(path) = &settings.device {
         let device =
             Device::open(path).with_context(|| format!("failed to open {}", path.display()))?;
         ensure_power_key(&device, path)?;
@@ -220,7 +660,7 @@ fn ensure_power_key(device: &Device, path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct Durations {
     debounce: Duration,
     single_window: Duration,
@@ -228,11 +668,11 @@ struct Durations {
 }
 
 impl Durations {
-    fn from_args(args: &Args) -> Self {
+    fn from_values(debounce: Duration, single_window: Duration, double_window: Duration) -> Self {
         Self {
-            debounce: Duration::from_millis(args.debounce_ms),
-            single_window: Duration::from_millis(args.single_window_ms),
-            double_window: Duration::from_millis(args.double_window_ms),
+            debounce,
+            single_window,
+            double_window,
         }
     }
 }
@@ -377,46 +817,51 @@ impl ButtonTracker {
     }
 }
 
-fn perform_action(action: Action, args: &Args) {
+fn perform_action(action: Action, settings: &Settings) {
     match action {
         Action::Single => {
             info!("single press → toggle-state command");
-            if let Err(err) = trigger_single(args) {
+            if let Err(err) = trigger_single(settings) {
                 error!(?err, "failed to send toggle-state command");
             }
         }
         Action::Double => {
             info!("double press → shutdown");
-            if let Err(err) = trigger_shutdown(&args.shutdown) {
+            if let Err(err) = trigger_shutdown(&settings.shutdown) {
                 error!(?err, "failed to run shutdown helper");
             }
         }
     }
 }
 
-fn trigger_single(args: &Args) -> Result<()> {
-    if let Some(pidfile) = &args.pidfile {
-        let running = target_process_running(pidfile, args.procname.as_deref())?;
+fn trigger_single(settings: &Settings) -> Result<()> {
+    if let Some(pidfile) = &settings.pidfile {
+        let running = target_process_running(pidfile, settings.procname.as_deref())?;
         if !running {
             warn!(
                 pidfile = %pidfile.display(),
-                procname = args.procname.as_deref().unwrap_or("<unspecified>"),
+                procname = settings.procname.as_deref().unwrap_or("<unspecified>"),
                 "skipping toggle-state command: kiosk process not running"
             );
             return Ok(());
         }
     }
 
-    let mut stream = UnixStream::connect(&args.control_socket).with_context(|| {
+    let mut stream = UnixStream::connect(&settings.control_socket).with_context(|| {
         format!(
             "failed to connect to control socket at {}",
-            args.control_socket.display()
+            settings.control_socket.display()
         )
     })?;
 
     stream
         .write_all(br#"{"command":"toggle-state"}"#)
         .context("failed to send toggle-state command")?;
+
+    settings
+        .screen
+        .toggle()
+        .context("failed to toggle display power")?;
 
     Ok(())
 }
@@ -469,7 +914,9 @@ fn target_process_running(pidfile: &Path, expected_name: Option<&str>) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, ButtonTracker, Durations, target_process_running};
+    use super::{
+        Action, ButtonTracker, Durations, parse_wlr_randr_outputs, target_process_running,
+    };
     use std::time::{Duration, Instant};
 
     fn durations() -> Durations {
@@ -571,5 +1018,35 @@ mod tests {
 
         assert!(!target_process_running(&pidfile, None)?);
         Ok(())
+    }
+
+    #[test]
+    fn parse_outputs_detects_enabled_state() {
+        let sample = r#"
+HDMI-A-1 "Dell Inc. DELL U2720Q" 3840x2160@60.00Hz (preferred, current)
+  Modes:
+    3840x2160@60.00Hz (preferred)
+  Position: 0,0
+  Scale: 1.000000
+  Enabled: yes
+  Status: connected
+
+eDP-1 "Sharp Corp." 1920x1080@60.01Hz
+  Enabled: no
+  Status: disconnected
+"#;
+
+        let outputs = parse_wlr_randr_outputs(sample);
+        assert_eq!(outputs.len(), 2);
+
+        let hdmi = outputs.iter().find(|out| out.name == "HDMI-A-1").unwrap();
+        assert!(hdmi.connected);
+        assert_eq!(hdmi.enabled, Some(true));
+        assert!(!hdmi.internal);
+
+        let panel = outputs.iter().find(|out| out.name == "eDP-1").unwrap();
+        assert!(!panel.connected);
+        assert_eq!(panel.enabled, Some(false));
+        assert!(panel.internal);
     }
 }

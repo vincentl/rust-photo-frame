@@ -10,6 +10,27 @@ photo-library-path: /var/lib/photo-frame/photos
 # Unix domain socket path for runtime control commands
 control-socket-path: /run/photo-frame/control.sock
 
+# Hardware button daemon configuration
+buttond:
+  # Optional override for the evdev device path that emits KEY_POWER. Leave null to auto-detect.
+  device: null
+  # Timing windows (milliseconds) that classify button interactions.
+  single-window-ms: 250
+  double-window-ms: 400
+  debounce-ms: 20
+  # Executable that performs a clean shutdown when the button is double-pressed.
+  shutdown-command: /opt/photo-frame/bin/photo-safe-shutdown
+  # Uncomment to require a specific kiosk process to be active before forwarding toggle commands.
+  # pidfile: /run/photo-frame/app.pid
+  # procname: rust-photo-frame
+  screen:
+    # Connector name reported by `wlr-randr`. Leave null to auto-select the first connected external output.
+    output: null
+    # Delay (milliseconds) to wait before powering the display off so the sleep screen can render.
+    off-delay-ms: 3500
+    # Wayland display to target when invoking `wlr-randr`.
+    wayland-display: wayland-1
+
 # Render/transition settings
 transition:
   # Choose how the viewer advances through the entries below: fixed, random, or sequential.

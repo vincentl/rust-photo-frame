@@ -274,7 +274,7 @@ enable_systemd_units() {
     systemd_status display-manager.service || true
 
     local unit
-    for unit in photoframe-wifi-manager.service photoframe-buttond.service; do
+    for unit in photoframe-wifi-manager.service buttond.service; do
         if systemd_unit_exists "${unit}"; then
             systemd_enable_now_unit "${unit}" || true
         fi
@@ -322,6 +322,33 @@ ensure_persistent_journald() {
     systemd_restart_unit systemd-journald
 }
 
+configure_logind_power_key() {
+    local module="logind"
+    local config="/etc/systemd/logind.conf"
+
+    log "[${module}] Forcing HandlePowerKey=ignore"
+    if [[ ! -f "${config}" ]]; then
+        install -m 0644 /dev/null "${config}"
+    fi
+
+    if grep -Eq '^[#[:space:]]*HandlePowerKey=ignore' "${config}"; then
+        log "[${module}] HandlePowerKey already set to ignore"
+    elif grep -Eq '^[#[:space:]]*HandlePowerKey=' "${config}"; then
+        sed -i 's/^[#[:space:]]*HandlePowerKey=.*/HandlePowerKey=ignore/' "${config}"
+        log "[${module}] Updated HandlePowerKey=ignore"
+    else
+        printf '\nHandlePowerKey=ignore\n' >>"${config}"
+        log "[${module}] Appended HandlePowerKey=ignore"
+    fi
+
+    if systemd_available; then
+        log "[${module}] Restarting systemd-logind"
+        systemd_restart_unit systemd-logind.service || log "[${module}] WARN: Failed to restart systemd-logind"
+    else
+        log "[${module}] systemctl unavailable; restart systemd-logind manually"
+    fi
+}
+
 main() {
     require_root
     require_trixie
@@ -334,6 +361,7 @@ main() {
     ensure_runtime_dirs
     install_polkit_rules
     ensure_persistent_journald
+    configure_logind_power_key
     enable_systemd_units
 
     log "Kiosk provisioning complete. greetd will launch sway on tty1 as kiosk."

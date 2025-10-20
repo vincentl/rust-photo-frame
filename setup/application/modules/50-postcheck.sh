@@ -12,7 +12,7 @@ fi
 KIOSK_SERVICE="${KIOSK_SERVICE:-greetd.service}"
 WIFI_SERVICE="${WIFI_SERVICE:-photoframe-wifi-manager.service}"
 SYNC_TIMER="${SYNC_TIMER:-photoframe-sync.timer}"
-BUTTON_SERVICE="${BUTTON_SERVICE:-photoframe-buttond.service}"
+BUTTON_SERVICE="${BUTTON_SERVICE:-buttond.service}"
 SEATD_SERVICE="${SEATD_SERVICE:-seatd.service}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/systemd.sh

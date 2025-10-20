@@ -1,0 +1,13 @@
+polkit.addRule(function(action, subject) {
+    if (!subject.isInGroup("kiosk")) {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    switch (action.id) {
+        case "org.freedesktop.login1.power-off":
+        case "org.freedesktop.login1.power-off-multiple-sessions":
+            return polkit.Result.YES;
+        default:
+            return polkit.Result.NOT_HANDLED;
+    }
+});
