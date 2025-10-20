@@ -144,18 +144,13 @@ async fn status_json(State(state): State<UiState>) -> Response {
 async fn monitor_connection(state: UiState, ssid: String) {
     for _ in 0..12 {
         match nm::device_connected(&state.config.interface).await {
-            Ok(true) => match nm::gateway_reachable(&state.config.interface).await {
-                Ok(true) => {
-                    let message = "Frame is back online.".to_string();
-                    if let Err(err) = write_last_attempt(&state, &ssid, "connected", &message, None)
-                    {
-                        warn!(error = ?err, "failed to mark connection as successful");
-                    }
-                    return;
+            Ok(true) => {
+                let message = "Frame is back on Wi-Fi.".to_string();
+                if let Err(err) = write_last_attempt(&state, &ssid, "connected", &message, None) {
+                    warn!(error = ?err, "failed to mark connection as successful");
                 }
-                Ok(false) => {}
-                Err(err) => warn!(error = ?err, "gateway probe failed while monitoring"),
-            },
+                return;
+            }
             Ok(false) => {}
             Err(err) => warn!(error = ?err, "device connectivity check failed while monitoring"),
         }
