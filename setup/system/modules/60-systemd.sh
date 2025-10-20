@@ -8,9 +8,9 @@ log() {
 }
 
 install_auxiliary_units() {
-    log "Installing photoframe systemd units"
+    log "Installing systemd units"
     local unit
-    for unit in "${REPO_ROOT}"/assets/systemd/photoframe-*; do
+    for unit in "${REPO_ROOT}"/assets/systemd/*.service "${REPO_ROOT}"/assets/systemd/*.timer; do
         [ -f "${unit}" ] || continue
         install -D -m 0644 "${unit}" "/etc/systemd/system/$(basename "${unit}")"
     done
@@ -51,6 +51,30 @@ ensure_persistent_journald() {
 
     log "[${module}] Restarting systemd-journald to apply configuration"
     systemctl restart systemd-journald
+}
+
+configure_logind_power_key() {
+    local module="logind"
+    local config="/etc/systemd/logind.conf"
+
+    log "[${module}] Setting HandlePowerKey=ignore"
+
+    if [[ ! -f "${config}" ]]; then
+        install -D -m 0644 /dev/null "${config}"
+    fi
+
+    if grep -Eq '^[#[:space:]]*HandlePowerKey=ignore' "${config}"; then
+        log "[${module}] HandlePowerKey already set to ignore"
+    elif grep -Eq '^[#[:space:]]*HandlePowerKey=' "${config}"; then
+        sed -i 's/^[#[:space:]]*HandlePowerKey=.*/HandlePowerKey=ignore/' "${config}"
+        log "[${module}] Updated HandlePowerKey=ignore"
+    else
+        printf '\nHandlePowerKey=ignore\n' >>"${config}"
+        log "[${module}] Appended HandlePowerKey=ignore"
+    fi
+
+    log "[${module}] Restarting systemd-logind to apply configuration"
+    systemctl restart systemd-logind
 }
 
 enable_systemd_units() {
@@ -105,9 +129,9 @@ enable_systemd_units() {
     fi
 
     local wifi_bin="/opt/photo-frame/bin/wifi-manager"
-    local button_bin="/opt/photo-frame/bin/photo-buttond"
+    local button_bin="/opt/photo-frame/bin/buttond"
     local unit
-    for unit in photoframe-wifi-manager.service photoframe-buttond.service; do
+    for unit in photoframe-wifi-manager.service buttond.service; do
         if systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
             systemctl enable "${unit}"
             case "${unit}" in
@@ -118,7 +142,7 @@ enable_systemd_units() {
                         log "Deferring start of ${unit}; ${wifi_bin} missing"
                     fi
                     ;;
-                photoframe-buttond.service)
+                buttond.service)
                     if [[ -x "${button_bin}" ]]; then
                         systemctl start "${unit}" || true
                     else
@@ -137,6 +161,7 @@ enable_systemd_units() {
 
 install_auxiliary_units
 ensure_persistent_journald
+configure_logind_power_key
 enable_systemd_units
 
 log "systemd provisioning complete"

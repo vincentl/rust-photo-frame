@@ -18,7 +18,7 @@ The script performs the following actions:
 - provisions `/run/photo-frame` (owned by `kiosk:kiosk`, mode `0770`) and drops an `/etc/tmpfiles.d/photo-frame.conf` entry so the control socket directory exists on every boot,
 - installs `/usr/local/bin/photoframe-session` and writes `/etc/greetd/config.toml` so virtual terminal 1 runs `/usr/local/bin/photoframe-session` as the `kiosk` user,
 - disables other display managers (`gdm3`, `sddm`, `lightdm`), enables `greetd.service` as the system `display-manager.service`, sets `graphical.target` as the default boot target, and masks `getty@tty1.service` to keep greetd in control of tty1,
-- deploys the `photoframe-*` helper units (wifi manager, sync timer, button daemon), and
+- deploys the helper units (`photoframe-wifi-manager.service`, `buttond.service`, `photoframe-sync.timer`), and
 - enables the kiosk units, starting them automatically once the corresponding binaries exist in `/opt/photo-frame`.
 
 When the script encounters a host that already reserves tty1 for greetd, it now prints idempotent status lines instead of systemd's verbose output. Expect logs like the following on subsequent runs:
