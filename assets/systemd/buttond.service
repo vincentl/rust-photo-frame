@@ -9,8 +9,7 @@ Type=simple
 User=kiosk
 Group=kiosk
 WorkingDirectory=/var/lib/photo-frame
-ExecStart=/opt/photo-frame/bin/photo-buttond --single-window-ms 250 --double-window-ms 400 --debounce-ms 20 \
-  --pidfile /run/photoframe/app.pid --procname rust-photo-frame --shutdown /opt/photo-frame/bin/photo-safe-shutdown
+ExecStart=/opt/photo-frame/bin/buttond --config /etc/photo-frame/config.yaml
 Restart=always
 RestartSec=1s
 CapabilityBoundingSet=CAP_KILL CAP_SYS_BOOT

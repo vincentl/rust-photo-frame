@@ -127,7 +127,7 @@ install_sway_config() {
 
 set $photo_app_id rust-photo-frame
 set $overlay_app_id wifi-overlay
-set $config_path /var/lib/photo-frame/config/config.yaml
+set $config_path /etc/photo-frame/config.yaml
 
 focus_follows_mouse no
 mouse_warping none
