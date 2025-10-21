@@ -53,6 +53,42 @@ pub async fn device_connected(interface: &str) -> Result<bool> {
     Ok(false)
 }
 
+pub async fn active_connection_id(interface: &str) -> Result<Option<String>> {
+    let output = nmcli(&[
+        "-t",
+        "-f",
+        "GENERAL.CONNECTION",
+        "device",
+        "show",
+        interface,
+    ])
+    .await?;
+    for line in output.lines() {
+        if let Some(value) = parse_nmcli_value(line) {
+            if value == "--" {
+                return Ok(None);
+            }
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
+pub async fn connected_to_infrastructure(
+    interface: &str,
+    hotspot_connection_id: &str,
+) -> Result<bool> {
+    if !device_connected(interface).await? {
+        return Ok(false);
+    }
+
+    match active_connection_id(interface).await? {
+        Some(active) if active == hotspot_connection_id => Ok(false),
+        Some(_) => Ok(true),
+        None => Ok(false),
+    }
+}
+
 pub async fn gateway_reachable(interface: &str) -> Result<bool> {
     let gw = default_gateway(interface).await?;
     if let Some(gw) = gw {

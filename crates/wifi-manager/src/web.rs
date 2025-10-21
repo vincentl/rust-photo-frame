@@ -143,7 +143,12 @@ async fn status_json(State(state): State<UiState>) -> Response {
 
 async fn monitor_connection(state: UiState, ssid: String) {
     for _ in 0..12 {
-        match nm::device_connected(&state.config.interface).await {
+        match nm::connected_to_infrastructure(
+            &state.config.interface,
+            &state.config.hotspot.connection_id,
+        )
+        .await
+        {
             Ok(true) => match nm::gateway_reachable(&state.config.interface).await {
                 Ok(true) => {
                     let message = "Frame is back online.".to_string();
