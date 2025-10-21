@@ -105,8 +105,17 @@ main() {
   fi
 
   info "Copying config"
-  if [ -f "${install_root}/var/config.yaml" ]; then
-    cp "${install_root}/var/config.yaml" "$tmpdir/runtime/config.yaml"
+  local etc_config
+  if [ "${install_root}" = "/" ]; then
+    etc_config="/etc/photo-frame/config.yaml"
+  else
+    etc_config="${install_root%/}/etc/photo-frame/config.yaml"
+  fi
+
+  if [ -f "$etc_config" ]; then
+    cp "$etc_config" "$tmpdir/runtime/config.yaml"
+  elif [ "${install_root}" != "/" ] && [ -f "/etc/photo-frame/config.yaml" ]; then
+    cp "/etc/photo-frame/config.yaml" "$tmpdir/runtime/config.yaml"
   elif [ -f "$REPO_ROOT/config.yaml" ]; then
     cp "$REPO_ROOT/config.yaml" "$tmpdir/runtime/config.yaml"
   fi
