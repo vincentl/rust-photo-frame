@@ -87,42 +87,30 @@ fn sd_ngon(p: vec2<f32>, n: i32, r: f32) -> f32 {
 }
 
 // Analytic curved-blade iris mask using intersection of equally spaced disks.
-// The iris is modeled as the intersection of N circles of radius `d` whose centers
-// lie on a ring of radius `c` around the origin. For each fragment direction, the
-// radial limit is the minimum of the upper roots across all disks. This produces
-// camera-like curved blades without tessellation.
+// Returns 1.0 inside the aperture and 0.0 outside. The aperture size is
+// controlled by `open_scale` in [0,1], and fully open spans the screen width.
 fn iris_mask(
   uv: vec2<f32>,
   aspect: f32,
   blades: u32,
   rotate_rad: f32,
-  t_eased: f32,
-  direction: u32,
+  open_scale: f32,
 ) -> f32 {
-  // Normalize timeline (account for open/close direction)
-  let tt = select(t_eased, 1.0 - t_eased, direction == 1u);
-
   // Map screen uv to centered, aspect-corrected space in [-1,1]
   let p0 = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(aspect, 1.0);
-  // Rotate blades as progress advances
-  let p = rot2(p0, rotate_rad * tt);
+  let p = rot2(p0, rotate_rad);
   let r = length(p);
   if (blades < 3u) {
     return 0.0;
   }
 
-  // Curved-blade base shape via intersection-of-disks, but keep disk radius
-  // strictly larger than center ring to avoid petal topology.
-  let c: f32 = 0.9;                 // ring radius of disk centers
-  let curve: f32 = 1.25;            // curvature factor; d = curve * c (> 1)
-  let d: f32 = curve * c;           // constant disk radius for curved blades
+  // Curved-blade base shape via intersection-of-disks. Keep disk radius > ring
+  // radius to avoid daisy topology.
+  let c: f32 = 0.9;       // ring radius of disk centers (in screen-space units)
+  let curve: f32 = 1.25;  // curvature factor; d = curve * c (> 1)
+  let d: f32 = curve * c; // disk radius
 
-  // Aperture scale s in [0,1] closes the iris without changing topology: we
-  // scale the boundary radius instead of shrinking d below c. This prevents
-  // the daisy-to-polygon flip.
-  let s = clamp(tt, 0.0, 1.0);
-
-  // Precompute angle of the fragment once; iterate disk centers efficiently.
+  // Compute minimum radial limit across blade disks at this direction.
   let theta = atan2(p.y, p.x);
   let sector = 6.283185307179586 / f32(blades);
   let cs = cos(sector);
@@ -154,7 +142,11 @@ fn iris_mask(
     return 0.0;
   }
 
-  let boundary = s * min_ru;
+  // Scale the boundary so fully open spans screen width: when open_scale=1,
+  // the boundary radius reaches `aspect` along the horizontal axis. The max of
+  // the unscaled boundary occurs at center alignment and equals (c + d).
+  let scale_to_width = aspect / (c + d);
+  let boundary = clamp(open_scale, 0.0, 1.0) * min_ru * scale_to_width;
   let sdf = boundary - r;
   let aa = max(fwidth(sdf), 1e-4);
   return smoothstep(0.0, aa, sdf);
@@ -246,16 +238,32 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       }
     }
     case 5u: {
-      let eased_t = clamp(U.t, 0.0, 1.0);
-      let mask = iris_mask(
-        in.screen_uv,
-        U.aspect,
-        max(U.iris_blades, 3u),
-        U.iris_rotate_rad,
-        eased_t,
-        U.iris_direction,
-      );
-      color = mix(current, next, mask);
+      // Two-phase iris: start fully open, close to black (first half), then
+      // open to reveal the next photo (second half). `U.t` is eased already.
+      let t = clamp(U.t, 0.0, 1.0);
+      let first = t < 0.5;
+      let t1 = clamp(t * 2.0, 0.0, 1.0);          // 0..1 over first half
+      let t2 = clamp((t - 0.5) * 2.0, 0.0, 1.0);  // 0..1 over second half
+
+      // Keep some numerical floor to avoid zero area causing banding
+      let open1 = max(1.0 - t1, 0.0); // close from 1 -> 0
+      let open2 = max(t2, 0.0);       // open from 0 -> 1
+
+      // Rotate blades gradually using provided rotate angle over the timeline
+      let rot = U.iris_rotate_rad * t;
+      let blades = max(U.iris_blades, 3u);
+
+      let mask_close = iris_mask(in.screen_uv, U.aspect, blades, rot, open1);
+      let mask_open  = iris_mask(in.screen_uv, U.aspect, blades, rot, open2);
+
+      let black = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+      if (first) {
+        // Show current image through a closing aperture over black
+        color = mix(black, current, mask_close);
+      } else {
+        // Reveal next image through an opening aperture over black
+        color = mix(black, next, mask_open);
+      }
     }
     default: {
       color = current;
