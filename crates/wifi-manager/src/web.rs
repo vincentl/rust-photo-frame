@@ -158,7 +158,8 @@ async fn monitor_connection(state: UiState, ssid: String) {
                     }
                     return;
                 }
-                return;
+                Ok(false) => {}
+                Err(err) => warn!(error = ?err, "gateway reachability check failed while monitoring"),
             }
             Ok(false) => {}
             Err(err) => warn!(error = ?err, "device connectivity check failed while monitoring"),
