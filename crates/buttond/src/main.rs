@@ -7,11 +7,11 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use evdev::{Device, EventSummary, KeyCode};
 use humantime::format_duration;
-use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -108,6 +108,7 @@ struct ButtondSettings {
     screen_on_command: CommandSpec,
     screen_off_command: CommandSpec,
     screen_off_delay: Duration,
+    screen_display_name: Option<String>,
 }
 
 impl ButtondSettings {
@@ -122,6 +123,7 @@ impl ButtondSettings {
             off_delay_ms,
             on_command,
             off_command,
+            display_name,
         } = screen;
         let screen_off_delay = Duration::from_millis(off_delay_ms);
 
@@ -133,6 +135,7 @@ impl ButtondSettings {
             screen_on_command: on_command.into_spec("screen-on"),
             screen_off_command: off_command.into_spec("screen-off"),
             screen_off_delay,
+            screen_display_name: display_name,
         })
     }
 
@@ -141,6 +144,7 @@ impl ButtondSettings {
             self.screen_on_command,
             self.screen_off_command,
             self.screen_off_delay,
+            self.screen_display_name,
         );
 
         Ok(Runtime {
@@ -241,6 +245,8 @@ struct ScreenConfig {
     on_command: CommandConfig,
     #[serde(default = "ScreenConfig::default_off_command")]
     off_command: CommandConfig,
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 impl Default for ScreenConfig {
@@ -249,6 +255,7 @@ impl Default for ScreenConfig {
             off_delay_ms: Self::default_off_delay_ms(),
             on_command: Self::default_on_command(),
             off_command: Self::default_off_command(),
+            display_name: None,
         }
     }
 }
@@ -349,19 +356,26 @@ struct ScreenRuntime {
     on_command: CommandSpec,
     off_command: CommandSpec,
     off_delay: Duration,
+    display_name: Option<String>,
 }
 
 impl ScreenRuntime {
-    fn new(on_command: CommandSpec, off_command: CommandSpec, off_delay: Duration) -> Self {
+    fn new(
+        on_command: CommandSpec,
+        off_command: CommandSpec,
+        off_delay: Duration,
+        display_name: Option<String>,
+    ) -> Self {
         Self {
             on_command,
             off_command,
             off_delay,
+            display_name,
         }
     }
 
     fn toggle_after_frame_toggle(&self) -> Result<ScreenState> {
-        let detected = match detect_primary_display_state() {
+        let detected = match detect_primary_display_state(self.display_name.as_deref()) {
             Ok(info) => {
                 debug!(output = %info.name, state = info.state.as_str(), "detected screen state");
                 info
@@ -369,7 +383,10 @@ impl ScreenRuntime {
             Err(err) => {
                 warn!(?err, "failed to detect screen state; assuming on");
                 ScreenDetection {
-                    name: String::from("unknown"),
+                    name: self
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| String::from("unknown")),
                     state: ScreenState::On,
                 }
             }
@@ -417,7 +434,7 @@ struct ScreenDetection {
     state: ScreenState,
 }
 
-fn detect_primary_display_state() -> Result<ScreenDetection> {
+fn detect_primary_display_state(display_name: Option<&str>) -> Result<ScreenDetection> {
     let output = Command::new("wlr-randr")
         .output()
         .context("failed to execute wlr-randr")?;
@@ -430,6 +447,11 @@ fn detect_primary_display_state() -> Result<ScreenDetection> {
     let stdout =
         String::from_utf8(output.stdout).context("wlr-randr output was not valid UTF-8")?;
 
+    parse_wlr_randr_outputs(&stdout, display_name)
+        .ok_or_else(|| anyhow!("no connected display detected"))
+}
+
+fn parse_wlr_randr_outputs(stdout: &str, display_name: Option<&str>) -> Option<ScreenDetection> {
     let mut current: Option<OutputRecord> = None;
     let mut best: Option<ScreenDetection> = None;
 
@@ -439,7 +461,7 @@ fn detect_primary_display_state() -> Result<ScreenDetection> {
         }
 
         if is_output_header(line) {
-            commit_output(&mut current, &mut best);
+            commit_output(&mut current, &mut best, display_name);
             let Some(name) = line.split_whitespace().next() else {
                 current = None;
                 continue;
@@ -475,9 +497,9 @@ fn detect_primary_display_state() -> Result<ScreenDetection> {
         }
     }
 
-    commit_output(&mut current, &mut best);
+    commit_output(&mut current, &mut best, display_name);
 
-    best.ok_or_else(|| anyhow!("no connected display detected"))
+    best
 }
 
 fn is_output_header(line: &str) -> bool {
@@ -495,17 +517,29 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-fn commit_output(current: &mut Option<OutputRecord>, best: &mut Option<ScreenDetection>) {
-    if best.is_some() {
-        *current = None;
-        return;
-    }
-
+fn commit_output(
+    current: &mut Option<OutputRecord>,
+    best: &mut Option<ScreenDetection>,
+    display_name: Option<&str>,
+) {
     let Some(record) = current.take() else {
         return;
     };
 
-    if let Some(candidate) = record.into_detection() {
+    if let Some(target_name) = display_name {
+        if record.name == target_name {
+            if let Some(candidate) = record.into_detection(true) {
+                *best = Some(candidate);
+            }
+            return;
+        }
+    }
+
+    if best.is_some() {
+        return;
+    }
+
+    if let Some(candidate) = record.into_detection(false) {
         *best = Some(candidate);
     }
 }
@@ -531,8 +565,14 @@ impl OutputRecord {
         }
     }
 
-    fn into_detection(self) -> Option<ScreenDetection> {
-        if self.is_internal || !self.is_connected() {
+    fn into_detection(self, allow_disconnected: bool) -> Option<ScreenDetection> {
+        if self.is_internal {
+            return None;
+        }
+
+        let connected = self.is_connected();
+
+        if !connected && !allow_disconnected {
             return None;
         }
 
@@ -545,7 +585,13 @@ impl OutputRecord {
                     ScreenState::Off
                 }
             })
-            .unwrap_or(ScreenState::On);
+            .unwrap_or_else(|| {
+                if connected {
+                    ScreenState::On
+                } else {
+                    ScreenState::Off
+                }
+            });
 
         Some(ScreenDetection {
             name: self.name,
@@ -857,8 +903,18 @@ impl ButtonTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, ButtonTracker, Durations};
+    use super::{parse_wlr_randr_outputs, Action, ButtonTracker, Durations, ScreenState};
     use std::time::{Duration, Instant};
+
+    const SAMPLE_OUTPUT: &str = r#"
+HDMI-A-1 "Primary" (normal left inverted right x axis y axis)
+    Enabled: yes
+    Status: connected
+
+HDMI-A-2 "Sleeper" (normal left inverted right x axis y axis)
+    Enabled: no
+    Status: disconnected
+"#;
 
     fn durations() -> Durations {
         Durations {
@@ -874,11 +930,9 @@ mod tests {
         let start = Instant::now();
 
         tracker.on_press(start);
-        assert!(
-            tracker
-                .on_release(start + Duration::from_millis(100))
-                .is_none()
-        );
+        assert!(tracker
+            .on_release(start + Duration::from_millis(100))
+            .is_none());
         assert_eq!(
             tracker.handle_timeout(start + Duration::from_millis(600)),
             Some(Action::Single)
@@ -891,11 +945,9 @@ mod tests {
         let start = Instant::now();
 
         tracker.on_press(start);
-        assert!(
-            tracker
-                .on_release(start + Duration::from_millis(120))
-                .is_none()
-        );
+        assert!(tracker
+            .on_release(start + Duration::from_millis(120))
+            .is_none());
 
         let second_press = start + Duration::from_millis(220);
         tracker.on_press(second_press);
@@ -916,15 +968,29 @@ mod tests {
 
         let bounce_press = bounce_release + Duration::from_millis(40);
         tracker.on_press(bounce_press);
-        assert!(
-            tracker
-                .on_release(bounce_press + Duration::from_millis(60))
-                .is_none()
-        );
+        assert!(tracker
+            .on_release(bounce_press + Duration::from_millis(60))
+            .is_none());
 
         assert_eq!(
             tracker.handle_timeout(start + Duration::from_millis(700)),
             Some(Action::Single)
         );
+    }
+
+    #[test]
+    fn parse_defaults_to_first_connected_output() {
+        let detection =
+            parse_wlr_randr_outputs(SAMPLE_OUTPUT, None).expect("expected connected output");
+        assert_eq!(detection.name, "HDMI-A-1");
+        assert_eq!(detection.state, ScreenState::On);
+    }
+
+    #[test]
+    fn parse_respects_disabled_named_output() {
+        let detection = parse_wlr_randr_outputs(SAMPLE_OUTPUT, Some("HDMI-A-2"))
+            .expect("expected named output");
+        assert_eq!(detection.name, "HDMI-A-2");
+        assert_eq!(detection.state, ScreenState::Off);
     }
 }
