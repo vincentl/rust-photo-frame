@@ -139,12 +139,7 @@ async fn start_hotspot(config: &Config, config_path: &PathBuf) -> Result<ActiveH
 }
 
 async fn check_online(config: &Config) -> Result<bool> {
-    let connected = nm::device_connected(&config.interface).await?;
-    if !connected {
-        return Ok(false);
-    }
-    let gateway = nm::gateway_reachable(&config.interface).await?;
-    Ok(gateway)
+    nm::device_connected(&config.interface).await
 }
 
 struct ActiveHotspot {
