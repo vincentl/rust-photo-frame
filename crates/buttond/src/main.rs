@@ -214,7 +214,7 @@ impl ButtondFileConfig {
         CommandConfig {
             label: "shutdown".into(),
             program: PathBuf::from("/usr/bin/loginctl"),
-            args: vec!["power-off".into()],
+            args: vec!["poweroff".into()],
         }
     }
 }

@@ -19,7 +19,7 @@ buttond:
   double-window-ms: 400
   shutdown-command:
     program: /usr/bin/loginctl
-    args: [power-off]
+    args: [poweroff]
   screen:
     off-delay-ms: 3500
     on-command:
