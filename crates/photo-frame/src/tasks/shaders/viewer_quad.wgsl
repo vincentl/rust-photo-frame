@@ -146,6 +146,47 @@ fn iris_boundary(
   return min_ru;
 }
 
+fn iris_scale_to_width(
+  aspect: f32,
+  blades: u32,
+) -> f32 {
+  // Same geometry constants as iris_boundary
+  let c: f32 = 0.9;
+  let curve: f32 = 1.25;
+  let d: f32 = curve * c;
+  if (blades < 3u) { return 1.0; }
+
+  // Evaluate the radial limit along the horizontal axis (theta=0), taking the
+  // minimum across all blade disks. This controls the maximal horizontal reach
+  // of the aperture before scaling.
+  let sector = 6.283185307179586 / f32(blades);
+  let cs = cos(sector);
+  let ss = sin(sector);
+  let ct = 1.0; // cos(0)
+  let st = 0.0; // sin(0)
+
+  var ci = 1.0; // cos(alpha)
+  var si = 0.0; // sin(alpha)
+  var min_ru0 = 1e9;
+  for (var i: u32 = 0u; i < blades; i = i + 1u) {
+    let cos_phi = ct * ci + st * si;           // simplifies to ci
+    let sin_phi = st * ci - ct * si;           // simplifies to -si
+    let disc = d * d - (c * c) * (sin_phi * sin_phi);
+    if (disc > 0.0) {
+      let ru = c * cos_phi + sqrt(max(disc, 0.0));
+      if (ru > 0.0) {
+        min_ru0 = min(min_ru0, ru);
+      }
+    }
+    let ci_next = ci * cs - si * ss;
+    let si_next = si * cs + ci * ss;
+    ci = ci_next;
+    si = si_next;
+  }
+  let denom = max(min_ru0, 1e-3);
+  return aspect / denom;
+}
+
 fn iris_mask(
   uv: vec2<f32>,
   aspect: f32,
@@ -156,11 +197,8 @@ fn iris_mask(
   let rvec = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(aspect, 1.0);
   let r = length(rot2(rvec, rotate_rad));
   let min_ru = iris_boundary(uv, aspect, blades, rotate_rad);
-  // Scale the boundary so fully open spans screen width: when open_scale=1,
-  // the boundary radius reaches `aspect` along the horizontal axis. The max of
-  // the unscaled boundary occurs at center alignment and equals (c + d).
-  let c: f32 = 0.9; let curve: f32 = 1.25; let d: f32 = curve * c;
-  let scale_to_width = aspect / (c + d);
+  // Scale the boundary so fully open spans screen width (horizontal diameter).
+  let scale_to_width = iris_scale_to_width(aspect, blades);
   let boundary = clamp(open_scale, 0.0, 1.0) * min_ru * scale_to_width;
   let sdf = boundary - r;
   let aa = max(fwidth(sdf), 1e-4);
@@ -256,6 +294,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       // Two-phase iris: start fully open, close to black (first half), then
       // open to reveal the next photo (second half). `U.t` is eased already.
       let t = clamp(U.t, 0.0, 1.0);
+      // Avoid tiny numerical flickers at endpoints
+      if (t <= 1e-4) { return current; }
+      if (t >= 0.9999) { return next; }
       let first = t < 0.5;
       let t1 = clamp(t * 2.0, 0.0, 1.0);          // 0..1 over first half
       let t2 = clamp((t - 0.5) * 2.0, 0.0, 1.0);  // 0..1 over second half
@@ -296,8 +337,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let p = rot2(rvec, rot);
       let rlen = length(p);
       let min_ru = iris_boundary(in.screen_uv, U.aspect, blades, rot);
-      let c: f32 = 0.9; let curve: f32 = 1.25; let d: f32 = curve * c;
-      let scale_to_width = U.aspect / (c + d);
+      let scale_to_width = iris_scale_to_width(U.aspect, blades);
       let boundary = clamp(open_scale, 0.0, 1.0) * min_ru * scale_to_width;
       let sdf = boundary - rlen; // positive inside aperture
 
