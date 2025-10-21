@@ -10,9 +10,16 @@
 # Defaults to wlan0 when no interface is provided.
 #
 # The script copies the active connection keyfile to
-# ~/wifi-backup.nmconnection and schedules an automatic restore with `at`
-# (if available). You can also manually restore the original profile with
-# the command that prints at the end of the run.
+# /root/wifi-backup.nmconnection and schedules an automatic restore.
+#
+# Scheduler strategy (Raspberry Pi OS Trixie):
+# - Use a transient one-shot systemd unit via systemd-run. This avoids any
+#   dependency on at/atd, survives SSH disconnects, and is easy to inspect
+#   with journalctl. If systemd-run is not available, the script refuses to
+#   proceed (to avoid stranding the device offline).
+#
+# Note: we use absolute paths and avoid '~' because at(1) runs /bin/sh
+# (dash on Debian) which does not expand tildes.
 #
 set -euo pipefail
 
@@ -29,6 +36,32 @@ IFACE="${1:-wlan0}"
 BAD_NAME="wifi-bad"
 BAD_PSK="wrong-password"
 DELAY_MIN=5
+NMCLI="$(command -v nmcli || echo /usr/bin/nmcli)"
+BACKUP="/root/wifi-backup.nmconnection"
+SCHEDULED_UNIT=""
+
+schedule_restore() {
+  local backup="$1"; shift
+  local conn_name="$1"; shift
+  local delay_min="$1"; shift
+  local when="${delay_min}m"
+  # Absolute path for nmcli and backup file; minimal environment in timers.
+  local cmd="$NMCLI connection import type wifi file '$backup' >/dev/null 2>&1 || true; $NMCLI connection up '$conn_name' >/dev/null 2>&1 || true"
+
+  if ! command -v systemd-run >/dev/null 2>&1; then
+    log "systemd-run is required to schedule auto-restore. Aborting to avoid stranding Wi‑Fi."
+    log "Manual restore would be: $NMCLI connection import type wifi file $backup; $NMCLI connection up '$conn_name'"
+    exit 2
+  fi
+
+  # One-shot transient unit that runs detached from this SSH session.
+  local unit="wifi-restore-$(date +%s)"
+  systemd-run --unit "$unit" --on-active="$when" --service-type=oneshot \
+    --property=RequiresMountsFor="$backup" \
+    /bin/sh -lc "$cmd" >/dev/null 2>&1 || true
+  SCHEDULED_UNIT="$unit"
+  log "Auto-restore scheduled in ${delay_min} min via systemd-run ($unit)"
+  }
 
 ACTIVE_CONN=$(nmcli -t -f NAME,TYPE,DEVICE connection show --active \
   | awk -F: -v i="$IFACE" '$3==i && ($2=="802-11-wireless" || $2=="wifi"){print $1; exit}')
@@ -44,17 +77,11 @@ if [[ -z "$KEYFILE" ]]; then
   log "Could not find keyfile for $ACTIVE_CONN"
   exit 1
 fi
-cp "$KEYFILE" ~/wifi-backup.nmconnection
-chmod 600 ~/wifi-backup.nmconnection
-log "Backup: ~/wifi-backup.nmconnection"
+cp "$KEYFILE" "$BACKUP"
+chmod 600 "$BACKUP"
+log "Backup: $BACKUP"
 
-if command -v at >/dev/null 2>&1; then
-  echo "nmcli connection import type wifi file ~/wifi-backup.nmconnection >/dev/null 2>&1 || true; nmcli connection up \"$ACTIVE_CONN\" >/dev/null 2>&1 || true" \
-    | at now + ${DELAY_MIN} minutes
-  log "Auto-restore scheduled in ${DELAY_MIN} min"
-else
-  log "Warning: 'at' not installed; no auto-restore scheduled."
-fi
+schedule_restore "$BACKUP" "$ACTIVE_CONN" "$DELAY_MIN"
 
 SSID=$(nmcli -g 802-11-wireless.ssid connection show "$ACTIVE_CONN")
 nmcli connection delete "$BAD_NAME" >/dev/null 2>&1 || true
@@ -66,5 +93,8 @@ log "Created '$BAD_NAME' for SSID '$SSID' with bad PSK"
 nmcli connection down "$ACTIVE_CONN" || true
 nmcli connection up "$BAD_NAME" || true
 log "Switched to '$BAD_NAME' (auth should fail)."
+if [[ -n "$SCHEDULED_UNIT" ]]; then
+  log "Restore timer logs: sudo journalctl -u $SCHEDULED_UNIT"
+fi
 log "Logs: sudo journalctl -fu photoframe-wifi-manager.service    and    sudo journalctl -fu NetworkManager"
-log "Restore: nmcli connection delete \"$BAD_NAME\"; nmcli connection import type wifi file ~/wifi-backup.nmconnection; nmcli connection up \"$ACTIVE_CONN\""
+log "Restore: nmcli connection delete \"$BAD_NAME\"; nmcli connection import type wifi file $BACKUP; nmcli connection up \"$ACTIVE_CONN\""
