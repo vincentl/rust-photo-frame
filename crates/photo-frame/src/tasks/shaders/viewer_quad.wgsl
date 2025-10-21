@@ -104,22 +104,25 @@ fn iris_mask(
 
   // Map screen uv to centered, aspect-corrected space in [-1,1]
   let p0 = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(aspect, 1.0);
+  // Rotate blades as progress advances
   let p = rot2(p0, rotate_rad * tt);
   let r = length(p);
   if (blades < 3u) {
     return 0.0;
   }
 
-  // Iris geometry parameters. `c` is the ring radius for disk centers, `d` is
-  // disk radius. When d < c, the intersection shrinks toward closed; when d >> c
-  // the aperture opens wide. Tuned for screen-space [-1,1].
-  let c: f32 = 0.9;                           // ring radius
-  let d_closed: f32 = c * 0.80;               // fully closed threshold
-  let d_open:   f32 = c * 2.20;               // fully open radius
-  let d: f32 = mix(d_closed, d_open, clamp(tt, 0.0, 1.0));
+  // Curved-blade base shape via intersection-of-disks, but keep disk radius
+  // strictly larger than center ring to avoid petal topology.
+  let c: f32 = 0.9;                 // ring radius of disk centers
+  let curve: f32 = 1.25;            // curvature factor; d = curve * c (> 1)
+  let d: f32 = curve * c;           // constant disk radius for curved blades
 
-  // Precompute angle of the fragment once; we iterate disk centers efficiently
-  // using complex multiplication by e^{i*sector}.
+  // Aperture scale s in [0,1] closes the iris without changing topology: we
+  // scale the boundary radius instead of shrinking d below c. This prevents
+  // the daisy-to-polygon flip.
+  let s = clamp(tt, 0.0, 1.0);
+
+  // Precompute angle of the fragment once; iterate disk centers efficiently.
   let theta = atan2(p.y, p.x);
   let sector = 6.283185307179586 / f32(blades);
   let cs = cos(sector);
@@ -127,38 +130,32 @@ fn iris_mask(
   let ct = cos(theta);
   let st = sin(theta);
 
-  // Start with center angle 0 and rotate per blade.
   var ci = 1.0; // cos(alpha)
   var si = 0.0; // sin(alpha)
-
   var min_ru = 1e9;
   var any = false;
   for (var i: u32 = 0u; i < blades; i = i + 1u) {
-    // phi = theta - alpha; compute via trig identities for speed/precision
     let cos_phi = ct * ci + st * si;
     let sin_phi = st * ci - ct * si;
     let disc = d * d - (c * c) * (sin_phi * sin_phi);
     if (disc > 0.0) {
-      // upper root of the quadratic r^2 - 2 r c cos(phi) + (c^2 - d^2) = 0
-      let ru = c * cos_phi + sqrt(disc);
+      let ru = c * cos_phi + sqrt(max(disc, 0.0));
       if (ru > 0.0) {
         any = true;
         min_ru = min(min_ru, ru);
       }
     }
-    // advance center angle: (ci, si) *= rot(sector)
     let ci_next = ci * cs - si * ss;
     let si_next = si * cs + ci * ss;
     ci = ci_next;
     si = si_next;
   }
-
   if (!any) {
     return 0.0;
   }
 
-  // Signed distance (positive inside aperture): sdf = min_ru - r
-  let sdf = min_ru - r;
+  let boundary = s * min_ru;
+  let sdf = boundary - r;
   let aa = max(fwidth(sdf), 1e-4);
   return smoothstep(0.0, aa, sdf);
 }

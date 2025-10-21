@@ -2478,13 +2478,13 @@ pub fn run_windowed(
                                         let stroke_width = *stroke_width;
                                         let tolerance = *tolerance;
                                         if have_current && have_next {
-                                            // Allow forcing the WGSL iris path for A/B debugging
-                                            // Set PHOTOFRAME_IRIS_FORCE_WGSL=1 to bypass tessellation
-                                            let force_wgsl_iris = std::env::var("PHOTOFRAME_IRIS_FORCE_WGSL")
+                                            // Default to WGSL iris (robust on Pi). Set
+                                            // PHOTOFRAME_IRIS_FORCE_TESSELLATED=1 to use the tessellated path.
+                                            let force_tessellated = std::env::var("PHOTOFRAME_IRIS_FORCE_TESSELLATED")
                                                 .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
                                                 .unwrap_or(false);
 
-                                            if force_wgsl_iris {
+                                            if !force_tessellated {
                                                 let base_progress = state.progress();
                                                 let eased_progress = {
                                                     let c = base_progress.clamp(0.0, 1.0);
@@ -2543,12 +2543,11 @@ pub fn run_windowed(
                                                     );
                                                     drop(clear_pass);
                                                 }
-                                                let rotation_sign =
-                                                    if matches!(direction, IrisDirection::Close) {
-                                                        -1.0
-                                                    } else {
-                                                        1.0
-                                                    };
+                                                let rotation_sign = if matches!(direction, IrisDirection::Close) {
+                                                    -1.0
+                                                } else {
+                                                    1.0
+                                                };
                                                 let params = IrisDrawParams {
                                                     screen_size: [screen_w, screen_h],
                                                     blades,
