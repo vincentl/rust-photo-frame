@@ -89,17 +89,17 @@ fn sd_ngon(p: vec2<f32>, n: i32, r: f32) -> f32 {
 // Analytic curved-blade iris mask using intersection of equally spaced disks.
 // Returns 1.0 inside the aperture and 0.0 outside. The aperture size is
 // controlled by `open_scale` in [0,1], and fully open spans the screen width.
-fn iris_mask(
+fn iris_boundary(
   uv: vec2<f32>,
   aspect: f32,
   blades: u32,
   rotate_rad: f32,
-  open_scale: f32,
+  // Returns the unscaled boundary radius (in aspect-corrected units) and a
+  // boolean indicating if a valid boundary was computed.
 ) -> f32 {
   // Map screen uv to centered, aspect-corrected space in [-1,1]
   let p0 = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(aspect, 1.0);
   let p = rot2(p0, rotate_rad);
-  let r = length(p);
   if (blades < 3u) {
     return 0.0;
   }
@@ -142,9 +142,24 @@ fn iris_mask(
     return 0.0;
   }
 
+  // Unscaled boundary radius along this ray
+  return min_ru;
+}
+
+fn iris_mask(
+  uv: vec2<f32>,
+  aspect: f32,
+  blades: u32,
+  rotate_rad: f32,
+  open_scale: f32,
+) -> f32 {
+  let rvec = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(aspect, 1.0);
+  let r = length(rot2(rvec, rotate_rad));
+  let min_ru = iris_boundary(uv, aspect, blades, rotate_rad);
   // Scale the boundary so fully open spans screen width: when open_scale=1,
   // the boundary radius reaches `aspect` along the horizontal axis. The max of
   // the unscaled boundary occurs at center alignment and equals (c + d).
+  let c: f32 = 0.9; let curve: f32 = 1.25; let d: f32 = curve * c;
   let scale_to_width = aspect / (c + d);
   let boundary = clamp(open_scale, 0.0, 1.0) * min_ru * scale_to_width;
   let sdf = boundary - r;
@@ -253,17 +268,48 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let rot = U.iris_rotate_rad * t;
       let blades = max(U.iris_blades, 3u);
 
+      // Compute masks for both halves.
       let mask_close = iris_mask(in.screen_uv, U.aspect, blades, rot, open1);
       let mask_open  = iris_mask(in.screen_uv, U.aspect, blades, rot, open2);
 
-      let black = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+      // Fill and stroke uniforms
+      let fill = vec4<f32>(
+        clamp(U.params2.xyz, vec3<f32>(0.0), vec3<f32>(1.0)),
+        clamp(U.params2.w, 0.0, 1.0)
+      );
+      let stroke_col = vec4<f32>(
+        clamp(U.params3.xyz, vec3<f32>(0.0), vec3<f32>(1.0)),
+        clamp(U.params3.w, 0.0, 1.0) // if provided as alpha; otherwise 1.0
+      );
+      let stroke_px = max(U.iris_pad0, 0.0);
+
+      // Base composition over occluder fill
       if (first) {
-        // Show current image through a closing aperture over black
-        color = mix(black, current, mask_close);
+        color = mix(fill, current, mask_close);
       } else {
-        // Reveal next image through an opening aperture over black
-        color = mix(black, next, mask_open);
+        color = mix(fill, next, mask_open);
       }
+
+      // Stroke ring: compute SDF band around boundary using current open scale
+      let open_scale = select(open2, open1, first);
+      let rvec = (in.screen_uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(U.aspect, 1.0);
+      let p = rot2(rvec, rot);
+      let rlen = length(p);
+      let min_ru = iris_boundary(in.screen_uv, U.aspect, blades, rot);
+      let c: f32 = 0.9; let curve: f32 = 1.25; let d: f32 = curve * c;
+      let scale_to_width = U.aspect / (c + d);
+      let boundary = clamp(open_scale, 0.0, 1.0) * min_ru * scale_to_width;
+      let sdf = boundary - rlen; // positive inside aperture
+
+      // Convert pixel width to our coordinate system (~y-based scale)
+      let px_to_ndc = 2.0 / max(U.screen_size.y, 1.0);
+      let half_band = max(stroke_px * px_to_ndc * 0.5, 1e-4);
+      let aa = max(fwidth(sdf), 1e-4);
+      // Band around |sdf| < half_band, anti-aliased
+      let edge = 1.0 - smoothstep(half_band, half_band + aa, abs(sdf));
+      let stroke_alpha = edge * stroke_col.a;
+      // Composite stroke over base color
+      color = mix(color, vec4<f32>(stroke_col.rgb, 1.0), stroke_alpha);
     }
     default: {
       color = current;
