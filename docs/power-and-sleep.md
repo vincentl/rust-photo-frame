@@ -37,11 +37,12 @@ wlr-randr --output @OUTPUT@ --on  || vcgencmd display_power 1
 ```
 `@OUTPUT@` is replaced with the first connected output reported by `wlr-randr`. If detection fails the code falls back to `HDMI-A-1` and logs a warning.
 
-`/opt/photo-frame/bin/powerctl` wraps the same logic. It auto-detects the first connected output, falls back to `HDMI-A-1`, and chains `vcgencmd` so you do not need to duplicate shell logic in your configuration. The helper is safe to call from other scripts:
+`/opt/photo-frame/bin/powerctl` wraps the same logic. It bootstraps the Wayland session when the caller omitted environment variables by exporting `XDG_RUNTIME_DIR=/run/user/$(id -u)` and picking the first `wayland-*` socket in that directory, then auto-detects the first connected output, falls back to `HDMI-A-1`, and chains `vcgencmd` so you do not need to duplicate shell logic in your configuration. The helper is safe to call from other scripts:
 ```bash
 powerctl sleep        # auto-detect output
 powerctl wake HDMI-A-1 # override the connector
 ```
+If no Wayland socket can be located, the helper now exits with a clear diagnostic so `buttond` and other callers surface the real failure instead of the generic “failed to connect” message. wlroots compositors publish sockets named `wayland-*`; custom setups should align with that convention or export `WAYLAND_DISPLAY` explicitly before invoking `powerctl`.
 
 ### CLI support
 
