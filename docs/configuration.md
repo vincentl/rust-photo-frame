@@ -230,7 +230,7 @@ buttond:
   single-window-ms: 250             # treat releases shorter than this as taps
   double-window-ms: 400             # wait this long for a second tap
   shutdown-command:
-    program: /usr/bin/loginctl
+    program: /usr/bin/systemctl
     args: [poweroff]
   screen:
     off-delay-ms: 3500
@@ -245,7 +245,7 @@ buttond:
 The installer deploys `buttond.service`, which launches `/opt/photo-frame/bin/buttond --config /etc/photo-frame/config.yaml` as the `kiosk` user. At runtime the daemon behaves as follows:
 
 - **Single press:** writes `{ "command": "ToggleState" }` to the control socket, then toggles the screen. If the display was off it immediately executes the configured wake command; if the display was on it delays for `off-delay-ms` (so the sleep screen is visible) before running the sleep command. The daemon inspects `wlr-randr` output on each press instead of relying on cached state, so restarts and manual overrides stay in sync with reality.
-- **Double press:** executes the `shutdown-command`. The default uses `loginctl poweroff`, and system provisioning installs a polkit rule so the `kiosk` user can issue the request without prompting.
+- **Double press:** executes the `shutdown-command`. The default uses `systemctl poweroff`, and system provisioning installs a polkit rule so the `kiosk` user can issue the request without prompting.
 - **Long press:** bypassed so the Pi firmware can force power-off.
 
 Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. Set `buttond.device` if the wrong input is chosen. Provisioning also pins `HandlePowerKey=ignore` inside `/etc/systemd/logind.conf` so logind never interprets presses as global shutdown requests; only `buttond` reacts to the events.
