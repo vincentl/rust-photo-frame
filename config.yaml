@@ -22,6 +22,7 @@ buttond:
     args: [poweroff]
   screen:
     off-delay-ms: 3500
+    display-name: null # Optional wlr-randr output name
     on-command:
       program: /opt/photo-frame/bin/powerctl
       args: [wake]

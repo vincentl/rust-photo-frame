@@ -234,6 +234,7 @@ buttond:
     args: [poweroff]
   screen:
     off-delay-ms: 3500
+    display-name: null               # optional wlr-randr output name to monitor
     on-command:
       program: /opt/photo-frame/bin/powerctl
       args: [wake]
@@ -247,6 +248,8 @@ The installer deploys `buttond.service`, which launches `/opt/photo-frame/bin/bu
 - **Single press:** writes `{ "command": "ToggleState" }` to the control socket, then toggles the screen. If the display was off it immediately executes the configured wake command; if the display was on it delays for `off-delay-ms` (so the sleep screen is visible) before running the sleep command. The daemon inspects `wlr-randr` output on each press instead of relying on cached state, so restarts and manual overrides stay in sync with reality.
 - **Double press:** executes the `shutdown-command`. The default uses `loginctl poweroff`, and system provisioning installs a polkit rule so the `kiosk` user can issue the request without prompting.
 - **Long press:** bypassed so the Pi firmware can force power-off.
+
+Pin `buttond.screen.display-name` to the exact `wlr-randr` output name (for example `HDMI-A-2`) when a specific connector should always be probed. The daemon still falls back to the first connected non-internal display when the field is omitted, but when set it treats that output as authoritative—even if `wlr-randr` reports it as disabled—to keep the sleep command state machine aligned with panels that power down between presses.
 
 Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. Set `buttond.device` if the wrong input is chosen. Provisioning also pins `HandlePowerKey=ignore` inside `/etc/systemd/logind.conf` so logind never interprets presses as global shutdown requests; only `buttond` reacts to the events.
 
