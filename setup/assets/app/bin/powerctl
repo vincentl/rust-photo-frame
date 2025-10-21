@@ -6,6 +6,53 @@ if [[ -z "$MODE" ]]; then
   echo "usage: powerctl {sleep|wake} [OUTPUT]" >&2
   exit 2
 fi
+
+pick_wayland_socket() {
+  local runtime_dir="${1%/}"
+  local matches
+
+  if ! matches=$(compgen -G "${runtime_dir}/wayland-*"); then
+    return 1
+  fi
+
+  local candidate
+  while IFS= read -r candidate; do
+    if [[ -S "$candidate" ]]; then
+      basename "$candidate"
+      return 0
+    fi
+  done <<<"$matches"
+
+  return 1
+}
+
+ensure_wayland_env() {
+  if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+    local derived="/run/user/$(id -u)"
+    if [[ -d "$derived" ]]; then
+      export XDG_RUNTIME_DIR="$derived"
+    else
+      echo "powerctl: XDG_RUNTIME_DIR is unset and derived path '$derived' does not exist" >&2
+      exit 1
+    fi
+  fi
+
+  if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
+    echo "powerctl: XDG_RUNTIME_DIR '$XDG_RUNTIME_DIR' does not exist" >&2
+    exit 1
+  fi
+
+  if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+    local socket
+    if ! socket="$(pick_wayland_socket "$XDG_RUNTIME_DIR")"; then
+      echo "powerctl: no Wayland display sockets found in $XDG_RUNTIME_DIR" >&2
+      exit 1
+    fi
+    export WAYLAND_DISPLAY="$socket"
+  fi
+}
+
+ensure_wayland_env
 detect_out() {
   wlr-randr | awk '
     function commit() {
