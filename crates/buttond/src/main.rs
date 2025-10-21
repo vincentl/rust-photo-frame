@@ -217,7 +217,7 @@ impl ButtondFileConfig {
     fn default_shutdown_command() -> CommandConfig {
         CommandConfig {
             label: "shutdown".into(),
-            program: PathBuf::from("/usr/bin/loginctl"),
+            program: PathBuf::from("/usr/bin/systemctl"),
             args: vec!["poweroff".into()],
         }
     }
