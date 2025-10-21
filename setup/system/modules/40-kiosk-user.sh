@@ -274,7 +274,7 @@ enable_systemd_units() {
     systemd_status display-manager.service || true
 
     local unit
-    for unit in photoframe-wifi-manager.service photoframe-buttond.service; do
+    for unit in photoframe-wifi-manager.service buttond.service; do
         if systemd_unit_exists "${unit}"; then
             systemd_enable_now_unit "${unit}" || true
         fi

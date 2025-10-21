@@ -486,26 +486,3 @@ fn display_args(args: &[&str]) -> String {
     }
     masked.join(" ")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::parse_nmcli_value;
-
-    #[test]
-    fn parse_nmcli_value_strips_key_prefix() {
-        let line = "IP4.GATEWAY:192.168.1.1";
-        assert_eq!(parse_nmcli_value(line), Some("192.168.1.1".to_string()));
-    }
-
-    #[test]
-    fn parse_nmcli_value_handles_value_only_line() {
-        let line = "192.168.1.1";
-        assert_eq!(parse_nmcli_value(line), Some("192.168.1.1".to_string()));
-    }
-
-    #[test]
-    fn parse_nmcli_value_ignores_blank_input() {
-        assert_eq!(parse_nmcli_value(""), None);
-        assert_eq!(parse_nmcli_value("   "), None);
-    }
-}

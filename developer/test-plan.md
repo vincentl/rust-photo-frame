@@ -64,7 +64,7 @@ Exercise each axis at least once per release cycle.
   ./setup/application/deploy.sh
   ```
   This stage copies binaries into `/opt/photo-frame`, installs the Google “Macondo” font system-wide, and prepares documentation/config templates. Re-run `sudo ./setup/system/install.sh` afterwards (or start the services manually) so the kiosk helpers and greetd pick up the freshly installed binaries.
-- [ ] Customize the writable config at `/var/lib/photo-frame/config.yaml`. Minimal example:
+- [ ] Customize the system config at `/etc/photo-frame/config.yaml` (requires sudo). Minimal example:
   ```yaml
   photo-library-path: /var/lib/photo-frame/photos
   # ├── cloud/  # sync target (rclone, Nextcloud, etc.)
@@ -185,7 +185,7 @@ Exercise each axis at least once per release cycle.
   tests/collect_logs.sh
   ```
 - [ ] Verify artifact present: `ls artifacts/FRAME-logs-*.tar.gz`.
-- [ ] Bundle includes: system metadata, boot journal, `greetd.service` + `photoframe-wifi-manager.service` journals/status, optional sync unit details, NetworkManager snapshots, DRM modes + EDID, runtime metrics (top, temperature, binary `--version`), `/var/lib/photo-frame/config.yaml`, `/opt/photo-frame/etc/wifi-manager.yaml`, and `print-status` output.
+- [ ] Bundle includes: system metadata, boot journal, `greetd.service` + `photoframe-wifi-manager.service` journals/status, optional sync unit details, NetworkManager snapshots, DRM modes + EDID, runtime metrics (top, temperature, binary `--version`), `/etc/photo-frame/config.yaml`, `/opt/photo-frame/etc/wifi-manager.yaml`, and `print-status` output.
 - [ ] Attach bundle to issue tracker entry with notes on observed behavior.
 
 ## Acceptance Criteria
@@ -201,8 +201,8 @@ Exercise each axis at least once per release cycle.
 
 ## Recovery & Rollback Notes
 - **Bad config.yaml:**
-  - [ ] Restore last-known-good from backup (`sudo cp /var/lib/photo-frame/config.yaml.bak /var/lib/photo-frame/config.yaml`).
-  - [ ] Validate YAML syntax with `yamllint` (if installed) or `python3 -c "import yaml,sys; yaml.safe_load(open('/var/lib/photo-frame/config.yaml'))"`.
+  - [ ] Restore last-known-good from backup (`sudo cp /etc/photo-frame/config.yaml.bak /etc/photo-frame/config.yaml`).
+  - [ ] Validate YAML syntax with `yamllint` (if installed) or `python3 -c "import yaml,sys; yaml.safe_load(open('/etc/photo-frame/config.yaml'))"`.
   - [ ] Restart service: `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service`.
 - **Broken service (fails to start):**
   - [ ] Inspect logs: `journalctl -u greetd.service -b` and `journalctl -u photoframe-wifi-manager.service -b`.

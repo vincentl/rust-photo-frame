@@ -75,14 +75,14 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Required?** Yes. Leave it unset and the application has no images to display.
 - **Accepted values & defaults:** Any absolute or relative filesystem path. The setup pipeline provisions `/var/lib/photo-frame/photos` with `cloud/` and `local/` subdirectories and points the default configuration there so both the runtime and any cloud sync job start from a known location.
 - **Effect on behavior:** Switching the path changes the library the watcher monitors; the viewer reloads the playlist when the directory contents change.
-- **Notes:** Keep the `cloud/` and `local/` folders under the configured root so the runtime can merge them. Use `cloud/` for content that will be overwritten by sync jobs (e.g., rclone, Nextcloud), and reserve `local/` for manual imports you do not want the sync job to prune. After the installer seeds `/var/lib/photo-frame/config.yaml`, edit that writable copy to move the library elsewhere (for example, to an attached drive or network share) if you do not want to keep photos under `/var/lib/photo-frame/photos`.
+- **Notes:** Keep the `cloud/` and `local/` folders under the configured root so the runtime can merge them. Use `cloud/` for content that will be overwritten by sync jobs (e.g., rclone, Nextcloud), and reserve `local/` for manual imports you do not want the sync job to prune. After the installer seeds `/etc/photo-frame/config.yaml`, update that system copy (via `sudo`) to move the library elsewhere if you do not want to keep photos under `/var/lib/photo-frame/photos`.
 
 ### `control-socket-path`
 
 - **Purpose:** Selects where the application exposes its Unix domain control socket for runtime commands (sleep toggles, future remote controls).
 - **Required?** Optional; defaults to `/run/photo-frame/control.sock`.
 - **Accepted values & defaults:** Any filesystem path, typically under `/run`, `/run/user/<uid>`, or another writable runtime directory.
-- **Effect on behavior:** The path is created on startup and removed on shutdown, but the parent directory must already exist with permissions that allow the kiosk user to create the socket. External helpers such as `photo-buttond` connect to this socket to send JSON commands.
+- **Effect on behavior:** The path is created on startup and removed on shutdown, but the parent directory must already exist with permissions that allow the kiosk user to create the socket. External helpers such as `buttond` connect to this socket to send JSON commands.
 - **Notes:** The kiosk provisioning script creates `/run/photo-frame` (mode `0770`, owned by `kiosk:kiosk`) and installs an `/etc/tmpfiles.d/photo-frame.conf` entry so the directory exists after every boot. If you override the setting, make sure to pre-create the directory portion of the path with matching ownership, e.g. `sudo install -d -m 0770 -o kiosk -g kiosk /var/lib/photo-frame/runtime`. Systems running the frame under a different user should adjust the ownership in that command accordingly. Permission errors during startup mean the process could not create the socket—double-check the directory permissions or point `control-socket-path` at a writable location like `/run/user/1000/photo-frame/control.sock`.
 
 ### `transition`
@@ -221,26 +221,34 @@ The setup pipeline installs `/opt/photo-frame/bin/powerctl`, a thin wrapper arou
 
 ## Power button daemon
 
-`photo-buttond` watches the Raspberry Pi 5 power-pad button via evdev. The installer drops a systemd unit that starts the daemon as the `frame` user with the following defaults:
+`buttond` watches the Raspberry Pi 5 power-pad button via evdev. The shared configuration file exposes a dedicated block so deployments can tune input timings, command hooks, and display handling without editing the systemd unit directly:
 
-```
-/opt/photo-frame/bin/photo-buttond \
-  --single-window-ms 250 \
-  --double-window-ms 400 \
-  --debounce-ms 20 \
-  --pidfile /run/photoframe/app.pid \
-  --procname rust-photo-frame \
-  --control-socket /run/photo-frame/control.sock \
-  --shutdown /opt/photo-frame/bin/photo-safe-shutdown
+```yaml
+buttond:
+  device: null                      # optional explicit evdev path
+  debounce-ms: 20                   # ignore chatter within this window
+  single-window-ms: 250             # treat releases shorter than this as taps
+  double-window-ms: 400             # wait this long for a second tap
+  shutdown-command:
+    program: /usr/bin/loginctl
+    args: [power-off]
+  screen:
+    off-delay-ms: 3500
+    on-command:
+      program: /opt/photo-frame/bin/powerctl
+      args: [wake]
+    off-command:
+      program: /opt/photo-frame/bin/powerctl
+      args: [sleep]
 ```
 
-- **Short press:** writes `{ "command": "ToggleState" }` to `/run/photo-frame/control.sock`.
-- **Double press:** runs `/opt/photo-frame/bin/photo-safe-shutdown`, which wraps `shutdown -h now`.
+The installer deploys `buttond.service`, which launches `/opt/photo-frame/bin/buttond --config /etc/photo-frame/config.yaml` as the `kiosk` user. At runtime the daemon behaves as follows:
+
+- **Single press:** writes `{ "command": "ToggleState" }` to the control socket, then toggles the screen. If the display was off it immediately executes the configured wake command; if the display was on it delays for `off-delay-ms` (so the sleep screen is visible) before running the sleep command. The daemon inspects `wlr-randr` output on each press instead of relying on cached state, so restarts and manual overrides stay in sync with reality.
+- **Double press:** executes the `shutdown-command`. The default uses `loginctl power-off`, and system provisioning installs a polkit rule so the `kiosk` user can issue the request without prompting.
 - **Long press:** bypassed so the Pi firmware can force power-off.
-- **System integration:** The provisioning script also installs a `systemd-logind` drop-in that sets `HandlePowerKey=ignore` so the desktop stack never interprets the press as a global poweroff request; only the daemon reacts to the event.
-- **Process guard:** When `--pidfile` and `--procname` are supplied the daemon verifies that the kiosk process listed in the PID file is running (and matches the expected name) before attempting to toggle playback. This avoids spurious log noise when the UI is offline.
 
-Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. If the wrong device is chosen, override it by editing the unit to pass `--device /dev/input/by-path/...-event`. Debounce, single-press, and double-press windows are configurable in milliseconds.
+Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. Set `buttond.device` if the wrong input is chosen. Provisioning also pins `HandlePowerKey=ignore` inside `/etc/systemd/logind.conf` so logind never interprets presses as global shutdown requests; only `buttond` reacts to the events.
 
 ### `matting`
 

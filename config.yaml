@@ -10,6 +10,25 @@ photo-library-path: /var/lib/photo-frame/photos
 # Unix domain socket path for runtime control commands
 control-socket-path: /run/photo-frame/control.sock
 
+# Hardware button daemon configuration
+buttond:
+  # Optional explicit evdev device path (autodetects when null)
+  device: null
+  debounce-ms: 20
+  single-window-ms: 250
+  double-window-ms: 400
+  shutdown-command:
+    program: /usr/bin/loginctl
+    args: [power-off]
+  screen:
+    off-delay-ms: 3500
+    on-command:
+      program: /opt/photo-frame/bin/powerctl
+      args: [wake]
+    off-command:
+      program: /opt/photo-frame/bin/powerctl
+      args: [sleep]
+
 # Render/transition settings
 transition:
   # Choose how the viewer advances through the entries below: fixed, random, or sequential.

@@ -4,7 +4,7 @@ The `wifi-manager` crate is the frame's single entry point for Wi-Fi monitoring,
 
 ## Capabilities at a glance
 
-- Detects connectivity loss by polling NetworkManager and verifying reachability of the default gateway.
+- Detects connectivity loss by polling NetworkManager for the interface's connection state.
 - Creates or updates an idempotent hotspot profile (`pf-hotspot`) and brings it online with a random three-word passphrase.
 - Serves a lightweight HTTP UI for submitting replacement SSID/password credentials, then provisions them via `nmcli`.
 - Renders a QR code that points to the recovery portal so phones can jump directly to the setup page.
@@ -73,7 +73,7 @@ overlay:
 | `overlay.overlay-app-id`       | Sway `app_id` that the overlay binary advertises; used for focus/teardown commands. |
 | `overlay.sway-socket`          | Optional override for the Sway IPC socket. Detected automatically from `/run/user/<uid>` when omitted. |
 
-Whenever you change the config, run `sudo systemctl restart wifi-manager` for the daemon to pick up the new settings.
+Whenever you change the config, run `sudo systemctl restart photoframe-wifi-manager.service` for the daemon to pick up the new settings.
 
 ## Runtime files
 
@@ -86,7 +86,7 @@ All mutable state lives under `/var/lib/photo-frame` and is owned by the `photo-
 
 ## Web provisioning flow
 
-1. The `watch` loop marks the frame `OFFLINE` after `offline-grace-sec` seconds without a gateway response.
+1. The `watch` loop marks the frame `OFFLINE` after `offline-grace-sec` seconds of NetworkManager reporting the interface disconnected.
 2. The hotspot profile (`pf-hotspot`) is ensured, then activated on the configured interface with WPA2-PSK security. The watcher simultaneously launches the `wifi-manager overlay` subcommand via Sway IPC and brings the web UI online so the on-device instructions, QR code, and portal stay in sync.
 3. A random three-word passphrase is selected from the bundled wordlist and written to `/var/lib/photo-frame/hotspot-password.txt`.
 4. The QR code generator produces `/var/lib/photo-frame/wifi-qr.png`, embedding the configured UI URL (default `http://192.168.4.1:8080/`).
@@ -108,7 +108,7 @@ The Wi-Fi manager is wired into the refreshed setup pipeline:
 - `setup/system/modules/60-systemd.sh` installs and enables `/etc/systemd/system/photoframe-wifi-manager.service` alongside the other kiosk units once the binaries exist.
 - `setup/application/modules/10-build.sh` compiles `wifi-manager` in release mode as the invoking user (never root).
 - `setup/application/modules/20-stage.sh` stages the binary, config template, wordlist, and docs.
-- `setup/application/modules/30-install.sh` installs artifacts into `/opt/photo-frame` and seeds `/var/lib/photo-frame/config/config.yaml` if missing.
+- `setup/application/modules/30-install.sh` installs artifacts into `/opt/photo-frame` and seeds `/etc/photo-frame/config.yaml` if missing.
 
 Re-running the scripts is idempotent: binaries are replaced in place, configs are preserved, ACLs stay intact, and systemd units reload cleanly.
 

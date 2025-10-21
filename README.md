@@ -33,7 +33,8 @@ From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync servic
 > **Install layout at a glance**
 >
 > - `/opt/photo-frame` holds the read-only release artifacts that ship with the project: compiled binaries, unit files, and the pristine configuration templates staged by the setup scripts.
-> - `/var/lib/photo-frame` carries the live state: the editable configuration (`config/config.yaml`), logs, caches, hotspot artifacts, and any synchronized media. Treat this tree as the working area that systemd services mutate at runtime.
+> - `/var/lib/photo-frame` carries the live state: logs, caches, hotspot artifacts, and any synchronized media. Treat this tree as the working area that systemd services mutate at runtime.
+> - `/etc/photo-frame/config.yaml` holds the active configuration the services consume. Edit this copy (with `sudo`) to adjust library paths, schedules, or button behavior.
 >
 > This split keeps upgrades simple—rerunning the installer refreshes `/opt` without clobbering the operator-managed data living under `/var`.
 

@@ -3,65 +3,53 @@ use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use evdev::{Device, EventSummary, KeyCode};
+use humantime::format_duration;
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Clone, Parser)]
 #[command(
-    name = "photo-buttond",
+    name = "buttond",
     about = "Power button handler for the Rust photo frame"
 )]
 struct Args {
+    /// Path to the shared configuration file.
+    #[arg(long, default_value = "/etc/photo-frame/config.yaml")]
+    config: PathBuf,
+
     /// Input device path (evdev). Auto-detects when omitted.
     #[arg(long)]
     device: Option<PathBuf>,
 
-    /// Maximum press duration to treat as a short press (milliseconds).
-    #[arg(long, default_value_t = 250)]
-    single_window_ms: u64,
-
-    /// Window to detect a second press and trigger shutdown (milliseconds).
-    #[arg(long, default_value_t = 400)]
-    double_window_ms: u64,
-
-    /// Debounce window applied to press/release transitions (milliseconds).
-    #[arg(long, default_value_t = 20)]
-    debounce_ms: u64,
-
-    /// Photo frame control socket.
-    #[arg(long, default_value = "/run/photo-frame/control.sock")]
-    control_socket: PathBuf,
-
-    /// Shutdown helper to execute on a double press.
-    #[arg(long, default_value = "/opt/photo-frame/bin/photo-safe-shutdown")]
-    shutdown: PathBuf,
-
     /// Logging level (error|warn|info|debug|trace).
     #[arg(long, default_value = "info")]
     log_level: String,
-
-    /// PID file written by the photo frame kiosk process.
-    #[arg(long)]
-    pidfile: Option<PathBuf>,
-
-    /// Expected process name for the kiosk PID (matches `/proc/<pid>/comm`).
-    #[arg(long)]
-    procname: Option<String>,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
     init_tracing(&args.log_level)?;
 
-    let durations = Durations::from_args(&args);
-    let (mut device, path) = open_device(&args)?;
+    let settings = ButtondSettings::load(&args.config, args.device.clone()).with_context(|| {
+        format!(
+            "failed to load configuration from {}",
+            args.config.display()
+        )
+    })?;
+    let device_override = settings.device.clone();
+    let durations = settings.durations;
+    let mut runtime = settings.into_runtime()?;
+
+    let (mut device, path) = open_device(device_override.as_ref())?;
     set_nonblocking(&device)
         .with_context(|| format!("failed to set {} non-blocking", path.display()))?;
     info!(device = %path.display(), "listening for power button events");
@@ -71,7 +59,7 @@ fn main() -> Result<()> {
     loop {
         let now = Instant::now();
         if let Some(action) = tracker.handle_timeout(now) {
-            perform_action(action, &args);
+            perform_action(action, &mut runtime);
             continue;
         }
 
@@ -87,7 +75,7 @@ fn main() -> Result<()> {
                             }
                             0 => {
                                 if let Some(action) = tracker.on_release(Instant::now()) {
-                                    perform_action(action, &args);
+                                    perform_action(action, &mut runtime);
                                 }
                             }
                             _ => {}
@@ -112,6 +100,496 @@ fn main() -> Result<()> {
     }
 }
 
+struct ButtondSettings {
+    device: Option<PathBuf>,
+    durations: Durations,
+    control_socket_path: PathBuf,
+    shutdown_command: CommandSpec,
+    screen_on_command: CommandSpec,
+    screen_off_command: CommandSpec,
+    screen_off_delay: Duration,
+}
+
+impl ButtondSettings {
+    fn load(config_path: &Path, device_override: Option<PathBuf>) -> Result<Self> {
+        let file_config = FileConfig::from_path(config_path)?;
+        let buttond = file_config.buttond;
+        let durations = Durations::from_config(&buttond);
+        let device = device_override.or(buttond.device);
+        let shutdown_command = buttond.shutdown_command.into_spec("shutdown");
+        let screen = buttond.screen;
+        let ScreenConfig {
+            off_delay_ms,
+            on_command,
+            off_command,
+        } = screen;
+        let screen_off_delay = Duration::from_millis(off_delay_ms);
+
+        Ok(Self {
+            device,
+            durations,
+            control_socket_path: file_config.control_socket_path,
+            shutdown_command,
+            screen_on_command: on_command.into_spec("screen-on"),
+            screen_off_command: off_command.into_spec("screen-off"),
+            screen_off_delay,
+        })
+    }
+
+    fn into_runtime(self) -> Result<Runtime> {
+        let screen = ScreenRuntime::new(
+            self.screen_on_command,
+            self.screen_off_command,
+            self.screen_off_delay,
+        );
+
+        Ok(Runtime {
+            control_socket_path: self.control_socket_path,
+            shutdown_command: self.shutdown_command,
+            screen,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct FileConfig {
+    #[serde(default = "FileConfig::default_control_socket_path")]
+    control_socket_path: PathBuf,
+    #[serde(default)]
+    buttond: ButtondFileConfig,
+}
+
+impl FileConfig {
+    fn from_path(path: &Path) -> Result<Self> {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed: Self = serde_yaml::from_str(&raw)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        if parsed.control_socket_path.as_os_str().is_empty() {
+            bail!("control-socket-path must not be empty");
+        }
+        if parsed.control_socket_path.file_name().is_none() {
+            bail!("control-socket-path must include a socket file name");
+        }
+        Ok(parsed)
+    }
+
+    fn default_control_socket_path() -> PathBuf {
+        PathBuf::from("/run/photo-frame/control.sock")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct ButtondFileConfig {
+    #[serde(default)]
+    device: Option<PathBuf>,
+    #[serde(default = "ButtondFileConfig::default_single_window_ms")]
+    single_window_ms: u64,
+    #[serde(default = "ButtondFileConfig::default_double_window_ms")]
+    double_window_ms: u64,
+    #[serde(default = "ButtondFileConfig::default_debounce_ms")]
+    debounce_ms: u64,
+    #[serde(default = "ButtondFileConfig::default_shutdown_command")]
+    shutdown_command: CommandConfig,
+    #[serde(default)]
+    screen: ScreenConfig,
+}
+
+impl ButtondFileConfig {
+    const fn default_single_window_ms() -> u64 {
+        250
+    }
+
+    const fn default_double_window_ms() -> u64 {
+        400
+    }
+
+    const fn default_debounce_ms() -> u64 {
+        20
+    }
+
+    fn default_shutdown_command() -> CommandConfig {
+        CommandConfig {
+            label: "shutdown".into(),
+            program: PathBuf::from("/usr/bin/loginctl"),
+            args: vec!["power-off".into()],
+        }
+    }
+}
+
+impl Default for ButtondFileConfig {
+    fn default() -> Self {
+        Self {
+            device: None,
+            single_window_ms: Self::default_single_window_ms(),
+            double_window_ms: Self::default_double_window_ms(),
+            debounce_ms: Self::default_debounce_ms(),
+            shutdown_command: Self::default_shutdown_command(),
+            screen: ScreenConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct ScreenConfig {
+    #[serde(default = "ScreenConfig::default_off_delay_ms")]
+    off_delay_ms: u64,
+    #[serde(default = "ScreenConfig::default_on_command")]
+    on_command: CommandConfig,
+    #[serde(default = "ScreenConfig::default_off_command")]
+    off_command: CommandConfig,
+}
+
+impl Default for ScreenConfig {
+    fn default() -> Self {
+        Self {
+            off_delay_ms: Self::default_off_delay_ms(),
+            on_command: Self::default_on_command(),
+            off_command: Self::default_off_command(),
+        }
+    }
+}
+
+impl ScreenConfig {
+    const fn default_off_delay_ms() -> u64 {
+        3500
+    }
+
+    fn default_on_command() -> CommandConfig {
+        CommandConfig {
+            label: "screen-on".into(),
+            program: PathBuf::from("/opt/photo-frame/bin/powerctl"),
+            args: vec!["wake".into()],
+        }
+    }
+
+    fn default_off_command() -> CommandConfig {
+        CommandConfig {
+            label: "screen-off".into(),
+            program: PathBuf::from("/opt/photo-frame/bin/powerctl"),
+            args: vec!["sleep".into()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct CommandConfig {
+    #[serde(default)]
+    label: String,
+    program: PathBuf,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+impl CommandConfig {
+    fn into_spec(self, fallback_label: &str) -> CommandSpec {
+        let label = if self.label.is_empty() {
+            fallback_label.to_string()
+        } else {
+            self.label
+        };
+        CommandSpec {
+            label,
+            program: self.program,
+            args: self.args,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CommandSpec {
+    label: String,
+    program: PathBuf,
+    args: Vec<String>,
+}
+
+impl CommandSpec {
+    fn run(&self) -> Result<()> {
+        debug!(
+            command = %self.program.display(),
+            args = ?self.args,
+            label = %self.label,
+            "running command"
+        );
+        let status = Command::new(&self.program)
+            .args(&self.args)
+            .status()
+            .with_context(|| format!("failed to execute {}", self.program.display()))?;
+        if !status.success() {
+            bail!("{} command exited with status {}", self.label, status);
+        }
+        Ok(())
+    }
+}
+
+struct Runtime {
+    control_socket_path: PathBuf,
+    shutdown_command: CommandSpec,
+    screen: ScreenRuntime,
+}
+
+impl Runtime {
+    fn handle_single(&mut self) -> Result<()> {
+        send_toggle_command(&self.control_socket_path)?;
+        let state = self.screen.toggle_after_frame_toggle()?;
+        info!(state = state.as_str(), "completed single-press toggle");
+        Ok(())
+    }
+
+    fn handle_double(&self) -> Result<()> {
+        self.shutdown_command.run()
+    }
+}
+
+struct ScreenRuntime {
+    on_command: CommandSpec,
+    off_command: CommandSpec,
+    off_delay: Duration,
+}
+
+impl ScreenRuntime {
+    fn new(on_command: CommandSpec, off_command: CommandSpec, off_delay: Duration) -> Self {
+        Self {
+            on_command,
+            off_command,
+            off_delay,
+        }
+    }
+
+    fn toggle_after_frame_toggle(&self) -> Result<ScreenState> {
+        let detected = match detect_primary_display_state() {
+            Ok(info) => {
+                debug!(output = %info.name, state = info.state.as_str(), "detected screen state");
+                info
+            }
+            Err(err) => {
+                warn!(?err, "failed to detect screen state; assuming on");
+                ScreenDetection {
+                    name: String::from("unknown"),
+                    state: ScreenState::On,
+                }
+            }
+        };
+
+        let next_state = match detected.state {
+            ScreenState::On => {
+                if !self.off_delay.is_zero() {
+                    info!(
+                        delay = %format_duration(self.off_delay),
+                        "waiting before turning the screen off"
+                    );
+                    thread::sleep(self.off_delay);
+                }
+                self.off_command.run()?;
+                ScreenState::Off
+            }
+            ScreenState::Off => {
+                self.on_command.run()?;
+                ScreenState::On
+            }
+        };
+
+        Ok(next_state)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenState {
+    On,
+    Off,
+}
+
+impl ScreenState {
+    fn as_str(self) -> &'static str {
+        match self {
+            ScreenState::On => "on",
+            ScreenState::Off => "off",
+        }
+    }
+}
+
+struct ScreenDetection {
+    name: String,
+    state: ScreenState,
+}
+
+fn detect_primary_display_state() -> Result<ScreenDetection> {
+    let output = Command::new("wlr-randr")
+        .output()
+        .context("failed to execute wlr-randr")?;
+    if !output.status.success() {
+        bail!(
+            "wlr-randr exited with status {status}",
+            status = output.status
+        );
+    }
+    let stdout =
+        String::from_utf8(output.stdout).context("wlr-randr output was not valid UTF-8")?;
+
+    let mut current: Option<OutputRecord> = None;
+    let mut best: Option<ScreenDetection> = None;
+
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if is_output_header(line) {
+            commit_output(&mut current, &mut best);
+            let Some(name) = line.split_whitespace().next() else {
+                current = None;
+                continue;
+            };
+            current = Some(OutputRecord::new(name));
+            continue;
+        }
+
+        if let Some(record) = current.as_mut() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("Enabled:") {
+                if let Some(value) = rest.trim().split_whitespace().next() {
+                    if let Some(enabled) = parse_bool(value) {
+                        record.enabled = Some(enabled);
+                        record.enabled_seen = true;
+                    }
+                }
+                continue;
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("Status:") {
+                if let Some(value) = rest.trim().split_whitespace().next() {
+                    let value = value.to_ascii_lowercase();
+                    if value.starts_with("connected") {
+                        record.status_connected = Some(true);
+                        record.status_seen = true;
+                    } else if value.starts_with("disconnected") {
+                        record.status_connected = Some(false);
+                        record.status_seen = true;
+                    }
+                }
+            }
+        }
+    }
+
+    commit_output(&mut current, &mut best);
+
+    best.ok_or_else(|| anyhow!("no connected display detected"))
+}
+
+fn is_output_header(line: &str) -> bool {
+    line.chars()
+        .next()
+        .map(|c| !c.is_whitespace())
+        .unwrap_or(false)
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "yes" | "on" | "true" | "1" => Some(true),
+        "no" | "off" | "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn commit_output(current: &mut Option<OutputRecord>, best: &mut Option<ScreenDetection>) {
+    if best.is_some() {
+        *current = None;
+        return;
+    }
+
+    let Some(record) = current.take() else {
+        return;
+    };
+
+    if let Some(candidate) = record.into_detection() {
+        *best = Some(candidate);
+    }
+}
+
+struct OutputRecord {
+    name: String,
+    is_internal: bool,
+    enabled: Option<bool>,
+    enabled_seen: bool,
+    status_connected: Option<bool>,
+    status_seen: bool,
+}
+
+impl OutputRecord {
+    fn new(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            is_internal: name.starts_with("eDP") || name.starts_with("LVDS"),
+            enabled: None,
+            enabled_seen: false,
+            status_connected: None,
+            status_seen: false,
+        }
+    }
+
+    fn into_detection(self) -> Option<ScreenDetection> {
+        if self.is_internal || !self.is_connected() {
+            return None;
+        }
+
+        let state = self
+            .enabled
+            .map(|enabled| {
+                if enabled {
+                    ScreenState::On
+                } else {
+                    ScreenState::Off
+                }
+            })
+            .unwrap_or(ScreenState::On);
+
+        Some(ScreenDetection {
+            name: self.name,
+            state,
+        })
+    }
+
+    fn is_connected(&self) -> bool {
+        if self.status_seen {
+            self.status_connected.unwrap_or(false)
+        } else if self.enabled_seen {
+            self.enabled.unwrap_or(false)
+        } else {
+            false
+        }
+    }
+}
+
+fn perform_action(action: Action, runtime: &mut Runtime) {
+    match action {
+        Action::Single => {
+            info!("single press → toggle frame state");
+            if let Err(err) = runtime.handle_single() {
+                error!(?err, "failed to process single press");
+            }
+        }
+        Action::Double => {
+            info!("double press → shutdown");
+            if let Err(err) = runtime.handle_double() {
+                error!(?err, "failed to run shutdown command");
+            }
+        }
+    }
+}
+
+fn send_toggle_command(path: &Path) -> Result<()> {
+    let mut stream = UnixStream::connect(path)
+        .with_context(|| format!("failed to connect to control socket at {}", path.display()))?;
+    stream
+        .write_all(br#"{"command":"toggle-state"}"#)
+        .context("failed to send toggle-state command")?;
+    Ok(())
+}
+
 fn set_nonblocking(device: &Device) -> Result<()> {
     let current = fcntl(device.as_fd(), FcntlArg::F_GETFL).context("F_GETFL failed")?;
     let mut flags = OFlag::from_bits_retain(current);
@@ -128,8 +606,8 @@ fn init_tracing(level: &str) -> Result<()> {
     Ok(())
 }
 
-fn open_device(args: &Args) -> Result<(Device, PathBuf)> {
-    if let Some(path) = &args.device {
+fn open_device(device_override: Option<&PathBuf>) -> Result<(Device, PathBuf)> {
+    if let Some(path) = device_override {
         let device =
             Device::open(path).with_context(|| format!("failed to open {}", path.display()))?;
         ensure_power_key(&device, path)?;
@@ -228,11 +706,11 @@ struct Durations {
 }
 
 impl Durations {
-    fn from_args(args: &Args) -> Self {
+    fn from_config(config: &ButtondFileConfig) -> Self {
         Self {
-            debounce: Duration::from_millis(args.debounce_ms),
-            single_window: Duration::from_millis(args.single_window_ms),
-            double_window: Duration::from_millis(args.double_window_ms),
+            debounce: Duration::from_millis(config.debounce_ms),
+            single_window: Duration::from_millis(config.single_window_ms),
+            double_window: Duration::from_millis(config.double_window_ms),
         }
     }
 }
@@ -377,99 +855,9 @@ impl ButtonTracker {
     }
 }
 
-fn perform_action(action: Action, args: &Args) {
-    match action {
-        Action::Single => {
-            info!("single press → toggle-state command");
-            if let Err(err) = trigger_single(args) {
-                error!(?err, "failed to send toggle-state command");
-            }
-        }
-        Action::Double => {
-            info!("double press → shutdown");
-            if let Err(err) = trigger_shutdown(&args.shutdown) {
-                error!(?err, "failed to run shutdown helper");
-            }
-        }
-    }
-}
-
-fn trigger_single(args: &Args) -> Result<()> {
-    if let Some(pidfile) = &args.pidfile {
-        let running = target_process_running(pidfile, args.procname.as_deref())?;
-        if !running {
-            warn!(
-                pidfile = %pidfile.display(),
-                procname = args.procname.as_deref().unwrap_or("<unspecified>"),
-                "skipping toggle-state command: kiosk process not running"
-            );
-            return Ok(());
-        }
-    }
-
-    let mut stream = UnixStream::connect(&args.control_socket).with_context(|| {
-        format!(
-            "failed to connect to control socket at {}",
-            args.control_socket.display()
-        )
-    })?;
-
-    stream
-        .write_all(br#"{"command":"toggle-state"}"#)
-        .context("failed to send toggle-state command")?;
-
-    Ok(())
-}
-
-fn trigger_shutdown(path: &Path) -> Result<()> {
-    let status = std::process::Command::new(path)
-        .status()
-        .with_context(|| format!("failed to execute {}", path.display()))?;
-    if !status.success() {
-        bail!("shutdown helper exited with status {status}");
-    }
-    Ok(())
-}
-
-fn target_process_running(pidfile: &Path, expected_name: Option<&str>) -> Result<bool> {
-    let contents = match fs::read_to_string(pidfile) {
-        Ok(contents) => contents,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => {
-            return Err(err)
-                .with_context(|| format!("failed to read pidfile {}", pidfile.display()));
-        }
-    };
-
-    let contents = contents.trim();
-    if contents.is_empty() {
-        bail!("pidfile {} is empty", pidfile.display());
-    }
-
-    let pid: i32 = contents
-        .parse()
-        .with_context(|| format!("invalid pid '{}' in {}", contents, pidfile.display()))?;
-
-    let proc_path = Path::new("/proc").join(pid.to_string());
-    if !proc_path.exists() {
-        return Ok(false);
-    }
-
-    if let Some(expected) = expected_name {
-        let comm_path = proc_path.join("comm");
-        let comm = fs::read_to_string(&comm_path)
-            .with_context(|| format!("failed to read process name from {}", comm_path.display()))?;
-        if comm.trim_end() != expected {
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Action, ButtonTracker, Durations, target_process_running};
+    use super::{Action, ButtonTracker, Durations};
     use std::time::{Duration, Instant};
 
     fn durations() -> Durations {
@@ -538,38 +926,5 @@ mod tests {
             tracker.handle_timeout(start + Duration::from_millis(700)),
             Some(Action::Single)
         );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn target_process_running_true_for_current_process() -> anyhow::Result<()> {
-        use std::fs;
-
-        let pid = std::process::id();
-        let temp_dir = tempfile::tempdir()?;
-        let pidfile = temp_dir.path().join("kiosk.pid");
-        fs::write(&pidfile, pid.to_string())?;
-
-        let comm = fs::read_to_string("/proc/self/comm")?;
-        let name = comm.trim_end().to_string();
-
-        assert!(target_process_running(&pidfile, Some(&name))?);
-        assert!(target_process_running(&pidfile, None)?);
-        assert!(!target_process_running(
-            &pidfile,
-            Some("definitely-not-the-name")
-        )?);
-
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn target_process_running_false_when_pidfile_missing() -> anyhow::Result<()> {
-        let temp_dir = tempfile::tempdir()?;
-        let pidfile = temp_dir.path().join("missing.pid");
-
-        assert!(!target_process_running(&pidfile, None)?);
-        Ok(())
     }
 }
