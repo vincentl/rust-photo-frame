@@ -110,40 +110,27 @@ fn iris_boundary(
   let curve: f32 = 1.25;  // curvature factor; d = curve * c (> 1)
   let d: f32 = curve * c; // disk radius
 
-  // Compute minimum radial limit across blade disks at this direction.
+  // Compute minimum radial limit across only the three nearest blade centers.
   let theta = atan2(p.y, p.x);
   let sector = 6.283185307179586 / f32(blades);
-  let cs = cos(sector);
-  let ss = sin(sector);
-  let ct = cos(theta);
-  let st = sin(theta);
+  let k = floor((theta + 0.5 * sector) / sector);
+  let a0 = k * sector;
+  let a1 = (k - 1.0) * sector;
+  let a2 = (k + 1.0) * sector;
 
-  var ci = 1.0; // cos(alpha)
-  var si = 0.0; // sin(alpha)
-  var min_ru = 1e9;
-  var any = false;
-  for (var i: u32 = 0u; i < blades; i = i + 1u) {
-    let cos_phi = ct * ci + st * si;
-    let sin_phi = st * ci - ct * si;
-    let disc = d * d - (c * c) * (sin_phi * sin_phi);
-    if (disc > 0.0) {
-      let ru = c * cos_phi + sqrt(max(disc, 0.0));
-      if (ru > 0.0) {
-        any = true;
-        min_ru = min(min_ru, ru);
-      }
-    }
-    let ci_next = ci * cs - si * ss;
-    let si_next = si * cs + ci * ss;
-    ci = ci_next;
-    si = si_next;
-  }
-  if (!any) {
-    return 0.0;
-  }
+  let eval_ru = fn(phi: f32) -> f32 {
+    let s = sin(phi);
+    let cph = cos(phi);
+    let disc = d * d - (c * c) * (s * s);
+    if (disc <= 0.0) { return 1e9; }
+    let ru = c * cph + sqrt(max(disc, 0.0));
+    return select(ru, 1e9, ru <= 0.0);
+  };
 
-  // Unscaled boundary radius along this ray
-  return min_ru;
+  let ru0 = eval_ru(theta - a0);
+  let ru1 = eval_ru(theta - a1);
+  let ru2 = eval_ru(theta - a2);
+  return min(ru0, min(ru1, ru2));
 }
 
 fn iris_scale_to_width(
@@ -156,34 +143,21 @@ fn iris_scale_to_width(
   let d: f32 = curve * c;
   if (blades < 3u) { return 1.0; }
 
-  // Evaluate the radial limit along the horizontal axis (theta=0), taking the
-  // minimum across all blade disks. This controls the maximal horizontal reach
-  // of the aperture before scaling.
+  // Evaluate the radial limit along the horizontal axis (theta=0) using
+  // only three nearest centers: 0 and ±sector.
   let sector = 6.283185307179586 / f32(blades);
-  let cs = cos(sector);
-  let ss = sin(sector);
-  let ct = 1.0; // cos(0)
-  let st = 0.0; // sin(0)
-
-  var ci = 1.0; // cos(alpha)
-  var si = 0.0; // sin(alpha)
-  var min_ru0 = 1e9;
-  for (var i: u32 = 0u; i < blades; i = i + 1u) {
-    let cos_phi = ct * ci + st * si;           // simplifies to ci
-    let sin_phi = st * ci - ct * si;           // simplifies to -si
-    let disc = d * d - (c * c) * (sin_phi * sin_phi);
-    if (disc > 0.0) {
-      let ru = c * cos_phi + sqrt(max(disc, 0.0));
-      if (ru > 0.0) {
-        min_ru0 = min(min_ru0, ru);
-      }
-    }
-    let ci_next = ci * cs - si * ss;
-    let si_next = si * cs + ci * ss;
-    ci = ci_next;
-    si = si_next;
-  }
-  let denom = max(min_ru0, 1e-3);
+  let eval_ru0 = fn(phi: f32) -> f32 {
+    let s = sin(phi);
+    let cph = cos(phi);
+    let disc = d * d - (c * c) * (s * s);
+    if (disc <= 0.0) { return 1e9; }
+    let ru = c * cph + sqrt(max(disc, 0.0));
+    return select(ru, 1e9, ru <= 0.0);
+  };
+  let r0 = eval_ru0(0.0);
+  let r1 = eval_ru0(sector);
+  let r2 = eval_ru0(-sector);
+  let denom = max(min(r0, min(r1, r2)), 1e-3);
   return aspect / denom;
 }
 
@@ -348,8 +322,28 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       // Band around |sdf| < half_band, anti-aliased
       let edge = 1.0 - smoothstep(half_band, half_band + aa, abs(sdf));
       let stroke_alpha = edge * stroke_col.a;
-      // Composite stroke over base color
+      // Composite outer ring stroke over base color
       color = mix(color, vec4<f32>(stroke_col.rgb, 1.0), stroke_alpha);
+
+      // Stroke blade seams (full length from center to boundary): thin lines at
+      // blade boundaries in angular space. This evokes the petal outlines.
+      // Distance from point to line through origin at angle m*sector is
+      // |r * sin(theta - m*sector)|. We draw a pixel-constant band.
+      let theta = atan2(p.y, p.x);
+      let sector = 6.283185307179586 / f32(blades);
+      // Reduce to nearest seam (multiple of sector)
+      let kline = round(theta / sector);
+      let seam_ang = kline * sector;
+      let ang_dist = abs(sin(theta - seam_ang));
+      // Convert stroke width to angular band: distance to line is r * sin Δ.
+      // We want a pixel width at this radius. Map pixels -> NDC and divide by r.
+      let eps_r = max(rlen, 1e-3);
+      let half_band_ang = max(stroke_px * px_to_ndc * 0.5 / eps_r, 1e-4);
+      let seam_edge = 1.0 - smoothstep(half_band_ang, half_band_ang + 1.5 * half_band_ang, ang_dist);
+      // Only draw seams on occluder (outside current aperture)
+      let occluder = select(1.0 - mask_open, 1.0 - mask_close, first);
+      let seam_alpha = seam_edge * occluder * stroke_col.a;
+      color = mix(color, vec4<f32>(stroke_col.rgb, 1.0), seam_alpha);
     }
     default: {
       color = current;
