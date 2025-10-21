@@ -53,6 +53,89 @@ pub async fn device_connected(interface: &str) -> Result<bool> {
     Ok(false)
 }
 
+pub async fn active_connection_id(interface: &str) -> Result<Option<String>> {
+    let output = nmcli(&[
+        "-t",
+        "-f",
+        "GENERAL.CONNECTION",
+        "device",
+        "show",
+        interface,
+    ])
+    .await?;
+    for line in output.lines() {
+        if let Some(value) = parse_nmcli_value(line) {
+            if value == "--" {
+                return Ok(None);
+            }
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
+pub async fn connected_to_infrastructure(
+    interface: &str,
+    hotspot_connection_id: &str,
+) -> Result<bool> {
+    if !device_connected(interface).await? {
+        return Ok(false);
+    }
+
+    match active_connection_id(interface).await? {
+        Some(active) if active == hotspot_connection_id => Ok(false),
+        Some(_) => Ok(true),
+        None => Ok(false),
+    }
+}
+
+pub async fn gateway_reachable(interface: &str) -> Result<bool> {
+    let gw = default_gateway(interface).await?;
+    if let Some(gw) = gw {
+        let status = Command::new("ping")
+            .arg("-c")
+            .arg("1")
+            .arg("-W")
+            .arg("2")
+            .arg(&gw)
+            .status()
+            .await
+            .with_context(|| format!("failed to spawn ping for gateway {gw}"))?;
+        return Ok(status.success());
+    }
+    Ok(false)
+}
+
+async fn default_gateway(interface: &str) -> Result<Option<String>> {
+    let output = nmcli(&["-t", "-f", "IP4.GATEWAY", "device", "show", interface]).await?;
+    for line in output.lines() {
+        if let Some(value) = parse_nmcli_value(line) {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
+fn parse_nmcli_value(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut parts = trimmed.splitn(2, ':');
+    let value = match (parts.next(), parts.next()) {
+        (Some(_key), Some(val)) => val.trim(),
+        (Some(val), None) => val.trim(),
+        _ => return None,
+    };
+
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 pub async fn ensure_hotspot_profile(
     hotspot: &HotspotConfig,
     interface: &str,
