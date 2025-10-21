@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use evdev::{Device, EventSummary, KeyCode};
 use humantime::format_duration;
@@ -108,7 +108,6 @@ struct ButtondSettings {
     screen_on_command: CommandSpec,
     screen_off_command: CommandSpec,
     screen_off_delay: Duration,
-    screen_state_file: PathBuf,
 }
 
 impl ButtondSettings {
@@ -120,7 +119,6 @@ impl ButtondSettings {
         let shutdown_command = buttond.shutdown_command.into_spec("shutdown");
         let screen = buttond.screen;
         let ScreenConfig {
-            state_file: screen_state_file,
             off_delay_ms,
             on_command,
             off_command,
@@ -135,7 +133,6 @@ impl ButtondSettings {
             screen_on_command: on_command.into_spec("screen-on"),
             screen_off_command: off_command.into_spec("screen-off"),
             screen_off_delay,
-            screen_state_file,
         })
     }
 
@@ -144,8 +141,7 @@ impl ButtondSettings {
             self.screen_on_command,
             self.screen_off_command,
             self.screen_off_delay,
-            self.screen_state_file,
-        )?;
+        );
 
         Ok(Runtime {
             control_socket_path: self.control_socket_path,
@@ -239,8 +235,6 @@ impl Default for ButtondFileConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct ScreenConfig {
-    #[serde(default = "ScreenConfig::default_state_file")]
-    state_file: PathBuf,
     #[serde(default = "ScreenConfig::default_off_delay_ms")]
     off_delay_ms: u64,
     #[serde(default = "ScreenConfig::default_on_command")]
@@ -252,7 +246,6 @@ struct ScreenConfig {
 impl Default for ScreenConfig {
     fn default() -> Self {
         Self {
-            state_file: Self::default_state_file(),
             off_delay_ms: Self::default_off_delay_ms(),
             on_command: Self::default_on_command(),
             off_command: Self::default_off_command(),
@@ -261,10 +254,6 @@ impl Default for ScreenConfig {
 }
 
 impl ScreenConfig {
-    fn default_state_file() -> PathBuf {
-        PathBuf::from("/run/photoframe/buttond-screen-state")
-    }
-
     const fn default_off_delay_ms() -> u64 {
         3500
     }
@@ -360,30 +349,33 @@ struct ScreenRuntime {
     on_command: CommandSpec,
     off_command: CommandSpec,
     off_delay: Duration,
-    state_file: PathBuf,
-    state: ScreenState,
 }
 
 impl ScreenRuntime {
-    fn new(
-        on_command: CommandSpec,
-        off_command: CommandSpec,
-        off_delay: Duration,
-        state_file: PathBuf,
-    ) -> Result<Self> {
-        let state = Self::restore_state(&state_file);
-        debug!(state = state.as_str(), file = %state_file.display(), "restored screen state");
-        Ok(Self {
+    fn new(on_command: CommandSpec, off_command: CommandSpec, off_delay: Duration) -> Self {
+        Self {
             on_command,
             off_command,
             off_delay,
-            state_file,
-            state,
-        })
+        }
     }
 
-    fn toggle_after_frame_toggle(&mut self) -> Result<ScreenState> {
-        match self.state {
+    fn toggle_after_frame_toggle(&self) -> Result<ScreenState> {
+        let detected = match detect_primary_display_state() {
+            Ok(info) => {
+                debug!(output = %info.name, state = info.state.as_str(), "detected screen state");
+                info
+            }
+            Err(err) => {
+                warn!(?err, "failed to detect screen state; assuming on");
+                ScreenDetection {
+                    name: String::from("unknown"),
+                    state: ScreenState::On,
+                }
+            }
+        };
+
+        let next_state = match detected.state {
             ScreenState::On => {
                 if !self.off_delay.is_zero() {
                     info!(
@@ -393,45 +385,15 @@ impl ScreenRuntime {
                     thread::sleep(self.off_delay);
                 }
                 self.off_command.run()?;
-                self.state = ScreenState::Off;
+                ScreenState::Off
             }
             ScreenState::Off => {
                 self.on_command.run()?;
-                self.state = ScreenState::On;
-            }
-        }
-        self.persist_state()?;
-        Ok(self.state)
-    }
-
-    fn restore_state(path: &Path) -> ScreenState {
-        match fs::read_to_string(path) {
-            Ok(contents) => ScreenState::from_str(contents.trim()).unwrap_or(ScreenState::On),
-            Err(err) if err.kind() == ErrorKind::NotFound => ScreenState::On,
-            Err(err) => {
-                warn!(
-                    file = %path.display(),
-                    error = %err,
-                    "failed to read screen state; assuming on"
-                );
                 ScreenState::On
             }
-        }
-    }
+        };
 
-    fn persist_state(&self) -> Result<()> {
-        if let Some(parent) = self.state_file.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create state directory {}", parent.display())
-            })?;
-        }
-        fs::write(&self.state_file, format!("{}\n", self.state.as_str())).with_context(|| {
-            format!(
-                "failed to persist screen state to {}",
-                self.state_file.display()
-            )
-        })?;
-        Ok(())
+        Ok(next_state)
     }
 }
 
@@ -448,12 +410,156 @@ impl ScreenState {
             ScreenState::Off => "off",
         }
     }
+}
 
-    fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "on" => Some(ScreenState::On),
-            "off" => Some(ScreenState::Off),
-            _ => None,
+struct ScreenDetection {
+    name: String,
+    state: ScreenState,
+}
+
+fn detect_primary_display_state() -> Result<ScreenDetection> {
+    let output = Command::new("wlr-randr")
+        .output()
+        .context("failed to execute wlr-randr")?;
+    if !output.status.success() {
+        bail!(
+            "wlr-randr exited with status {status}",
+            status = output.status
+        );
+    }
+    let stdout =
+        String::from_utf8(output.stdout).context("wlr-randr output was not valid UTF-8")?;
+
+    let mut current: Option<OutputRecord> = None;
+    let mut best: Option<ScreenDetection> = None;
+
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if is_output_header(line) {
+            commit_output(&mut current, &mut best);
+            let Some(name) = line.split_whitespace().next() else {
+                current = None;
+                continue;
+            };
+            current = Some(OutputRecord::new(name));
+            continue;
+        }
+
+        if let Some(record) = current.as_mut() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("Enabled:") {
+                if let Some(value) = rest.trim().split_whitespace().next() {
+                    if let Some(enabled) = parse_bool(value) {
+                        record.enabled = Some(enabled);
+                        record.enabled_seen = true;
+                    }
+                }
+                continue;
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("Status:") {
+                if let Some(value) = rest.trim().split_whitespace().next() {
+                    let value = value.to_ascii_lowercase();
+                    if value.starts_with("connected") {
+                        record.status_connected = Some(true);
+                        record.status_seen = true;
+                    } else if value.starts_with("disconnected") {
+                        record.status_connected = Some(false);
+                        record.status_seen = true;
+                    }
+                }
+            }
+        }
+    }
+
+    commit_output(&mut current, &mut best);
+
+    best.ok_or_else(|| anyhow!("no connected display detected"))
+}
+
+fn is_output_header(line: &str) -> bool {
+    line.chars()
+        .next()
+        .map(|c| !c.is_whitespace())
+        .unwrap_or(false)
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "yes" | "on" | "true" | "1" => Some(true),
+        "no" | "off" | "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn commit_output(current: &mut Option<OutputRecord>, best: &mut Option<ScreenDetection>) {
+    if best.is_some() {
+        *current = None;
+        return;
+    }
+
+    let Some(record) = current.take() else {
+        return;
+    };
+
+    if let Some(candidate) = record.into_detection() {
+        *best = Some(candidate);
+    }
+}
+
+struct OutputRecord {
+    name: String,
+    is_internal: bool,
+    enabled: Option<bool>,
+    enabled_seen: bool,
+    status_connected: Option<bool>,
+    status_seen: bool,
+}
+
+impl OutputRecord {
+    fn new(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            is_internal: name.starts_with("eDP") || name.starts_with("LVDS"),
+            enabled: None,
+            enabled_seen: false,
+            status_connected: None,
+            status_seen: false,
+        }
+    }
+
+    fn into_detection(self) -> Option<ScreenDetection> {
+        if self.is_internal || !self.is_connected() {
+            return None;
+        }
+
+        let state = self
+            .enabled
+            .map(|enabled| {
+                if enabled {
+                    ScreenState::On
+                } else {
+                    ScreenState::Off
+                }
+            })
+            .unwrap_or(ScreenState::On);
+
+        Some(ScreenDetection {
+            name: self.name,
+            state,
+        })
+    }
+
+    fn is_connected(&self) -> bool {
+        if self.status_seen {
+            self.status_connected.unwrap_or(false)
+        } else if self.enabled_seen {
+            self.enabled.unwrap_or(false)
+        } else {
+            false
         }
     }
 }

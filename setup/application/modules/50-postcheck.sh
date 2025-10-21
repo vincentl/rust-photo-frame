@@ -29,12 +29,12 @@ run_sudo() {
 
 BIN_PATH="${INSTALL_ROOT}/bin/rust-photo-frame"
 WIFI_BIN_PATH="${INSTALL_ROOT}/bin/wifi-manager"
-CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/config.yaml"
+CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/photo-frame/config.yaml"
 WIFI_CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/wifi-manager.yaml"
 WORDLIST_PATH="${INSTALL_ROOT}/share/wordlist.txt"
 PHOTO_BIN_PATH="${INSTALL_ROOT}/bin/photo-frame"
 VAR_DIR="/var/lib/photo-frame"
-VAR_CONFIG="${VAR_DIR}/config/config.yaml"
+SYSTEM_CONFIG="/etc/photo-frame/config.yaml"
 
 dump_logs_on_failure() {
     local status=$1
@@ -100,8 +100,8 @@ if [[ "${var_owner}" != "${SERVICE_USER}" || "${var_group}" != "${SERVICE_GROUP}
     exit 1
 fi
 
-if ! run_sudo -u "${SERVICE_USER}" test -f "${VAR_CONFIG}"; then
-    log WARN "Runtime config missing at ${VAR_CONFIG}; copy ${CONFIG_TEMPLATE} or rerun ./setup/app/run.sh"
+if [[ ! -f "${SYSTEM_CONFIG}" ]]; then
+    log WARN "System config missing at ${SYSTEM_CONFIG}; copy ${CONFIG_TEMPLATE} or rerun ./setup/app/run.sh"
 fi
 
 if systemd_available; then
@@ -194,8 +194,8 @@ Install root : ${INSTALL_ROOT}
 Service user : ${SERVICE_USER}
 Service group: ${SERVICE_GROUP}
 Binary       : ${BIN_PATH}
-Config (RO)  : ${CONFIG_TEMPLATE}
-Config (RW)  : ${VAR_CONFIG}
+Config (template): ${CONFIG_TEMPLATE}
+Config (active)  : ${SYSTEM_CONFIG}
 Wi-Fi binary : ${WIFI_BIN_PATH}
 Wi-Fi config : ${WIFI_CONFIG_TEMPLATE}
 Wi-Fi wordlist: ${WORDLIST_PATH}
@@ -207,7 +207,7 @@ ${BUTTON_SERVICE}: ${button_status}
 ${SYNC_TIMER}: ${sync_status}
 ${SEATD_SERVICE}: ${seatd_status}
 Next steps:
-  - Customize ${VAR_CONFIG} for your site.
+  - Customize ${SYSTEM_CONFIG} for your site (requires sudo).
   - Review journal logs with 'journalctl -u ${KIOSK_SERVICE} -f'.
 ----------------------------------------
 SUMMARY

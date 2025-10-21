@@ -111,7 +111,7 @@ sudo ./setup/system/install.sh
 ./setup/application/deploy.sh
 ```
 
-   Run this command as the unprivileged operator account. It compiles the photo frame, stages the release artifacts, and installs them into `/opt/photo-frame`. The stage verifies the kiosk service account exists and will prompt for sudo to create it (along with its primary group) when missing. The closing postcheck confirms binaries and templates are in place and will warn if the runtime config at `/var/lib/photo-frame/config/config.yaml` is missing; re-running the command recreates it from the staged template.
+   Run this command as the unprivileged operator account. It compiles the photo frame, stages the release artifacts, and installs them into `/opt/photo-frame`. The stage verifies the kiosk service account exists and will prompt for sudo to create it (along with its primary group) when missing. The closing postcheck confirms binaries and templates are in place and will warn if the system config at `/etc/photo-frame/config.yaml` is missing; re-running the command recreates it from the staged template.
 
 > **Filesystem roles**
 >

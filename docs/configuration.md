@@ -75,7 +75,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Required?** Yes. Leave it unset and the application has no images to display.
 - **Accepted values & defaults:** Any absolute or relative filesystem path. The setup pipeline provisions `/var/lib/photo-frame/photos` with `cloud/` and `local/` subdirectories and points the default configuration there so both the runtime and any cloud sync job start from a known location.
 - **Effect on behavior:** Switching the path changes the library the watcher monitors; the viewer reloads the playlist when the directory contents change.
-- **Notes:** Keep the `cloud/` and `local/` folders under the configured root so the runtime can merge them. Use `cloud/` for content that will be overwritten by sync jobs (e.g., rclone, Nextcloud), and reserve `local/` for manual imports you do not want the sync job to prune. After the installer seeds `/var/lib/photo-frame/config.yaml`, edit that writable copy to move the library elsewhere (for example, to an attached drive or network share) if you do not want to keep photos under `/var/lib/photo-frame/photos`.
+- **Notes:** Keep the `cloud/` and `local/` folders under the configured root so the runtime can merge them. Use `cloud/` for content that will be overwritten by sync jobs (e.g., rclone, Nextcloud), and reserve `local/` for manual imports you do not want the sync job to prune. After the installer seeds `/etc/photo-frame/config.yaml`, update that system copy (via `sudo`) to move the library elsewhere if you do not want to keep photos under `/var/lib/photo-frame/photos`.
 
 ### `control-socket-path`
 
@@ -233,7 +233,6 @@ buttond:
     program: /usr/bin/loginctl
     args: [power-off]
   screen:
-    state-file: /run/photoframe/buttond-screen-state
     off-delay-ms: 3500
     on-command:
       program: /opt/photo-frame/bin/powerctl
@@ -245,7 +244,7 @@ buttond:
 
 The installer deploys `buttond.service`, which launches `/opt/photo-frame/bin/buttond --config /etc/photo-frame/config.yaml` as the `kiosk` user. At runtime the daemon behaves as follows:
 
-- **Single press:** writes `{ "command": "ToggleState" }` to the control socket, then toggles the screen. If the display was off it immediately executes the configured wake command; if the display was on it delays for `off-delay-ms` (so the sleep screen is visible) before running the sleep command. The current display state is cached in `screen.state-file` so restarts resume the previous mode.
+- **Single press:** writes `{ "command": "ToggleState" }` to the control socket, then toggles the screen. If the display was off it immediately executes the configured wake command; if the display was on it delays for `off-delay-ms` (so the sleep screen is visible) before running the sleep command. The daemon inspects `wlr-randr` output on each press instead of relying on cached state, so restarts and manual overrides stay in sync with reality.
 - **Double press:** executes the `shutdown-command`. The default uses `loginctl power-off`, and system provisioning installs a polkit rule so the `kiosk` user can issue the request without prompting.
 - **Long press:** bypassed so the Pi firmware can force power-off.
 

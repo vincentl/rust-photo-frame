@@ -108,7 +108,7 @@ The Wi-Fi manager is wired into the refreshed setup pipeline:
 - `setup/system/modules/60-systemd.sh` installs and enables `/etc/systemd/system/photoframe-wifi-manager.service` alongside the other kiosk units once the binaries exist.
 - `setup/application/modules/10-build.sh` compiles `wifi-manager` in release mode as the invoking user (never root).
 - `setup/application/modules/20-stage.sh` stages the binary, config template, wordlist, and docs.
-- `setup/application/modules/30-install.sh` installs artifacts into `/opt/photo-frame` and seeds `/var/lib/photo-frame/config/config.yaml` if missing.
+- `setup/application/modules/30-install.sh` installs artifacts into `/opt/photo-frame` and seeds `/etc/photo-frame/config.yaml` if missing.
 
 Re-running the scripts is idempotent: binaries are replaced in place, configs are preserved, ACLs stay intact, and systemd units reload cleanly.
 

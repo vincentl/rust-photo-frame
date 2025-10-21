@@ -77,7 +77,7 @@ if [[ -f "${ASSETS_APP_ROOT}/share/wordlist.txt" ]]; then
 fi
 
 if [[ -f "${REPO_ROOT}/config.yaml" ]]; then
-    install -Dm644 "${REPO_ROOT}/config.yaml" "${STAGE_DIR}/etc/config.yaml"
+    install -Dm644 "${REPO_ROOT}/config.yaml" "${STAGE_DIR}/etc/photo-frame/config.yaml"
 else
     log WARN "Default config.yaml not found at repo root"
 fi

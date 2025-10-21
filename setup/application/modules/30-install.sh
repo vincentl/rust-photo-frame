@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE_ROOT="${STAGE_ROOT:-${SCRIPT_DIR}/../build}"
 STAGE_DIR="${STAGE_ROOT}/stage"
 VAR_ROOT="/var/lib/photo-frame"
-CONFIG_DEST="${VAR_ROOT}/config/config.yaml"
+CONFIG_DEST="/etc/photo-frame/config.yaml"
 
 log() {
     local level="$1"; shift
@@ -66,7 +66,7 @@ prepare_runtime() {
         run_sudo install -d -m 750 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${VAR_ROOT}"
     fi
     local subdir
-    for subdir in photos config; do
+    for subdir in photos; do
         local path="${VAR_ROOT}/${subdir}"
         if [[ ! -d "${path}" ]]; then
             run_sudo install -d -m 770 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${path}"
@@ -87,11 +87,15 @@ prepare_runtime() {
             fi
         done
     fi
-    if [[ -f "${STAGE_DIR}/etc/config.yaml" ]]; then
+    if [[ -f "${STAGE_DIR}/etc/photo-frame/config.yaml" ]]; then
         if run_sudo test -f "${CONFIG_DEST}"; then
-            log INFO "Preserving existing runtime config at ${CONFIG_DEST}"
+            log INFO "Preserving existing system config at ${CONFIG_DEST}"
         else
-            run_sudo install -m 660 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${STAGE_DIR}/etc/config.yaml" "${CONFIG_DEST}"
+            local config_dir
+            config_dir="$(dirname "${CONFIG_DEST}")"
+            run_sudo install -d -m 755 "${config_dir}"
+            run_sudo install -m 660 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" \
+                "${STAGE_DIR}/etc/photo-frame/config.yaml" "${CONFIG_DEST}"
             log INFO "Seeded default config at ${CONFIG_DEST}"
         fi
     fi

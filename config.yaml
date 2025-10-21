@@ -21,7 +21,6 @@ buttond:
     program: /usr/bin/loginctl
     args: [power-off]
   screen:
-    state-file: /run/photoframe/buttond-screen-state
     off-delay-ms: 3500
     on-command:
       program: /opt/photo-frame/bin/powerctl
