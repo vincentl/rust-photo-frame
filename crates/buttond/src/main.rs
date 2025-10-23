@@ -1,5 +1,5 @@
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
@@ -861,11 +861,19 @@ fn ensure_wayland_env(command: &mut Command) -> Result<WaylandDiscovery> {
     command.env("XDG_RUNTIME_DIR", &runtime_dir);
 
     if let Some(current_display) = env::var_os("WAYLAND_DISPLAY") {
-        command.env("WAYLAND_DISPLAY", &current_display);
-        return Ok(WaylandDiscovery {
-            runtime_dir,
-            socket: Some(current_display),
-        });
+        if wayland_socket_is_ready(&runtime_dir, current_display.as_os_str()) {
+            command.env("WAYLAND_DISPLAY", &current_display);
+            return Ok(WaylandDiscovery {
+                runtime_dir,
+                socket: Some(current_display),
+            });
+        }
+
+        debug!(
+            display = ?current_display,
+            runtime = %runtime_dir.display(),
+            "configured Wayland display socket missing; retrying discovery",
+        );
     }
 
     let mut found: Option<OsString> = None;
@@ -896,6 +904,28 @@ fn ensure_wayland_env(command: &mut Command) -> Result<WaylandDiscovery> {
         runtime_dir,
         socket: None,
     })
+}
+
+fn wayland_socket_is_ready(runtime_dir: &Path, display: &OsStr) -> bool {
+    let path = wayland_socket_path(runtime_dir, display);
+    match fs::metadata(&path) {
+        Ok(metadata) => metadata.file_type().is_socket(),
+        Err(err) => {
+            if err.kind() != io::ErrorKind::NotFound {
+                debug!(?path, error = ?err, "failed to inspect WAYLAND_DISPLAY socket");
+            }
+            false
+        }
+    }
+}
+
+fn wayland_socket_path(runtime_dir: &Path, display: &OsStr) -> PathBuf {
+    let candidate = Path::new(display);
+    if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        runtime_dir.join(candidate)
+    }
 }
 
 fn matches_wayland_display(name: &OsString) -> bool {
