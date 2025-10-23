@@ -122,7 +122,7 @@ Exercise each axis at least once per release cycle.
   sudo evtest    # inspect for gpio-keys or power-button device
   ```
 - [ ] Short press → expect app sleep toggle (log should show control socket command).
-- [ ] Double-click → expect clean shutdown (`shutdown -h now` path confirmed in journal).
+- [ ] Double-click → expect clean shutdown (`systemctl poweroff -i` path confirmed in journal).
 - [ ] Long press → document expected behavior (hard-off). **Do not perform if risk of corruption.**
 - [ ] Evidence:
   ```sh
