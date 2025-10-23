@@ -100,76 +100,19 @@ fn iris_boundary(
   // Map screen uv to centered, aspect-corrected space in [-1,1]
   let p0 = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(aspect, 1.0);
   let p = rot2(p0, rotate_rad);
-  if (blades < 3u) {
-    return 0.0;
-  }
+  if (blades < 3u) { return 0.0; }
 
-  // Curved-blade base shape via intersection-of-disks. Keep disk radius > ring
-  // radius to avoid daisy topology.
-  let c: f32 = 0.9;       // ring radius of disk centers (in screen-space units)
-  let curve: f32 = 1.25;  // curvature factor; d = curve * c (> 1)
-  let d: f32 = curve * c; // disk radius
-
-  // Compute minimum radial limit across only the three nearest blade centers.
+  // Regular N-gon boundary: fold angle into canonical sector and return
+  // 1 / cos(phi). Caller multiplies by apothem (aspect * open_scale).
   let theta = atan2(p.y, p.x);
   let sector = 6.283185307179586 / f32(blades);
   let k = floor((theta + 0.5 * sector) / sector);
-  let a0 = k * sector;
-  let a1 = (k - 1.0) * sector;
-  let a2 = (k + 1.0) * sector;
-
-  // Evaluate ru for three nearest centers
-  let phi0 = theta - a0;
-  let s0 = sin(phi0);
-  let c0 = cos(phi0);
-  let disc0 = d * d - (c * c) * (s0 * s0);
-  let ru0 = select(c * c0 + sqrt(max(disc0, 0.0)), 1e9, disc0 <= 0.0 || (c * c0 + sqrt(max(disc0, 0.0))) <= 0.0);
-
-  let phi1 = theta - a1;
-  let s1 = sin(phi1);
-  let c1 = cos(phi1);
-  let disc1 = d * d - (c * c) * (s1 * s1);
-  let ru1 = select(c * c1 + sqrt(max(disc1, 0.0)), 1e9, disc1 <= 0.0 || (c * c1 + sqrt(max(disc1, 0.0))) <= 0.0);
-
-  let phi2 = theta - a2;
-  let s2 = sin(phi2);
-  let c2 = cos(phi2);
-  let disc2 = d * d - (c * c) * (s2 * s2);
-  let ru2 = select(c * c2 + sqrt(max(disc2, 0.0)), 1e9, disc2 <= 0.0 || (c * c2 + sqrt(max(disc2, 0.0))) <= 0.0);
-  return min(ru0, min(ru1, ru2));
+  let phi = theta - k * sector;   // [-sector/2, sector/2]
+  let c = max(cos(phi), 1e-4);
+  return 1.0 / c;
 }
 
-fn iris_scale_to_width(
-  aspect: f32,
-  blades: u32,
-) -> f32 {
-  // Same geometry constants as iris_boundary
-  let c: f32 = 0.9;
-  let curve: f32 = 1.25;
-  let d: f32 = curve * c;
-  if (blades < 3u) { return 1.0; }
-
-  // Evaluate the radial limit along the horizontal axis (theta=0) using
-  // only three nearest centers: 0 and ±sector.
-  let sector = 6.283185307179586 / f32(blades);
-  // Evaluate ru at theta=0 against centers 0 and ±sector
-  let s0 = sin(0.0);
-  let c0 = cos(0.0);
-  let disc0 = d * d - (c * c) * (s0 * s0);
-  let r0 = select(c * c0 + sqrt(max(disc0, 0.0)), 1e9, disc0 <= 0.0 || (c * c0 + sqrt(max(disc0, 0.0))) <= 0.0);
-
-  let s1 = sin(-sector);
-  let c1 = cos(-sector);
-  let disc1 = d * d - (c * c) * (s1 * s1);
-  let r1 = select(c * c1 + sqrt(max(disc1, 0.0)), 1e9, disc1 <= 0.0 || (c * c1 + sqrt(max(disc1, 0.0))) <= 0.0);
-
-  let s2 = sin(sector);
-  let c2 = cos(sector);
-  let disc2 = d * d - (c * c) * (s2 * s2);
-  let r2 = select(c * c2 + sqrt(max(disc2, 0.0)), 1e9, disc2 <= 0.0 || (c * c2 + sqrt(max(disc2, 0.0))) <= 0.0);
-  let denom = max(min(r0, min(r1, r2)), 1e-3);
-  return aspect / denom;
-}
+// Polygon path scales directly by apothem (screen aspect), no extra factor.
 
 fn iris_mask(
   uv: vec2<f32>,
@@ -180,10 +123,9 @@ fn iris_mask(
 ) -> f32 {
   let rvec = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(aspect, 1.0);
   let r = length(rot2(rvec, rotate_rad));
-  let min_ru = iris_boundary(uv, aspect, blades, rotate_rad);
-  // Scale the boundary so fully open spans screen width (horizontal diameter).
-  let scale_to_width = iris_scale_to_width(aspect, blades);
-  let boundary = clamp(open_scale, 0.0, 1.0) * min_ru * scale_to_width;
+  let factor = iris_boundary(uv, aspect, blades, rotate_rad); // 1/cos(phi)
+  // Fully open spans screen width: apothem = aspect
+  let boundary = clamp(open_scale, 0.0, 1.0) * aspect * factor;
   let sdf = boundary - r;
   let aa = max(fwidth(sdf), 1e-4);
   return smoothstep(0.0, aa, sdf);
@@ -320,9 +262,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let rvec = (in.screen_uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(U.aspect, 1.0);
       let p = rot2(rvec, rot);
       let rlen = length(p);
-      let min_ru = iris_boundary(in.screen_uv, U.aspect, blades, rot);
-      let scale_to_width = iris_scale_to_width(U.aspect, blades);
-      let boundary = clamp(open_scale, 0.0, 1.0) * min_ru * scale_to_width;
+      let factor = iris_boundary(in.screen_uv, U.aspect, blades, rot); // 1/cos(phi)
+      let boundary = clamp(open_scale, 0.0, 1.0) * U.aspect * factor;
       let sdf = boundary - rlen; // positive inside aperture
 
       // Convert pixel width to our coordinate system (~y-based scale)
