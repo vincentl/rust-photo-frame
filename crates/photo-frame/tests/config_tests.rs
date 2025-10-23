@@ -712,7 +712,6 @@ transition:
       segments-per-90deg: 4
       segments-per-cubic: 12
       value: 0.75
-      tolerance: 0.2
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -740,7 +739,6 @@ transition:
             assert_eq!(cfg.fill_rgba, [0.75, 0.8, 0.85, 1.0]);
             assert_eq!(cfg.stroke_rgba, [0.2, 0.25, 0.3, 1.0]);
             assert!((cfg.stroke_width - 2.0).abs() < f32::EPSILON);
-            assert!((cfg.tolerance - 0.2).abs() < f32::EPSILON);
             assert!((cfg.radius - 72.0).abs() < f32::EPSILON);
             assert_eq!(cfg.stroke_segments_per_90deg, 4);
             assert_eq!(cfg.stroke_segments_per_cubic, 12);

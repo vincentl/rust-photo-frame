@@ -1911,7 +1911,6 @@ impl TransitionOptions {
                     fill_rgba: builder.iris_fill_rgba.unwrap_or(defaults.fill_rgba),
                     stroke_rgba: builder.iris_stroke_rgba.unwrap_or(defaults.stroke_rgba),
                     stroke_width: builder.iris_stroke_width.unwrap_or(defaults.stroke_width),
-                    tolerance: builder.iris_tolerance.unwrap_or(defaults.tolerance),
                     stroke_enabled: builder
                         .iris_stroke_enabled
                         .unwrap_or(defaults.stroke_enabled),
@@ -2105,7 +2104,6 @@ pub struct IrisTransition {
     pub fill_rgba: [f32; 4],
     pub stroke_rgba: [f32; 4],
     pub stroke_width: f32,
-    pub tolerance: f32,
     pub stroke_enabled: bool,
     pub radius: f32,
     pub stroke_segments_per_90deg: u32,
@@ -2122,7 +2120,6 @@ impl Default for IrisTransition {
             fill_rgba: [0.85, 0.85, 0.85, 1.0],
             stroke_rgba: [0.10, 0.10, 0.10, 1.0],
             stroke_width: 2.0,
-            tolerance: 0.25,
             stroke_enabled: true,
             radius: 80.0,
             stroke_segments_per_90deg: 6,
@@ -2179,11 +2176,6 @@ impl IrisTransition {
         if self.stroke_width < 0.0 {
             self.stroke_width = 0.0;
         }
-        ensure!(
-            self.tolerance.is_finite(),
-            format!("transition option {} has non-finite iris.tolerance", kind)
-        );
-        self.tolerance = self.tolerance.clamp(0.01, 2.0);
         ensure!(
             self.radius.is_finite(),
             format!("transition option {} has non-finite iris.radius", kind)
@@ -2310,7 +2302,6 @@ struct TransitionOptionBuilder {
     iris_fill_rgba: Option<[f32; 4]>,
     iris_stroke_rgba: Option<[f32; 4]>,
     iris_stroke_width: Option<f32>,
-    iris_tolerance: Option<f32>,
     iris_stroke_enabled: Option<bool>,
     iris_radius: Option<f32>,
     iris_segments_per_90deg: Option<u32>,
@@ -2459,9 +2450,6 @@ fn apply_transition_inline_field<E: de::Error>(
         "stroke-px" | "stroke_px" if matches!(kind, TransitionKind::Iris) => {
             builder.iris_stroke_width = Some(inline_value_to::<f32, E>(value)?);
         }
-        "tolerance" if matches!(kind, TransitionKind::Iris) => {
-            builder.iris_tolerance = Some(inline_value_to::<f32, E>(value)?);
-        }
         "enabled" if matches!(kind, TransitionKind::Iris) => {
             builder.iris_stroke_enabled = Some(inline_value_to::<bool, E>(value)?);
         }
@@ -2500,7 +2488,6 @@ fn apply_transition_inline_field<E: de::Error>(
                     "fill-rgba",
                     "stroke-rgba",
                     "stroke-width",
-                    "tolerance",
                     "enabled",
                     "petal-count",
                     "radius",

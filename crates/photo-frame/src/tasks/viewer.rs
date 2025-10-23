@@ -55,7 +55,6 @@ pub(super) enum ActiveTransition {
         fill_rgba: [f32; 4],
         stroke_rgba: [f32; 4],
         stroke_width: f32,
-        tolerance: f32,
         stroke_enabled: bool,
         radius: f32,
         segments_per_90deg: u32,
@@ -141,7 +140,6 @@ impl TransitionState {
                 fill_rgba: cfg.fill_rgba,
                 stroke_rgba: cfg.stroke_rgba,
                 stroke_width: cfg.stroke_width,
-                tolerance: cfg.tolerance,
                 stroke_enabled: cfg.stroke_enabled,
                 radius: cfg.radius,
                 segments_per_90deg: cfg.stroke_segments_per_90deg,
@@ -2486,23 +2484,9 @@ pub fn run_windowed(
                             }
 
                             let mut should_draw_quad = false;
-                            let debug_bezier = std::env::var("PHOTOFRAME_DEBUG_BEZIER")
-                                .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
-                                .unwrap_or(false);
                             let mut iris_request: Option<IrisConfig> = None;
 
-                            if debug_bezier {
-                                // Draw current image and overlay a debug quadratic Bezier stroke.
-                                uniforms.kind = 6; // bezier overlay
-                                // Control points in UV for a gentle arc across center
-                                uniforms.params0 = [0.15, 0.60, 0.50, 0.25]; // P0.xy, P1.xy
-                                uniforms.params1[0] = 0.85; // P2.x
-                                uniforms.params1[1] = 0.60; // P2.y
-                                uniforms.params1[2] = 4.0; // stroke width px
-                                // Red stroke by default
-                                uniforms.params3 = [1.0, 0.1, 0.1, 1.0];
-                                should_draw_quad = have_current;
-                            } else if let Some(state) = wake.transition_state() {
+                            if let Some(state) = wake.transition_state() {
                                 match state.variant() {
                                     ActiveTransition::Iris {
                                         blades,
@@ -2511,7 +2495,6 @@ pub fn run_windowed(
                                         fill_rgba,
                                         stroke_rgba,
                                         stroke_width,
-                                        tolerance,
                                         stroke_enabled,
                                         radius,
                                         segments_per_90deg,
@@ -2524,7 +2507,6 @@ pub fn run_windowed(
                                         let fill_rgba = *fill_rgba;
                                         let stroke_rgba = *stroke_rgba;
                                         let stroke_width = *stroke_width;
-                                        let _tolerance = *tolerance;
                                         let stroke_enabled = *stroke_enabled;
                                         let radius = *radius;
                                         let segments_per_90deg = *segments_per_90deg;

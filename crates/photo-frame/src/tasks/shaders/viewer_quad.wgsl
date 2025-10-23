@@ -239,16 +239,11 @@ switch (U.kind) {
       let mask_close = iris_mask(in.screen_uv, U.aspect, blades, rot, open1);
       let mask_open  = iris_mask(in.screen_uv, U.aspect, blades, rot, open2);
 
-      // Fill and stroke uniforms
+      // Occluder fill color
       let fill = vec4<f32>(
         clamp(U.params2.xyz, vec3<f32>(0.0), vec3<f32>(1.0)),
         clamp(U.params2.w, 0.0, 1.0)
       );
-      let stroke_col = vec4<f32>(
-        clamp(U.params3.xyz, vec3<f32>(0.0), vec3<f32>(1.0)),
-        clamp(U.params3.w, 0.0, 1.0) // if provided as alpha; otherwise 1.0
-      );
-      let stroke_px = max(U.iris_pad0, 0.0);
 
       // Base composition over occluder fill
       if (first) {
@@ -256,87 +251,6 @@ switch (U.kind) {
       } else {
         color = mix(fill, next, mask_open);
       }
-
-      // Stroke ring: compute SDF band around boundary using current open scale
-      let open_scale = select(open2, open1, first);
-      let rvec = (in.screen_uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(U.aspect, 1.0);
-      let p = rot2(rvec, rot);
-      let rlen = length(p);
-      let factor = iris_boundary(in.screen_uv, U.aspect, blades, rot); // 1/cos(phi)
-      let boundary = clamp(open_scale, 0.0, 1.0) * U.aspect * factor;
-      let sdf = boundary - rlen; // positive inside aperture
-
-      // Convert pixel width to our coordinate system (~y-based scale)
-      let px_to_ndc = 2.0 / max(U.screen_size.y, 1.0);
-      let half_band = max(stroke_px * px_to_ndc * 0.5, 1e-4);
-      let aa = max(fwidth(sdf), 1e-4);
-      // Band around |sdf| < half_band, anti-aliased
-      let edge = 1.0 - smoothstep(half_band, half_band + aa, abs(sdf));
-      let stroke_alpha = edge * stroke_col.a;
-      // Composite outer ring stroke over base color
-      color = mix(color, vec4<f32>(stroke_col.rgb, 1.0), stroke_alpha);
-
-      // Stroke blade seams (full length from center to boundary): thin lines at
-      // blade boundaries in angular space. This evokes the petal outlines.
-      // Distance from point to line through origin at angle m*sector is
-      // |r * sin(theta - m*sector)|. We draw a pixel-constant band.
-      let theta = atan2(p.y, p.x);
-      let sector = 6.283185307179586 / f32(blades);
-      // Reduce to nearest seam (multiple of sector)
-      let kline = round(theta / sector);
-      let seam_ang = kline * sector;
-      let ang_dist = abs(sin(theta - seam_ang));
-      // Convert stroke width to angular band: distance to line is r * sin Δ.
-      // We want a pixel width at this radius. Map pixels -> NDC and divide by r.
-      let eps_r = max(rlen, 1e-3);
-      let half_band_ang = max(stroke_px * px_to_ndc * 0.5 / eps_r, 1e-4);
-      let seam_edge = 1.0 - smoothstep(half_band_ang, half_band_ang + 1.5 * half_band_ang, ang_dist);
-      // Only draw seams on occluder (outside current aperture)
-      let occluder = select(1.0 - mask_open, 1.0 - mask_close, first);
-      let seam_alpha = seam_edge * occluder * stroke_col.a;
-      color = mix(color, vec4<f32>(stroke_col.rgb, 1.0), seam_alpha);
-    }
-    case 6u: {
-      // Debug: stroke a single quadratic Bezier over the current image
-      // params0.xy = P0 (uv), params0.zw = P1 (uv), params1.xy = P2 (uv)
-      // params1.z = stroke width (px), params3 = stroke rgba
-      color = current;
-
-      // Control points in pixel space
-      let P0 = U.screen_size * clamp(U.params0.xy, vec2<f32>(0.0), vec2<f32>(1.0));
-      let P1 = U.screen_size * clamp(U.params0.zw, vec2<f32>(0.0), vec2<f32>(1.0));
-      let P2 = U.screen_size * clamp(U.params1.xy, vec2<f32>(0.0), vec2<f32>(1.0));
-      let stroke_px = max(U.params1.z, 0.0);
-      let stroke = vec4<f32>(
-        clamp(U.params3.xyz, vec3<f32>(0.0), vec3<f32>(1.0)),
-        clamp(U.params3.w, 0.0, 1.0)
-      );
-
-      // Distance from this pixel to the Bezier, approximated by a polyline
-      let p = in.screen_uv * U.screen_size;
-      let N: i32 = 32; // segments
-      var min_d = 1e9;
-      var a = P0;
-      for (var i: i32 = 1; i <= N; i = i + 1) {
-        let t = f32(i) / f32(N);
-        // Quadratic Bezier point via de Casteljau
-        let q0 = mix(P0, P1, t);
-        let q1 = mix(P1, P2, t);
-        let b = mix(q0, q1, t);
-        // Distance to segment a-b
-        let ab = b - a;
-        let ap = p - a;
-        let h = clamp(dot(ap, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
-        let d = length(ap - ab * h);
-        min_d = min(min_d, d);
-        a = b;
-      }
-
-      let half_w = max(0.5 * stroke_px, 0.0);
-      let aa = max(fwidth(min_d), 1.0);
-      let edge = 1.0 - smoothstep(half_w, half_w + aa, min_d);
-      let alpha = edge * stroke.a;
-      color = mix(color, vec4<f32>(stroke.rgb, 1.0), alpha);
     }
     default: {
       color = current;
