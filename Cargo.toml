@@ -3,6 +3,7 @@ members = [
     "crates/photo-frame",
     "crates/buttond",
     "crates/wifi-manager",
+    "crates/config-model",
 ]
 resolver = "2"
 

@@ -33,6 +33,7 @@ winit = "0.30.12"
 glyphon = { git = "https://github.com/grovesNL/glyphon.git", rev = "de4b5b8d4e52310be8df56d82a759593920acc04" }
 fontdb = "0.23.0"
 palette = "0.7.6"
+config-model = { path = "../config-model" }
 
 [dev-dependencies]
 tempfile = "3.23.0"

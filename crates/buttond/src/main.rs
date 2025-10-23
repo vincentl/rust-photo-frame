@@ -7,11 +7,12 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
+use config_model::{AwakeScheduleConfig, GreetingScreenConfig};
 use evdev::{Device, EventSummary, KeyCode};
 use humantime::format_duration;
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -109,33 +110,44 @@ struct ButtondSettings {
     screen_off_command: CommandSpec,
     screen_off_delay: Duration,
     screen_display_name: Option<String>,
+    #[allow(dead_code)]
+    greeting_screen_delay: Duration,
+    #[allow(dead_code)]
+    awake_schedule: Option<AwakeScheduleConfig>,
 }
 
 impl ButtondSettings {
     fn load(config_path: &Path, device_override: Option<PathBuf>) -> Result<Self> {
         let file_config = FileConfig::from_path(config_path)?;
-        let buttond = file_config.buttond;
+        let FileConfig {
+            control_socket_path,
+            buttond,
+            greeting_screen,
+            awake_schedule,
+        } = file_config;
         let durations = Durations::from_config(&buttond);
         let device = device_override.or(buttond.device);
         let shutdown_command = buttond.shutdown_command.into_spec("shutdown");
-        let screen = buttond.screen;
         let ScreenConfig {
             off_delay_ms,
             on_command,
             off_command,
             display_name,
-        } = screen;
+        } = buttond.screen;
         let screen_off_delay = Duration::from_millis(off_delay_ms);
+        let greeting_screen_delay = greeting_screen.effective_duration();
 
         Ok(Self {
             device,
             durations,
-            control_socket_path: file_config.control_socket_path,
+            control_socket_path,
             shutdown_command,
             screen_on_command: on_command.into_spec("screen-on"),
             screen_off_command: off_command.into_spec("screen-off"),
             screen_off_delay,
             screen_display_name: display_name,
+            greeting_screen_delay,
+            awake_schedule,
         })
     }
 
@@ -162,19 +174,32 @@ struct FileConfig {
     control_socket_path: PathBuf,
     #[serde(default)]
     buttond: ButtondFileConfig,
+    #[serde(default)]
+    greeting_screen: GreetingScreenConfig,
+    #[serde(default)]
+    awake_schedule: Option<AwakeScheduleConfig>,
 }
 
 impl FileConfig {
     fn from_path(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let parsed: Self = serde_yaml::from_str(&raw)
+        let mut parsed: Self = serde_yaml::from_str(&raw)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         if parsed.control_socket_path.as_os_str().is_empty() {
             bail!("control-socket-path must not be empty");
         }
         if parsed.control_socket_path.file_name().is_none() {
             bail!("control-socket-path must include a socket file name");
+        }
+        parsed
+            .greeting_screen
+            .validate()
+            .context("invalid greeting screen configuration")?;
+        if let Some(schedule) = parsed.awake_schedule.as_mut() {
+            schedule
+                .validate()
+                .context("invalid awake schedule configuration")?;
         }
         Ok(parsed)
     }
@@ -903,7 +928,7 @@ impl ButtonTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_wlr_randr_outputs, Action, ButtonTracker, Durations, ScreenState};
+    use super::{Action, ButtonTracker, Durations, ScreenState, parse_wlr_randr_outputs};
     use std::time::{Duration, Instant};
 
     const SAMPLE_OUTPUT: &str = r#"
@@ -930,9 +955,11 @@ HDMI-A-2 "Sleeper" (normal left inverted right x axis y axis)
         let start = Instant::now();
 
         tracker.on_press(start);
-        assert!(tracker
-            .on_release(start + Duration::from_millis(100))
-            .is_none());
+        assert!(
+            tracker
+                .on_release(start + Duration::from_millis(100))
+                .is_none()
+        );
         assert_eq!(
             tracker.handle_timeout(start + Duration::from_millis(600)),
             Some(Action::Single)
@@ -945,9 +972,11 @@ HDMI-A-2 "Sleeper" (normal left inverted right x axis y axis)
         let start = Instant::now();
 
         tracker.on_press(start);
-        assert!(tracker
-            .on_release(start + Duration::from_millis(120))
-            .is_none());
+        assert!(
+            tracker
+                .on_release(start + Duration::from_millis(120))
+                .is_none()
+        );
 
         let second_press = start + Duration::from_millis(220);
         tracker.on_press(second_press);
@@ -968,9 +997,11 @@ HDMI-A-2 "Sleeper" (normal left inverted right x axis y axis)
 
         let bounce_press = bounce_release + Duration::from_millis(40);
         tracker.on_press(bounce_press);
-        assert!(tracker
-            .on_release(bounce_press + Duration::from_millis(60))
-            .is_none());
+        assert!(
+            tracker
+                .on_release(bounce_press + Duration::from_millis(60))
+                .is_none()
+        );
 
         assert_eq!(
             tracker.handle_timeout(start + Duration::from_millis(700)),

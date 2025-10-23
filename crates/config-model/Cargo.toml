@@ -1,0 +1,15 @@
+[package]
+name = "config-model"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1.0.100"
+chrono = { version = "0.4.38", features = ["serde"] }
+chrono-tz = { version = "0.10.0", features = ["serde"] }
+serde = { version = "1.0.227", features = ["derive"] }
+
+[dev-dependencies]
+serde_yaml = "0.9.34"
