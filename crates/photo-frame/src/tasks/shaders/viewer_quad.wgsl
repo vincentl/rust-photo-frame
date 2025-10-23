@@ -118,18 +118,24 @@ fn iris_boundary(
   let a1 = (k - 1.0) * sector;
   let a2 = (k + 1.0) * sector;
 
-  let eval_ru = fn(phi: f32) -> f32 {
-    let s = sin(phi);
-    let cph = cos(phi);
-    let disc = d * d - (c * c) * (s * s);
-    if (disc <= 0.0) { return 1e9; }
-    let ru = c * cph + sqrt(max(disc, 0.0));
-    return select(ru, 1e9, ru <= 0.0);
-  };
+  // Evaluate ru for three nearest centers
+  let phi0 = theta - a0;
+  let s0 = sin(phi0);
+  let c0 = cos(phi0);
+  let disc0 = d * d - (c * c) * (s0 * s0);
+  let ru0 = select(c * c0 + sqrt(max(disc0, 0.0)), 1e9, disc0 <= 0.0 || (c * c0 + sqrt(max(disc0, 0.0))) <= 0.0);
 
-  let ru0 = eval_ru(theta - a0);
-  let ru1 = eval_ru(theta - a1);
-  let ru2 = eval_ru(theta - a2);
+  let phi1 = theta - a1;
+  let s1 = sin(phi1);
+  let c1 = cos(phi1);
+  let disc1 = d * d - (c * c) * (s1 * s1);
+  let ru1 = select(c * c1 + sqrt(max(disc1, 0.0)), 1e9, disc1 <= 0.0 || (c * c1 + sqrt(max(disc1, 0.0))) <= 0.0);
+
+  let phi2 = theta - a2;
+  let s2 = sin(phi2);
+  let c2 = cos(phi2);
+  let disc2 = d * d - (c * c) * (s2 * s2);
+  let ru2 = select(c * c2 + sqrt(max(disc2, 0.0)), 1e9, disc2 <= 0.0 || (c * c2 + sqrt(max(disc2, 0.0))) <= 0.0);
   return min(ru0, min(ru1, ru2));
 }
 
@@ -146,17 +152,21 @@ fn iris_scale_to_width(
   // Evaluate the radial limit along the horizontal axis (theta=0) using
   // only three nearest centers: 0 and ±sector.
   let sector = 6.283185307179586 / f32(blades);
-  let eval_ru0 = fn(phi: f32) -> f32 {
-    let s = sin(phi);
-    let cph = cos(phi);
-    let disc = d * d - (c * c) * (s * s);
-    if (disc <= 0.0) { return 1e9; }
-    let ru = c * cph + sqrt(max(disc, 0.0));
-    return select(ru, 1e9, ru <= 0.0);
-  };
-  let r0 = eval_ru0(0.0);
-  let r1 = eval_ru0(sector);
-  let r2 = eval_ru0(-sector);
+  // Evaluate ru at theta=0 against centers 0 and ±sector
+  let s0 = sin(0.0);
+  let c0 = cos(0.0);
+  let disc0 = d * d - (c * c) * (s0 * s0);
+  let r0 = select(c * c0 + sqrt(max(disc0, 0.0)), 1e9, disc0 <= 0.0 || (c * c0 + sqrt(max(disc0, 0.0))) <= 0.0);
+
+  let s1 = sin(-sector);
+  let c1 = cos(-sector);
+  let disc1 = d * d - (c * c) * (s1 * s1);
+  let r1 = select(c * c1 + sqrt(max(disc1, 0.0)), 1e9, disc1 <= 0.0 || (c * c1 + sqrt(max(disc1, 0.0))) <= 0.0);
+
+  let s2 = sin(sector);
+  let c2 = cos(sector);
+  let disc2 = d * d - (c * c) * (s2 * s2);
+  let r2 = select(c * c2 + sqrt(max(disc2, 0.0)), 1e9, disc2 <= 0.0 || (c * c2 + sqrt(max(disc2, 0.0))) <= 0.0);
   let denom = max(min(r0, min(r1, r2)), 1e-3);
   return aspect / denom;
 }
