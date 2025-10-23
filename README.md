@@ -69,6 +69,7 @@ Full operating procedures, configuration options, and troubleshooting steps are 
 - Configurable matting, transitions, and photo effects
 - Supports multiple image formats: JPG, PNG, GIF, WebP, BMP, TIFF
 - Robust error handling with structured logging
+- buttond automatically derives the active Wayland display socket at startup, waiting briefly for the compositor when needed so DPMS commands stay reliable
 - Boots to the greeting screen and waits for external `set-state` commands before advancing, keeping scheduling logic in buttond.
 
 ## Architecture Overview
