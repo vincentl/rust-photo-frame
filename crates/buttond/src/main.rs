@@ -996,6 +996,15 @@ enum SchedulerCommand {
     GoToSleep,
 }
 
+impl SchedulerCommand {
+    fn target_mode(self) -> ViewerMode {
+        match self {
+            SchedulerCommand::WakeUp => ViewerMode::Awake,
+            SchedulerCommand::GoToSleep => ViewerMode::Asleep,
+        }
+    }
+}
+
 fn spawn_scheduler(
     config: SchedulerConfig,
     shared_state: Arc<Mutex<FrameState>>,
@@ -1017,7 +1026,10 @@ fn scheduler_loop(
     tx: mpsc::Sender<SchedulerCommand>,
 ) {
     const MAX_SLEEP: Duration = Duration::from_secs(60);
+    const COMMAND_SETTLE: Duration = Duration::from_millis(100);
+    const COMMAND_RETRY: Duration = Duration::from_secs(1);
     let greeting_ready_at = Instant::now() + config.greeting_delay;
+    let mut pending_command: Option<(SchedulerCommand, Instant)> = None;
 
     loop {
         let now_instant = Instant::now();
@@ -1034,6 +1046,12 @@ fn scheduler_loop(
             )
         };
 
+        if let Some((command, _)) = pending_command.as_ref() {
+            if current_mode == command.target_mode() {
+                pending_command = None;
+            }
+        }
+
         if should_be_awake && current_mode != ViewerMode::Awake {
             if !greeting_complete && now_instant < greeting_ready_at {
                 sleep_for(
@@ -1043,8 +1061,21 @@ fn scheduler_loop(
                 continue;
             }
 
+            if let Some((command, last_sent)) = pending_command.as_ref() {
+                if *command == SchedulerCommand::WakeUp
+                    && now_instant.duration_since(*last_sent) < COMMAND_RETRY
+                {
+                    sleep_for(COMMAND_SETTLE, MAX_SLEEP);
+                    continue;
+                }
+            }
+
             match tx.send(SchedulerCommand::WakeUp) {
-                Ok(()) => continue,
+                Ok(()) => {
+                    pending_command = Some((SchedulerCommand::WakeUp, Instant::now()));
+                    sleep_for(COMMAND_SETTLE, MAX_SLEEP);
+                    continue;
+                }
                 Err(_) => {
                     debug!("scheduler exiting after receiver closed");
                     break;
@@ -1059,8 +1090,21 @@ fn scheduler_loop(
                 }
             }
 
+            if let Some((command, last_sent)) = pending_command.as_ref() {
+                if *command == SchedulerCommand::GoToSleep
+                    && now_instant.duration_since(*last_sent) < COMMAND_RETRY
+                {
+                    sleep_for(COMMAND_SETTLE, MAX_SLEEP);
+                    continue;
+                }
+            }
+
             match tx.send(SchedulerCommand::GoToSleep) {
-                Ok(()) => continue,
+                Ok(()) => {
+                    pending_command = Some((SchedulerCommand::GoToSleep, Instant::now()));
+                    sleep_for(COMMAND_SETTLE, MAX_SLEEP);
+                    continue;
+                }
                 Err(_) => {
                     debug!("scheduler exiting after receiver closed");
                     break;
@@ -1749,6 +1793,34 @@ awake-scheduled: {}
             .recv_timeout(Duration::from_millis(200))
             .expect("scheduler sleep");
         assert_eq!(command, SchedulerCommand::GoToSleep);
+
+        drop(rx);
+        handle.join().expect("scheduler thread");
+    }
+
+    #[test]
+    fn scheduler_throttles_duplicate_commands() {
+        let config = SchedulerConfig {
+            schedule: always_awake_schedule(),
+            greeting_delay: Duration::from_millis(0),
+            sleep_grace: Duration::from_millis(0),
+        };
+        let state = Arc::new(Mutex::new(FrameState::new(ViewerMode::Asleep)));
+
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn({
+            let config = config.clone();
+            let state = Arc::clone(&state);
+            move || scheduler_loop(config, state, tx)
+        });
+
+        let command = rx
+            .recv_timeout(Duration::from_millis(200))
+            .expect("scheduler wake");
+        assert_eq!(command, SchedulerCommand::WakeUp);
+
+        thread::sleep(Duration::from_millis(250));
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
 
         drop(rx);
         handle.join().expect("scheduler thread");
