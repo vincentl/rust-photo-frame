@@ -14,6 +14,8 @@ struct TransitionUniforms {
   _pad0: f32,
   iris_blades: u32,
   _pad1: u32,
+  // Final pad so the struct size rounds up to 128 bytes (std140 multiple of 16)
+  _pad2: vec2<u32>,
 };
 
 @group(0) @binding(0)

@@ -799,6 +799,7 @@ pub fn run_windowed(
         _pad0: f32,
         iris_blades: u32,
         _pad1: u32,
+        _pad2: [u32; 2],
     }
 
     struct GpuCtx {
@@ -2450,6 +2451,7 @@ pub fn run_windowed(
                                 _pad0: 0.0,
                                 iris_blades: 0,
                                 _pad1: 0,
+                                _pad2: [0, 0],
                             };
                             let mut current_bind = &gpu.blank_plane.bind;
                             let mut next_bind = &gpu.blank_plane.bind;
