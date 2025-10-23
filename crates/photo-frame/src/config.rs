@@ -14,11 +14,7 @@ use serde_yaml::{Mapping, Value as YamlValue};
 
 use crate::processing::fixed_image::FixedImageBackground;
 
-#[allow(unused_imports)]
-pub use config_model::{
-    AwakeScheduleConfig, GreetingScreenColorsConfig, GreetingScreenConfig, ScreenMessageConfig,
-    SleepScreenConfig,
-};
+pub use config_model::{GreetingScreenConfig, ScreenMessageConfig, SleepScreenConfig};
 
 pub const DEFAULT_CONTROL_SOCKET_PATH: &str = "/run/photo-frame/control.sock";
 
@@ -2457,8 +2453,6 @@ pub struct Configuration {
     pub greeting_screen: GreetingScreenConfig,
     /// Sleep screen shown when the frame enters sleep mode.
     pub sleep_screen: SleepScreenConfig,
-    /// Optional scheduled awake intervals that toggle viewer state automatically.
-    pub awake_schedule: Option<AwakeScheduleConfig>,
 }
 
 impl Configuration {
@@ -2503,11 +2497,6 @@ impl Configuration {
         self.sleep_screen
             .validate()
             .context("invalid sleep screen configuration")?;
-        if let Some(schedule) = self.awake_schedule.as_mut() {
-            schedule
-                .validate()
-                .context("invalid awake schedule configuration")?;
-        }
         Ok(self)
     }
 }
@@ -2528,7 +2517,6 @@ impl Default for Configuration {
             playlist: PlaylistOptions::default(),
             greeting_screen: GreetingScreenConfig::default(),
             sleep_screen: SleepScreenConfig::default(),
-            awake_schedule: None,
         }
     }
 }

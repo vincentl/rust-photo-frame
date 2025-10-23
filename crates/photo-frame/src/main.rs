@@ -3,7 +3,6 @@ mod events;
 mod gpu;
 mod processing;
 mod renderer;
-mod schedule;
 mod tasks {
     pub mod files;
     pub mod greeting_screen;
@@ -21,7 +20,6 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -144,39 +142,6 @@ async fn main() -> Result<()> {
             run_control_socket(cancel, control, control_socket_path)
                 .await
                 .context("control socket task failed")
-        });
-    }
-
-    let greeting_duration = cfg.greeting_screen.effective_duration();
-
-    if let Some(schedule_cfg) = cfg.awake_schedule.clone() {
-        let cancel = cancel.clone();
-        let control = viewer_control_tx.clone();
-        let greeting_duration = greeting_duration;
-        tasks.spawn(async move {
-            schedule::run(schedule_cfg, cancel, control, greeting_duration)
-                .await
-                .context("awake schedule task failed")
-        });
-    } else {
-        let cancel = cancel.clone();
-        let control = viewer_control_tx.clone();
-        let greeting_duration = greeting_duration;
-        let greeting_duration_ms = greeting_duration.as_millis().min(u128::from(u64::MAX)) as u64;
-        tasks.spawn(async move {
-            tracing::debug!(greeting_duration_ms, "auto_wake_timer_armed");
-            tokio::select! {
-                _ = cancel.cancelled() => Ok(()),
-                _ = sleep(greeting_duration) => {
-                    tracing::debug!(greeting_duration_ms, "auto_wake_timer_elapsed");
-                    if let Err(err) = control.send(ViewerCommand::SetState(ViewerState::Awake)).await {
-                        tracing::debug!("auto-wake command dropped: {err}");
-                    } else {
-                        tracing::debug!("auto_wake_command_sent");
-                    }
-                    Ok(())
-                }
-            }
         });
     }
 

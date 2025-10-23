@@ -72,14 +72,20 @@ Exercise each axis at least once per release cycle.
   greeting-screen:
     message: "Welcome home!"
     font: "Macondo"
-  sleep-mode:
+  awake-schedule:
     timezone: America/Los_Angeles
-    on-hours:
-      start: "07:00"
-      end: "22:00"
-    display-power:
-      sleep-command: "wlr-randr --output @OUTPUT@ --off || vcgencmd display_power 0"
-      wake-command: "wlr-randr --output @OUTPUT@ --on  || vcgencmd display_power 1"
+    awake-scheduled:
+      daily:
+        - ["07:00", "22:00"]
+  buttond:
+    screen:
+      off-delay-ms: 3500
+      on-command:
+        program: /opt/photo-frame/bin/powerctl
+        args: [wake]
+      off-command:
+        program: /opt/photo-frame/bin/powerctl
+        args: [sleep]
   ```
 - [ ] Populate `/var/lib/photo-frame/photos/cloud` via your sync pipeline for mirrored libraries and `/var/lib/photo-frame/photos/local` for ad-hoc media (or the equivalent subdirectories under the configured library path) according to the test matrix scenario.
 

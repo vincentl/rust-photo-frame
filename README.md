@@ -8,7 +8,7 @@ A digital photo frame driver implemented in Rust with a pipeline tuned for Raspb
 
 - Runs entirely on-device with a configurable playlist weighting system.
 - Supports rich visual treatments (mats, transitions, print simulation) without requiring graphics expertise.
-- Sleep scheduling with manual overrides and Wayland-friendly DPMS commands for HDMI displays.
+- External buttond integration handles wake/sleep scheduling and Wayland-friendly DPMS commands for HDMI displays.
 
 ## Table of Contents
 
@@ -34,7 +34,7 @@ From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync servic
 >
 > - `/opt/photo-frame` holds the read-only release artifacts that ship with the project: compiled binaries, unit files, and the pristine configuration templates staged by the setup scripts.
 > - `/var/lib/photo-frame` carries the live state: logs, caches, hotspot artifacts, and any synchronized media. Treat this tree as the working area that systemd services mutate at runtime.
-> - `/etc/photo-frame/config.yaml` holds the active configuration the services consume. Edit this copy (with `sudo`) to adjust library paths, schedules, or button behavior.
+> - `/etc/photo-frame/config.yaml` holds the active configuration the services consume. Edit this copy (with `sudo`) to adjust library paths or button behavior.
 >
 > This split keeps upgrades simple—rerunning the installer refreshes `/opt` without clobbering the operator-managed data living under `/var`.
 
@@ -69,6 +69,7 @@ Full operating procedures, configuration options, and troubleshooting steps are 
 - Configurable matting, transitions, and photo effects
 - Supports multiple image formats: JPG, PNG, GIF, WebP, BMP, TIFF
 - Robust error handling with structured logging
+- Boots to the greeting screen and waits for external `set-state` commands before advancing, keeping scheduling logic in buttond.
 
 ## Architecture Overview
 
@@ -101,7 +102,7 @@ All configuration options—from playlist weighting and greeting screens to tran
 
 > **Matting at a glance:** The viewer walks `matting.active` from top to bottom, expanding inline palettes (such as `colors` arrays) into a canonical list of presets. Random and sequential selection both operate on that expanded list, so weighting or rotation happens after the inline swatches unfold. See the [full matting documentation](docs/configuration.md#matting-configuration) for details and examples.
 
-Need help wiring the sleep schedule to Raspberry Pi + Dell HDMI hardware? The dedicated power guide covers DPMS commands, troubleshooting, and verification steps. [Power & sleep details →](docs/power-and-sleep.md)
+Need help wiring buttond's wake/sleep schedule to Raspberry Pi + Dell HDMI hardware? The dedicated power guide covers DPMS commands, troubleshooting, and verification steps. [Power & sleep details →](docs/power-and-sleep.md)
 
 ## Fabrication
 
