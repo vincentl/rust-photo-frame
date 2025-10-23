@@ -4,16 +4,20 @@ use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::{self, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::{Duration as ChronoDuration, Utc};
 use clap::Parser;
 use config_model::{AwakeScheduleConfig, GreetingScreenConfig};
 use evdev::{Device, EventSummary, KeyCode};
 use humantime::format_duration;
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use serde::Deserialize;
+use serde_json::json;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -48,7 +52,10 @@ fn main() -> Result<()> {
     })?;
     let device_override = settings.device.clone();
     let durations = settings.durations;
-    let mut runtime = settings.into_runtime()?;
+    let (mut runtime, scheduler_config) = settings.into_runtime()?;
+
+    let mut scheduler_rx =
+        scheduler_config.and_then(|config| spawn_scheduler(config, runtime.shared_state()));
 
     let (mut device, path) = open_device(device_override.as_ref())?;
     set_nonblocking(&device)
@@ -58,6 +65,33 @@ fn main() -> Result<()> {
     let mut tracker = ButtonTracker::new(durations);
 
     loop {
+        if let Some(rx) = scheduler_rx.as_ref() {
+            let mut disconnected = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(SchedulerCommand::WakeUp) => {
+                        if let Err(err) = runtime.wake_up(TransitionSource::Scheduled) {
+                            error!(?err, "failed to process scheduled wake");
+                        }
+                    }
+                    Ok(SchedulerCommand::GoToSleep) => {
+                        if let Err(err) = runtime.go_to_sleep(TransitionSource::Scheduled) {
+                            error!(?err, "failed to process scheduled sleep");
+                        }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        warn!("scheduler channel disconnected");
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+            if disconnected {
+                scheduler_rx = None;
+            }
+        }
+
         let now = Instant::now();
         if let Some(action) = tracker.handle_timeout(now) {
             perform_action(action, &mut runtime);
@@ -110,10 +144,16 @@ struct ButtondSettings {
     screen_off_command: CommandSpec,
     screen_off_delay: Duration,
     screen_display_name: Option<String>,
-    #[allow(dead_code)]
     greeting_screen_delay: Duration,
-    #[allow(dead_code)]
     awake_schedule: Option<AwakeScheduleConfig>,
+    sleep_grace: Duration,
+}
+
+#[derive(Clone)]
+struct SchedulerConfig {
+    schedule: AwakeScheduleConfig,
+    greeting_delay: Duration,
+    sleep_grace: Duration,
 }
 
 impl ButtondSettings {
@@ -136,6 +176,7 @@ impl ButtondSettings {
         } = buttond.screen;
         let screen_off_delay = Duration::from_millis(off_delay_ms);
         let greeting_screen_delay = greeting_screen.effective_duration();
+        let sleep_grace = Duration::from_millis(buttond.sleep_grace_ms);
 
         Ok(Self {
             device,
@@ -148,22 +189,52 @@ impl ButtondSettings {
             screen_display_name: display_name,
             greeting_screen_delay,
             awake_schedule,
+            sleep_grace,
         })
     }
 
-    fn into_runtime(self) -> Result<Runtime> {
+    fn into_runtime(self) -> Result<(Runtime, Option<SchedulerConfig>)> {
+        let executor: Arc<dyn CommandExecutor> = Arc::new(OsCommandExecutor);
+        let detector: Arc<dyn ScreenDetector> = Arc::new(WlrScreenDetector);
+
         let screen = ScreenRuntime::new(
             self.screen_on_command,
             self.screen_off_command,
             self.screen_off_delay,
             self.screen_display_name,
+            executor.clone(),
+            detector,
         );
 
-        Ok(Runtime {
-            control_socket_path: self.control_socket_path,
-            shutdown_command: self.shutdown_command,
+        let initial_state = screen
+            .detect_state()
+            .map(|detection| detection.state.into())
+            .unwrap_or_else(|err| {
+                warn!(
+                    ?err,
+                    "failed to detect initial screen state; assuming awake"
+                );
+                ViewerMode::Awake
+            });
+
+        let control_socket: Arc<dyn ControlSocket> =
+            Arc::new(UnixControlSocket::new(self.control_socket_path.clone()));
+
+        let runtime = Runtime::new(
+            control_socket,
+            self.shutdown_command,
             screen,
-        })
+            executor,
+            initial_state,
+        );
+
+        let scheduler = self.awake_schedule.map(|schedule| SchedulerConfig {
+            schedule,
+            greeting_delay: self.greeting_screen_delay,
+            sleep_grace: self.sleep_grace,
+        });
+
+        Ok((runtime, scheduler))
     }
 }
 
@@ -220,6 +291,8 @@ struct ButtondFileConfig {
     double_window_ms: u64,
     #[serde(default = "ButtondFileConfig::default_debounce_ms")]
     debounce_ms: u64,
+    #[serde(default = "ButtondFileConfig::default_sleep_grace_ms")]
+    sleep_grace_ms: u64,
     #[serde(default = "ButtondFileConfig::default_shutdown_command")]
     shutdown_command: CommandConfig,
     #[serde(default)]
@@ -239,6 +312,10 @@ impl ButtondFileConfig {
         20
     }
 
+    const fn default_sleep_grace_ms() -> u64 {
+        300_000
+    }
+
     fn default_shutdown_command() -> CommandConfig {
         CommandConfig {
             label: "shutdown".into(),
@@ -255,6 +332,7 @@ impl Default for ButtondFileConfig {
             single_window_ms: Self::default_single_window_ms(),
             double_window_ms: Self::default_double_window_ms(),
             debounce_ms: Self::default_debounce_ms(),
+            sleep_grace_ms: Self::default_sleep_grace_ms(),
             shutdown_command: Self::default_shutdown_command(),
             screen: ScreenConfig::default(),
         }
@@ -339,68 +417,125 @@ struct CommandSpec {
     args: Vec<String>,
 }
 
-impl CommandSpec {
-    fn run(&self) -> Result<()> {
+trait CommandExecutor: Send + Sync {
+    fn execute(&self, command: &CommandSpec) -> Result<()>;
+}
+
+struct OsCommandExecutor;
+
+impl CommandExecutor for OsCommandExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<()> {
         debug!(
-            command = %self.program.display(),
-            args = ?self.args,
-            label = %self.label,
-            "running command"
+            program = %command.program.display(),
+            args = ?command.args,
+            label = %command.label,
+            "running command",
         );
-        let status = Command::new(&self.program)
-            .args(&self.args)
+        let status = Command::new(&command.program)
+            .args(&command.args)
             .status()
-            .with_context(|| format!("failed to execute {}", self.program.display()))?;
+            .with_context(|| format!("failed to execute {}", command.program.display()))?;
         if !status.success() {
-            bail!("{} command exited with status {}", self.label, status);
+            bail!("{} command exited with status {}", command.label, status);
         }
         Ok(())
+    }
+}
+
+trait ControlSocket: Send + Sync {
+    fn send_set_state(&self, state: ViewerMode) -> Result<()>;
+}
+
+struct UnixControlSocket {
+    path: PathBuf,
+}
+
+impl UnixControlSocket {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl ControlSocket for UnixControlSocket {
+    fn send_set_state(&self, state: ViewerMode) -> Result<()> {
+        const MAX_ATTEMPTS: usize = 3;
+        const RETRY_DELAY: Duration = Duration::from_millis(150);
+
+        let payload = serde_json::to_vec(&json!({
+            "command": "set-state",
+            "state": state.as_str(),
+        }))
+        .context("failed to serialize control payload")?;
+
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match UnixStream::connect(&self.path) {
+                Ok(mut stream) => {
+                    if let Err(err) = stream.write_all(&payload) {
+                        warn!(
+                            attempt,
+                            path = %self.path.display(),
+                            ?err,
+                            "failed to send control payload",
+                        );
+                        last_error = Some(err.into());
+                    } else {
+                        return Ok(());
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        attempt,
+                        path = %self.path.display(),
+                        ?err,
+                        "failed to connect to control socket",
+                    );
+                    last_error = Some(err.into());
+                }
+            }
+
+            if attempt < MAX_ATTEMPTS {
+                thread::sleep(RETRY_DELAY);
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow!("failed to send control command after retries")))
     }
 }
 
 struct Runtime {
-    control_socket_path: PathBuf,
+    control_socket: Arc<dyn ControlSocket>,
     shutdown_command: CommandSpec,
     screen: ScreenRuntime,
+    executor: Arc<dyn CommandExecutor>,
+    state: Arc<Mutex<FrameState>>,
 }
 
 impl Runtime {
-    fn handle_single(&mut self) -> Result<()> {
-        send_toggle_command(&self.control_socket_path)?;
-        let state = self.screen.toggle_after_frame_toggle()?;
-        info!(state = state.as_str(), "completed single-press toggle");
-        Ok(())
-    }
-
-    fn handle_double(&self) -> Result<()> {
-        self.shutdown_command.run()
-    }
-}
-
-struct ScreenRuntime {
-    on_command: CommandSpec,
-    off_command: CommandSpec,
-    off_delay: Duration,
-    display_name: Option<String>,
-}
-
-impl ScreenRuntime {
     fn new(
-        on_command: CommandSpec,
-        off_command: CommandSpec,
-        off_delay: Duration,
-        display_name: Option<String>,
+        control_socket: Arc<dyn ControlSocket>,
+        shutdown_command: CommandSpec,
+        screen: ScreenRuntime,
+        executor: Arc<dyn CommandExecutor>,
+        initial_state: ViewerMode,
     ) -> Self {
+        let state = Arc::new(Mutex::new(FrameState::new(initial_state)));
         Self {
-            on_command,
-            off_command,
-            off_delay,
-            display_name,
+            control_socket,
+            shutdown_command,
+            screen,
+            executor,
+            state,
         }
     }
 
-    fn toggle_after_frame_toggle(&self) -> Result<ScreenState> {
-        let detected = match detect_primary_display_state(self.display_name.as_deref()) {
+    fn shared_state(&self) -> Arc<Mutex<FrameState>> {
+        Arc::clone(&self.state)
+    }
+
+    fn handle_manual_toggle(&mut self) -> Result<()> {
+        let detected = match self.screen.detect_state() {
             Ok(info) => {
                 debug!(output = %info.name, state = info.state.as_str(), "detected screen state");
                 info
@@ -409,33 +544,200 @@ impl ScreenRuntime {
                 warn!(?err, "failed to detect screen state; assuming on");
                 ScreenDetection {
                     name: self
-                        .display_name
-                        .clone()
+                        .screen
+                        .display_name()
                         .unwrap_or_else(|| String::from("unknown")),
                     state: ScreenState::On,
                 }
             }
         };
 
-        let next_state = match detected.state {
+        match detected.state {
             ScreenState::On => {
-                if !self.off_delay.is_zero() {
-                    info!(
-                        delay = %format_duration(self.off_delay),
-                        "waiting before turning the screen off"
-                    );
-                    thread::sleep(self.off_delay);
-                }
-                self.off_command.run()?;
-                ScreenState::Off
+                info!("single press → putting frame to sleep");
+                self.go_to_sleep(TransitionSource::Manual)?;
             }
             ScreenState::Off => {
-                self.on_command.run()?;
-                ScreenState::On
+                info!("single press → waking frame");
+                self.wake_up(TransitionSource::Manual)?;
             }
-        };
+        }
 
-        Ok(next_state)
+        Ok(())
+    }
+
+    fn handle_double(&self) -> Result<()> {
+        self.executor.execute(&self.shutdown_command)
+    }
+
+    fn wake_up(&mut self, source: TransitionSource) -> Result<()> {
+        if self.current_viewer_mode() == ViewerMode::Awake {
+            info!(
+                reason = source.as_str(),
+                "wake_up requested but frame already awake"
+            );
+            self.record_state(ViewerMode::Awake, source);
+            return Ok(());
+        }
+
+        self.screen.power_on()?;
+        self.control_socket.send_set_state(ViewerMode::Awake)?;
+        info!(reason = source.as_str(), "frame wake request completed");
+        self.record_state(ViewerMode::Awake, source);
+        Ok(())
+    }
+
+    fn go_to_sleep(&mut self, source: TransitionSource) -> Result<()> {
+        if self.current_viewer_mode() == ViewerMode::Asleep {
+            info!(
+                reason = source.as_str(),
+                "sleep requested but frame already asleep"
+            );
+            self.record_state(ViewerMode::Asleep, source);
+            return Ok(());
+        }
+
+        self.control_socket.send_set_state(ViewerMode::Asleep)?;
+        let delay = self.screen.off_delay();
+        if !delay.is_zero() {
+            info!(reason = source.as_str(), delay = %format_duration(delay), "waiting before powering screen off");
+            thread::sleep(delay);
+        }
+        self.screen.power_off()?;
+        info!(reason = source.as_str(), "frame sleep request completed");
+        self.record_state(ViewerMode::Asleep, source);
+        Ok(())
+    }
+
+    fn current_viewer_mode(&self) -> ViewerMode {
+        let guard = self.state.lock().expect("frame state poisoned");
+        guard.mode
+    }
+
+    fn record_state(&self, mode: ViewerMode, source: TransitionSource) {
+        let mut guard = self.state.lock().expect("frame state poisoned");
+        guard.update(mode, source);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TransitionSource {
+    Manual,
+    Scheduled,
+}
+
+impl TransitionSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            TransitionSource::Manual => "manual",
+            TransitionSource::Scheduled => "scheduled",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ManualOverride {
+    at: Instant,
+    target: ViewerMode,
+}
+
+struct FrameState {
+    mode: ViewerMode,
+    last_manual_override: Option<ManualOverride>,
+    greeting_complete: bool,
+}
+
+impl FrameState {
+    fn new(mode: ViewerMode) -> Self {
+        Self {
+            mode,
+            last_manual_override: None,
+            greeting_complete: mode == ViewerMode::Awake,
+        }
+    }
+
+    fn update(&mut self, mode: ViewerMode, source: TransitionSource) {
+        self.mode = mode;
+        match source {
+            TransitionSource::Manual => {
+                self.last_manual_override = Some(ManualOverride {
+                    at: Instant::now(),
+                    target: mode,
+                });
+            }
+            TransitionSource::Scheduled => {
+                self.last_manual_override = None;
+            }
+        }
+
+        if mode == ViewerMode::Awake {
+            self.greeting_complete = true;
+        }
+    }
+
+    fn last_manual_awake(&self) -> Option<Instant> {
+        self.last_manual_override
+            .as_ref()
+            .and_then(|override_info| {
+                if override_info.target == ViewerMode::Awake {
+                    Some(override_info.at)
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn greeting_complete(&self) -> bool {
+        self.greeting_complete
+    }
+}
+
+struct ScreenRuntime {
+    on_command: CommandSpec,
+    off_command: CommandSpec,
+    off_delay: Duration,
+    display_name: Option<String>,
+    executor: Arc<dyn CommandExecutor>,
+    detector: Arc<dyn ScreenDetector>,
+}
+
+impl ScreenRuntime {
+    fn new(
+        on_command: CommandSpec,
+        off_command: CommandSpec,
+        off_delay: Duration,
+        display_name: Option<String>,
+        executor: Arc<dyn CommandExecutor>,
+        detector: Arc<dyn ScreenDetector>,
+    ) -> Self {
+        Self {
+            on_command,
+            off_command,
+            off_delay,
+            display_name,
+            executor,
+            detector,
+        }
+    }
+
+    fn power_on(&self) -> Result<()> {
+        self.executor.execute(&self.on_command)
+    }
+
+    fn power_off(&self) -> Result<()> {
+        self.executor.execute(&self.off_command)
+    }
+
+    fn off_delay(&self) -> Duration {
+        self.off_delay
+    }
+
+    fn display_name(&self) -> Option<String> {
+        self.display_name.clone()
+    }
+
+    fn detect_state(&self) -> Result<ScreenDetection> {
+        self.detector.detect(self.display_name.as_deref())
     }
 }
 
@@ -454,9 +756,45 @@ impl ScreenState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewerMode {
+    Awake,
+    Asleep,
+}
+
+impl ViewerMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            ViewerMode::Awake => "awake",
+            ViewerMode::Asleep => "asleep",
+        }
+    }
+}
+
+impl From<ScreenState> for ViewerMode {
+    fn from(state: ScreenState) -> Self {
+        match state {
+            ScreenState::On => ViewerMode::Awake,
+            ScreenState::Off => ViewerMode::Asleep,
+        }
+    }
+}
+
 struct ScreenDetection {
     name: String,
     state: ScreenState,
+}
+
+trait ScreenDetector: Send + Sync {
+    fn detect(&self, display_name: Option<&str>) -> Result<ScreenDetection>;
+}
+
+struct WlrScreenDetector;
+
+impl ScreenDetector for WlrScreenDetector {
+    fn detect(&self, display_name: Option<&str>) -> Result<ScreenDetection> {
+        detect_primary_display_state(display_name)
+    }
 }
 
 fn detect_primary_display_state(display_name: Option<&str>) -> Result<ScreenDetection> {
@@ -639,7 +977,7 @@ fn perform_action(action: Action, runtime: &mut Runtime) {
     match action {
         Action::Single => {
             info!("single press → toggle frame state");
-            if let Err(err) = runtime.handle_single() {
+            if let Err(err) = runtime.handle_manual_toggle() {
                 error!(?err, "failed to process single press");
             }
         }
@@ -652,13 +990,125 @@ fn perform_action(action: Action, runtime: &mut Runtime) {
     }
 }
 
-fn send_toggle_command(path: &Path) -> Result<()> {
-    let mut stream = UnixStream::connect(path)
-        .with_context(|| format!("failed to connect to control socket at {}", path.display()))?;
-    stream
-        .write_all(br#"{"command":"toggle-state"}"#)
-        .context("failed to send toggle-state command")?;
-    Ok(())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchedulerCommand {
+    WakeUp,
+    GoToSleep,
+}
+
+fn spawn_scheduler(
+    config: SchedulerConfig,
+    shared_state: Arc<Mutex<FrameState>>,
+) -> Option<mpsc::Receiver<SchedulerCommand>> {
+    let (tx, rx) = mpsc::channel();
+    let builder = thread::Builder::new().name(String::from("buttond-scheduler"));
+    match builder.spawn(move || scheduler_loop(config, shared_state, tx)) {
+        Ok(_) => Some(rx),
+        Err(err) => {
+            error!(?err, "failed to spawn scheduler thread");
+            None
+        }
+    }
+}
+
+fn scheduler_loop(
+    config: SchedulerConfig,
+    shared_state: Arc<Mutex<FrameState>>,
+    tx: mpsc::Sender<SchedulerCommand>,
+) {
+    const MAX_SLEEP: Duration = Duration::from_secs(60);
+    let greeting_ready_at = Instant::now() + config.greeting_delay;
+
+    loop {
+        let now_instant = Instant::now();
+        let timezone = config.schedule.timezone();
+        let now = Utc::now().with_timezone(&timezone);
+        let should_be_awake = config.schedule.is_awake_at(now);
+
+        let (current_mode, last_manual_awake, greeting_complete) = {
+            let guard = shared_state.lock().expect("frame state poisoned");
+            (
+                guard.mode,
+                guard.last_manual_awake(),
+                guard.greeting_complete(),
+            )
+        };
+
+        if should_be_awake && current_mode != ViewerMode::Awake {
+            if !greeting_complete && now_instant < greeting_ready_at {
+                sleep_for(
+                    greeting_ready_at.saturating_duration_since(now_instant),
+                    MAX_SLEEP,
+                );
+                continue;
+            }
+
+            match tx.send(SchedulerCommand::WakeUp) {
+                Ok(()) => continue,
+                Err(_) => {
+                    debug!("scheduler exiting after receiver closed");
+                    break;
+                }
+            }
+        } else if !should_be_awake && current_mode != ViewerMode::Asleep {
+            if let Some(manual_awake_at) = last_manual_awake {
+                let deadline = manual_awake_at + config.sleep_grace;
+                if now_instant < deadline {
+                    sleep_for(deadline.saturating_duration_since(now_instant), MAX_SLEEP);
+                    continue;
+                }
+            }
+
+            match tx.send(SchedulerCommand::GoToSleep) {
+                Ok(()) => continue,
+                Err(_) => {
+                    debug!("scheduler exiting after receiver closed");
+                    break;
+                }
+            }
+        }
+
+        let mut next_check = now_instant + MAX_SLEEP;
+
+        if let Some((transition, _)) = config.schedule.next_transition_after(now) {
+            if let Some(duration) = chrono_duration_to_std(transition.signed_duration_since(now)) {
+                let candidate = now_instant + duration;
+                if candidate < next_check {
+                    next_check = candidate;
+                }
+            }
+        }
+
+        if !greeting_complete && now_instant < greeting_ready_at && greeting_ready_at < next_check {
+            next_check = greeting_ready_at;
+        }
+
+        if let Some(manual_awake_at) = last_manual_awake {
+            let deadline = manual_awake_at + config.sleep_grace;
+            if deadline < next_check {
+                next_check = deadline;
+            }
+        }
+
+        let sleep_duration = next_check.saturating_duration_since(Instant::now());
+        sleep_for(sleep_duration, MAX_SLEEP);
+    }
+}
+
+fn sleep_for(duration: Duration, max_sleep: Duration) {
+    if duration.is_zero() {
+        thread::yield_now();
+        return;
+    }
+    thread::sleep(duration.min(max_sleep));
+}
+
+fn chrono_duration_to_std(duration: ChronoDuration) -> Option<Duration> {
+    if duration <= ChronoDuration::zero() {
+        None
+    } else {
+        duration.to_std().ok()
+    }
 }
 
 fn set_nonblocking(device: &Device) -> Result<()> {
@@ -928,8 +1378,22 @@ impl ButtonTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, ButtonTracker, Durations, ScreenState, parse_wlr_randr_outputs};
+    use super::{
+        Action, ButtonTracker, CommandExecutor, CommandSpec, ControlSocket, Durations, FrameState,
+        Runtime, SchedulerCommand, SchedulerConfig, ScreenDetection, ScreenDetector, ScreenRuntime,
+        ScreenState, TransitionSource, UnixControlSocket, ViewerMode, parse_wlr_randr_outputs,
+        scheduler_loop,
+    };
+    use config_model::AwakeScheduleConfig;
+    use serde_yaml::from_str;
+    use std::io::Read;
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
     use std::time::{Duration, Instant};
+    use tempfile::tempdir;
 
     const SAMPLE_OUTPUT: &str = r#"
 HDMI-A-1 "Primary" (normal left inverted right x axis y axis)
@@ -946,6 +1410,110 @@ HDMI-A-2 "Sleeper" (normal left inverted right x axis y axis)
             debounce: Duration::from_millis(20),
             single_window: Duration::from_millis(250),
             double_window: Duration::from_millis(400),
+        }
+    }
+
+    fn command(label: &str) -> CommandSpec {
+        CommandSpec {
+            label: label.to_string(),
+            program: PathBuf::from("/bin/true"),
+            args: Vec::new(),
+        }
+    }
+
+    fn always_awake_schedule() -> AwakeScheduleConfig {
+        let mut schedule: AwakeScheduleConfig = from_str(
+            r#"
+timezone: "UTC"
+awake-scheduled:
+  daily:
+    - ["00:00", "23:59"]
+"#,
+        )
+        .expect("valid schedule yaml");
+        schedule.validate().expect("valid schedule");
+        schedule
+    }
+
+    fn always_asleep_schedule() -> AwakeScheduleConfig {
+        let mut schedule: AwakeScheduleConfig = from_str(
+            r#"
+timezone: "UTC"
+awake-scheduled: {}
+"#,
+        )
+        .expect("valid schedule yaml");
+        schedule.validate().expect("valid schedule");
+        schedule
+    }
+
+    #[derive(Default, Clone)]
+    struct RecordingExecutor {
+        calls: Arc<Mutex<Vec<(String, Instant)>>>,
+    }
+
+    impl RecordingExecutor {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn calls(&self) -> Arc<Mutex<Vec<(String, Instant)>>> {
+            Arc::clone(&self.calls)
+        }
+    }
+
+    impl CommandExecutor for RecordingExecutor {
+        fn execute(&self, command: &CommandSpec) -> super::Result<()> {
+            self.calls
+                .lock()
+                .expect("recording executor poisoned")
+                .push((command.label.clone(), Instant::now()));
+            Ok(())
+        }
+    }
+
+    #[derive(Default, Clone)]
+    struct RecordingControlSocket {
+        events: Arc<Mutex<Vec<(ViewerMode, Instant)>>>,
+    }
+
+    impl RecordingControlSocket {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn events(&self) -> Arc<Mutex<Vec<(ViewerMode, Instant)>>> {
+            Arc::clone(&self.events)
+        }
+    }
+
+    impl ControlSocket for RecordingControlSocket {
+        fn send_set_state(&self, state: ViewerMode) -> super::Result<()> {
+            self.events
+                .lock()
+                .expect("recording control socket poisoned")
+                .push((state, Instant::now()));
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct StaticDetector {
+        state: ScreenState,
+    }
+
+    impl StaticDetector {
+        fn new(state: ScreenState) -> Self {
+            Self { state }
+        }
+    }
+
+    impl ScreenDetector for StaticDetector {
+        fn detect(&self, display_name: Option<&str>) -> super::Result<ScreenDetection> {
+            Ok(ScreenDetection {
+                name: display_name.unwrap_or("mock").to_string(),
+                state: self.state,
+            })
         }
     }
 
@@ -1023,5 +1591,166 @@ HDMI-A-2 "Sleeper" (normal left inverted right x axis y axis)
             .expect("expected named output");
         assert_eq!(detection.name, "HDMI-A-2");
         assert_eq!(detection.state, ScreenState::Off);
+    }
+
+    #[test]
+    fn wake_up_runs_power_on_before_viewer_notification() {
+        let executor = RecordingExecutor::new();
+        let control = RecordingControlSocket::new();
+        let detector = StaticDetector::new(ScreenState::Off);
+
+        let screen = ScreenRuntime::new(
+            command("screen-on"),
+            command("screen-off"),
+            Duration::from_millis(0),
+            Some("HDMI-A-1".into()),
+            Arc::new(executor.clone()),
+            Arc::new(detector),
+        );
+
+        let runtime_control: Arc<dyn ControlSocket> = Arc::new(control.clone());
+        let mut runtime = Runtime::new(
+            runtime_control,
+            command("shutdown"),
+            screen,
+            Arc::new(executor.clone()),
+            ViewerMode::Asleep,
+        );
+
+        runtime
+            .wake_up(TransitionSource::Manual)
+            .expect("wake should succeed");
+
+        let calls = executor.calls();
+        let events = control.events();
+        let call_guard = calls.lock().expect("executor calls poisoned");
+        let event_guard = events.lock().expect("control events poisoned");
+        assert_eq!(call_guard.len(), 1);
+        assert_eq!(call_guard[0].0, "screen-on");
+        assert_eq!(event_guard.len(), 1);
+        assert_eq!(event_guard[0].0, ViewerMode::Awake);
+        assert!(call_guard[0].1 <= event_guard[0].1);
+    }
+
+    #[test]
+    fn sleep_request_waits_before_power_off() {
+        let executor = RecordingExecutor::new();
+        let control = RecordingControlSocket::new();
+        let detector = StaticDetector::new(ScreenState::On);
+        let off_delay = Duration::from_millis(40);
+
+        let screen = ScreenRuntime::new(
+            command("screen-on"),
+            command("screen-off"),
+            off_delay,
+            Some("HDMI-A-1".into()),
+            Arc::new(executor.clone()),
+            Arc::new(detector),
+        );
+
+        let runtime_control: Arc<dyn ControlSocket> = Arc::new(control.clone());
+        let mut runtime = Runtime::new(
+            runtime_control,
+            command("shutdown"),
+            screen,
+            Arc::new(executor.clone()),
+            ViewerMode::Awake,
+        );
+
+        runtime
+            .go_to_sleep(TransitionSource::Manual)
+            .expect("sleep should succeed");
+
+        let calls = executor.calls();
+        let events = control.events();
+        let call_guard = calls.lock().expect("executor calls poisoned");
+        let event_guard = events.lock().expect("control events poisoned");
+        assert_eq!(call_guard.len(), 1);
+        assert_eq!(call_guard[0].0, "screen-off");
+        assert_eq!(event_guard.len(), 1);
+        assert_eq!(event_guard[0].0, ViewerMode::Asleep);
+        assert!(event_guard[0].1 <= call_guard[0].1);
+        assert!(
+            call_guard[0].1.saturating_duration_since(event_guard[0].1)
+                >= off_delay - Duration::from_millis(5)
+        );
+    }
+
+    #[test]
+    fn control_socket_emits_set_state_json() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("control.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind control socket");
+
+        let socket = UnixControlSocket::new(socket_path.clone());
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).expect("read payload");
+            String::from_utf8(buf).expect("utf8 payload")
+        });
+
+        socket
+            .send_set_state(ViewerMode::Awake)
+            .expect("send payload");
+
+        let payload = handle.join().expect("server thread");
+        assert_eq!(payload, r#"{"command":"set-state","state":"awake"}"#);
+    }
+
+    #[test]
+    fn scheduler_delays_initial_wake_until_greeting() {
+        let config = SchedulerConfig {
+            schedule: always_awake_schedule(),
+            greeting_delay: Duration::from_millis(60),
+            sleep_grace: Duration::from_millis(0),
+        };
+        let state = Arc::new(Mutex::new(FrameState::new(ViewerMode::Asleep)));
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn({
+            let config = config.clone();
+            let state = Arc::clone(&state);
+            move || scheduler_loop(config, state, tx)
+        });
+
+        let start = Instant::now();
+        let command = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("scheduler wake");
+        assert_eq!(command, SchedulerCommand::WakeUp);
+        assert!(start.elapsed() >= Duration::from_millis(60));
+
+        drop(rx);
+        handle.join().expect("scheduler thread");
+    }
+
+    #[test]
+    fn scheduler_respects_manual_sleep_grace() {
+        let config = SchedulerConfig {
+            schedule: always_asleep_schedule(),
+            greeting_delay: Duration::from_millis(0),
+            sleep_grace: Duration::from_millis(80),
+        };
+        let state = Arc::new(Mutex::new(FrameState::new(ViewerMode::Awake)));
+        {
+            let mut guard = state.lock().expect("state poisoned");
+            guard.update(ViewerMode::Awake, TransitionSource::Manual);
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn({
+            let config = config.clone();
+            let state = Arc::clone(&state);
+            move || scheduler_loop(config, state, tx)
+        });
+
+        assert!(rx.recv_timeout(Duration::from_millis(40)).is_err());
+        let command = rx
+            .recv_timeout(Duration::from_millis(200))
+            .expect("scheduler sleep");
+        assert_eq!(command, SchedulerCommand::GoToSleep);
+
+        drop(rx);
+        handle.join().expect("scheduler thread");
     }
 }
