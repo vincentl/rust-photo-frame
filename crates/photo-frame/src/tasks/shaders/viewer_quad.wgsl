@@ -7,14 +7,13 @@ struct TransitionUniforms {
   params0: vec4<f32>,
   params1: vec4<f32>,
   params2: vec4<f32>,
-  params3: vec4<f32>,
   t: f32,
   aspect: f32,
   iris_rotate_rad: f32,
-  iris_pad0: f32,
+  // Pad f32 to align next u32 pair to 16 bytes boundary
+  _pad0: f32,
   iris_blades: u32,
-  iris_direction: u32,
-  iris_pad1: vec2<u32>,
+  _pad1: u32,
 };
 
 @group(0) @binding(0)

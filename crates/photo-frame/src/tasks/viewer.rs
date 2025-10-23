@@ -793,14 +793,12 @@ pub fn run_windowed(
         params0: [f32; 4],
         params1: [f32; 4],
         params2: [f32; 4],
-        params3: [f32; 4],
         t: f32,
         aspect: f32,
         iris_rotate_rad: f32,
-        iris_pad0: f32,
+        _pad0: f32,
         iris_blades: u32,
-        iris_direction: u32,
-        iris_pad1: [u32; 2],
+        _pad1: u32,
     }
 
     struct GpuCtx {
@@ -2446,14 +2444,12 @@ pub fn run_windowed(
                                 params0: [0.0; 4],
                                 params1: [0.0; 4],
                                 params2: [0.0; 4],
-                                params3: [0.0; 4],
                                 t: 0.0,
                                 aspect,
                                 iris_rotate_rad: 0.0,
-                                iris_pad0: 0.0,
+                                _pad0: 0.0,
                                 iris_blades: 0,
-                                iris_direction: 0,
-                                iris_pad1: [0, 0],
+                                _pad1: 0,
                             };
                             let mut current_bind = &gpu.blank_plane.bind;
                             let mut next_bind = &gpu.blank_plane.bind;
@@ -2532,16 +2528,8 @@ pub fn run_windowed(
                                             uniforms.aspect = aspect;
                                             uniforms.iris_blades = blades;
                                             uniforms.iris_rotate_rad = rotate_radians;
-                                            uniforms.iris_direction =
-                                                if matches!(direction, IrisDirection::Close) {
-                                                    1
-                                                } else {
-                                                    0
-                                                };
-                                            // Provide occluder fill/stroke and stroke width to WGSL path
-                                            uniforms.params2 = fill_rgba; // fill RGBA
-                                            uniforms.params3 = stroke_rgba; // stroke RGBA
-                                            uniforms.iris_pad0 = stroke_width; // stroke width in px
+                                            // Provide occluder fill to WGSL path
+        										uniforms.params2 = fill_rgba; // fill RGBA
                                             should_draw_quad = true;
                                             iris_request = Some(if stroke_enabled {
                                                 IrisConfig {

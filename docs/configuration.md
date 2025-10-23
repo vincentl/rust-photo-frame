@@ -364,10 +364,20 @@ The remaining knobs depend on the transition family.
   - **`stripe-count`** (integer ≥ 1, default `24`): How many horizontal bands sweep in; higher counts mimic a finer e-ink refresh.
   - **`flash-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB color used for the bright flash phases before the black inversion. Channels outside `0–255` are clamped.
 - **`iris`**
-  - **`blades`** (integer, default `7`, clamped to `5–18`): Number of shutter spokes sketched around the aperture.
-  - **`blade-rgba`** (`[r, g, b, a]` float array, default `[0.12, 0.12, 0.12, 1.0]`): Base color for the iris blades. Channels outside `0–1` are clamped; the alpha component scales how dark the rendered blades appear.
+  - **`blades` / `petal-count`** (integer, default `7`, clamped to `3–12`): Number of shutter spokes around the aperture.
+  - **`rotate-radians`** (float, default `0.9`, clamped to `0–2π`): Total blade rotation applied over the course of the transition.
+  - **`direction`** (enum, default `open`): `open` re-opens from a small aperture; `close` closes first, then re-opens to reveal the next photo.
+  - **`fill-rgba`** (`[r, g, b, a]` float array, default `[0.85, 0.85, 0.85, 1.0]`): Occluder color used for the iris blades while they cover the image.
+  - Optional stroke overlay (drawn with the Bézier stroke pass):
+    - **`enabled`** (bool, default `true`): Enable/disable drawing blade outlines.
+    - **`stroke-rgba` / `color-rgba`** (`[r, g, b, a]` float array, default `[0.10, 0.10, 0.10, 1.0]`): Stroke color for the blade outlines.
+    - **`stroke-width` / `stroke-px`** (float pixels, default `2.0`, clamped to `≥ 0.0`): Stroke width in screen pixels.
+    - **`segments-per-90deg`** (integer ≥ 1, default `6`): Arc tessellation granularity per 90° when generating the blade curve.
+    - **`segments-per-cubic`** (integer ≥ 1, default `16`): Polyline steps per cubic Bezier when expanding the stroke on-GPU.
+    - **`radius`** (float > 0, default `80.0`): Geometric iris radius used in the analytic petal construction.
+    - **`value`** (float, default `1.04`, clamped to `0.0–1.2`): Petal curvature parameter controlling the shape of each blade edge.
 
-  The iris transition renders shaded SLR-style blades that first close over the current photo, then reopen to reveal the next one. Each half of the timeline is dedicated to one of those motions, producing a mechanical shutter feel.
+  The iris transition closes over the current photo, then reopens to reveal the next one. The occluder is composed in the main quad shader, while optional blade strokes are rendered by a dedicated Bézier stroke pass for crisp outlines.
 
 ### Example: single inline fade
 

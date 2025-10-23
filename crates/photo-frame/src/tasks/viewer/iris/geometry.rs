@@ -65,12 +65,14 @@ pub fn build_iris_petal_cubics(
 
     let theta_p1 = p1y.atan2(p1x);
     let theta_q = FRAC_PI_2;
+    // Move along the circle counter-clockwise from p1 to q so endpoints slide
+    // along the next curve as the aperture animates.
     cubics.extend(arc_to_cubics(
         [0.0, 0.0],
         radius,
         theta_p1,
         theta_q,
-        false,
+        true,
         segments_per_90deg,
     ));
 
@@ -157,17 +159,15 @@ fn tangent(theta: f32, ccw: bool) -> [f32; 2] {
     }
 }
 
-fn make_mvp(radius: f32, rotation: f32) -> [[f32; 4]; 4] {
-    let scale = if radius.abs() < f32::EPSILON {
-        1.0
-    } else {
-        1.0 / radius
-    };
+fn make_mvp(radius: f32, rotation: f32, aspect: f32) -> [[f32; 4]; 4] {
+    // Scale by 1/radius to normalize geometry, then aspect-correct Y so that
+    // circles remain circular in screen pixels (width-based sizing).
+    let scale = if radius.abs() < f32::EPSILON { 1.0 } else { 1.0 / radius };
     let (sin_r, cos_r) = rotation.sin_cos();
 
     [
         [cos_r * scale, -sin_r * scale, 0.0, 0.0],
-        [sin_r * scale, cos_r * scale, 0.0, 0.0],
+        [sin_r * scale * aspect, cos_r * scale * aspect, 0.0, 0.0],
         [0.0, 0.0, 1.0, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ]
@@ -199,8 +199,9 @@ pub fn rebuild_buffers(
     let vertex_count = 2 * segments_per_cubic as usize * actual_cubic_count as usize;
     let instance_count = cfg.petal_count.max(1);
 
+    let aspect = if viewport[1] > 0.0 { viewport[0] / viewport[1] } else { 1.0 };
     let params = Params {
-        mvp: make_mvp(cfg.radius.max(f32::EPSILON), cfg.rotation),
+        mvp: make_mvp(cfg.radius.max(f32::EPSILON), cfg.rotation, aspect),
         viewport_px: viewport,
         half_width_px: 0.5 * cfg.stroke_px,
         _pad0: 0.0,
