@@ -95,8 +95,8 @@ fn vs_main(@builtin(vertex_index) vid: u32,
   let half_ndc = px_to_ndc(half_px);
 
   let offset_ndc = safe_normalize(n_ndc) * half_ndc;
-  let signed = select(-1.0, 1.0, side == 1u);
-  let out_ndc = p0_ndc + signed * offset_ndc;
+  let side_sign = select(-1.0, 1.0, side == 1u);
+  let out_ndc = p0_ndc + side_sign * offset_ndc;
 
   var outv: VSOut;
   outv.pos = vec4<f32>(out_ndc, 0.0, 1.0);
