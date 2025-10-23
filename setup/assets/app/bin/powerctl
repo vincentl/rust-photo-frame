@@ -33,26 +33,27 @@ ensure_wayland_env() {
       export XDG_RUNTIME_DIR="$derived"
     else
       echo "powerctl: XDG_RUNTIME_DIR is unset and derived path '$derived' does not exist" >&2
-      exit 1
+      return 1
     fi
   fi
 
   if [[ ! -d "$XDG_RUNTIME_DIR" ]]; then
     echo "powerctl: XDG_RUNTIME_DIR '$XDG_RUNTIME_DIR' does not exist" >&2
-    exit 1
+    return 1
   fi
 
   if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
     local socket
     if ! socket="$(pick_wayland_socket "$XDG_RUNTIME_DIR")"; then
       echo "powerctl: no Wayland display sockets found in $XDG_RUNTIME_DIR" >&2
-      exit 1
+      return 1
     fi
     export WAYLAND_DISPLAY="$socket"
   fi
+
+  return 0
 }
 
-ensure_wayland_env
 detect_out() {
   wlr-randr | awk '
     function commit() {
@@ -125,11 +126,17 @@ detect_out() {
   '
 }
 if [[ "$OUT" == "@AUTO@" ]]; then
+  ensure_wayland_env
   if ! OUT="$(detect_out)"; then
     echo "powerctl: failed to detect connected output" >&2
     exit 1
   fi
+else
+  if [[ -z "${WAYLAND_DISPLAY:-}" || -z "${XDG_RUNTIME_DIR:-}" ]]; then
+    ensure_wayland_env || true
+  fi
 fi
+
 if [[ "$MODE" == "sleep" ]]; then
   wlr-randr --output "$OUT" --off || vcgencmd display_power 0
 else
