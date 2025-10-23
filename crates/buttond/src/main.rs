@@ -202,13 +202,20 @@ impl ButtondSettings {
         let greeting_screen_delay = greeting_screen.effective_duration();
         let sleep_grace = Duration::from_millis(sleep_grace_ms);
 
+        let mut screen_on_command = on_command.into_spec("screen-on");
+        let mut screen_off_command = off_command.into_spec("screen-off");
+        if let Some(name) = display_name.as_ref() {
+            screen_on_command.args.push(name.clone());
+            screen_off_command.args.push(name.clone());
+        }
+
         Ok(Self {
             device,
             durations,
             control_socket_path,
             shutdown_command,
-            screen_on_command: on_command.into_spec("screen-on"),
-            screen_off_command: off_command.into_spec("screen-off"),
+            screen_on_command,
+            screen_off_command,
             screen_off_delay,
             screen_display_name: display_name,
             greeting_screen_delay,
