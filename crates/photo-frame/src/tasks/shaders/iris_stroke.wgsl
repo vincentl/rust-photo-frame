@@ -1,20 +1,20 @@
 struct Cubic {
-  p0: vec2<f32>;
-  p1: vec2<f32>;
-  p2: vec2<f32>;
-  p3: vec2<f32>;
+  p0: vec2<f32>,
+  p1: vec2<f32>,
+  p2: vec2<f32>,
+  p3: vec2<f32>,
 };
 
 struct Params {
-  mvp: mat4x4<f32>;
-  viewport_px: vec2<f32>;
-  half_width_px: f32;
-  _pad0: f32;
-  segments_per_cubic: u32;
-  petal_count: u32;
-  cubics_count: u32;
-  _pad1: u32;
-  color_rgba: vec4<f32>;
+  mvp: mat4x4<f32>,
+  viewport_px: vec2<f32>,
+  half_width_px: f32,
+  _pad0: f32,
+  segments_per_cubic: u32,
+  petal_count: u32,
+  cubics_count: u32,
+  _pad1: u32,
+  color_rgba: vec4<f32>,
 };
 
 @group(0) @binding(0) var<storage, read> cubics: array<Cubic>;
