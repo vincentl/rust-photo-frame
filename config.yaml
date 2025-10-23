@@ -94,7 +94,8 @@ sleep-screen:
     font: "#f0e8d5"         # warm ivory
     accent: "#375978"       # muted indigo-teal
 
-# Optional awake schedule (viewer sleeps outside these intervals)
+# Wake/sleep scheduling now lives in buttond. Configure buttond's awake schedule
+# to drive the frame via `set-state` commands when you want timed behavior.
 awake-schedule:
   timezone: "America/New_York"
   awake-scheduled:

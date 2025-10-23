@@ -65,7 +65,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 | **Presentation**       | `photo-effect`, `matting`                                             |
 | **Greeting Screen**    | `greeting-screen`                                                     |
 | **Runtime control**    | `control-socket-path`                                                 |
-| **Power schedule**     | `sleep-mode`                                                          |
+| **External scheduling** | `awake-schedule` (consumed by `buttond`)                              |
 
 ## Key reference
 
@@ -168,60 +168,31 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Effect on behavior:** Shares the same renderer as the greeting screen so your sleep banner uses identical sizing rules and readability checks. The message displays until the viewer fully enters sleep mode.
 - **Notes:** All fields mirror `greeting-screen` aside from the `duration-seconds` delay, which does not apply when sleeping.
 
-### `sleep-mode`
+### Wake/sleep control
 
-- **Purpose:** Defines when the frame should pause the slideshow, blank the screen to a dim level, and resume automatically.
-- **Required?** Optional; when omitted the frame runs 24/7.
-- **Accepted values & defaults:** Mapping with the keys below. Times accept `HH:MM` or `HH:MM:SS` strings and may optionally include a trailing IANA timezone name (for example `"07:30 America/Los_Angeles"`). When no timezone is specified on a field, the top-level `timezone` value applies.
-  - `timezone` — Required IANA timezone identifier. Sets the base clock used to pick weekday/weekend overrides and interpret times that do not specify their own zone.
-  - `on-hours.start` / `on-hours.end` — Required local times describing when the frame should be awake each day. Start and end may wrap past midnight (for example `22:00 → 08:00` keeps the panel awake overnight). Start and end must not be identical. When the clock reaches `start` the viewer immediately wakes, and when it reaches `end` the viewer immediately sleeps—even if a manual override was active.
-  - `weekday-override` / `weekend-override` — Optional blocks with their own `start`/`end` that replace the default window on weekdays (`Mon–Fri`) or weekends (`Sat/Sun`).
-  - `days` — Optional map keyed by weekday name (`monday`, `tues`, …) that replaces both default and weekday/weekend overrides for specific days. Precedence is `days[...]` → `weekday/weekend-override` → `on-hours`.
-- `dim-brightness` — Optional float between `0.0` (black) and `1.0` (white). Controls the solid color used while sleeping. Defaults to `0.05`.
-- `display-power` — Optional block that issues hardware sleep/wake actions in addition to dimming. Configure any combination of:
-  - `backlight-path` plus the required `sleep-value`/`wake-value` strings to write to a backlight sysfs node (intended for DSI panels or laptop-class devices). HDMI monitors typically do **not** expose `/sys/class/backlight` entries.
-  - `sleep-command` and/or `wake-command` shell snippets that run when the frame transitions into or out of sleep. The defaults issue Wayland DPMS requests via `wlr-randr --output @OUTPUT@ --off|--on` with a fallback to `vcgencmd display_power 0|1`. The `@OUTPUT@` placeholder is replaced at runtime with the first connected output reported by `wlr-randr`, or `HDMI-A-1` if auto-detection fails.
-- **Effect on behavior:** Outside the configured "on" window the viewer stops advancing slides, cancels any in-flight transitions, and clears the surface to the dim color. When the schedule says to wake up, the currently loaded image is shown again and normal dwell/transition pacing resumes. The schedule is evaluated using the configured timezone on a wall-clock basis; DST transitions do not cause drift.
-- **Manual override:** Writing a JSON command such as `{"command":"ToggleState"}` to the control socket (default `/run/photo-frame/control.sock`, override via `control-socket-path`) toggles the current state immediately—handy for a single-button GPIO input. Each press flips sleep ↔ wake regardless of the schedule. The next scheduled boundary still wins: hitting `on-hours.start` forces wake, `on-hours.end` forces sleep, and either transition clears any active manual override. Environment helpers `PHOTO_FRAME_SLEEP_OVERRIDE=sleep|wake` or `PHOTO_FRAME_SLEEP_OVERRIDE_FILE=/path/to/state` can seed the initial state at startup, but upcoming schedule boundaries will still apply. Overrides are logged with timestamps and the schedule timeline continues to update in the background.
-- **CLI helpers:**
-  - `--verbose-sleep` logs the parsed schedule and the next 24 hours of transitions during startup.
-  - `--sleep-test <SECONDS>` forces the configured display-power commands to sleep, waits `SECONDS`, wakes the panel (retrying once after two seconds), and exits.
+- **Purpose:** Coordinates when the slideshow runs and when the panel naps.
+- **Required?** Optional; without outside input the frame shows the greeting screen, transitions into sleep, and waits indefinitely.
+- **How it works:** The application no longer owns an internal schedule. After startup it remains asleep until another client sends `set-state` or `ToggleState` commands over the control socket.
+- **Manual control:** Pipe JSON such as `{"command":"set-state","state":"awake"}` or `{"command":"ToggleState"}` to `/run/photo-frame/control.sock` (override via `control-socket-path`). The chosen state persists until the next command arrives.
+- **Automation:** Deploy [`buttond`](#power-button-daemon) and populate the shared `awake-schedule` block. buttond evaluates the schedule, issues `set-state` commands at the appropriate boundaries, and runs display power hooks on your behalf.
 
-#### Canonical example
+Example schedule fragment consumed by `buttond`:
 
 ```yaml
-sleep:
+awake-schedule:
   timezone: America/New_York
-  on-hours:
-    # 8am–10pm; app sleeps outside this window
-    start: "08:00"
-    end:   "22:00"
-
-  # Optional overrides (take precedence over on-hours)
-  weekday-override:
-    start: "07:30"
-    end:   "23:00"
-  days:
-    sunday:
-      start: "09:30"
-      end:   "21:00"
-
-  # Dim color brightness (0=black, 1=white). Default 0.05
-  dim-brightness: 0.05
-
-  # True power control (HDMI monitor over Wayland)
-  display-power:
-    # Leave the @OUTPUT@ placeholder so the app can substitute the detected
-    # connector. You can hard-code a name like HDMI-A-1 if preferred.
-    sleep-command: "wlr-randr --output @OUTPUT@ --off || vcgencmd display_power 0"
-    wake-command:  "wlr-randr --output @OUTPUT@ --on  || vcgencmd display_power 1"
+  awake-scheduled:
+    daily:
+      - ["07:30", "22:00"]
+    weekend:
+      - ["09:00", "23:00"]
 ```
 
-The setup pipeline installs `/opt/photo-frame/bin/powerctl`, a thin wrapper around the same logic. Swap the example strings for `/opt/photo-frame/bin/powerctl sleep` / `wake` if you prefer the helper script once the staged tree has been deployed to `/opt`.
+See [Display Power and Sleep Guide](power-and-sleep.md) for end-to-end wiring tips, DPMS command examples, and validation steps.
 
 ## Power button daemon
 
-`buttond` watches the Raspberry Pi 5 power-pad button via evdev. The shared configuration file exposes a dedicated block so deployments can tune input timings, command hooks, and display handling without editing the systemd unit directly:
+`buttond` watches the Raspberry Pi 5 power-pad button via evdev and now orchestrates scheduled wake/sleep transitions. The shared configuration file exposes a dedicated block so deployments can tune input timings, command hooks, and display handling without editing the systemd unit directly:
 
 ```yaml
 buttond:
@@ -232,6 +203,7 @@ buttond:
   shutdown-command:
     program: /usr/bin/systemctl
     args: [poweroff]
+  sleep-grace-ms: 300000             # defer scheduled sleep this long after last activity
   screen:
     off-delay-ms: 3500
     display-name: null               # optional wlr-randr output name to monitor
@@ -243,11 +215,14 @@ buttond:
       args: [sleep]
 ```
 
+Pair the block above with a top-level `awake-schedule` section to describe the desired wake windows.
+
 The installer deploys `buttond.service`, which launches `/opt/photo-frame/bin/buttond --config /etc/photo-frame/config.yaml` as the `kiosk` user. At runtime the daemon behaves as follows:
 
 - **Single press:** writes `{ "command": "ToggleState" }` to the control socket, then toggles the screen. If the display was off it immediately executes the configured wake command; if the display was on it delays for `off-delay-ms` (so the sleep screen is visible) before running the sleep command. The daemon inspects `wlr-randr` output on each press instead of relying on cached state, so restarts and manual overrides stay in sync with reality.
 - **Double press:** executes the `shutdown-command`. The default uses `systemctl poweroff`, and system provisioning installs a polkit rule so the `kiosk` user can issue the request without prompting.
 - **Long press:** bypassed so the Pi firmware can force power-off.
+- **Scheduled transitions:** when `awake-schedule` is present, buttond waits for the greeting delay, applies the schedule’s current state, and drives future wake/sleep transitions using `set-state` commands. `sleep-grace-ms` ensures recent manual activity can briefly delay an automatic sleep so the audience isn’t plunged into darkness mid-interaction.
 
 Pin `buttond.screen.display-name` to the exact `wlr-randr` output name (for example `HDMI-A-2`) when a specific connector should always be probed. The daemon still falls back to the first connected non-internal display when the field is omitted, but when set it treats that output as authoritative—even if `wlr-randr` reports it as disabled—to keep the sleep command state machine aligned with panels that power down between presses.
 
