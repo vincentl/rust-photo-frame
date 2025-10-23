@@ -1,6 +1,9 @@
+use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -798,20 +801,108 @@ impl ScreenDetector for WlrScreenDetector {
 }
 
 fn detect_primary_display_state(display_name: Option<&str>) -> Result<ScreenDetection> {
-    let output = Command::new("wlr-randr")
-        .output()
-        .context("failed to execute wlr-randr")?;
-    if !output.status.success() {
-        bail!(
-            "wlr-randr exited with status {status}",
-            status = output.status
-        );
-    }
-    let stdout =
-        String::from_utf8(output.stdout).context("wlr-randr output was not valid UTF-8")?;
+    const WAYLAND_SOCKET_RETRY_COUNT: usize = 5;
+    const WAYLAND_SOCKET_RETRY_DELAY: Duration = Duration::from_millis(100);
 
-    parse_wlr_randr_outputs(&stdout, display_name)
-        .ok_or_else(|| anyhow!("no connected display detected"))
+    let mut last_env: Option<WaylandDiscovery> = None;
+
+    for attempt in 0..WAYLAND_SOCKET_RETRY_COUNT {
+        let mut command = Command::new("wlr-randr");
+        let discovery = ensure_wayland_env(&mut command)?;
+
+        if discovery.socket.is_none() {
+            last_env = Some(discovery);
+            if attempt + 1 == WAYLAND_SOCKET_RETRY_COUNT {
+                break;
+            }
+            thread::sleep(WAYLAND_SOCKET_RETRY_DELAY);
+            continue;
+        }
+
+        let output = command.output().context("failed to execute wlr-randr")?;
+        if !output.status.success() {
+            bail!(
+                "wlr-randr exited with status {status}",
+                status = output.status
+            );
+        }
+        let stdout =
+            String::from_utf8(output.stdout).context("wlr-randr output was not valid UTF-8")?;
+
+        return parse_wlr_randr_outputs(&stdout, display_name)
+            .ok_or_else(|| anyhow!("no connected display detected"));
+    }
+
+    let missing = last_env
+        .map(|env| env.runtime_dir)
+        .unwrap_or_else(|| PathBuf::from("<unknown>"));
+    bail!("no Wayland display sockets found in {}", missing.display())
+}
+
+struct WaylandDiscovery {
+    runtime_dir: PathBuf,
+    socket: Option<OsString>,
+}
+
+fn ensure_wayland_env(command: &mut Command) -> Result<WaylandDiscovery> {
+    let runtime_dir_from_env = env::var_os("XDG_RUNTIME_DIR");
+    let runtime_dir = runtime_dir_from_env
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let uid = unsafe { libc::getuid() };
+            PathBuf::from(format!("/run/user/{uid}"))
+        });
+
+    if !runtime_dir.is_dir() {
+        bail!("XDG_RUNTIME_DIR '{}' does not exist", runtime_dir.display());
+    }
+
+    command.env("XDG_RUNTIME_DIR", &runtime_dir);
+
+    if let Some(current_display) = env::var_os("WAYLAND_DISPLAY") {
+        command.env("WAYLAND_DISPLAY", &current_display);
+        return Ok(WaylandDiscovery {
+            runtime_dir,
+            socket: Some(current_display),
+        });
+    }
+
+    let mut found: Option<OsString> = None;
+    for entry in fs::read_dir(&runtime_dir)
+        .with_context(|| format!("failed to list {}", runtime_dir.display()))?
+    {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !matches_wayland_display(&name) {
+            continue;
+        }
+        let ty = entry.file_type()?;
+        if ty.is_socket() {
+            found = Some(name);
+            break;
+        }
+    }
+
+    if let Some(socket) = found {
+        command.env("WAYLAND_DISPLAY", &socket);
+        return Ok(WaylandDiscovery {
+            runtime_dir,
+            socket: Some(socket),
+        });
+    }
+
+    Ok(WaylandDiscovery {
+        runtime_dir,
+        socket: None,
+    })
+}
+
+fn matches_wayland_display(name: &OsString) -> bool {
+    match name.to_str() {
+        Some(candidate) => candidate.starts_with("wayland-"),
+        None => false,
+    }
 }
 
 fn parse_wlr_randr_outputs(stdout: &str, display_name: Option<&str>) -> Option<ScreenDetection> {
@@ -1425,19 +1516,48 @@ mod tests {
     use super::{
         Action, ButtonTracker, CommandExecutor, CommandSpec, ControlSocket, Durations, FrameState,
         Runtime, SchedulerCommand, SchedulerConfig, ScreenDetection, ScreenDetector, ScreenRuntime,
-        ScreenState, TransitionSource, UnixControlSocket, ViewerMode, parse_wlr_randr_outputs,
-        scheduler_loop,
+        ScreenState, TransitionSource, UnixControlSocket, ViewerMode, ensure_wayland_env,
+        parse_wlr_randr_outputs, scheduler_loop,
     };
     use config_model::AwakeScheduleConfig;
     use serde_yaml::from_str;
+    use std::ffi::{OsStr, OsString};
     use std::io::Read;
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn replace(key: &'static str, value: Option<&OsStr>) -> Self {
+            let original = std::env::var_os(key);
+            match value {
+                Some(val) => unsafe { std::env::set_var(key, val) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.original.as_ref() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     const SAMPLE_OUTPUT: &str = r#"
 HDMI-A-1 "Primary" (normal left inverted right x axis y axis)
@@ -1596,6 +1716,60 @@ awake-scheduled: {}
             tracker.on_release(second_press + Duration::from_millis(80)),
             Some(Action::Double)
         );
+    }
+
+    #[test]
+    fn ensure_wayland_env_reports_missing_socket() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let runtime = tempdir().expect("tempdir");
+        let runtime_path = runtime.path().to_path_buf();
+        let _runtime_guard = EnvGuard::replace("XDG_RUNTIME_DIR", Some(runtime_path.as_os_str()));
+        let _display_guard = EnvGuard::replace("WAYLAND_DISPLAY", None);
+
+        let mut command = Command::new("true");
+        let discovery = ensure_wayland_env(&mut command).expect("env configured");
+
+        assert_eq!(discovery.runtime_dir, runtime_path);
+        assert!(discovery.socket.is_none());
+
+        let envs: Vec<(OsString, Option<OsString>)> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(|v| v.to_os_string())))
+            .collect();
+        assert!(envs.iter().any(|(key, value)| {
+            key.as_os_str() == OsStr::new("XDG_RUNTIME_DIR")
+                && value.as_ref().map(|v| v.as_os_str()) == Some(runtime_path.as_os_str())
+        }));
+        assert!(
+            envs.iter()
+                .all(|(key, _)| key.as_os_str() != OsStr::new("WAYLAND_DISPLAY"))
+        );
+    }
+
+    #[test]
+    fn ensure_wayland_env_picks_existing_socket() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let runtime = tempdir().expect("tempdir");
+        let runtime_path = runtime.path().to_path_buf();
+        let socket_path = runtime_path.join("wayland-test");
+        let _listener = UnixListener::bind(&socket_path).expect("socket created");
+        let _runtime_guard = EnvGuard::replace("XDG_RUNTIME_DIR", Some(runtime_path.as_os_str()));
+        let _display_guard = EnvGuard::replace("WAYLAND_DISPLAY", None);
+
+        let mut command = Command::new("true");
+        let discovery = ensure_wayland_env(&mut command).expect("env configured");
+
+        assert_eq!(discovery.runtime_dir, runtime_path);
+        assert_eq!(discovery.socket, Some(OsString::from("wayland-test")));
+
+        let envs: Vec<(OsString, Option<OsString>)> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(|v| v.to_os_string())))
+            .collect();
+        assert!(envs.iter().any(|(key, value)| {
+            key.as_os_str() == OsStr::new("WAYLAND_DISPLAY")
+                && value.as_ref().map(|v| v.as_os_str()) == Some(OsStr::new("wayland-test"))
+        }));
     }
 
     #[test]

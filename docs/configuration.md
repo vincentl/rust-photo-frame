@@ -226,6 +226,8 @@ The installer deploys `buttond.service`, which launches `/opt/photo-frame/bin/bu
 
 Pin `buttond.screen.display-name` to the exact `wlr-randr` output name (for example `HDMI-A-2`) when a specific connector should always be probed. The daemon still falls back to the first connected non-internal display when the field is omitted, but when set it treats that output as authoritative—even if `wlr-randr` reports it as disabled—to keep the sleep command state machine aligned with panels that power down between presses.
 
+`buttond` automatically derives `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` for its `wlr-randr` probes by scanning `/run/user/<uid>` for Wayland sockets. When the compositor is still starting it retries for a short window instead of failing the service, smoothing over race conditions between startup units.
+
 Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. Set `buttond.device` if the wrong input is chosen. Provisioning also pins `HandlePowerKey=ignore` inside `/etc/systemd/logind.conf` so logind never interprets presses as global shutdown requests; only `buttond` reacts to the events.
 
 ### `matting`
