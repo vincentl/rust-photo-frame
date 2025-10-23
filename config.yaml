@@ -18,9 +18,10 @@ buttond:
   single-window-ms: 250
   double-window-ms: 400
   sleep-grace-ms: 300000 # Delay before scheduled sleep after a manual wake (ms)
+  force-shutdown: true # Append -i to bypass logind interactive user veto
   shutdown-command:
     program: /usr/bin/systemctl
-    args: [poweroff]
+    args: [poweroff, -i]
   screen:
     off-delay-ms: 3500
     display-name: null # Optional wlr-randr output name

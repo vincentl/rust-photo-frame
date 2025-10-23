@@ -200,9 +200,10 @@ buttond:
   debounce-ms: 20                   # ignore chatter within this window
   single-window-ms: 250             # treat releases shorter than this as taps
   double-window-ms: 400             # wait this long for a second tap
+  force-shutdown: true              # append -i to bypass logind interactive-user veto
   shutdown-command:
     program: /usr/bin/systemctl
-    args: [poweroff]
+    args: [poweroff, -i]
   sleep-grace-ms: 300000             # defer scheduled sleep this long after last activity
   screen:
     off-delay-ms: 3500
@@ -217,10 +218,12 @@ buttond:
 
 Pair the block above with a top-level `awake-schedule` section to describe the desired wake windows.
 
+`force-shutdown` toggles whether buttond appends `-i` to the shutdown command. When enabled (the default) `systemctl poweroff` skips the interactive user check so a kiosk session left open on another VT cannot block shutdown. Set it to `false` if a deployment needs logind to prompt or veto a shutdown, and buttond will automatically strip `-i` even if it was present in the configured arguments.
+
 The installer deploys `buttond.service`, which launches `/opt/photo-frame/bin/buttond --config /etc/photo-frame/config.yaml` as the `kiosk` user. At runtime the daemon behaves as follows:
 
 - **Single press:** writes `{ "command": "ToggleState" }` to the control socket, then toggles the screen. If the display was off it immediately executes the configured wake command; if the display was on it delays for `off-delay-ms` (so the sleep screen is visible) before running the sleep command. The daemon inspects `wlr-randr` output on each press instead of relying on cached state, so restarts and manual overrides stay in sync with reality.
-- **Double press:** executes the `shutdown-command`. The default uses `systemctl poweroff`, and system provisioning installs a polkit rule so the `kiosk` user can issue the request without prompting.
+- **Double press:** executes the `shutdown-command`. The default uses `systemctl poweroff -i`, bypassing logind's interactive user veto so kiosk shutdowns succeed even when a user is logged in elsewhere. Provisioning installs a polkit rule so the `kiosk` user can issue the request without prompting.
 - **Long press:** bypassed so the Pi firmware can force power-off.
 - **Scheduled transitions:** when `awake-schedule` is present, buttond waits for the greeting delay, applies the schedule’s current state, and drives future wake/sleep transitions using `set-state` commands. `sleep-grace-ms` ensures recent manual activity can briefly delay an automatic sleep so the audience isn’t plunged into darkness mid-interaction.
 

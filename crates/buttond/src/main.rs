@@ -152,6 +152,18 @@ struct ButtondSettings {
     sleep_grace: Duration,
 }
 
+const FORCE_SHUTDOWN_FLAG: &str = "-i";
+
+fn configure_shutdown_args(args: &mut Vec<String>, force_shutdown: bool) {
+    if force_shutdown {
+        if !args.iter().any(|arg| arg == FORCE_SHUTDOWN_FLAG) {
+            args.push(FORCE_SHUTDOWN_FLAG.to_string());
+        }
+    } else {
+        args.retain(|arg| arg != FORCE_SHUTDOWN_FLAG);
+    }
+}
+
 #[derive(Clone)]
 struct SchedulerConfig {
     schedule: AwakeScheduleConfig,
@@ -168,26 +180,45 @@ impl ButtondSettings {
             greeting_screen,
             awake_schedule,
         } = file_config;
-        let durations = Durations::from_config(&buttond);
-        let device = device_override.or(buttond.device);
-        let shutdown_command = buttond.shutdown_command.into_spec("shutdown");
+        let ButtondFileConfig {
+            device,
+            single_window_ms,
+            double_window_ms,
+            debounce_ms,
+            sleep_grace_ms,
+            shutdown_command,
+            screen,
+            force_shutdown,
+        } = buttond;
+
+        let durations = Durations::from_millis(debounce_ms, single_window_ms, double_window_ms);
+        let device = device_override.or(device);
+        let mut shutdown_command = shutdown_command.into_spec("shutdown");
+        configure_shutdown_args(&mut shutdown_command.args, force_shutdown);
         let ScreenConfig {
             off_delay_ms,
             on_command,
             off_command,
             display_name,
-        } = buttond.screen;
+        } = screen;
         let screen_off_delay = Duration::from_millis(off_delay_ms);
         let greeting_screen_delay = greeting_screen.effective_duration();
-        let sleep_grace = Duration::from_millis(buttond.sleep_grace_ms);
+        let sleep_grace = Duration::from_millis(sleep_grace_ms);
+
+        let mut screen_on_command = on_command.into_spec("screen-on");
+        let mut screen_off_command = off_command.into_spec("screen-off");
+        if let Some(name) = display_name.as_ref() {
+            screen_on_command.args.push(name.clone());
+            screen_off_command.args.push(name.clone());
+        }
 
         Ok(Self {
             device,
             durations,
             control_socket_path,
             shutdown_command,
-            screen_on_command: on_command.into_spec("screen-on"),
-            screen_off_command: off_command.into_spec("screen-off"),
+            screen_on_command,
+            screen_off_command,
             screen_off_delay,
             screen_display_name: display_name,
             greeting_screen_delay,
@@ -296,6 +327,8 @@ struct ButtondFileConfig {
     debounce_ms: u64,
     #[serde(default = "ButtondFileConfig::default_sleep_grace_ms")]
     sleep_grace_ms: u64,
+    #[serde(default = "ButtondFileConfig::default_force_shutdown")]
+    force_shutdown: bool,
     #[serde(default = "ButtondFileConfig::default_shutdown_command")]
     shutdown_command: CommandConfig,
     #[serde(default)]
@@ -319,11 +352,15 @@ impl ButtondFileConfig {
         300_000
     }
 
+    const fn default_force_shutdown() -> bool {
+        true
+    }
+
     fn default_shutdown_command() -> CommandConfig {
         CommandConfig {
             label: "shutdown".into(),
             program: PathBuf::from("/usr/bin/systemctl"),
-            args: vec!["poweroff".into()],
+            args: vec!["poweroff".into(), "-i".into()],
         }
     }
 }
@@ -336,6 +373,7 @@ impl Default for ButtondFileConfig {
             double_window_ms: Self::default_double_window_ms(),
             debounce_ms: Self::default_debounce_ms(),
             sleep_grace_ms: Self::default_sleep_grace_ms(),
+            force_shutdown: Self::default_force_shutdown(),
             shutdown_command: Self::default_shutdown_command(),
             screen: ScreenConfig::default(),
         }
@@ -1392,11 +1430,11 @@ struct Durations {
 }
 
 impl Durations {
-    fn from_config(config: &ButtondFileConfig) -> Self {
+    fn from_millis(debounce_ms: u64, single_window_ms: u64, double_window_ms: u64) -> Self {
         Self {
-            debounce: Duration::from_millis(config.debounce_ms),
-            single_window: Duration::from_millis(config.single_window_ms),
-            double_window: Duration::from_millis(config.double_window_ms),
+            debounce: Duration::from_millis(debounce_ms),
+            single_window: Duration::from_millis(single_window_ms),
+            double_window: Duration::from_millis(double_window_ms),
         }
     }
 }
@@ -1687,6 +1725,31 @@ awake-scheduled: {}
                 .lock()
                 .expect("recording control socket poisoned")
                 .push((state, Instant::now()));
+            Ok(())
+        }
+    }
+
+    #[derive(Default, Clone)]
+    struct RecordingCommandExecutor {
+        calls: Arc<Mutex<Vec<CommandSpec>>>,
+    }
+
+    impl RecordingCommandExecutor {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn calls(&self) -> Arc<Mutex<Vec<CommandSpec>>> {
+            Arc::clone(&self.calls)
+        }
+    }
+
+    impl CommandExecutor for RecordingCommandExecutor {
+        fn execute(&self, command: &CommandSpec) -> super::Result<()> {
+            self.calls
+                .lock()
+                .expect("recording executor poisoned")
+                .push(command.clone());
             Ok(())
         }
     }
