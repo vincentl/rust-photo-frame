@@ -17,6 +17,7 @@ buttond:
   debounce-ms: 20
   single-window-ms: 250
   double-window-ms: 400
+  sleep-grace-ms: 300000 # Delay before scheduled sleep after a manual wake (ms)
   shutdown-command:
     program: /usr/bin/systemctl
     args: [poweroff]
