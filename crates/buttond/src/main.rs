@@ -149,6 +149,18 @@ struct ButtondSettings {
     sleep_grace: Duration,
 }
 
+const FORCE_SHUTDOWN_FLAG: &str = "-i";
+
+fn configure_shutdown_args(args: &mut Vec<String>, force_shutdown: bool) {
+    if force_shutdown {
+        if !args.iter().any(|arg| arg == FORCE_SHUTDOWN_FLAG) {
+            args.push(FORCE_SHUTDOWN_FLAG.to_string());
+        }
+    } else {
+        args.retain(|arg| arg != FORCE_SHUTDOWN_FLAG);
+    }
+}
+
 #[derive(Clone)]
 struct SchedulerConfig {
     schedule: AwakeScheduleConfig,
@@ -165,18 +177,30 @@ impl ButtondSettings {
             greeting_screen,
             awake_schedule,
         } = file_config;
-        let durations = Durations::from_config(&buttond);
-        let device = device_override.or(buttond.device);
-        let shutdown_command = buttond.shutdown_command.into_spec("shutdown");
+        let ButtondFileConfig {
+            device,
+            single_window_ms,
+            double_window_ms,
+            debounce_ms,
+            sleep_grace_ms,
+            shutdown_command,
+            screen,
+            force_shutdown,
+        } = buttond;
+
+        let durations = Durations::from_millis(debounce_ms, single_window_ms, double_window_ms);
+        let device = device_override.or(device);
+        let mut shutdown_command = shutdown_command.into_spec("shutdown");
+        configure_shutdown_args(&mut shutdown_command.args, force_shutdown);
         let ScreenConfig {
             off_delay_ms,
             on_command,
             off_command,
             display_name,
-        } = buttond.screen;
+        } = screen;
         let screen_off_delay = Duration::from_millis(off_delay_ms);
         let greeting_screen_delay = greeting_screen.effective_duration();
-        let sleep_grace = Duration::from_millis(buttond.sleep_grace_ms);
+        let sleep_grace = Duration::from_millis(sleep_grace_ms);
 
         Ok(Self {
             device,
@@ -293,6 +317,8 @@ struct ButtondFileConfig {
     debounce_ms: u64,
     #[serde(default = "ButtondFileConfig::default_sleep_grace_ms")]
     sleep_grace_ms: u64,
+    #[serde(default = "ButtondFileConfig::default_force_shutdown")]
+    force_shutdown: bool,
     #[serde(default = "ButtondFileConfig::default_shutdown_command")]
     shutdown_command: CommandConfig,
     #[serde(default)]
@@ -316,11 +342,15 @@ impl ButtondFileConfig {
         300_000
     }
 
+    const fn default_force_shutdown() -> bool {
+        true
+    }
+
     fn default_shutdown_command() -> CommandConfig {
         CommandConfig {
             label: "shutdown".into(),
             program: PathBuf::from("/usr/bin/systemctl"),
-            args: vec!["poweroff".into()],
+            args: vec!["poweroff".into(), "-i".into()],
         }
     }
 }
@@ -333,6 +363,7 @@ impl Default for ButtondFileConfig {
             double_window_ms: Self::default_double_window_ms(),
             debounce_ms: Self::default_debounce_ms(),
             sleep_grace_ms: Self::default_sleep_grace_ms(),
+            force_shutdown: Self::default_force_shutdown(),
             shutdown_command: Self::default_shutdown_command(),
             screen: ScreenConfig::default(),
         }
@@ -1271,11 +1302,11 @@ struct Durations {
 }
 
 impl Durations {
-    fn from_config(config: &ButtondFileConfig) -> Self {
+    fn from_millis(debounce_ms: u64, single_window_ms: u64, double_window_ms: u64) -> Self {
         Self {
-            debounce: Duration::from_millis(config.debounce_ms),
-            single_window: Duration::from_millis(config.single_window_ms),
-            double_window: Duration::from_millis(config.double_window_ms),
+            debounce: Duration::from_millis(debounce_ms),
+            single_window: Duration::from_millis(single_window_ms),
+            double_window: Duration::from_millis(double_window_ms),
         }
     }
 }
@@ -1423,13 +1454,14 @@ impl ButtonTracker {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, ButtonTracker, CommandExecutor, CommandSpec, ControlSocket, Durations, FrameState,
-        Runtime, SchedulerCommand, SchedulerConfig, ScreenDetection, ScreenDetector, ScreenRuntime,
-        ScreenState, TransitionSource, UnixControlSocket, ViewerMode, parse_wlr_randr_outputs,
-        scheduler_loop,
+        Action, ButtonTracker, ButtondSettings, CommandExecutor, CommandSpec, ControlSocket,
+        Durations, FrameState, Runtime, SchedulerCommand, SchedulerConfig, ScreenDetection,
+        ScreenDetector, ScreenRuntime, ScreenState, TransitionSource, UnixControlSocket,
+        ViewerMode, parse_wlr_randr_outputs, scheduler_loop,
     };
     use config_model::AwakeScheduleConfig;
     use serde_yaml::from_str;
+    use std::fs;
     use std::io::Read;
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
@@ -1541,6 +1573,31 @@ awake-scheduled: {}
         }
     }
 
+    #[derive(Default, Clone)]
+    struct RecordingCommandExecutor {
+        calls: Arc<Mutex<Vec<CommandSpec>>>,
+    }
+
+    impl RecordingCommandExecutor {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn calls(&self) -> Arc<Mutex<Vec<CommandSpec>>> {
+            Arc::clone(&self.calls)
+        }
+    }
+
+    impl CommandExecutor for RecordingCommandExecutor {
+        fn execute(&self, command: &CommandSpec) -> super::Result<()> {
+            self.calls
+                .lock()
+                .expect("recording executor poisoned")
+                .push(command.clone());
+            Ok(())
+        }
+    }
+
     #[derive(Clone)]
     struct StaticDetector {
         state: ScreenState,
@@ -1595,6 +1652,85 @@ awake-scheduled: {}
         assert_eq!(
             tracker.on_release(second_press + Duration::from_millis(80)),
             Some(Action::Double)
+        );
+    }
+
+    #[test]
+    fn double_press_runs_force_shutdown_command() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+control-socket-path: /tmp/photo-frame-control.sock
+buttond:
+  shutdown-command:
+    program: /usr/bin/systemctl
+    args: [poweroff]
+"#,
+        )
+        .expect("write config");
+
+        let settings = ButtondSettings::load(&config_path, None).expect("load config");
+
+        let executor = RecordingCommandExecutor::new();
+        let detector = StaticDetector::new(ScreenState::On);
+        let control = RecordingControlSocket::new();
+
+        let executor_arc: Arc<dyn CommandExecutor> = Arc::new(executor.clone());
+        let screen = ScreenRuntime::new(
+            settings.screen_on_command.clone(),
+            settings.screen_off_command.clone(),
+            settings.screen_off_delay,
+            settings.screen_display_name.clone(),
+            executor_arc.clone(),
+            Arc::new(detector),
+        );
+
+        let runtime_control: Arc<dyn ControlSocket> = Arc::new(control);
+        let runtime = Runtime::new(
+            runtime_control,
+            settings.shutdown_command.clone(),
+            screen,
+            executor_arc,
+            ViewerMode::Awake,
+        );
+
+        runtime
+            .handle_double()
+            .expect("shutdown command should execute");
+
+        let calls = executor.calls();
+        let guard = calls.lock().expect("recording executor poisoned");
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0].label, "shutdown");
+        assert!(
+            guard[0].args.iter().any(|arg| arg == "-i"),
+            "expected shutdown args to contain -i, found {:?}",
+            guard[0].args
+        );
+    }
+
+    #[test]
+    fn force_shutdown_flag_can_be_disabled() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+buttond:
+  force-shutdown: false
+  shutdown-command:
+    program: /usr/bin/systemctl
+    args: [poweroff, -i]
+"#,
+        )
+        .expect("write config");
+
+        let settings = ButtondSettings::load(&config_path, None).expect("load config");
+        assert!(
+            !settings.shutdown_command.args.iter().any(|arg| arg == "-i"),
+            "force-shutdown=false should remove -i"
         );
     }
 
