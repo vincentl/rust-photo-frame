@@ -138,7 +138,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   var next = sample_plane(next_tex, next_samp, U.next_dest, screen_pos);
   var color = current;
   let progress = clamp(U.progress, 0.0, 1.0);
-  switch (U.kind) {
+switch (U.kind) {
     case 0u: {
       color = current;
     }
@@ -295,6 +295,48 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
       let occluder = select(1.0 - mask_open, 1.0 - mask_close, first);
       let seam_alpha = seam_edge * occluder * stroke_col.a;
       color = mix(color, vec4<f32>(stroke_col.rgb, 1.0), seam_alpha);
+    }
+    case 6u: {
+      // Debug: stroke a single quadratic Bezier over the current image
+      // params0.xy = P0 (uv), params0.zw = P1 (uv), params1.xy = P2 (uv)
+      // params1.z = stroke width (px), params3 = stroke rgba
+      color = current;
+
+      // Control points in pixel space
+      let P0 = U.screen_size * clamp(U.params0.xy, vec2<f32>(0.0), vec2<f32>(1.0));
+      let P1 = U.screen_size * clamp(U.params0.zw, vec2<f32>(0.0), vec2<f32>(1.0));
+      let P2 = U.screen_size * clamp(U.params1.xy, vec2<f32>(0.0), vec2<f32>(1.0));
+      let stroke_px = max(U.params1.z, 0.0);
+      let stroke = vec4<f32>(
+        clamp(U.params3.xyz, vec3<f32>(0.0), vec3<f32>(1.0)),
+        clamp(U.params3.w, 0.0, 1.0)
+      );
+
+      // Distance from this pixel to the Bezier, approximated by a polyline
+      let p = in.screen_uv * U.screen_size;
+      let N: i32 = 32; // segments
+      var min_d = 1e9;
+      var a = P0;
+      for (var i: i32 = 1; i <= N; i = i + 1) {
+        let t = f32(i) / f32(N);
+        // Quadratic Bezier point via de Casteljau
+        let q0 = mix(P0, P1, t);
+        let q1 = mix(P1, P2, t);
+        let b = mix(q0, q1, t);
+        // Distance to segment a-b
+        let ab = b - a;
+        let ap = p - a;
+        let h = clamp(dot(ap, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+        let d = length(ap - ab * h);
+        min_d = min(min_d, d);
+        a = b;
+      }
+
+      let half_w = max(0.5 * stroke_px, 0.0);
+      let aa = max(fwidth(min_d), 1.0);
+      let edge = 1.0 - smoothstep(half_w, half_w + aa, min_d);
+      let alpha = edge * stroke.a;
+      color = mix(color, vec4<f32>(stroke.rgb, 1.0), alpha);
     }
     default: {
       color = current;

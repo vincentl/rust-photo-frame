@@ -1,1 +1,1 @@
-pub mod iris_tess;
+// Tessellated iris removed; WGSL-only pipeline in viewer shaders.

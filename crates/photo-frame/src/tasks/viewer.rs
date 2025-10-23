@@ -12,7 +12,7 @@ use crate::events::{
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
-use crate::renderer::iris_tess::{IrisDrawParams, IrisRenderer, IrisStage};
+// Tessellated iris removed; WGSL handles iris rendering.
 use crate::tasks::greeting_screen::GreetingScreen;
 use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
 use futures::executor::block_on;
@@ -805,7 +805,7 @@ pub fn run_windowed(
         sampler: wgpu::Sampler,
         pipeline: wgpu::RenderPipeline,
         blank_plane: TexturePlane,
-        iris: IrisRenderer,
+        // tessellated iris removed
     }
 
     fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
@@ -1640,7 +1640,6 @@ pub fn run_windowed(
 
             let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
 
-            let iris = IrisRenderer::new(&device, format, &img_bind_layout);
 
             let greeting = GreetingScene::new(GreetingScreen::new(
                 &device,
@@ -1669,7 +1668,7 @@ pub fn run_windowed(
                 sampler,
                 pipeline,
                 blank_plane,
-                iris,
+                // no tessellated iris
             };
             if let Some(mode) = self.mode.as_mut() {
                 mode.set_overlays(Some(greeting), Some(sleep));
@@ -2456,10 +2455,23 @@ pub fn run_windowed(
                                 have_next = true;
                             }
 
-                            let mut iris_rendered = false;
                             let mut should_draw_quad = false;
+                            let debug_bezier = std::env::var("PHOTOFRAME_DEBUG_BEZIER")
+                                .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
+                                .unwrap_or(false);
 
-                            if let Some(state) = wake.transition_state() {
+                            if debug_bezier {
+                                // Draw current image and overlay a debug quadratic Bezier stroke.
+                                uniforms.kind = 6; // bezier overlay
+                                // Control points in UV for a gentle arc across center
+                                uniforms.params0 = [0.15, 0.60, 0.50, 0.25]; // P0.xy, P1.xy
+                                uniforms.params1[0] = 0.85; // P2.x
+                                uniforms.params1[1] = 0.60; // P2.y
+                                uniforms.params1[2] = 4.0;  // stroke width px
+                                // Red stroke by default
+                                uniforms.params3 = [1.0, 0.1, 0.1, 1.0];
+                                should_draw_quad = have_current;
+                            } else if let Some(state) = wake.transition_state() {
                                 match state.variant() {
                                     ActiveTransition::Iris {
                                         blades,
@@ -2478,13 +2490,6 @@ pub fn run_windowed(
                                         let stroke_width = *stroke_width;
                                         let tolerance = *tolerance;
                                         if have_current && have_next {
-                                            // Default to WGSL iris (robust on Pi). Set
-                                            // PHOTOFRAME_IRIS_FORCE_TESSELLATED=1 to use the tessellated path.
-                                            let force_tessellated = std::env::var("PHOTOFRAME_IRIS_FORCE_TESSELLATED")
-                                                .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
-                                                .unwrap_or(false);
-
-                                            if !force_tessellated {
                                                 let base_progress = state.progress();
                                                 let eased_progress = {
                                                     let c = base_progress.clamp(0.0, 1.0);
@@ -2501,85 +2506,6 @@ pub fn run_windowed(
                                                 uniforms.params3 = stroke_rgba;    // stroke RGBA
                                                 uniforms.iris_pad0 = stroke_width; // stroke width in px
                                                 should_draw_quad = true;
-                                            } else {
-                                                let base_progress = state.progress();
-                                                let timeline =
-                                                    if matches!(direction, IrisDirection::Close) {
-                                                        1.0 - base_progress
-                                                    } else {
-                                                        base_progress
-                                                    };
-                                                let ease = |value: f32| {
-                                                    let clamped = value.clamp(0.0, 1.0);
-                                                    clamped * clamped * (3.0 - 2.0 * clamped)
-                                                };
-                                                let closeness = if timeline < 0.5 {
-                                                    ease(timeline * 2.0)
-                                                } else {
-                                                    1.0 - ease((timeline - 0.5) * 2.0)
-                                                };
-                                                let stage = if timeline < 0.5 {
-                                                    IrisStage::Closing
-                                                } else {
-                                                    IrisStage::Opening
-                                                };
-                                                {
-                                                    let clear_pass = encoder.begin_render_pass(
-                                                        &wgpu::RenderPassDescriptor {
-                                                            label: Some("iris-clear-pass"),
-                                                            color_attachments: &[Some(
-                                                                wgpu::RenderPassColorAttachment {
-                                                                    view: &view,
-                                                                    depth_slice: None,
-                                                                    resolve_target: None,
-                                                                    ops: wgpu::Operations {
-                                                                        load: wgpu::LoadOp::Clear(
-                                                                            self.clear_color,
-                                                                        ),
-                                                                        store: wgpu::StoreOp::Store,
-                                                                    },
-                                                                },
-                                                            )],
-                                                            depth_stencil_attachment: None,
-                                                            occlusion_query_set: None,
-                                                            timestamp_writes: None,
-                                                        },
-                                                    );
-                                                    drop(clear_pass);
-                                                }
-                                                let rotation_sign = if matches!(direction, IrisDirection::Close) {
-                                                    -1.0
-                                                } else {
-                                                    1.0
-                                                };
-                                                let params = IrisDrawParams {
-                                                    screen_size: [screen_w, screen_h],
-                                                    blades,
-                                                    closeness,
-                                                    tolerance,
-                                                    stroke_width,
-                                                    rotation: rotate_radians
-                                                        * base_progress
-                                                        * rotation_sign,
-                                                    fill_color: fill_rgba,
-                                                    stroke_color: stroke_rgba,
-                                                    stage,
-                                                    current_rect,
-                                                    next_rect,
-                                                    current_bind,
-                                                    next_bind,
-                                                };
-                                                iris_rendered = gpu.iris.draw(
-                                                    &gpu.device,
-                                                    &gpu.queue,
-                                                    &mut encoder,
-                                                    &view,
-                                                    params,
-                                                );
-                                                if !iris_rendered {
-                                                    should_draw_quad = have_current;
-                                                }
-                                            }
                                         } else {
                                             should_draw_quad = have_current;
                                         }
@@ -2643,7 +2569,7 @@ pub fn run_windowed(
                                 should_draw_quad = true;
                             }
 
-                            if !iris_rendered && should_draw_quad {
+                            if should_draw_quad {
                                 gpu.queue.write_buffer(
                                     &gpu.uniform_buf,
                                     0,
@@ -3496,13 +3422,7 @@ mod tests {
         assert_eq!(deferred_images.len(), 1);
     }
 
-    fn iris_stage_for_progress(progress: f32) -> IrisStage {
-        if progress < 0.5 {
-            IrisStage::Closing
-        } else {
-            IrisStage::Opening
-        }
-    }
+    // Tessellated iris removed; WGSL path owns timing.
 
     #[test]
     fn matting_queue_starts_after_initial_surface_config() {
@@ -3540,14 +3460,5 @@ mod tests {
         assert_eq!(harness.deferred_queue_len(), 0);
     }
 
-    #[test]
-    fn iris_close_direction_remains_in_closing_stage_first_half() {
-        let stage_start = iris_stage_for_progress(0.0);
-        let stage_mid = iris_stage_for_progress(0.25);
-        let stage_transition = iris_stage_for_progress(0.5);
-
-        assert_eq!(stage_start, IrisStage::Closing);
-        assert_eq!(stage_mid, IrisStage::Closing);
-        assert_eq!(stage_transition, IrisStage::Opening);
-    }
+    // Removed tessellated-iris specific stage tests.
 }
