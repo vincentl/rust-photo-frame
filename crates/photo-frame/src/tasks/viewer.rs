@@ -2480,9 +2480,15 @@ pub fn run_windowed(
                                         if have_current && have_next {
                                             // Default to WGSL iris (robust on Pi). Set
                                             // PHOTOFRAME_IRIS_FORCE_TESSELLATED=1 to use the tessellated path.
-                                            let force_tessellated = std::env::var("PHOTOFRAME_IRIS_FORCE_TESSELLATED")
-                                                .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
-                                                .unwrap_or(false);
+                                            let force_tessellated =
+                                                std::env::var("PHOTOFRAME_IRIS_FORCE_TESSELLATED")
+                                                    .map(|s| {
+                                                        matches!(
+                                                            s.as_str(),
+                                                            "1" | "true" | "yes" | "on"
+                                                        )
+                                                    })
+                                                    .unwrap_or(false);
 
                                             if !force_tessellated {
                                                 let base_progress = state.progress();
@@ -2495,10 +2501,15 @@ pub fn run_windowed(
                                                 uniforms.aspect = aspect;
                                                 uniforms.iris_blades = blades;
                                                 uniforms.iris_rotate_rad = rotate_radians;
-                                                uniforms.iris_direction = if matches!(direction, IrisDirection::Close) { 1 } else { 0 };
+                                                uniforms.iris_direction =
+                                                    if matches!(direction, IrisDirection::Close) {
+                                                        1
+                                                    } else {
+                                                        0
+                                                    };
                                                 // Provide occluder fill/stroke and stroke width to WGSL path
-                                                uniforms.params2 = fill_rgba;      // fill RGBA
-                                                uniforms.params3 = stroke_rgba;    // stroke RGBA
+                                                uniforms.params2 = fill_rgba; // fill RGBA
+                                                uniforms.params3 = stroke_rgba; // stroke RGBA
                                                 uniforms.iris_pad0 = stroke_width; // stroke width in px
                                                 should_draw_quad = true;
                                             } else {
@@ -2547,11 +2558,12 @@ pub fn run_windowed(
                                                     );
                                                     drop(clear_pass);
                                                 }
-                                                let rotation_sign = if matches!(direction, IrisDirection::Close) {
-                                                    -1.0
-                                                } else {
-                                                    1.0
-                                                };
+                                                let rotation_sign =
+                                                    if matches!(direction, IrisDirection::Close) {
+                                                        -1.0
+                                                    } else {
+                                                        1.0
+                                                    };
                                                 let params = IrisDrawParams {
                                                     screen_size: [screen_w, screen_h],
                                                     blades,

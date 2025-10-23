@@ -34,6 +34,7 @@ glyphon = { git = "https://github.com/grovesNL/glyphon.git", rev = "de4b5b8d4e52
 fontdb = "0.23.0"
 lyon = { version = "1.0.1", features = ["extra"] }
 palette = "0.7.6"
+config-model = { path = "../config-model" }
 
 [dev-dependencies]
 tempfile = "3.23.0"
