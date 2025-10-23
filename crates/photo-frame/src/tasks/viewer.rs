@@ -1,5 +1,7 @@
+mod iris;
 pub mod scenes;
 
+use self::iris::{IrisConfig, IrisRenderer};
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
@@ -12,7 +14,7 @@ use crate::events::{
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
-// Tessellated iris removed; WGSL handles iris rendering.
+// Tessellated iris replaced by GPU-driven stroke renderer.
 use crate::tasks::greeting_screen::GreetingScreen;
 use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
 use futures::executor::block_on;
@@ -54,6 +56,11 @@ pub(super) enum ActiveTransition {
         stroke_rgba: [f32; 4],
         stroke_width: f32,
         tolerance: f32,
+        stroke_enabled: bool,
+        radius: f32,
+        segments_per_90deg: u32,
+        segments_per_cubic: u32,
+        value_limit: f32,
     },
 }
 
@@ -135,6 +142,11 @@ impl TransitionState {
                 stroke_rgba: cfg.stroke_rgba,
                 stroke_width: cfg.stroke_width,
                 tolerance: cfg.tolerance,
+                stroke_enabled: cfg.stroke_enabled,
+                radius: cfg.radius,
+                segments_per_90deg: cfg.stroke_segments_per_90deg,
+                segments_per_cubic: cfg.stroke_segments_per_cubic,
+                value_limit: cfg.stroke_value,
             },
         };
 
@@ -805,7 +817,7 @@ pub fn run_windowed(
         sampler: wgpu::Sampler,
         pipeline: wgpu::RenderPipeline,
         blank_plane: TexturePlane,
-        // tessellated iris removed
+        iris: IrisRenderer,
     }
 
     fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
@@ -1639,7 +1651,7 @@ pub fn run_windowed(
             };
 
             let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
-
+            let iris = IrisRenderer::new(&device, format);
 
             let greeting = GreetingScene::new(GreetingScreen::new(
                 &device,
@@ -1668,7 +1680,7 @@ pub fn run_windowed(
                 sampler,
                 pipeline,
                 blank_plane,
-                // no tessellated iris
+                iris,
             };
             if let Some(mode) = self.mode.as_mut() {
                 mode.set_overlays(Some(greeting), Some(sleep));
@@ -2058,6 +2070,17 @@ pub fn run_windowed(
                         gpu.config.width = new_size.width;
                         gpu.config.height = new_size.height;
                         gpu.surface.configure(&gpu.device, &gpu.config);
+                        let iris_cfg = gpu
+                            .iris
+                            .last_config()
+                            .cloned()
+                            .unwrap_or_else(IrisConfig::disabled);
+                        gpu.iris.resize(
+                            &gpu.device,
+                            &gpu.queue,
+                            [new_size.width as f32, new_size.height as f32],
+                            &iris_cfg,
+                        );
                         let ready = self.update_surface_ready(
                             new_size.width,
                             new_size.height,
@@ -2116,6 +2139,17 @@ pub fn run_windowed(
                         gpu.config.width = size.width;
                         gpu.config.height = size.height;
                         gpu.surface.configure(&gpu.device, &gpu.config);
+                        let iris_cfg = gpu
+                            .iris
+                            .last_config()
+                            .cloned()
+                            .unwrap_or_else(IrisConfig::disabled);
+                        gpu.iris.resize(
+                            &gpu.device,
+                            &gpu.queue,
+                            [size.width as f32, size.height as f32],
+                            &iris_cfg,
+                        );
                         let ready = self.update_surface_ready(
                             size.width,
                             size.height,
@@ -2425,8 +2459,6 @@ pub fn run_windowed(
                             };
                             let mut current_bind = &gpu.blank_plane.bind;
                             let mut next_bind = &gpu.blank_plane.bind;
-                            let mut current_rect = [0.0f32; 4];
-                            let mut next_rect = [0.0f32; 4];
                             let mut have_current = false;
                             let mut have_next = false;
 
@@ -2437,8 +2469,7 @@ pub fn run_windowed(
                                     gpu.config.width,
                                     gpu.config.height,
                                 );
-                                current_rect = rect_to_uniform(rect);
-                                uniforms.current_dest = current_rect;
+                                uniforms.current_dest = rect_to_uniform(rect);
                                 current_bind = &cur.plane.bind;
                                 have_current = true;
                             }
@@ -2449,8 +2480,7 @@ pub fn run_windowed(
                                     gpu.config.width,
                                     gpu.config.height,
                                 );
-                                next_rect = rect_to_uniform(rect);
-                                uniforms.next_dest = next_rect;
+                                uniforms.next_dest = rect_to_uniform(rect);
                                 next_bind = &next.plane.bind;
                                 have_next = true;
                             }
@@ -2459,6 +2489,7 @@ pub fn run_windowed(
                             let debug_bezier = std::env::var("PHOTOFRAME_DEBUG_BEZIER")
                                 .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
                                 .unwrap_or(false);
+                            let mut iris_request: Option<IrisConfig> = None;
 
                             if debug_bezier {
                                 // Draw current image and overlay a debug quadratic Bezier stroke.
@@ -2467,7 +2498,7 @@ pub fn run_windowed(
                                 uniforms.params0 = [0.15, 0.60, 0.50, 0.25]; // P0.xy, P1.xy
                                 uniforms.params1[0] = 0.85; // P2.x
                                 uniforms.params1[1] = 0.60; // P2.y
-                                uniforms.params1[2] = 4.0;  // stroke width px
+                                uniforms.params1[2] = 4.0; // stroke width px
                                 // Red stroke by default
                                 uniforms.params3 = [1.0, 0.1, 0.1, 1.0];
                                 should_draw_quad = have_current;
@@ -2481,6 +2512,11 @@ pub fn run_windowed(
                                         stroke_rgba,
                                         stroke_width,
                                         tolerance,
+                                        stroke_enabled,
+                                        radius,
+                                        segments_per_90deg,
+                                        segments_per_cubic,
+                                        value_limit,
                                     } => {
                                         let blades = (*blades).max(3);
                                         let rotate_radians = *rotate_radians;
@@ -2488,31 +2524,61 @@ pub fn run_windowed(
                                         let fill_rgba = *fill_rgba;
                                         let stroke_rgba = *stroke_rgba;
                                         let stroke_width = *stroke_width;
-                                        let tolerance = *tolerance;
+                                        let _tolerance = *tolerance;
+                                        let stroke_enabled = *stroke_enabled;
+                                        let radius = *radius;
+                                        let segments_per_90deg = *segments_per_90deg;
+                                        let segments_per_cubic = *segments_per_cubic;
+                                        let value_limit = *value_limit;
                                         if have_current && have_next {
-                                                let base_progress = state.progress();
-                                                let eased_progress = {
-                                                    let c = base_progress.clamp(0.0, 1.0);
-                                                    c * c * (3.0 - 2.0 * c)
+                                            let base_progress = state.progress();
+                                            let eased_progress = {
+                                                let c = base_progress.clamp(0.0, 1.0);
+                                                c * c * (3.0 - 2.0 * c)
+                                            };
+                                            let closure =
+                                                if matches!(direction, IrisDirection::Close) {
+                                                    eased_progress
+                                                } else {
+                                                    1.0 - eased_progress
                                                 };
-                                                uniforms.kind = 5; // WGSL iris in viewer_quad.wgsl
-                                                uniforms.t = eased_progress;
-                                                uniforms.aspect = aspect;
-                                                uniforms.iris_blades = blades;
-                                                uniforms.iris_rotate_rad = rotate_radians;
-                                                uniforms.iris_direction =
-                                                    if matches!(direction, IrisDirection::Close) {
-                                                        1
-                                                    } else {
-                                                        0
-                                                    };
-                                                // Provide occluder fill/stroke and stroke width to WGSL path
-                                                uniforms.params2 = fill_rgba; // fill RGBA
-                                                uniforms.params3 = stroke_rgba; // stroke RGBA
-                                                uniforms.iris_pad0 = stroke_width; // stroke width in px
-                                                should_draw_quad = true;
+                                            let value = (closure * value_limit)
+                                                .clamp(0.0, value_limit.max(0.0));
+                                            let rotation = rotate_radians * closure;
+                                            uniforms.kind = 5; // WGSL iris in viewer_quad.wgsl
+                                            uniforms.t = eased_progress;
+                                            uniforms.aspect = aspect;
+                                            uniforms.iris_blades = blades;
+                                            uniforms.iris_rotate_rad = rotate_radians;
+                                            uniforms.iris_direction =
+                                                if matches!(direction, IrisDirection::Close) {
+                                                    1
+                                                } else {
+                                                    0
+                                                };
+                                            // Provide occluder fill/stroke and stroke width to WGSL path
+                                            uniforms.params2 = fill_rgba; // fill RGBA
+                                            uniforms.params3 = stroke_rgba; // stroke RGBA
+                                            uniforms.iris_pad0 = stroke_width; // stroke width in px
+                                            should_draw_quad = true;
+                                            iris_request = Some(if stroke_enabled {
+                                                IrisConfig {
+                                                    enabled: true,
+                                                    petal_count: blades,
+                                                    radius,
+                                                    stroke_px: stroke_width,
+                                                    segments_per_90deg,
+                                                    segments_per_cubic,
+                                                    color_rgba: stroke_rgba,
+                                                    value,
+                                                    rotation,
+                                                }
+                                            } else {
+                                                IrisConfig::disabled()
+                                            });
                                         } else {
                                             should_draw_quad = have_current;
+                                            iris_request = Some(IrisConfig::disabled());
                                         }
                                     }
                                     _ => {
@@ -2575,6 +2641,21 @@ pub fn run_windowed(
                             }
 
                             if should_draw_quad {
+                                let iris_cfg_to_draw = iris_request.clone();
+                                if let Some(cfg) = iris_cfg_to_draw.as_ref() {
+                                    if cfg.enabled {
+                                        gpu.iris.update(
+                                            &gpu.device,
+                                            &gpu.queue,
+                                            [screen_w, screen_h],
+                                            cfg,
+                                        );
+                                    } else {
+                                        gpu.iris.disable();
+                                    }
+                                } else {
+                                    gpu.iris.disable();
+                                }
                                 gpu.queue.write_buffer(
                                     &gpu.uniform_buf,
                                     0,
@@ -2603,8 +2684,17 @@ pub fn run_windowed(
                                 rpass.set_bind_group(1, current_bind, &[]);
                                 rpass.set_bind_group(2, next_bind, &[]);
                                 rpass.draw(0..6, 0..1);
+                                if let Some(cfg) = iris_cfg_to_draw {
+                                    if cfg.enabled {
+                                        gpu.iris.draw(&mut rpass);
+                                    }
+                                }
+                                drop(rpass);
+                                encoder.pop_debug_group();
+                            } else {
+                                gpu.iris.disable();
+                                encoder.pop_debug_group();
                             }
-                            encoder.pop_debug_group();
                             gpu.queue.submit(Some(encoder.finish()));
                             frame.present();
                             wake.after_present();

@@ -11,6 +11,7 @@ use rand::seq::IteratorRandom;
 use serde::Deserialize;
 use serde::de::{self, DeserializeOwned, Deserializer, MapAccess, SeqAccess, Unexpected, Visitor};
 use serde_yaml::{Mapping, Value as YamlValue};
+use tracing::info;
 
 use crate::processing::fixed_image::FixedImageBackground;
 
@@ -1911,6 +1912,17 @@ impl TransitionOptions {
                     stroke_rgba: builder.iris_stroke_rgba.unwrap_or(defaults.stroke_rgba),
                     stroke_width: builder.iris_stroke_width.unwrap_or(defaults.stroke_width),
                     tolerance: builder.iris_tolerance.unwrap_or(defaults.tolerance),
+                    stroke_enabled: builder
+                        .iris_stroke_enabled
+                        .unwrap_or(defaults.stroke_enabled),
+                    radius: builder.iris_radius.unwrap_or(defaults.radius),
+                    stroke_segments_per_90deg: builder
+                        .iris_segments_per_90deg
+                        .unwrap_or(defaults.stroke_segments_per_90deg),
+                    stroke_segments_per_cubic: builder
+                        .iris_segments_per_cubic
+                        .unwrap_or(defaults.stroke_segments_per_cubic),
+                    stroke_value: builder.iris_value.unwrap_or(defaults.stroke_value),
                 })
             }
         };
@@ -1943,6 +1955,18 @@ impl TransitionOptions {
             }
             TransitionMode::Iris(iris) => {
                 iris.normalize(kind)?;
+                info!(
+                    kind = ?kind,
+                    blades = iris.blades,
+                    rotate_radians = iris.rotate_radians,
+                    stroke_enabled = iris.stroke_enabled,
+                    radius = iris.radius,
+                    stroke_width = iris.stroke_width,
+                    segments_per_90deg = iris.stroke_segments_per_90deg,
+                    segments_per_cubic = iris.stroke_segments_per_cubic,
+                    value = iris.stroke_value,
+                    "iris_transition_configured"
+                );
             }
         }
 
@@ -2082,6 +2106,11 @@ pub struct IrisTransition {
     pub stroke_rgba: [f32; 4],
     pub stroke_width: f32,
     pub tolerance: f32,
+    pub stroke_enabled: bool,
+    pub radius: f32,
+    pub stroke_segments_per_90deg: u32,
+    pub stroke_segments_per_cubic: u32,
+    pub stroke_value: f32,
 }
 
 impl Default for IrisTransition {
@@ -2092,8 +2121,13 @@ impl Default for IrisTransition {
             direction: IrisDirection::Open,
             fill_rgba: [0.85, 0.85, 0.85, 1.0],
             stroke_rgba: [0.10, 0.10, 0.10, 1.0],
-            stroke_width: 1.5,
+            stroke_width: 2.0,
             tolerance: 0.25,
+            stroke_enabled: true,
+            radius: 80.0,
+            stroke_segments_per_90deg: 6,
+            stroke_segments_per_cubic: 16,
+            stroke_value: 1.04,
         }
     }
 }
@@ -2150,6 +2184,24 @@ impl IrisTransition {
             format!("transition option {} has non-finite iris.tolerance", kind)
         );
         self.tolerance = self.tolerance.clamp(0.01, 2.0);
+        ensure!(
+            self.radius.is_finite(),
+            format!("transition option {} has non-finite iris.radius", kind)
+        );
+        if self.radius <= 0.0 {
+            self.radius = 1.0;
+        }
+        if self.stroke_segments_per_90deg == 0 {
+            self.stroke_segments_per_90deg = 1;
+        }
+        if self.stroke_segments_per_cubic == 0 {
+            self.stroke_segments_per_cubic = 1;
+        }
+        ensure!(
+            self.stroke_value.is_finite(),
+            format!("transition option {} has non-finite iris.value", kind)
+        );
+        self.stroke_value = self.stroke_value.clamp(0.0, 1.2);
         Ok(())
     }
 }
@@ -2259,6 +2311,11 @@ struct TransitionOptionBuilder {
     iris_stroke_rgba: Option<[f32; 4]>,
     iris_stroke_width: Option<f32>,
     iris_tolerance: Option<f32>,
+    iris_stroke_enabled: Option<bool>,
+    iris_radius: Option<f32>,
+    iris_segments_per_90deg: Option<u32>,
+    iris_segments_per_cubic: Option<u32>,
+    iris_value: Option<f32>,
 }
 
 impl TransitionOptionBuilder {
@@ -2393,11 +2450,35 @@ fn apply_transition_inline_field<E: de::Error>(
         "stroke-rgba" if matches!(kind, TransitionKind::Iris) => {
             builder.iris_stroke_rgba = Some(inline_value_to::<[f32; 4], E>(value)?);
         }
+        "color-rgba" | "color_rgba" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_stroke_rgba = Some(inline_value_to::<[f32; 4], E>(value)?);
+        }
         "stroke-width" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_stroke_width = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "stroke-px" | "stroke_px" if matches!(kind, TransitionKind::Iris) => {
             builder.iris_stroke_width = Some(inline_value_to::<f32, E>(value)?);
         }
         "tolerance" if matches!(kind, TransitionKind::Iris) => {
             builder.iris_tolerance = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "enabled" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_stroke_enabled = Some(inline_value_to::<bool, E>(value)?);
+        }
+        "petal-count" | "petal_count" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_blades = Some(inline_value_to::<u32, E>(value)?);
+        }
+        "radius" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_radius = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "segments-per-90deg" | "segments_per_90deg" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_segments_per_90deg = Some(inline_value_to::<u32, E>(value)?);
+        }
+        "segments-per-cubic" | "segments_per_cubic" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_segments_per_cubic = Some(inline_value_to::<u32, E>(value)?);
+        }
+        "value" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_value = Some(inline_value_to::<f32, E>(value)?);
         }
         _ => {
             return Err(de::Error::unknown_field(
@@ -2420,6 +2501,14 @@ fn apply_transition_inline_field<E: de::Error>(
                     "stroke-rgba",
                     "stroke-width",
                     "tolerance",
+                    "enabled",
+                    "petal-count",
+                    "radius",
+                    "stroke-px",
+                    "segments-per-90deg",
+                    "segments-per-cubic",
+                    "color-rgba",
+                    "value",
                 ],
             ));
         }

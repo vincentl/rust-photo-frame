@@ -701,12 +701,17 @@ transition:
   active:
     - kind: iris
       duration-ms: 880
-      blades: 9
+      enabled: true
+      petal-count: 9
       rotate-radians: 1.25
       direction: close
+      radius: 72.0
       fill-rgba: [0.75, 0.8, 0.85, 1.0]
-      stroke-rgba: [0.2, 0.25, 0.3, 1.0]
-      stroke-width: 2.0
+      color-rgba: [0.2, 0.25, 0.3, 1.0]
+      stroke-px: 2.0
+      segments-per-90deg: 4
+      segments-per-cubic: 12
+      value: 0.75
       tolerance: 0.2
 "#;
 
@@ -726,6 +731,7 @@ transition:
     match selected.option.mode() {
         rust_photo_frame::config::TransitionMode::Iris(cfg) => {
             assert_eq!(cfg.blades, 9);
+            assert!(cfg.stroke_enabled);
             assert!((cfg.rotate_radians - 1.25).abs() < f32::EPSILON);
             assert_eq!(
                 cfg.direction,
@@ -735,6 +741,10 @@ transition:
             assert_eq!(cfg.stroke_rgba, [0.2, 0.25, 0.3, 1.0]);
             assert!((cfg.stroke_width - 2.0).abs() < f32::EPSILON);
             assert!((cfg.tolerance - 0.2).abs() < f32::EPSILON);
+            assert!((cfg.radius - 72.0).abs() < f32::EPSILON);
+            assert_eq!(cfg.stroke_segments_per_90deg, 4);
+            assert_eq!(cfg.stroke_segments_per_cubic, 12);
+            assert!((cfg.stroke_value - 0.75).abs() < f32::EPSILON);
         }
         _ => panic!("expected iris transition"),
     }
