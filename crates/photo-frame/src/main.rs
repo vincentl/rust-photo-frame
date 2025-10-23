@@ -17,12 +17,14 @@ use clap::Parser;
 use humantime::{format_rfc3339, parse_rfc3339};
 use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(unix)]
+use chrono::{DateTime, Utc};
 #[cfg(unix)]
 use serde::Deserialize;
 #[cfg(unix)]
@@ -138,10 +140,18 @@ async fn main() -> Result<()> {
         let cancel = cancel.clone();
         let control = viewer_control_tx.clone();
         let control_socket_path = cfg.control_socket_path.clone();
+        let greeting_delay = cfg.greeting_screen.effective_duration();
+        let schedule = cfg.awake_schedule.clone();
         tasks.spawn(async move {
-            run_control_socket(cancel, control, control_socket_path)
-                .await
-                .context("control socket task failed")
+            run_control_socket(
+                cancel,
+                control,
+                control_socket_path,
+                greeting_delay,
+                schedule,
+            )
+            .await
+            .context("control socket task failed")
         });
     }
 
@@ -338,6 +348,8 @@ async fn run_control_socket(
     cancel: CancellationToken,
     control: mpsc::Sender<ViewerCommand>,
     socket_path: PathBuf,
+    greeting_delay: Duration,
+    schedule: Option<config::AwakeScheduleConfig>,
 ) -> Result<()> {
     if let Some(parent) = socket_path.parent() {
         if let Err(err) = std::fs::create_dir_all(parent) {
@@ -376,6 +388,12 @@ async fn run_control_socket(
 
     tracing::info!(path = %socket_path.display(), "listening for control commands");
 
+    if let Err(err) =
+        run_initial_schedule_preamble(&cancel, &control, greeting_delay, schedule.as_ref()).await
+    {
+        tracing::warn!("control preamble failed: {err}");
+    }
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -404,6 +422,106 @@ async fn run_control_socket(
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+async fn run_initial_schedule_preamble(
+    cancel: &CancellationToken,
+    control: &mpsc::Sender<ViewerCommand>,
+    greeting_delay: Duration,
+    schedule: Option<&config::AwakeScheduleConfig>,
+) -> Result<()> {
+    if !greeting_delay.is_zero() {
+        tracing::debug!(
+            delay = %humantime::format_duration(greeting_delay),
+            "waiting for greeting preamble before applying schedule",
+        );
+        let delay = tokio::time::sleep(greeting_delay);
+        tokio::pin!(delay);
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            _ = delay => {}
+        }
+    }
+
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+
+    let target_state = schedule
+        .map(|schedule| scheduled_viewer_state(schedule, Utc::now()))
+        .unwrap_or(ViewerState::Awake);
+
+    tracing::info!(
+        ?target_state,
+        "control preamble sending initial viewer state"
+    );
+    control
+        .send(ViewerCommand::SetState(target_state))
+        .await
+        .context("failed to send initial viewer state")?;
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn scheduled_viewer_state(
+    schedule: &config::AwakeScheduleConfig,
+    now: DateTime<Utc>,
+) -> ViewerState {
+    let local_now = now.with_timezone(&schedule.timezone());
+    if schedule.is_awake_at(local_now) {
+        ViewerState::Awake
+    } else {
+        ViewerState::Asleep
+    }
+}
+
+#[cfg(all(test, unix))]
+mod schedule_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn scheduled_viewer_state_respects_intervals() {
+        let yaml = r#"
+timezone: "UTC"
+awake-scheduled:
+  daily:
+    - ["06:00", "08:00"]
+    - ["10:00", "22:00"]
+"#;
+
+        let schedule: config::AwakeScheduleConfig =
+            serde_yaml::from_str(yaml).expect("valid schedule");
+
+        let awake_morning = Utc
+            .with_ymd_and_hms(2024, 5, 1, 7, 30, 0)
+            .earliest()
+            .expect("valid time");
+        assert_eq!(
+            scheduled_viewer_state(&schedule, awake_morning),
+            ViewerState::Awake
+        );
+
+        let asleep_gap = Utc
+            .with_ymd_and_hms(2024, 5, 1, 9, 0, 0)
+            .earliest()
+            .expect("valid time");
+        assert_eq!(
+            scheduled_viewer_state(&schedule, asleep_gap),
+            ViewerState::Asleep
+        );
+
+        let awake_evening = Utc
+            .with_ymd_and_hms(2024, 5, 1, 12, 0, 0)
+            .earliest()
+            .expect("valid time");
+        assert_eq!(
+            scheduled_viewer_state(&schedule, awake_evening),
+            ViewerState::Awake
+        );
+    }
 }
 
 #[cfg(unix)]
