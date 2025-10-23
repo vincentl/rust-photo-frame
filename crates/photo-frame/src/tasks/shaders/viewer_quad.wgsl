@@ -103,14 +103,36 @@ fn iris_boundary(
   let p = rot2(p0, rotate_rad);
   if (blades < 3u) { return 0.0; }
 
-  // Regular N-gon boundary: fold angle into canonical sector and return
-  // 1 / cos(phi). Caller multiplies by apothem (aspect * open_scale).
-  let theta = atan2(p.y, p.x);
-  let sector = 6.283185307179586 / f32(blades);
-  let k = floor((theta + 0.5 * sector) / sector);
-  let phi = theta - k * sector;   // [-sector/2, sector/2]
-  let c = max(cos(phi), 1e-4);
-  return 1.0 / c;
+  // Curved-blade boundary from intersection of equally spaced disks.
+  // Each blade is a circle of radius R whose center lies on a circle of
+  // radius d around the origin. For a ray at angle theta, the first hit
+  // with circle i (center c_i) is:
+  //   λ_i = dot(c_i, u) + sqrt(R^2 - ||c_i||^2 + dot(c_i,u)^2),  u = (cosθ,sinθ)
+  // The iris boundary is min_i λ_i.
+  // We choose R = aspect (half screen width in isotropic units) so fully
+  // open spans the screen horizontally, and d = (1 - open_scale) * R so
+  // the aperture closes as centers move outward.
+  let p_iso = p; // already in aspect-corrected space
+  let theta = atan2(p_iso.y, p_iso.x);
+  let u = vec2<f32>(cos(theta), sin(theta));
+  let R = aspect;
+  let d = (1.0 - open_scale) * R;
+  let step = 6.283185307179586 / f32(blades);
+  // Rotate centers by rotate_rad
+  let rot_c = mat2x2<f32>(cos(rotate_rad), -sin(rotate_rad),
+                          sin(rotate_rad),  cos(rotate_rad));
+  var r_min = 1e9;
+  for (var i: u32 = 0u; i < blades; i = i + 1u) {
+    let ang = f32(i) * step;
+    let c_local = vec2<f32>(d * cos(ang), d * sin(ang));
+    let c = rot_c * c_local;
+    let cu = dot(c, u);
+    let disc = max(R * R - dot(c, c) + cu * cu, 0.0);
+    let lam = cu + sqrt(disc);
+    r_min = min(r_min, lam);
+  }
+  // Return factor so that boundary = factor (caller multiplies by aspect*open_scale)
+  return r_min / max(aspect * open_scale, 1e-4);  
 }
 
 // Polygon path scales directly by apothem (screen aspect), no extra factor.
@@ -122,10 +144,11 @@ fn iris_mask(
   rotate_rad: f32,
   open_scale: f32,
 ) -> f32 {
-  let rvec = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(aspect, 1.0);
-  let r = length(rot2(rvec, rotate_rad));
-  let factor = iris_boundary(uv, aspect, blades, rotate_rad); // 1/cos(phi)
-  // Fully open spans screen width: apothem = aspect
+  // Map to isotropic space where circles are round in pixels
+  let p = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(aspect, 1.0);
+  let pr = rot2(p, rotate_rad);
+  let r = length(pr);
+  let factor = iris_boundary(uv, aspect, blades, rotate_rad);
   let boundary = clamp(open_scale, 0.0, 1.0) * aspect * factor;
   let sdf = boundary - r;
   let aa = max(fwidth(sdf), 1e-4);

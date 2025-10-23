@@ -1,110 +1,91 @@
-struct Cubic {
-  p0: vec2<f32>,
-  p1: vec2<f32>,
-  p2: vec2<f32>,
-  p3: vec2<f32>,
+// Curved-blade iris stroke using the same SDF as the fill shader.
+// Matches the SVG construction (arcs from equal-radius disks).
+// Stroke width is in pixels and kept visually constant with proper AA.
+
+let PI  : f32 = 3.1415926535897932384626433832795;
+let TAU : f32 = 6.283185307179586476925286766559;
+
+fn rot2(p: vec2<f32>, a: f32) -> vec2<f32> {
+  let c = cos(a);
+  let s = sin(a);
+  return vec2<f32>(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
+// --- uniforms ---------------------------------------------------------------
+// Adjust these names/types to match your existing bind group if needed.
+struct Globals {
+  resolution    : vec2<f32>; // framebuffer size in pixels (width, height)
+  aspect        : f32;       // width/height
+  open_scale    : f32;       // 0 (closed) .. 1 (fully open)
+  rotate_rad    : f32;       // iris rotation in radians
+  blades        : u32;       // number of blades
+  stroke_px     : f32;       // desired stroke width in *pixels*
+  _pad0         : vec3<f32>; // alignment padding
+};
+@group(0) @binding(0) var<uniform> G : Globals;
+
+struct VsOut {
+  @location(0) uv : vec2<f32>;
+  @builtin(position) pos: vec4<f32>;
 };
 
-struct Params {
-  mvp: mat4x4<f32>,
-  viewport_px: vec2<f32>,
-  half_width_px: f32,
-  _pad0: f32,
-  segments_per_cubic: u32,
-  petal_count: u32,
-  cubics_count: u32,
-  _pad1: u32,
-  color_rgba: vec4<f32>,
-};
+// --- curved-blade boundary ---------------------------------------------------
+// Returns factor s so that boundary radius = s * (G.aspect * G.open_scale).
+fn iris_boundary_factor(uv: vec2<f32>) -> f32 {
+  // Work in isotropic space so circles stay round: scale X by aspect
+  let p_iso = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(G.aspect, 1.0);
+  let theta = atan2(p_iso.y, p_iso.x);
+  let u = vec2<f32>(cos(theta), sin(theta));
 
-@group(0) @binding(0) var<storage, read> cubics: array<Cubic>;
-@group(0) @binding(1) var<uniform> params: Params;
+  // Circle radius R sets the fully-open horizontal span.
+  let R = G.aspect; // half-width in isotropic units
+  // Centers move outward as the iris closes.
+  let d = (1.0 - clamp(G.open_scale, 0.0, 1.0)) * R;
 
-fn eval_cubic(p0: vec2<f32>, p1: vec2<f32>, p2: vec2<f32>, p3: vec2<f32>, t: f32) -> vec2<f32> {
-  let omt = 1.0 - t;
-  let omt2 = omt * omt;
-  let t2  = t * t;
-  return p0 * (omt2 * omt) +
-         p1 * (3.0 * omt2 * t) +
-         p2 * (3.0 * omt * t2) +
-         p3 * (t2 * t);
-}
+  let step = TAU / f32(G.blades);
+  let rc = mat2x2<f32>(cos(G.rotate_rad), -sin(G.rotate_rad),
+                       sin(G.rotate_rad),  cos(G.rotate_rad));
 
-fn to_clip(p: vec2<f32>) -> vec4<f32> {
-  return params.mvp * vec4<f32>(p, 0.0, 1.0);
-}
-
-fn clip_to_ndc_xy(c: vec4<f32>) -> vec2<f32> {
-  return c.xy / c.w;
-}
-
-fn px_to_ndc(px: vec2<f32>) -> vec2<f32> {
-  return 2.0 * px / params.viewport_px;
-}
-
-fn safe_normalize(v: vec2<f32>) -> vec2<f32> {
-  let len = length(v);
-  if len > 1e-5 {
-    return v / len;
+  var r_min = 1e9;
+  for (var i: u32 = 0u; i < G.blades; i = i + 1u) {
+    let ang = f32(i) * step;
+    let c_local = vec2<f32>(d * cos(ang), d * sin(ang));
+    let c = rc * c_local;
+    let cu = dot(c, u);
+    let disc = max(R * R - dot(c, c) + cu * cu, 0.0);
+    let lam = cu + sqrt(disc);   // ray–circle first hit
+    r_min = min(r_min, lam);
   }
-  return vec2<f32>(0.0, 1.0);
+  // Factor so boundary radius = factor * (aspect * open_scale)
+  return r_min / max(G.aspect * max(G.open_scale, 1e-4), 1e-4);
 }
 
-struct VSOut {
-  @builtin(position) pos: vec4<f32>,
-  @location(0) v_color: vec4<f32>,
-};
-
-@vertex
-fn vs_main(@builtin(vertex_index) vid: u32,
-           @builtin(instance_index) iid: u32) -> VSOut {
-  let segs = max(params.segments_per_cubic, 1u);
-  let total_steps = segs * params.cubics_count;
-
-  let k = min(vid >> 1u, total_steps);
-  let side = (vid & 1u);
-
-  let cubic_idx = select(k / segs, 0u, params.cubics_count == 0u);
-  let step_in_cubic = select(k % segs, 0u, params.cubics_count == 0u);
-
-  let inv_segs = 1.0 / f32(segs);
-  let t0 = f32(step_in_cubic) * inv_segs;
-  let t1 = min(1.0, t0 + inv_segs);
-
-  let c = cubics[cubic_idx];
-  var p0 = eval_cubic(c.p0, c.p1, c.p2, c.p3, t0);
-  let p1 = eval_cubic(c.p0, c.p1, c.p2, c.p3, t1);
-
-  let count = max(params.petal_count, 1u);
-  let angle = (f32(iid) * 6.28318530718) / f32(count);
-  let cs = cos(angle);
-  let sn = sin(angle);
-  let rot = mat2x2<f32>(cs, -sn, sn, cs);
-  p0 = rot * p0;
-  let p1r = rot * p1;
-
-  let p0_clip = to_clip(p0);
-  let p1_clip = to_clip(p1r);
-  let p0_ndc = clip_to_ndc_xy(p0_clip);
-  let p1_ndc = clip_to_ndc_xy(p1_clip);
-
-  let dir = safe_normalize(p1_ndc - p0_ndc);
-  let n_ndc = vec2<f32>(-dir.y, dir.x);
-
-  let half_px = vec2<f32>(params.half_width_px, params.half_width_px);
-  let half_ndc = px_to_ndc(half_px);
-
-  let offset_ndc = safe_normalize(n_ndc) * half_ndc;
-  let side_sign = select(-1.0, 1.0, side == 1u);
-  let out_ndc = p0_ndc + side_sign * offset_ndc;
-
-  var outv: VSOut;
-  outv.pos = vec4<f32>(out_ndc, 0.0, 1.0);
-  outv.v_color = params.color_rgba;
-  return outv;
+// Signed distance to the iris edge in isotropic space (positive inside).
+fn iris_sdf(uv: vec2<f32>) -> f32 {
+  let p_iso = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(G.aspect, 1.0);
+  let pr = rot2(p_iso, G.rotate_rad);
+  let r = length(pr);
+  let factor = iris_boundary_factor(uv);
+  let boundary = clamp(G.open_scale, 0.0, 1.0) * G.aspect * factor;
+  return boundary - r;
 }
 
 @fragment
-fn fs_main(@location(0) v_color: vec4<f32>) -> @location(0) vec4<f32> {
-  return v_color;
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+  let sdf = iris_sdf(in.uv);
+
+  // Convert stroke width from pixels to isotropic NDC units (Y maps to 2.0)
+  let stroke_ndc = (G.stroke_px / max(G.resolution.y, 1.0)) * 2.0;
+
+  // Draw where |sdf| <= w/2, with smooth AA around the edges.
+  let edge = abs(sdf) - 0.5 * stroke_ndc;
+  let aa  = max(fwidth(edge), 1e-4);
+  let alpha = 1.0 - smoothstep(0.0, aa, edge);
+
+  // Colors — wire these in from your pipeline as needed.
+  let stroke_color = vec3<f32>(0.0, 0.0, 0.0); // black outline
+  let bg_color     = vec3<f32>(0.0, 0.0, 0.0); // premultiplied over your fill
+
+  let rgb = mix(bg_color, stroke_color, alpha);
+  return vec4<f32>(rgb, alpha);
 }
