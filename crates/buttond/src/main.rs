@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
@@ -236,7 +237,14 @@ impl ButtondSettings {
         let sway_env = Arc::new(SwayEnvironment::prepare()?);
         let executor: Arc<dyn CommandExecutor> =
             Arc::new(SwayCommandExecutor::new(sway_env.clone()));
-        let detector: Arc<dyn ScreenDetector> = Arc::new(SwayScreenDetector::new(sway_env));
+        let powerctl_program = detect_powerctl_program(
+            &self.screen_on_command,
+            &self.screen_off_command,
+        );
+        let detector: Arc<dyn ScreenDetector> = Arc::new(SwayScreenDetector::new(
+            sway_env,
+            powerctl_program,
+        ));
 
         let screen = ScreenRuntime::new(
             self.screen_on_command,
@@ -272,6 +280,22 @@ impl ButtondSettings {
 
         Ok((runtime, scheduler))
     }
+}
+
+fn detect_powerctl_program(on: &CommandSpec, off: &CommandSpec) -> Option<PathBuf> {
+    for command in [on, off] {
+        if command
+            .program
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name == "powerctl")
+            .unwrap_or(false)
+        {
+            return Some(command.program.clone());
+        }
+    }
+
+    None
 }
 
 #[derive(Debug, Deserialize)]
@@ -835,16 +859,54 @@ trait ScreenDetector: Send + Sync {
 
 struct SwayScreenDetector {
     env: Arc<SwayEnvironment>,
+    powerctl_program: Option<PathBuf>,
 }
 
 impl SwayScreenDetector {
-    fn new(env: Arc<SwayEnvironment>) -> Self {
-        Self { env }
+    fn new(env: Arc<SwayEnvironment>, powerctl_program: Option<PathBuf>) -> Self {
+        Self {
+            env,
+            powerctl_program,
+        }
     }
-}
 
-impl ScreenDetector for SwayScreenDetector {
-    fn detect(&self, display_name: Option<&str>) -> Result<ScreenDetection> {
+    fn detect_via_powerctl(&self, program: &Path, display_name: &str) -> Result<ScreenDetection> {
+        let mut command = Command::new(program);
+        command.arg("state").arg(display_name);
+        self.env.configure(&mut command);
+
+        let output = command
+            .output()
+            .with_context(|| format!("failed to execute {} state probe", program.display()))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "{} state probe exited with status {}{}",
+                program.display(),
+                output.status,
+                if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stderr.trim())
+                }
+            );
+        }
+
+        let stdout = String::from_utf8(output.stdout)
+            .context("powerctl state output was not valid UTF-8")?;
+        let state = match stdout.trim() {
+            "on" => ScreenState::On,
+            "off" => ScreenState::Off,
+            other => bail!("unexpected powerctl state output: {other}"),
+        };
+
+        Ok(ScreenDetection {
+            name: display_name.to_string(),
+            state,
+        })
+    }
+
+    fn detect_via_swaymsg(&self, display_name: Option<&str>) -> Result<ScreenDetection> {
         let mut command = Command::new("swaymsg");
         self.env.configure(&mut command);
         command.arg("-t").arg("get_outputs").arg("--raw");
@@ -860,6 +922,26 @@ impl ScreenDetector for SwayScreenDetector {
         }
 
         parse_sway_outputs(&output.stdout, display_name)
+    }
+}
+
+impl ScreenDetector for SwayScreenDetector {
+    fn detect(&self, display_name: Option<&str>) -> Result<ScreenDetection> {
+        if let (Some(program), Some(name)) = (&self.powerctl_program, display_name) {
+            match self.detect_via_powerctl(program, name) {
+                Ok(detection) => return Ok(detection),
+                Err(err) => {
+                    warn!(
+                        program = %program.display(),
+                        %name,
+                        ?err,
+                        "powerctl state detection failed; falling back to swaymsg",
+                    );
+                }
+            }
+        }
+
+        self.detect_via_swaymsg(display_name)
     }
 }
 
@@ -967,14 +1049,9 @@ fn parse_sway_outputs(stdout: &[u8], display_name: Option<&str>) -> Result<Scree
 
     let power = record
         .power
-        .as_ref()
-        .with_context(|| format!("sway output '{}' did not report power state", record.name))?;
+        .ok_or_else(|| anyhow!("sway output '{}' did not report power state", record.name))?;
 
-    let state = match power.as_str() {
-        "on" => ScreenState::On,
-        "off" => ScreenState::Off,
-        value => bail!("unexpected sway output power value: {value}"),
-    };
+    let state = power.into_state();
 
     Ok(ScreenDetection {
         name: record.name.clone(),
@@ -985,7 +1062,69 @@ fn parse_sway_outputs(stdout: &[u8], display_name: Option<&str>) -> Result<Scree
 #[derive(Deserialize)]
 struct SwayOutput {
     name: String,
-    power: Option<String>,
+    power: Option<SwayPower>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwayPower {
+    On,
+    Off,
+}
+
+impl SwayPower {
+    fn into_state(self) -> ScreenState {
+        match self {
+            SwayPower::On => ScreenState::On,
+            SwayPower::Off => ScreenState::Off,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SwayPower {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SwayPowerVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SwayPowerVisitor {
+            type Value = SwayPower;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a string or boolean sway power state")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(match value {
+                    true => SwayPower::On,
+                    false => SwayPower::Off,
+                })
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "on" => Ok(SwayPower::On),
+                    "off" => Ok(SwayPower::Off),
+                    other => Err(E::unknown_variant(other, &["on", "off"])),
+                }
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                self.visit_str(&value)
+            }
+        }
+
+        deserializer.deserialize_any(SwayPowerVisitor)
+    }
 }
 
 fn perform_action(action: Action, runtime: &mut Runtime) {
@@ -1441,13 +1580,16 @@ mod tests {
         Action, ButtonTracker, CommandExecutor, CommandSpec, ControlSocket, Durations,
         FORCE_SHUTDOWN_FLAG, FrameState, NO_ASK_PASSWORD_FLAG, Runtime, SchedulerCommand,
         SchedulerConfig, ScreenDetection, ScreenDetector, ScreenRuntime, ScreenState,
-        SwayEnvironment, TransitionSource, UnixControlSocket, ViewerMode, configure_shutdown_args,
+        SwayEnvironment, SwayScreenDetector, TransitionSource, UnixControlSocket, ViewerMode,
+        configure_shutdown_args,
         parse_sway_outputs, scheduler_loop,
     };
     use config_model::AwakeScheduleConfig;
     use serde_yaml::from_str;
     use std::ffi::{OsStr, OsString};
     use std::io::Read;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::sync::mpsc;
@@ -1487,6 +1629,13 @@ mod tests {
 [
   {"name": "HDMI-A-1", "power": "on"},
   {"name": "HDMI-A-2", "power": "off"}
+]
+"#;
+
+    const SAMPLE_BOOL_OUTPUT: &str = r#"
+[
+  {"name": "HDMI-A-1", "power": true},
+  {"name": "HDMI-A-2", "power": false}
 ]
 "#;
 
@@ -1725,6 +1874,42 @@ awake-scheduled: {}
             .expect("expected named output");
         assert_eq!(detection.name, "HDMI-A-2");
         assert_eq!(detection.state, ScreenState::Off);
+    }
+
+    #[test]
+    fn parse_accepts_boolean_power_values() {
+        let detection = parse_sway_outputs(SAMPLE_BOOL_OUTPUT.as_bytes(), None)
+            .expect("expected connected output");
+        assert_eq!(detection.name, "HDMI-A-1");
+        assert_eq!(detection.state, ScreenState::On);
+
+        let detection = parse_sway_outputs(SAMPLE_BOOL_OUTPUT.as_bytes(), Some("HDMI-A-2"))
+            .expect("expected named output");
+        assert_eq!(detection.name, "HDMI-A-2");
+        assert_eq!(detection.state, ScreenState::Off);
+    }
+
+    #[test]
+    fn detector_uses_powerctl_state_when_available() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("powerctl");
+        fs::write(&script_path, "#!/usr/bin/env bash\necho on\n").expect("write script");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("set perms");
+
+        let env = Arc::new(SwayEnvironment {
+            runtime_dir: dir.path().to_path_buf(),
+            socket_path: dir.path().join("sway-ipc.test.sock"),
+        });
+
+        let detector = SwayScreenDetector::new(env, Some(script_path));
+        let detection = detector
+            .detect(Some("HDMI-A-1"))
+            .expect("powerctl state detection");
+
+        assert_eq!(detection.name, "HDMI-A-1");
+        assert_eq!(detection.state, ScreenState::On);
     }
 
     #[test]

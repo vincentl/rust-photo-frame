@@ -3,54 +3,74 @@ set -euo pipefail
 
 MODE="${1:-}"
 TARGET="${2:-*}"
-if [[ "$MODE" != "sleep" && "$MODE" != "wake" ]]; then
-  echo "usage: powerctl {sleep|wake} [OUTPUT]" >&2
+if [[ "$MODE" != "sleep" && "$MODE" != "wake" && "$MODE" != "state" ]]; then
+  echo "usage: powerctl {sleep|wake|state} [OUTPUT]" >&2
   exit 2
 fi
 
-runtime_dir="${XDG_RUNTIME_DIR:-}"
-if [[ -z "$runtime_dir" ]]; then
-  runtime_dir="/run/user/$(id -u)"
-fi
-
+runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 if [[ ! -d "$runtime_dir" ]]; then
   echo "powerctl: XDG_RUNTIME_DIR '$runtime_dir' does not exist" >&2
   exit 1
 fi
 
 find_sway_socket() {
-  local socket="${SWAYSOCK:-}"
-  if [[ -n "$socket" && -S "$socket" ]]; then
-    printf '%s' "$socket"
+  # Prefer an already-correct socket
+  if [[ -n "${SWAYSOCK:-}" && -S "$SWAYSOCK" ]]; then
+    printf '%s' "$SWAYSOCK"
     return 0
   fi
 
-  local matches
-  if ! matches=$(compgen -G "${runtime_dir%/}/sway-ipc.*.sock" 2>/dev/null); then
+  # Owner uid of runtime dir (robust under sudo)
+  local ruid
+  ruid="$(stat -c '%u' "$runtime_dir" 2>/dev/null || id -u)"
+
+  # Sway PID for that uid
+  local spid
+  if ! spid="$(pgrep -u "$ruid" -x sway | head -n1)"; then
+    echo "powerctl: no sway process found for uid $ruid" >&2
     return 1
   fi
 
+  # Socket name includes the PID
   local candidate
-  while IFS= read -r candidate; do
-    if [[ -S "$candidate" ]]; then
-      printf '%s' "$candidate"
-      return 0
-    fi
-  done <<<"$matches"
+  candidate="$(compgen -G "${runtime_dir%/}/sway-ipc.${ruid}.${spid}.sock" 2>/dev/null | head -n1 || true)"
+  if [[ -n "$candidate" && -S "$candidate" ]]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
 
+  echo "powerctl: no IPC socket for sway PID $spid in $runtime_dir" >&2
   return 1
 }
 
-socket="$(find_sway_socket)" || {
-  echo "powerctl: failed to locate sway IPC socket in $runtime_dir" >&2
-  exit 1
-}
+SWAYSOCK="$(find_sway_socket)" || exit 1
+export XDG_RUNTIME_DIR="$runtime_dir" SWAYSOCK
 
-export XDG_RUNTIME_DIR="$runtime_dir"
-export SWAYSOCK="$socket"
-
-if [[ "$MODE" == "sleep" ]]; then
-  swaymsg output "$TARGET" power off
-else
-  swaymsg output "$TARGET" power on
-fi
+case "$MODE" in
+  sleep)
+    swaymsg -s "$SWAYSOCK" "output $TARGET power off" >/dev/null
+    ;;
+  wake)
+    swaymsg -s "$SWAYSOCK" "output $TARGET power on" >/dev/null
+    ;;
+  state)
+    outputs_json="$(swaymsg -s "$SWAYSOCK" -r -t get_outputs)"
+    if [[ "$TARGET" == "*" ]]; then
+      if jq -e 'map(.power == true) | any' >/dev/null <<<"$outputs_json"; then
+        echo "on"
+      else
+        echo "off"
+      fi
+    else
+      p="$(jq -r --arg N "$TARGET" '
+            map(select(.name == $N)) | if length==0 then "___notfound___" else .[0].power end
+          ' <<<"$outputs_json")"
+      if [[ "$p" == "___notfound___" ]]; then
+        echo "powerctl: output '$TARGET' not found" >&2
+        exit 3
+      fi
+      [[ "$p" == "true" ]] && echo "on" || echo "off"
+    fi
+    ;;
+esac
