@@ -95,6 +95,7 @@ fn iris_boundary(
   aspect: f32,
   blades: u32,
   rotate_rad: f32,
+  open_scale: f32,
   // Returns the unscaled boundary radius (in aspect-corrected units) and a
   // boolean indicating if a valid boundary was computed.
 ) -> f32 {
@@ -148,7 +149,7 @@ fn iris_mask(
   let p = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(aspect, 1.0);
   let pr = rot2(p, rotate_rad);
   let r = length(pr);
-  let factor = iris_boundary(uv, aspect, blades, rotate_rad);
+  let factor = iris_boundary(uv, aspect, blades, rotate_rad, open_scale);
   let boundary = clamp(open_scale, 0.0, 1.0) * aspect * factor;
   let sdf = boundary - r;
   let aa = max(fwidth(sdf), 1e-4);
