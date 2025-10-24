@@ -8,36 +8,36 @@ log() {
 }
 
 PACKAGES=(
+    acl
     at
-    libinput10
-    libwayland-client0
-    libgbm1
-    libdrm2
-    mesa-vulkan-drivers
-    seatd
-    dbus
-    dbus-user-session
-    network-manager
     build-essential
-    pkg-config
-    libudev-dev
-    libssl-dev
-    libclang-dev
     clang
     cmake
-    python3
     curl
+    dbus
+    dbus-user-session
     git
-    rsync
+    kmscube
+    libclang-dev
+    libdrm2
+    libgbm1
+    libinput10
+    libssl-dev
+    libudev-dev
+    libwayland-client0
     logrotate
-    acl
+    mesa-vulkan-drivers
+    network-manager
+    pkg-config
+    python3
     rclone
+    rsync
+    seatd
     sway
     swaybg
     swayidle
     swaylock
     vulkan-tools
-    kmscube
 )
 
 log "Updating apt package index"
