@@ -1,5 +1,4 @@
 use std::env;
-use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
@@ -153,14 +152,20 @@ struct ButtondSettings {
 }
 
 const FORCE_SHUTDOWN_FLAG: &str = "-i";
+const NO_ASK_PASSWORD_FLAG: &str = "--no-ask-password";
 
 fn configure_shutdown_args(args: &mut Vec<String>, force_shutdown: bool) {
-    if force_shutdown {
-        if !args.iter().any(|arg| arg == FORCE_SHUTDOWN_FLAG) {
-            args.push(FORCE_SHUTDOWN_FLAG.to_string());
+    configure_shutdown_flag(args, FORCE_SHUTDOWN_FLAG, force_shutdown);
+    configure_shutdown_flag(args, NO_ASK_PASSWORD_FLAG, force_shutdown);
+}
+
+fn configure_shutdown_flag(args: &mut Vec<String>, flag: &str, enabled: bool) {
+    if enabled {
+        if !args.iter().any(|arg| arg == flag) {
+            args.push(flag.to_string());
         }
     } else {
-        args.retain(|arg| arg != FORCE_SHUTDOWN_FLAG);
+        args.retain(|arg| arg != flag);
     }
 }
 
@@ -228,8 +233,10 @@ impl ButtondSettings {
     }
 
     fn into_runtime(self) -> Result<(Runtime, Option<SchedulerConfig>)> {
-        let executor: Arc<dyn CommandExecutor> = Arc::new(OsCommandExecutor);
-        let detector: Arc<dyn ScreenDetector> = Arc::new(WlrScreenDetector);
+        let sway_env = Arc::new(SwayEnvironment::prepare()?);
+        let executor: Arc<dyn CommandExecutor> =
+            Arc::new(SwayCommandExecutor::new(sway_env.clone()));
+        let detector: Arc<dyn ScreenDetector> = Arc::new(SwayScreenDetector::new(sway_env));
 
         let screen = ScreenRuntime::new(
             self.screen_on_command,
@@ -242,14 +249,9 @@ impl ButtondSettings {
 
         let initial_state = screen
             .detect_state()
-            .map(|detection| detection.state.into())
-            .unwrap_or_else(|err| {
-                warn!(
-                    ?err,
-                    "failed to detect initial screen state; assuming awake"
-                );
-                ViewerMode::Awake
-            });
+            .context("failed to detect initial screen state")?
+            .state
+            .into();
 
         let control_socket: Arc<dyn ControlSocket> =
             Arc::new(UnixControlSocket::new(self.control_socket_path.clone()));
@@ -462,9 +464,17 @@ trait CommandExecutor: Send + Sync {
     fn execute(&self, command: &CommandSpec) -> Result<()>;
 }
 
-struct OsCommandExecutor;
+struct SwayCommandExecutor {
+    env: Arc<SwayEnvironment>,
+}
 
-impl CommandExecutor for OsCommandExecutor {
+impl SwayCommandExecutor {
+    fn new(env: Arc<SwayEnvironment>) -> Self {
+        Self { env }
+    }
+}
+
+impl CommandExecutor for SwayCommandExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<()> {
         debug!(
             program = %command.program.display(),
@@ -472,8 +482,10 @@ impl CommandExecutor for OsCommandExecutor {
             label = %command.label,
             "running command",
         );
-        let status = Command::new(&command.program)
-            .args(&command.args)
+        let mut os_command = Command::new(&command.program);
+        os_command.args(&command.args);
+        self.env.configure(&mut os_command);
+        let status = os_command
             .status()
             .with_context(|| format!("failed to execute {}", command.program.display()))?;
         if !status.success() {
@@ -576,22 +588,8 @@ impl Runtime {
     }
 
     fn handle_manual_toggle(&mut self) -> Result<()> {
-        let detected = match self.screen.detect_state() {
-            Ok(info) => {
-                debug!(output = %info.name, state = info.state.as_str(), "detected screen state");
-                info
-            }
-            Err(err) => {
-                warn!(?err, "failed to detect screen state; assuming on");
-                ScreenDetection {
-                    name: self
-                        .screen
-                        .display_name()
-                        .unwrap_or_else(|| String::from("unknown")),
-                    state: ScreenState::On,
-                }
-            }
-        };
+        let detected = self.screen.detect_state()?;
+        debug!(output = %detected.name, state = detected.state.as_str(), "detected screen state");
 
         match detected.state {
             ScreenState::On => {
@@ -773,10 +771,6 @@ impl ScreenRuntime {
         self.off_delay
     }
 
-    fn display_name(&self) -> Option<String> {
-        self.display_name.clone()
-    }
-
     fn detect_state(&self) -> Result<ScreenDetection> {
         self.detector.detect(self.display_name.as_deref())
     }
@@ -821,6 +815,15 @@ impl From<ScreenState> for ViewerMode {
     }
 }
 
+impl From<ViewerMode> for ScreenState {
+    fn from(mode: ViewerMode) -> Self {
+        match mode {
+            ViewerMode::Awake => ScreenState::On,
+            ViewerMode::Asleep => ScreenState::Off,
+        }
+    }
+}
+
 struct ScreenDetection {
     name: String,
     state: ScreenState,
@@ -830,306 +833,159 @@ trait ScreenDetector: Send + Sync {
     fn detect(&self, display_name: Option<&str>) -> Result<ScreenDetection>;
 }
 
-struct WlrScreenDetector;
+struct SwayScreenDetector {
+    env: Arc<SwayEnvironment>,
+}
 
-impl ScreenDetector for WlrScreenDetector {
-    fn detect(&self, display_name: Option<&str>) -> Result<ScreenDetection> {
-        detect_primary_display_state(display_name)
+impl SwayScreenDetector {
+    fn new(env: Arc<SwayEnvironment>) -> Self {
+        Self { env }
     }
 }
 
-fn detect_primary_display_state(display_name: Option<&str>) -> Result<ScreenDetection> {
-    const WAYLAND_SOCKET_RETRY_COUNT: usize = 5;
-    const WAYLAND_SOCKET_RETRY_DELAY: Duration = Duration::from_millis(100);
+impl ScreenDetector for SwayScreenDetector {
+    fn detect(&self, display_name: Option<&str>) -> Result<ScreenDetection> {
+        let mut command = Command::new("swaymsg");
+        self.env.configure(&mut command);
+        command.arg("-t").arg("get_outputs").arg("--raw");
 
-    let mut last_env: Option<WaylandDiscovery> = None;
-
-    for attempt in 0..WAYLAND_SOCKET_RETRY_COUNT {
-        let mut command = Command::new("wlr-randr");
-        let discovery = ensure_wayland_env(&mut command)?;
-
-        if discovery.socket.is_none() {
-            last_env = Some(discovery);
-            if attempt + 1 == WAYLAND_SOCKET_RETRY_COUNT {
-                break;
-            }
-            thread::sleep(WAYLAND_SOCKET_RETRY_DELAY);
-            continue;
-        }
-
-        let output = command.output().context("failed to execute wlr-randr")?;
+        let output = command
+            .output()
+            .context("failed to execute swaymsg for output detection")?;
         if !output.status.success() {
             bail!(
-                "wlr-randr exited with status {status}",
+                "swaymsg exited with status {status}",
                 status = output.status
             );
         }
-        let stdout =
-            String::from_utf8(output.stdout).context("wlr-randr output was not valid UTF-8")?;
 
-        return parse_wlr_randr_outputs(&stdout, display_name)
-            .ok_or_else(|| anyhow!("no connected display detected"));
+        parse_sway_outputs(&output.stdout, display_name)
     }
-
-    let missing = last_env
-        .map(|env| env.runtime_dir)
-        .unwrap_or_else(|| PathBuf::from("<unknown>"));
-    bail!("no Wayland display sockets found in {}", missing.display())
 }
 
-struct WaylandDiscovery {
+struct SwayEnvironment {
     runtime_dir: PathBuf,
-    socket: Option<OsString>,
+    socket_path: PathBuf,
 }
 
-fn ensure_wayland_env(command: &mut Command) -> Result<WaylandDiscovery> {
-    let runtime_dir_from_env = env::var_os("XDG_RUNTIME_DIR");
-    let runtime_dir = runtime_dir_from_env
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let uid = unsafe { libc::getuid() };
-            PathBuf::from(format!("/run/user/{uid}"))
-        });
+impl SwayEnvironment {
+    fn prepare() -> Result<Self> {
+        let runtime_dir = match env::var_os("XDG_RUNTIME_DIR") {
+            Some(value) if !value.is_empty() => PathBuf::from(value),
+            _ => {
+                let uid = unsafe { libc::getuid() };
+                PathBuf::from(format!("/run/user/{uid}"))
+            }
+        };
 
-    if !runtime_dir.is_dir() {
-        bail!("XDG_RUNTIME_DIR '{}' does not exist", runtime_dir.display());
-    }
-
-    command.env("XDG_RUNTIME_DIR", &runtime_dir);
-
-    if let Some(current_display) = env::var_os("WAYLAND_DISPLAY") {
-        if wayland_socket_is_ready(&runtime_dir, current_display.as_os_str()) {
-            command.env("WAYLAND_DISPLAY", &current_display);
-            return Ok(WaylandDiscovery {
-                runtime_dir,
-                socket: Some(current_display),
-            });
+        if !runtime_dir.is_dir() {
+            bail!("XDG_RUNTIME_DIR '{}' does not exist", runtime_dir.display());
         }
 
-        debug!(
-            display = ?current_display,
-            runtime = %runtime_dir.display(),
-            "configured Wayland display socket missing; retrying discovery",
-        );
-    }
-
-    let mut found: Option<OsString> = None;
-    for entry in fs::read_dir(&runtime_dir)
-        .with_context(|| format!("failed to list {}", runtime_dir.display()))?
-    {
-        let entry = entry?;
-        let name = entry.file_name();
-        if !matches_wayland_display(&name) {
-            continue;
+        if let Some(sock) = env::var_os("SWAYSOCK") {
+            let candidate = PathBuf::from(sock);
+            if is_socket(&candidate)? {
+                return Ok(Self {
+                    runtime_dir,
+                    socket_path: candidate,
+                });
+            }
+            bail!(
+                "SWAYSOCK '{}' is not a valid sway IPC socket",
+                candidate.display()
+            );
         }
-        let ty = entry.file_type()?;
-        if ty.is_socket() {
-            found = Some(name);
-            break;
-        }
-    }
 
-    if let Some(socket) = found {
-        command.env("WAYLAND_DISPLAY", &socket);
-        return Ok(WaylandDiscovery {
+        let socket_path = find_sway_socket(&runtime_dir)?;
+        Ok(Self {
             runtime_dir,
-            socket: Some(socket),
-        });
-    }
-
-    Ok(WaylandDiscovery {
-        runtime_dir,
-        socket: None,
-    })
-}
-
-fn wayland_socket_is_ready(runtime_dir: &Path, display: &OsStr) -> bool {
-    let path = wayland_socket_path(runtime_dir, display);
-    match fs::metadata(&path) {
-        Ok(metadata) => metadata.file_type().is_socket(),
-        Err(err) => {
-            if err.kind() != io::ErrorKind::NotFound {
-                debug!(?path, error = ?err, "failed to inspect WAYLAND_DISPLAY socket");
-            }
-            false
-        }
-    }
-}
-
-fn wayland_socket_path(runtime_dir: &Path, display: &OsStr) -> PathBuf {
-    let candidate = Path::new(display);
-    if candidate.is_absolute() {
-        candidate.to_path_buf()
-    } else {
-        runtime_dir.join(candidate)
-    }
-}
-
-fn matches_wayland_display(name: &OsString) -> bool {
-    match name.to_str() {
-        Some(candidate) => candidate.starts_with("wayland-"),
-        None => false,
-    }
-}
-
-fn parse_wlr_randr_outputs(stdout: &str, display_name: Option<&str>) -> Option<ScreenDetection> {
-    let mut current: Option<OutputRecord> = None;
-    let mut best: Option<ScreenDetection> = None;
-
-    for line in stdout.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        if is_output_header(line) {
-            commit_output(&mut current, &mut best, display_name);
-            let Some(name) = line.split_whitespace().next() else {
-                current = None;
-                continue;
-            };
-            current = Some(OutputRecord::new(name));
-            continue;
-        }
-
-        if let Some(record) = current.as_mut() {
-            let trimmed = line.trim_start();
-            if let Some(rest) = trimmed.strip_prefix("Enabled:") {
-                if let Some(value) = rest.trim().split_whitespace().next() {
-                    if let Some(enabled) = parse_bool(value) {
-                        record.enabled = Some(enabled);
-                        record.enabled_seen = true;
-                    }
-                }
-                continue;
-            }
-
-            if let Some(rest) = trimmed.strip_prefix("Status:") {
-                if let Some(value) = rest.trim().split_whitespace().next() {
-                    let value = value.to_ascii_lowercase();
-                    if value.starts_with("connected") {
-                        record.status_connected = Some(true);
-                        record.status_seen = true;
-                    } else if value.starts_with("disconnected") {
-                        record.status_connected = Some(false);
-                        record.status_seen = true;
-                    }
-                }
-            }
-        }
-    }
-
-    commit_output(&mut current, &mut best, display_name);
-
-    best
-}
-
-fn is_output_header(line: &str) -> bool {
-    line.chars()
-        .next()
-        .map(|c| !c.is_whitespace())
-        .unwrap_or(false)
-}
-
-fn parse_bool(value: &str) -> Option<bool> {
-    match value.to_ascii_lowercase().as_str() {
-        "yes" | "on" | "true" | "1" => Some(true),
-        "no" | "off" | "false" | "0" => Some(false),
-        _ => None,
-    }
-}
-
-fn commit_output(
-    current: &mut Option<OutputRecord>,
-    best: &mut Option<ScreenDetection>,
-    display_name: Option<&str>,
-) {
-    let Some(record) = current.take() else {
-        return;
-    };
-
-    if let Some(target_name) = display_name {
-        if record.name == target_name {
-            if let Some(candidate) = record.into_detection(true) {
-                *best = Some(candidate);
-            }
-            return;
-        }
-    }
-
-    if best.is_some() {
-        return;
-    }
-
-    if let Some(candidate) = record.into_detection(false) {
-        *best = Some(candidate);
-    }
-}
-
-struct OutputRecord {
-    name: String,
-    is_internal: bool,
-    enabled: Option<bool>,
-    enabled_seen: bool,
-    status_connected: Option<bool>,
-    status_seen: bool,
-}
-
-impl OutputRecord {
-    fn new(name: &str) -> Self {
-        Self {
-            name: name.to_owned(),
-            is_internal: name.starts_with("eDP") || name.starts_with("LVDS"),
-            enabled: None,
-            enabled_seen: false,
-            status_connected: None,
-            status_seen: false,
-        }
-    }
-
-    fn into_detection(self, allow_disconnected: bool) -> Option<ScreenDetection> {
-        if self.is_internal {
-            return None;
-        }
-
-        let connected = self.is_connected();
-
-        if !connected && !allow_disconnected {
-            return None;
-        }
-
-        let state = self
-            .enabled
-            .map(|enabled| {
-                if enabled {
-                    ScreenState::On
-                } else {
-                    ScreenState::Off
-                }
-            })
-            .unwrap_or_else(|| {
-                if connected {
-                    ScreenState::On
-                } else {
-                    ScreenState::Off
-                }
-            });
-
-        Some(ScreenDetection {
-            name: self.name,
-            state,
+            socket_path,
         })
     }
 
-    fn is_connected(&self) -> bool {
-        if self.status_seen {
-            self.status_connected.unwrap_or(false)
-        } else if self.enabled_seen {
-            self.enabled.unwrap_or(false)
-        } else {
-            false
+    fn configure(&self, command: &mut Command) {
+        command.env("XDG_RUNTIME_DIR", &self.runtime_dir);
+        command.env("SWAYSOCK", &self.socket_path);
+    }
+}
+
+fn is_socket(path: &Path) -> Result<bool> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.file_type().is_socket()),
+        Err(err) => {
+            if err.kind() == io::ErrorKind::NotFound {
+                Ok(false)
+            } else {
+                Err(err).with_context(|| format!("failed to inspect {}", path.display()))
+            }
         }
     }
+}
+
+fn find_sway_socket(runtime_dir: &Path) -> Result<PathBuf> {
+    let mut entries: Vec<PathBuf> = fs::read_dir(runtime_dir)
+        .with_context(|| format!("failed to list {}", runtime_dir.display()))?
+        .filter_map(|entry| {
+            entry.ok().map(|e| e.path()).filter(|path| {
+                match path.file_name().and_then(|name| name.to_str()) {
+                    Some(name) => name.starts_with("sway-ipc.") && name.ends_with(".sock"),
+                    None => false,
+                }
+            })
+        })
+        .collect();
+
+    entries.sort();
+    for candidate in entries {
+        if is_socket(&candidate)? {
+            return Ok(candidate);
+        }
+    }
+
+    bail!(
+        "failed to locate sway IPC socket in {}",
+        runtime_dir.display()
+    )
+}
+
+fn parse_sway_outputs(stdout: &[u8], display_name: Option<&str>) -> Result<ScreenDetection> {
+    let outputs: Vec<SwayOutput> =
+        serde_json::from_slice(stdout).context("failed to parse swaymsg outputs")?;
+
+    let mut candidates = outputs.iter().filter(|output| output.power.is_some());
+
+    let record = if let Some(name) = display_name {
+        outputs
+            .iter()
+            .find(|output| output.name == name)
+            .with_context(|| format!("no sway output named '{name}'"))?
+    } else {
+        candidates
+            .next()
+            .context("no sway outputs expose a power state")?
+    };
+
+    let power = record
+        .power
+        .as_ref()
+        .with_context(|| format!("sway output '{}' did not report power state", record.name))?;
+
+    let state = match power.as_str() {
+        "on" => ScreenState::On,
+        "off" => ScreenState::Off,
+        value => bail!("unexpected sway output power value: {value}"),
+    };
+
+    Ok(ScreenDetection {
+        name: record.name.clone(),
+        state,
+    })
+}
+
+#[derive(Deserialize)]
+struct SwayOutput {
+    name: String,
+    power: Option<String>,
 }
 
 fn perform_action(action: Action, runtime: &mut Runtime) {
@@ -1582,10 +1438,11 @@ impl ButtonTracker {
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, ButtonTracker, CommandExecutor, CommandSpec, ControlSocket, Durations, FrameState,
-        Runtime, SchedulerCommand, SchedulerConfig, ScreenDetection, ScreenDetector, ScreenRuntime,
-        ScreenState, TransitionSource, UnixControlSocket, ViewerMode, ensure_wayland_env,
-        parse_wlr_randr_outputs, scheduler_loop,
+        Action, ButtonTracker, CommandExecutor, CommandSpec, ControlSocket, Durations,
+        FORCE_SHUTDOWN_FLAG, FrameState, NO_ASK_PASSWORD_FLAG, Runtime, SchedulerCommand,
+        SchedulerConfig, ScreenDetection, ScreenDetector, ScreenRuntime, ScreenState,
+        SwayEnvironment, TransitionSource, UnixControlSocket, ViewerMode, configure_shutdown_args,
+        parse_sway_outputs, scheduler_loop,
     };
     use config_model::AwakeScheduleConfig;
     use serde_yaml::from_str;
@@ -1593,7 +1450,6 @@ mod tests {
     use std::io::Read;
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
-    use std::process::Command;
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -1628,13 +1484,10 @@ mod tests {
     }
 
     const SAMPLE_OUTPUT: &str = r#"
-HDMI-A-1 "Primary" (normal left inverted right x axis y axis)
-    Enabled: yes
-    Status: connected
-
-HDMI-A-2 "Sleeper" (normal left inverted right x axis y axis)
-    Enabled: no
-    Status: disconnected
+[
+  {"name": "HDMI-A-1", "power": "on"},
+  {"name": "HDMI-A-2", "power": "off"}
+]
 "#;
 
     fn durations() -> Durations {
@@ -1677,6 +1530,25 @@ awake-scheduled: {}
         .expect("valid schedule yaml");
         schedule.validate().expect("valid schedule");
         schedule
+    }
+
+    #[test]
+    fn configure_shutdown_args_adds_force_flags() {
+        let mut args = vec![String::from("poweroff")];
+        configure_shutdown_args(&mut args, true);
+        assert!(args.iter().any(|arg| arg == FORCE_SHUTDOWN_FLAG));
+        assert!(args.iter().any(|arg| arg == NO_ASK_PASSWORD_FLAG));
+    }
+
+    #[test]
+    fn configure_shutdown_args_removes_force_flags() {
+        let mut args = vec![
+            String::from("poweroff"),
+            FORCE_SHUTDOWN_FLAG.to_string(),
+            NO_ASK_PASSWORD_FLAG.to_string(),
+        ];
+        configure_shutdown_args(&mut args, false);
+        assert_eq!(args, vec![String::from("poweroff")]);
     }
 
     #[derive(Default, Clone)]
@@ -1725,31 +1597,6 @@ awake-scheduled: {}
                 .lock()
                 .expect("recording control socket poisoned")
                 .push((state, Instant::now()));
-            Ok(())
-        }
-    }
-
-    #[derive(Default, Clone)]
-    struct RecordingCommandExecutor {
-        calls: Arc<Mutex<Vec<CommandSpec>>>,
-    }
-
-    impl RecordingCommandExecutor {
-        fn new() -> Self {
-            Self::default()
-        }
-
-        fn calls(&self) -> Arc<Mutex<Vec<CommandSpec>>> {
-            Arc::clone(&self.calls)
-        }
-    }
-
-    impl CommandExecutor for RecordingCommandExecutor {
-        fn execute(&self, command: &CommandSpec) -> super::Result<()> {
-            self.calls
-                .lock()
-                .expect("recording executor poisoned")
-                .push(command.clone());
             Ok(())
         }
     }
@@ -1812,57 +1659,33 @@ awake-scheduled: {}
     }
 
     #[test]
-    fn ensure_wayland_env_reports_missing_socket() {
+    fn sway_environment_uses_explicit_socket() {
         let _lock = ENV_LOCK.lock().expect("env lock poisoned");
         let runtime = tempdir().expect("tempdir");
         let runtime_path = runtime.path().to_path_buf();
+        let socket_path = runtime_path.join("sway-ipc.1234.1.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("socket created");
         let _runtime_guard = EnvGuard::replace("XDG_RUNTIME_DIR", Some(runtime_path.as_os_str()));
-        let _display_guard = EnvGuard::replace("WAYLAND_DISPLAY", None);
+        let _socket_guard = EnvGuard::replace("SWAYSOCK", Some(socket_path.as_os_str()));
 
-        let mut command = Command::new("true");
-        let discovery = ensure_wayland_env(&mut command).expect("env configured");
-
-        assert_eq!(discovery.runtime_dir, runtime_path);
-        assert!(discovery.socket.is_none());
-
-        let envs: Vec<(OsString, Option<OsString>)> = command
-            .get_envs()
-            .map(|(key, value)| (key.to_os_string(), value.map(|v| v.to_os_string())))
-            .collect();
-        assert!(envs.iter().any(|(key, value)| {
-            key.as_os_str() == OsStr::new("XDG_RUNTIME_DIR")
-                && value.as_ref().map(|v| v.as_os_str()) == Some(runtime_path.as_os_str())
-        }));
-        assert!(
-            envs.iter()
-                .all(|(key, _)| key.as_os_str() != OsStr::new("WAYLAND_DISPLAY"))
-        );
+        let env = SwayEnvironment::prepare().expect("env configured");
+        assert_eq!(env.runtime_dir, runtime_path);
+        assert_eq!(env.socket_path, socket_path);
     }
 
     #[test]
-    fn ensure_wayland_env_picks_existing_socket() {
+    fn sway_environment_discovers_socket_in_runtime() {
         let _lock = ENV_LOCK.lock().expect("env lock poisoned");
         let runtime = tempdir().expect("tempdir");
         let runtime_path = runtime.path().to_path_buf();
-        let socket_path = runtime_path.join("wayland-test");
+        let socket_path = runtime_path.join("sway-ipc.1234.2.sock");
         let _listener = UnixListener::bind(&socket_path).expect("socket created");
         let _runtime_guard = EnvGuard::replace("XDG_RUNTIME_DIR", Some(runtime_path.as_os_str()));
-        let _display_guard = EnvGuard::replace("WAYLAND_DISPLAY", None);
+        let _socket_guard = EnvGuard::replace("SWAYSOCK", None);
 
-        let mut command = Command::new("true");
-        let discovery = ensure_wayland_env(&mut command).expect("env configured");
-
-        assert_eq!(discovery.runtime_dir, runtime_path);
-        assert_eq!(discovery.socket, Some(OsString::from("wayland-test")));
-
-        let envs: Vec<(OsString, Option<OsString>)> = command
-            .get_envs()
-            .map(|(key, value)| (key.to_os_string(), value.map(|v| v.to_os_string())))
-            .collect();
-        assert!(envs.iter().any(|(key, value)| {
-            key.as_os_str() == OsStr::new("WAYLAND_DISPLAY")
-                && value.as_ref().map(|v| v.as_os_str()) == Some(OsStr::new("wayland-test"))
-        }));
+        let env = SwayEnvironment::prepare().expect("env configured");
+        assert_eq!(env.runtime_dir, runtime_path);
+        assert_eq!(env.socket_path, socket_path);
     }
 
     #[test]
@@ -1891,14 +1714,14 @@ awake-scheduled: {}
     #[test]
     fn parse_defaults_to_first_connected_output() {
         let detection =
-            parse_wlr_randr_outputs(SAMPLE_OUTPUT, None).expect("expected connected output");
+            parse_sway_outputs(SAMPLE_OUTPUT.as_bytes(), None).expect("expected connected output");
         assert_eq!(detection.name, "HDMI-A-1");
         assert_eq!(detection.state, ScreenState::On);
     }
 
     #[test]
     fn parse_respects_disabled_named_output() {
-        let detection = parse_wlr_randr_outputs(SAMPLE_OUTPUT, Some("HDMI-A-2"))
+        let detection = parse_sway_outputs(SAMPLE_OUTPUT.as_bytes(), Some("HDMI-A-2"))
             .expect("expected named output");
         assert_eq!(detection.name, "HDMI-A-2");
         assert_eq!(detection.state, ScreenState::Off);
