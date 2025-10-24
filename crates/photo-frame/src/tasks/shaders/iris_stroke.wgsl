@@ -2,8 +2,8 @@
 // Matches the SVG construction (arcs from equal-radius disks).
 // Stroke width is in pixels and kept visually constant with proper AA.
 
-let PI  : f32 = 3.1415926535897932384626433832795;
-let TAU : f32 = 6.283185307179586476925286766559;
+const PI  : f32 = 3.1415926535897932384626433832795;
+const TAU : f32 = 6.283185307179586476925286766559;
 
 fn rot2(p: vec2<f32>, a: f32) -> vec2<f32> {
   let c = cos(a);
