@@ -1,5 +1,5 @@
 use rand::{SeedableRng, seq::SliceRandom};
-use rust_photo_frame::config::Configuration;
+use rust_photo_frame::config::{Configuration, GlobalPhotoSettings};
 use rust_photo_frame::events::{InvalidPhoto, InventoryEvent};
 use rust_photo_frame::tasks::files;
 use std::fs;
@@ -22,7 +22,10 @@ async fn startup_recursive_scan_emits_photo_added() {
 
     let cfg = Configuration {
         photo_library_path: lib.clone(),
-        oversample: 1.0,
+        global_photo_settings: GlobalPhotoSettings {
+            oversample: 1.0,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -70,7 +73,10 @@ async fn invalid_photo_is_deleted_and_emits_removed() {
 
     let cfg = Configuration {
         photo_library_path: lib.clone(),
-        oversample: 1.0,
+        global_photo_settings: GlobalPhotoSettings {
+            oversample: 1.0,
+            ..Default::default()
+        },
         ..Default::default()
     };
 

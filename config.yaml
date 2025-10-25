@@ -58,11 +58,14 @@ transition:
       reveal-portion: 0.55
       stripe-count: 24
       flash-color: [0, 0, 0]
-# Dwell time (ms) the current image remains fully displayed before the next transition
-dwell-ms: 2000
-
-# GPU render oversample factor (1.0 = native to screen)
-oversample: 1.0
+# Global photo settings
+global-photo-settings:
+  # Dwell time (ms) the current image remains fully displayed before the next transition
+  dwell-ms: 2000
+  # GPU render oversample factor (1.0 = native to screen)
+  oversample: 1.0
+  # Maximum enlargement applied when fitting small photos
+  max-upscale-factor: 1.0
 
 # Greeting screen displayed while the first images are prepared
 greeting-screen:
@@ -144,7 +147,6 @@ matting:
         - [0, 0, 0]
         - [32, 32, 32]
       minimum-mat-percentage: 0.0
-      max-upscale-factor: 1.0
     - kind: blur
       minimum-mat-percentage: 3.5
       sigma: 32.0

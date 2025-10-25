@@ -21,12 +21,31 @@ pub use config_model::{
 pub const DEFAULT_CONTROL_SOCKET_PATH: &str = "/run/photo-frame/control.sock";
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
+pub struct GlobalPhotoSettings {
+    /// GPU render oversample factor relative to screen size (1.0 = native).
+    pub oversample: f32,
+    /// Time an image remains fully visible before starting a transition, in ms.
+    pub dwell_ms: u64,
+    /// Global maximum enlargement applied to the photo when fitting inside the mat.
+    pub max_upscale_factor: f32,
+}
+
+impl Default for GlobalPhotoSettings {
+    fn default() -> Self {
+        Self {
+            oversample: 1.0,
+            dwell_ms: 2000,
+            max_upscale_factor: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct MattingOptions {
-    #[serde(default = "MattingOptions::default_minimum_percentage")]
+    #[serde(default = "MattingOptions::default_minimum_percentage")] 
     pub minimum_mat_percentage: f32,
-    #[serde(default = "MattingOptions::default_max_upscale_factor")]
-    pub max_upscale_factor: f32,
     #[serde(default, flatten)]
     pub style: MattingMode,
     #[serde(default, skip_deserializing)]
@@ -553,7 +572,6 @@ impl Default for MattingOptions {
     fn default() -> Self {
         Self {
             minimum_mat_percentage: Self::default_minimum_percentage(),
-            max_upscale_factor: Self::default_max_upscale_factor(),
             style: MattingMode::default(),
             runtime: MattingRuntime::default(),
         }
@@ -565,14 +583,7 @@ impl MattingOptions {
         0.0
     }
 
-    const fn default_max_upscale_factor() -> f32 {
-        1.0
-    }
-
     pub fn prepare_runtime(&mut self) -> Result<()> {
-        self.max_upscale_factor = self
-            .max_upscale_factor
-            .max(Self::default_max_upscale_factor());
         self.runtime = MattingRuntime::default();
         if let MattingMode::FixedColor { colors, .. } = &self.style {
             ensure!(
@@ -672,9 +683,6 @@ impl MattingOptions {
             minimum_mat_percentage: base
                 .minimum_mat_percentage
                 .unwrap_or_else(Self::default_minimum_percentage),
-            max_upscale_factor: base
-                .max_upscale_factor
-                .unwrap_or_else(Self::default_max_upscale_factor),
             style,
             runtime: MattingRuntime::default(),
         }
@@ -694,7 +702,6 @@ impl MattingOptions {
 #[derive(Default, Clone)]
 struct MattingOptionBuilder {
     minimum_mat_percentage: Option<f32>,
-    max_upscale_factor: Option<f32>,
     fixed_colors: Option<Vec<[u8; 3]>>,
     sigma: Option<f32>,
     sample_scale: Option<f32>,
@@ -753,12 +760,6 @@ where
             }
             builder.minimum_mat_percentage = Some(inline_value_to::<f32, E>(value)?);
         }
-        "max-upscale-factor" => {
-            if builder.max_upscale_factor.is_some() {
-                return Err(de::Error::duplicate_field("max-upscale-factor"));
-            }
-            builder.max_upscale_factor = Some(inline_value_to::<f32, E>(value)?);
-        }
         other => match kind {
             MattingKind::FixedColor => match other {
                 "colors" => {
@@ -781,7 +782,6 @@ where
                             "colors",
                             "color",
                             "minimum-mat-percentage",
-                            "max-upscale-factor",
                         ],
                     ));
                 }
@@ -813,7 +813,6 @@ where
                             "sample-scale",
                             "backend",
                             "minimum-mat-percentage",
-                            "max-upscale-factor",
                         ],
                     ));
                 }
@@ -866,7 +865,6 @@ where
                             "warp-period-px",
                             "weft-period-px",
                             "minimum-mat-percentage",
-                            "max-upscale-factor",
                         ],
                     ));
                 }
@@ -892,7 +890,6 @@ where
                             "path",
                             "fit",
                             "minimum-mat-percentage",
-                            "max-upscale-factor",
                         ],
                     ));
                 }
@@ -2272,19 +2269,17 @@ fn apply_transition_inline_field<E: de::Error>(
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct Configuration {
     /// Root directory to scan recursively for images.
     pub photo_library_path: PathBuf,
     /// Unix domain socket accepting runtime control commands.
     #[serde(default = "Configuration::default_control_socket_path")]
     pub control_socket_path: PathBuf,
-    /// GPU render oversample factor relative to screen size (1.0 = native).
-    pub oversample: f32,
+    /// Global photo render sizing/timing controls.
+    pub global_photo_settings: GlobalPhotoSettings,
     /// Transition behavior between successive photos.
     pub transition: TransitionConfig,
-    /// Time an image remains fully visible before starting a transition, in ms.
-    pub dwell_ms: u64,
     /// How many images the viewer preloads/keeps pending.
     pub viewer_preload_count: usize,
     /// Maximum number of concurrent image decodes in the loader.
@@ -2304,6 +2299,11 @@ pub struct Configuration {
     /// Optional wake/sleep schedule used when a control daemon is absent.
     #[serde(default)]
     pub awake_schedule: Option<AwakeScheduleConfig>,
+    /// Placeholder for the hardware button daemon's config block so that
+    /// rust-photo-frame can coexist with a shared config file without
+    /// accepting other unknown keys.
+    #[serde(default)]
+    pub buttond: Option<YamlValue>,
 }
 
 impl Configuration {
@@ -2322,8 +2322,14 @@ impl Configuration {
             self.loader_max_concurrent_decodes > 0,
             "loader-max-concurrent-decodes must be greater than zero"
         );
-        ensure!(self.oversample > 0.0, "oversample must be positive");
-        ensure!(self.dwell_ms > 0, "dwell-ms must be greater than zero");
+        ensure!(
+            self.global_photo_settings.oversample > 0.0,
+            "oversample must be positive"
+        );
+        ensure!(
+            self.global_photo_settings.dwell_ms > 0,
+            "dwell-ms must be greater than zero"
+        );
         ensure!(
             !self.control_socket_path.as_os_str().is_empty(),
             "control-socket-path must not be empty"
@@ -2362,9 +2368,8 @@ impl Default for Configuration {
         Self {
             photo_library_path: PathBuf::new(),
             control_socket_path: Self::default_control_socket_path(),
-            oversample: 1.0,
+            global_photo_settings: GlobalPhotoSettings::default(),
             transition: TransitionConfig::default(),
-            dwell_ms: 2000,
             viewer_preload_count: 3,
             loader_max_concurrent_decodes: 4,
             startup_shuffle_seed: None,
@@ -2374,6 +2379,7 @@ impl Default for Configuration {
             greeting_screen: GreetingScreenConfig::default(),
             sleep_screen: SleepScreenConfig::default(),
             awake_schedule: None,
+            buttond: None,
         }
     }
 }

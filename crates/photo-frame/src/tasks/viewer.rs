@@ -162,6 +162,7 @@ struct MatParams {
     screen_h: u32,
     oversample: f32,
     max_dim: u32,
+    max_upscale_factor: f32,
     matting: MattingOptions,
 }
 
@@ -349,6 +350,7 @@ struct MattingBridge<'a> {
     surface: Option<SurfaceState>,
     matting: &'a MattingConfig,
     oversample: f32,
+    max_upscale_factor: f32,
     mat_pipeline: &'a MattingPipeline,
 }
 
@@ -407,6 +409,7 @@ impl<'a> MattingBridge<'a> {
                 screen_h: surface.height.max(1),
                 oversample: self.oversample,
                 max_dim: surface.max_texture_dimension,
+                max_upscale_factor: self.max_upscale_factor,
                 matting: selected.option.clone(),
             };
             let QueuedImage {
@@ -472,6 +475,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         screen_h,
         oversample,
         max_dim,
+        max_upscale_factor,
         matting,
     } = params;
     if screen_w == 0 || screen_h == 0 {
@@ -480,7 +484,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
 
     let (canvas_w, canvas_h) = compute_canvas_size(screen_w, screen_h, oversample, max_dim);
     let margin = (matting.minimum_mat_percentage / 100.0).clamp(0.0, 0.45);
-    let max_upscale = matting.max_upscale_factor.max(1.0);
+    let max_upscale = max_upscale_factor.max(1.0);
     let avg_color = average_color(&src);
 
     if let MattingMode::Studio {
@@ -1131,6 +1135,7 @@ pub fn run_windowed(
         mode: Option<ViewerMode>,
         preload_count: usize,
         oversample: f32,
+        max_upscale_factor: f32,
         matting: MattingConfig,
         mat_pipeline: MattingPipeline,
         mat_inflight: usize,
@@ -1246,6 +1251,7 @@ pub fn run_windowed(
                 surface,
                 matting: &self.matting,
                 oversample: self.oversample,
+                max_upscale_factor: self.max_upscale_factor,
                 mat_pipeline: &self.mat_pipeline,
             };
             let mut enqueue_matting = move |wake: &mut scenes::WakeScene| {
@@ -1323,6 +1329,7 @@ pub fn run_windowed(
                 surface,
                 matting: &self.matting,
                 oversample: self.oversample,
+                max_upscale_factor: self.max_upscale_factor,
                 mat_pipeline: &self.mat_pipeline,
             };
             let mut enqueue_matting = move |wake: &mut scenes::WakeScene| {
@@ -1915,6 +1922,7 @@ pub fn run_windowed(
                 surface,
                 matting: &self.matting,
                 oversample: self.oversample,
+                max_upscale_factor: self.max_upscale_factor,
                 mat_pipeline: &self.mat_pipeline,
             };
             bridge.queue_for_wake(wake);
@@ -2615,7 +2623,10 @@ pub fn run_windowed(
         })
     };
     let control_driver = tokio::spawn(drive_viewer_events(command_rx, control_cancel, proxy));
-    let initial_wake = scenes::WakeScene::new(cfg.dwell_ms, cfg.transition.clone());
+    let initial_wake = scenes::WakeScene::new(
+        cfg.global_photo_settings.dwell_ms,
+        cfg.transition.clone(),
+    );
     let mut app = App {
         from_loader,
         to_manager_displayed,
@@ -2627,7 +2638,8 @@ pub fn run_windowed(
         pending_scene_enter: true,
         mode: Some(ViewerMode::new(ViewerModeKind::Greeting, initial_wake)),
         preload_count: cfg.viewer_preload_count,
-        oversample: cfg.oversample,
+        oversample: cfg.global_photo_settings.oversample,
+        max_upscale_factor: cfg.global_photo_settings.max_upscale_factor,
         matting: cfg.matting.clone(),
         mat_pipeline,
         mat_inflight: 0,
@@ -3103,6 +3115,7 @@ pub mod testkit {
         mat_pipeline: MattingPipeline,
         wake: scenes::WakeScene,
         oversample: f32,
+        max_upscale_factor: f32,
         matting: MattingConfig,
         surface_configured: bool,
         surface: Option<SurfaceState>,
@@ -3134,6 +3147,7 @@ pub mod testkit {
                 mat_pipeline: MattingPipeline::new(1, preload_count.max(2)),
                 wake: scenes::WakeScene::new(dwell_ms, transition_cfg),
                 oversample,
+                max_upscale_factor: 1.0,
                 matting,
                 surface_configured: false,
                 surface: None,
@@ -3171,6 +3185,7 @@ pub mod testkit {
                 surface: surface_state_for_queue(self.surface_configured, self.surface),
                 matting: &self.matting,
                 oversample: self.oversample,
+                max_upscale_factor: self.max_upscale_factor,
                 mat_pipeline: &self.mat_pipeline,
             };
             bridge.queue_for_wake(&mut self.wake);
@@ -3324,6 +3339,7 @@ mod tests {
             surface: Some(SurfaceState::new(1, 1, 4096)),
             matting: &matting,
             oversample: 1.0,
+            max_upscale_factor: 1.0,
             mat_pipeline: &mat_pipeline,
         };
         let mut wake = scenes::WakeScene::new(5_000, TransitionConfig::default());

@@ -1,7 +1,7 @@
 use rand::{SeedableRng, rngs::StdRng};
 use rust_photo_frame::config::{
-    Configuration, MattingKind, MattingMode, MattingSelection, PhotoEffectOptions, StudioMatColor,
-    TransitionKind, TransitionSelection,
+    Configuration, GlobalPhotoSettings, MattingKind, MattingMode, MattingSelection,
+    PhotoEffectOptions, StudioMatColor, TransitionKind, TransitionSelection,
 };
 use std::path::PathBuf;
 
@@ -12,18 +12,19 @@ photo-library-path: "/photos"
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(cfg.photo_library_path, PathBuf::from("/photos"));
-    assert!((cfg.oversample - 1.0).abs() < f32::EPSILON);
+    assert!((cfg.global_photo_settings.oversample - 1.0).abs() < f32::EPSILON);
 }
 
 #[test]
 fn parse_with_oversample() {
     let yaml = r#"
 photo-library-path: "/photos"
-oversample: 1.5
+global-photo-settings:
+  oversample: 1.5
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(cfg.photo_library_path, PathBuf::from("/photos"));
-    assert!((cfg.oversample - 1.5).abs() < f32::EPSILON);
+    assert!((cfg.global_photo_settings.oversample - 1.5).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -954,7 +955,10 @@ fn validated_rejects_invalid_numeric_ranges() {
     assert!(cfg.validated().is_err());
 
     let cfg = Configuration {
-        oversample: 0.0,
+        global_photo_settings: GlobalPhotoSettings {
+            oversample: 0.0,
+            ..Default::default()
+        },
         ..Default::default()
     };
     assert!(cfg.validated().is_err());

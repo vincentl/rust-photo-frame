@@ -19,10 +19,12 @@ transition:
   active:
     - kind: fade
       duration-ms: 400
-dwell-ms: 2000 # Time an image remains fully visible (ms)
+global-photo-settings:
+  dwell-ms: 2000 # Time an image remains fully visible (ms)
+  oversample: 1.0 # GPU render oversample vs. screen size
+  max-upscale-factor: 1.0 # Limit for enlarging small images
 viewer-preload-count: 3 # Images the viewer preloads; also sets viewer channel capacity
 loader-max-concurrent-decodes: 4 # Concurrent decodes in the loader
-oversample: 1.0 # GPU render oversample vs. screen size
 startup-shuffle-seed: null # Optional deterministic seed for initial shuffle
 
 photo-effect:
@@ -41,7 +43,6 @@ matting:
   active:
     - kind: fixed-color
       minimum-mat-percentage: 0.0 # % of each screen edge reserved for the mat border
-      max-upscale-factor: 1.0 # Limit for enlarging images when applying mats
       colors: [[0, 0, 0], [32, 32, 32]]
     - kind: blur
       minimum-mat-percentage: 3.5
@@ -59,8 +60,8 @@ Use the quick reference below to locate the knobs you care about, then dive into
 | Role                   | Keys                                                                  |
 | ---------------------- | --------------------------------------------------------------------- |
 | **Required**           | `photo-library-path`                                                  |
-| **Core timing**        | `transition`, `dwell-ms`, `playlist`                                  |
-| **Performance tuning** | `viewer-preload-count`, `loader-max-concurrent-decodes`, `oversample` |
+| **Core timing**        | `transition`, `global-photo-settings`, `playlist`                      |
+| **Performance tuning** | `viewer-preload-count`, `loader-max-concurrent-decodes`, `global-photo-settings.oversample` |
 | **Deterministic runs** | `startup-shuffle-seed`                                                |
 | **Presentation**       | `photo-effect`, `matting`                                             |
 | **Greeting Screen**    | `greeting-screen`                                                     |
@@ -92,12 +93,15 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Accepted values & defaults:** Provide a mapping with the keys documented in [Transition configuration](#transition-configuration). When omitted the runtime behaves as `{ selection: fixed, active: [{ kind: fade }] }` with the standard fade options.
 - **Effect on behavior:** Adjust the duration, direction, randomness, or transition family to match the feel you want—from subtle fades to bold pushes or e‑ink style reveals.
 
-### `dwell-ms`
+### `global-photo-settings`
 
-- **Purpose:** Defines how long the current photo remains fully visible before a transition kicks in.
-- **Required?** Optional.
-- **Accepted values & defaults:** Positive integer in milliseconds; default `2000`. Validation rejects zero or negative values.
-- **Effect on behavior:** Raising the value slows the slideshow; lowering it speeds up how quickly the frame advances.
+- **Purpose:** Collects core photo timing and sizing parameters.
+- **Required?** Optional; sensible defaults apply when omitted.
+- **Keys and defaults:**
+  - `dwell-ms` (u64, default `2000`): How long to show the current photo before transitioning. Must be positive.
+  - `oversample` (float, default `1.0`): GPU render oversample relative to screen size. Must be positive.
+  - `max-upscale-factor` (float, default `1.0`): Maximum enlargement applied when fitting small photos inside the mat.
+- **Effect on behavior:** Tune slideshow pacing (`dwell-ms`), GPU workload and perceived sharpness (`oversample`), and how aggressively small photos are enlarged (`max-upscale-factor`).
 
 ### `viewer-preload-count`
 
@@ -113,7 +117,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Accepted values & defaults:** Positive integer; default `4`. Validation enforces a minimum of one.
 - **Effect on behavior:** Increasing the cap can keep the pipeline fed on multi-core systems; decreasing it prevents lower-powered CPUs from thrashing under heavy decode loads.
 
-### `oversample`
+### `global-photo-settings.oversample`
 
 - **Purpose:** Adjusts the off-screen render resolution relative to the display.
 - **Required?** Optional.
@@ -417,7 +421,6 @@ When `selection` is omitted, the runtime infers it: a single canonical slot beco
 Each active entry understands the shared settings below:
 
 - **`minimum-mat-percentage`** (float, default `0.0`): Fraction of each screen edge reserved for the mat border. The renderer clamps values to `0–45%`.
-- **`max-upscale-factor`** (float, default `1.0`): Maximum enlargement applied to the photo when fitting inside the mat.
 
 The remaining controls depend on the mat `kind`:
 

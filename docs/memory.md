@@ -32,7 +32,7 @@ can spike.
    therefore multiply steady-state memory usage.【F:crates/photo-frame/src/processing/fixed_image.rs†L13-L123】
 
 In the current configuration it is common to have three frames in flight. On a
-3840×2160 display with `oversample: 1.0`, a single RGBA image consumes roughly
+3840×2160 display with `global-photo-settings.oversample: 1.0`, a single RGBA image consumes roughly
 33 MiB. With the copies above, a steady-state queue can therefore exceed
 400 MiB—before accounting for GPU allocations, font caches, and the rest of the
 system. That pressure encourages the kernel OOM killer to target unrelated
