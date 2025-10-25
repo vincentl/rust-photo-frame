@@ -1,1 +1,1 @@
-// Tessellated iris removed; WGSL-only pipeline in viewer shaders.
+// Viewer transitions are implemented entirely in WGSL shaders.

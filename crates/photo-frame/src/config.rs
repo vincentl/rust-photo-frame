@@ -1589,12 +1589,11 @@ pub enum TransitionKind {
     Wipe,
     Push,
     EInk,
-    Iris,
 }
 
 impl TransitionKind {
-    const ALL: &'static [Self] = &[Self::Fade, Self::Wipe, Self::Push, Self::EInk, Self::Iris];
-    const NAMES: &'static [&'static str] = &["fade", "wipe", "push", "e-ink", "iris"];
+    const ALL: &'static [Self] = &[Self::Fade, Self::Wipe, Self::Push, Self::EInk];
+    const NAMES: &'static [&'static str] = &["fade", "wipe", "push", "e-ink"];
 
     fn as_str(&self) -> &'static str {
         match self {
@@ -1602,7 +1601,6 @@ impl TransitionKind {
             Self::Wipe => "wipe",
             Self::Push => "push",
             Self::EInk => "e-ink",
-            Self::Iris => "iris",
         }
     }
 
@@ -1612,7 +1610,6 @@ impl TransitionKind {
             Self::Wipe => 2,
             Self::Push => 3,
             Self::EInk => 4,
-            Self::Iris => 5,
         }
     }
 }
@@ -1772,7 +1769,6 @@ impl TransitionOptions {
             TransitionKind::Wipe => (400, TransitionMode::Wipe(WipeTransition::default())),
             TransitionKind::Push => (400, TransitionMode::Push(PushTransition::default())),
             TransitionKind::EInk => (1600, TransitionMode::EInk(EInkTransition::default())),
-            TransitionKind::Iris => (900, TransitionMode::Iris(IrisTransition::default())),
         };
         Self {
             kind,
@@ -1825,9 +1821,6 @@ impl TransitionOptions {
                     eink.stripe_count = 1;
                 }
                 eink.flash_count = eink.flash_count.min(6);
-            }
-            TransitionMode::Iris(iris) => {
-                iris.normalize(self.kind)?;
             }
         }
         Ok(())
@@ -1897,20 +1890,6 @@ impl TransitionOptions {
                     flash_color: builder.eink_flash_color.unwrap_or(defaults.flash_color),
                 })
             }
-            TransitionKind::Iris => {
-                let defaults = IrisTransition::default();
-                TransitionMode::Iris(IrisTransition {
-                    blades: builder.iris_blades.unwrap_or(defaults.blades),
-                    rotate_radians: builder
-                        .iris_rotate_radians
-                        .unwrap_or(defaults.rotate_radians),
-                    direction: builder.iris_direction.unwrap_or(defaults.direction),
-                    fill_rgba: builder.iris_fill_rgba.unwrap_or(defaults.fill_rgba),
-                    stroke_rgba: builder.iris_stroke_rgba.unwrap_or(defaults.stroke_rgba),
-                    stroke_width: builder.iris_stroke_width.unwrap_or(defaults.stroke_width),
-                    tolerance: builder.iris_tolerance.unwrap_or(defaults.tolerance),
-                })
-            }
         };
         let mut option = Self {
             kind,
@@ -1939,9 +1918,6 @@ impl TransitionOptions {
                 }
                 eink.flash_count = eink.flash_count.min(6);
             }
-            TransitionMode::Iris(iris) => {
-                iris.normalize(kind)?;
-            }
         }
 
         Ok(option)
@@ -1954,7 +1930,6 @@ pub enum TransitionMode {
     Wipe(WipeTransition),
     Push(PushTransition),
     EInk(EInkTransition),
-    Iris(IrisTransition),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2058,100 +2033,6 @@ impl Default for EInkTransition {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum IrisDirection {
-    Open,
-    Close,
-}
-
-impl Default for IrisDirection {
-    fn default() -> Self {
-        Self::Open
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct IrisTransition {
-    pub blades: u32,
-    pub rotate_radians: f32,
-    pub direction: IrisDirection,
-    pub fill_rgba: [f32; 4],
-    pub stroke_rgba: [f32; 4],
-    pub stroke_width: f32,
-    pub tolerance: f32,
-}
-
-impl Default for IrisTransition {
-    fn default() -> Self {
-        Self {
-            blades: 7,
-            rotate_radians: 0.9,
-            direction: IrisDirection::Open,
-            fill_rgba: [0.85, 0.85, 0.85, 1.0],
-            stroke_rgba: [0.10, 0.10, 0.10, 1.0],
-            stroke_width: 1.5,
-            tolerance: 0.25,
-        }
-    }
-}
-
-impl IrisTransition {
-    fn normalize(&mut self, kind: TransitionKind) -> Result<()> {
-        if self.blades < 3 {
-            self.blades = 3;
-        }
-        if self.blades > 12 {
-            self.blades = 12;
-        }
-        ensure!(
-            self.rotate_radians.is_finite(),
-            format!(
-                "transition option {} has non-finite iris.rotate-radians",
-                kind
-            )
-        );
-        let max_rotation = std::f32::consts::TAU;
-        self.rotate_radians = self.rotate_radians.clamp(0.0, max_rotation);
-        for (idx, channel) in self.fill_rgba.iter_mut().enumerate() {
-            ensure!(
-                channel.is_finite(),
-                format!(
-                    "transition option {} has non-finite iris.fill-rgba channel {}",
-                    kind, idx
-                )
-            );
-            *channel = channel.clamp(0.0, 1.0);
-        }
-        for (idx, channel) in self.stroke_rgba.iter_mut().enumerate() {
-            ensure!(
-                channel.is_finite(),
-                format!(
-                    "transition option {} has non-finite iris.stroke-rgba channel {}",
-                    kind, idx
-                )
-            );
-            *channel = channel.clamp(0.0, 1.0);
-        }
-        ensure!(
-            self.stroke_width.is_finite(),
-            format!(
-                "transition option {} has non-finite iris.stroke-width",
-                kind
-            )
-        );
-        if self.stroke_width < 0.0 {
-            self.stroke_width = 0.0;
-        }
-        ensure!(
-            self.tolerance.is_finite(),
-            format!("transition option {} has non-finite iris.tolerance", kind)
-        );
-        self.tolerance = self.tolerance.clamp(0.01, 2.0);
-        Ok(())
-    }
-}
-
 impl<'de> Deserialize<'de> for TransitionConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -2250,13 +2131,6 @@ struct TransitionOptionBuilder {
     eink_reveal_portion: Option<f32>,
     eink_stripe_count: Option<u32>,
     eink_flash_color: Option<[u8; 3]>,
-    iris_blades: Option<u32>,
-    iris_rotate_radians: Option<f32>,
-    iris_direction: Option<IrisDirection>,
-    iris_fill_rgba: Option<[f32; 4]>,
-    iris_stroke_rgba: Option<[f32; 4]>,
-    iris_stroke_width: Option<f32>,
-    iris_tolerance: Option<f32>,
 }
 
 impl TransitionOptionBuilder {
@@ -2376,27 +2250,6 @@ fn apply_transition_inline_field<E: de::Error>(
         "flash-color" if matches!(kind, TransitionKind::EInk) => {
             builder.eink_flash_color = Some(inline_value_to::<[u8; 3], E>(value)?);
         }
-        "blades" if matches!(kind, TransitionKind::Iris) => {
-            builder.iris_blades = Some(inline_value_to::<u32, E>(value)?);
-        }
-        "rotate-radians" if matches!(kind, TransitionKind::Iris) => {
-            builder.iris_rotate_radians = Some(inline_value_to::<f32, E>(value)?);
-        }
-        "direction" if matches!(kind, TransitionKind::Iris) => {
-            builder.iris_direction = Some(inline_value_to::<IrisDirection, E>(value)?);
-        }
-        "fill-rgba" if matches!(kind, TransitionKind::Iris) => {
-            builder.iris_fill_rgba = Some(inline_value_to::<[f32; 4], E>(value)?);
-        }
-        "stroke-rgba" if matches!(kind, TransitionKind::Iris) => {
-            builder.iris_stroke_rgba = Some(inline_value_to::<[f32; 4], E>(value)?);
-        }
-        "stroke-width" if matches!(kind, TransitionKind::Iris) => {
-            builder.iris_stroke_width = Some(inline_value_to::<f32, E>(value)?);
-        }
-        "tolerance" if matches!(kind, TransitionKind::Iris) => {
-            builder.iris_tolerance = Some(inline_value_to::<f32, E>(value)?);
-        }
         _ => {
             return Err(de::Error::unknown_field(
                 field,
@@ -2411,13 +2264,6 @@ fn apply_transition_inline_field<E: de::Error>(
                     "reveal-portion",
                     "stripe-count",
                     "flash-color",
-                    "blades",
-                    "rotate-radians",
-                    "direction",
-                    "fill-rgba",
-                    "stroke-rgba",
-                    "stroke-width",
-                    "tolerance",
                 ],
             ));
         }

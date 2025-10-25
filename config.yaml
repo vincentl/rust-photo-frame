@@ -58,16 +58,6 @@ transition:
       reveal-portion: 0.55
       stripe-count: 24
       flash-color: [0, 0, 0]
-    - kind: iris
-      duration-ms: 900
-      blades: 7
-      rotate-radians: 1.05
-      direction: open
-      fill-rgba: [0.85, 0.85, 0.85, 1.0]
-      stroke-rgba: [0.10, 0.10, 0.10, 1.0]
-      stroke-width: 1.5
-      tolerance: 0.25
-
 # Dwell time (ms) the current image remains fully displayed before the next transition
 dwell-ms: 2000
 

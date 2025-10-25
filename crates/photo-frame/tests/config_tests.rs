@@ -693,54 +693,6 @@ transition:
 }
 
 #[test]
-fn parse_inline_iris_transition() {
-    let yaml = r#"
-photo-library-path: "/photos"
-transition:
-  selection: fixed
-  active:
-    - kind: iris
-      duration-ms: 880
-      blades: 9
-      rotate-radians: 1.25
-      direction: close
-      fill-rgba: [0.75, 0.8, 0.85, 1.0]
-      stroke-rgba: [0.2, 0.25, 0.3, 1.0]
-      stroke-width: 2.0
-      tolerance: 0.2
-"#;
-
-    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    assert!(matches!(
-        cfg.transition.selection(),
-        TransitionSelection::Fixed(entry)
-            if entry.kind == TransitionKind::Iris && entry.index == 0
-    ));
-    let selected = cfg
-        .transition
-        .primary_selected()
-        .expect("expected iris transition option");
-    assert_eq!(selected.entry.kind, TransitionKind::Iris);
-    assert_eq!(selected.entry.index, 0);
-    assert_eq!(selected.option.duration().as_millis(), 880);
-    match selected.option.mode() {
-        rust_photo_frame::config::TransitionMode::Iris(cfg) => {
-            assert_eq!(cfg.blades, 9);
-            assert!((cfg.rotate_radians - 1.25).abs() < f32::EPSILON);
-            assert_eq!(
-                cfg.direction,
-                rust_photo_frame::config::IrisDirection::Close
-            );
-            assert_eq!(cfg.fill_rgba, [0.75, 0.8, 0.85, 1.0]);
-            assert_eq!(cfg.stroke_rgba, [0.2, 0.25, 0.3, 1.0]);
-            assert!((cfg.stroke_width - 2.0).abs() < f32::EPSILON);
-            assert!((cfg.tolerance - 0.2).abs() < f32::EPSILON);
-        }
-        _ => panic!("expected iris transition"),
-    }
-}
-
-#[test]
 fn parse_random_transition_configuration() {
     let yaml = r#"
 photo-library-path: "/photos"
@@ -1059,31 +1011,6 @@ transition:
         err.to_string()
             .contains("requires angle-jitter-degrees >= 0")
     );
-}
-
-#[test]
-fn iris_transition_clamps_blade_count() {
-    let yaml = r#"
-photo-library-path: "/photos"
-transition:
-  selection: fixed
-  active:
-    - kind: iris
-      blades: 0
-"#;
-
-    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    let selected = cfg
-        .transition
-        .primary_selected()
-        .expect("expected iris transition option");
-    assert_eq!(selected.entry.kind, TransitionKind::Iris);
-    match selected.option.mode() {
-        rust_photo_frame::config::TransitionMode::Iris(cfg) => {
-            assert_eq!(cfg.blades, 3);
-        }
-        _ => panic!("expected iris transition"),
-    }
 }
 
 #[test]

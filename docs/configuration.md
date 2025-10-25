@@ -312,7 +312,7 @@ photo-effect:
 
 ## Transition configuration
 
-The `transition` block controls how the viewer blends between photos. Supply one or more entries under `transition.active`; each entry begins with a required `kind` tag (`fade`, `wipe`, `push`, `e-ink`, or `iris`) followed by the fields that customise that transition. Use `transition.selection` to describe how the viewer steps through that list.
+The `transition` block controls how the viewer blends between photos. Supply one or more entries under `transition.active`; each entry begins with a required `kind` tag (`fade`, `wipe`, `push`, or `e-ink`) followed by the fields that customise that transition. Use `transition.selection` to describe how the viewer steps through that list.
 
 | Key         | Required? | Default                                                       | Accepted values                           | Effect |
 | ----------- | --------- | ------------------------------------------------------------- | ----------------------------------------- | ------ |
@@ -343,12 +343,6 @@ The remaining knobs depend on the transition family.
   - **`reveal-portion`** (float, default `0.55`, clamped to `0.05–0.95`): Fraction of the timeline spent flashing before the stripes start uncovering the next slide.
   - **`stripe-count`** (integer ≥ 1, default `24`): How many horizontal bands sweep in; higher counts mimic a finer e-ink refresh.
   - **`flash-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB color used for the bright flash phases before the black inversion. Channels outside `0–255` are clamped.
-- **`iris`**
-  - **`blades`** (integer, default `7`, clamped to `5–18`): Number of shutter spokes sketched around the aperture.
-  - **`blade-rgba`** (`[r, g, b, a]` float array, default `[0.12, 0.12, 0.12, 1.0]`): Base color for the iris blades. Channels outside `0–1` are clamped; the alpha component scales how dark the rendered blades appear.
-
-  The iris transition renders shaded SLR-style blades that first close over the current photo, then reopen to reveal the next one. Each half of the timeline is dedicated to one of those motions, producing a mechanical shutter feel.
-
 ### Example: single inline fade
 
 ```yaml

@@ -74,7 +74,7 @@ sudo -u kiosk \
   XDG_RUNTIME_DIR="/run/user/$(id -u kiosk)" \
   dbus-run-session \
   env PHOTOFRAME_LOG=stdout \
-  env RUST_LOG='rust_photo_frame::renderer::iris_tess=debug,info' \
+  env RUST_LOG='rust_photo_frame::tasks::viewer=debug,info' \
   sway -c /usr/local/share/photoframe/sway/config
 ```
 
@@ -85,7 +85,7 @@ sudo -u kiosk \
   XDG_RUNTIME_DIR="/run/user/$(id -u kiosk)" \
   dbus-run-session \
   env PHOTOFRAME_LOG='file:/var/tmp/photo-frame.log' \
-  env RUST_LOG='rust_photo_frame::renderer::iris_tess=debug,info' \
+  env RUST_LOG='rust_photo_frame::tasks::viewer=debug,info' \
   sway -c /usr/local/share/photoframe/sway/config
 
 sudo tail -f /var/tmp/photo-frame.log

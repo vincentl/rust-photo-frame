@@ -6,15 +6,7 @@ struct TransitionUniforms {
   next_dest: vec4<f32>,
   params0: vec4<f32>,
   params1: vec4<f32>,
-  params2: vec4<f32>,
   params3: vec4<f32>,
-  t: f32,
-  aspect: f32,
-  iris_rotate_rad: f32,
-  iris_pad0: f32,
-  iris_blades: u32,
-  iris_direction: u32,
-  iris_pad1: vec2<u32>,
 };
 
 @group(0) @binding(0)
@@ -68,67 +60,6 @@ fn sample_plane(
   }
   let c = textureSample(tex, samp, uv);
   return vec4<f32>(c.rgb, 1.0);
-}
-
-fn rot2(p: vec2<f32>, a: f32) -> vec2<f32> {
-  let c = cos(a);
-  let s = sin(a);
-  return vec2<f32>(c * p.x - s * p.y, s * p.x + c * p.y);
-}
-
-fn sd_ngon(p: vec2<f32>, n: i32, r: f32) -> f32 {
-  let pi = 3.141592653589793;
-  let nn = max(n, 3);
-  let an = pi / f32(nn);
-  let ang = atan2(p.y, p.x);
-  let m = floor(0.5 + ang / (2.0 * an));
-  let a = ang - (m * 2.0 * an);
-  return length(p) * cos(an) - r * cos(a - an);
-}
-
-// Analytic curved-blade iris mask using intersection of equally spaced disks.
-// Returns 1.0 inside the aperture and 0.0 outside. The aperture size is
-// controlled by `open_scale` in [0,1], and fully open spans the screen width.
-fn iris_boundary(
-  uv: vec2<f32>,
-  aspect: f32,
-  blades: u32,
-  rotate_rad: f32,
-  // Returns the unscaled boundary radius (in aspect-corrected units) and a
-  // boolean indicating if a valid boundary was computed.
-) -> f32 {
-  // Map screen uv to centered, aspect-corrected space in [-1,1]
-  let p0 = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(aspect, 1.0);
-  let p = rot2(p0, rotate_rad);
-  if (blades < 3u) { return 0.0; }
-
-  // Regular N-gon boundary: fold angle into canonical sector and return
-  // 1 / cos(phi). Caller multiplies by apothem (aspect * open_scale).
-  let theta = atan2(p.y, p.x);
-  let sector = 6.283185307179586 / f32(blades);
-  let k = floor((theta + 0.5 * sector) / sector);
-  let phi = theta - k * sector;   // [-sector/2, sector/2]
-  let c = max(cos(phi), 1e-4);
-  return 1.0 / c;
-}
-
-// Polygon path scales directly by apothem (screen aspect), no extra factor.
-
-fn iris_mask(
-  uv: vec2<f32>,
-  aspect: f32,
-  blades: u32,
-  rotate_rad: f32,
-  open_scale: f32,
-) -> f32 {
-  let rvec = (uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(aspect, 1.0);
-  let r = length(rot2(rvec, rotate_rad));
-  let factor = iris_boundary(uv, aspect, blades, rotate_rad); // 1/cos(phi)
-  // Fully open spans screen width: apothem = aspect
-  let boundary = clamp(open_scale, 0.0, 1.0) * aspect * factor;
-  let sdf = boundary - r;
-  let aa = max(fwidth(sdf), 1e-4);
-  return smoothstep(0.0, aa, sdf);
 }
 
 @fragment
@@ -215,86 +146,6 @@ switch (U.kind) {
         let ghost = mix(current, vec4<f32>(flash_rgb, 1.0), 0.55);
         color = mix(ghost, next, mask);
       }
-    }
-    case 5u: {
-      // Two-phase iris: start fully open, close to black (first half), then
-      // open to reveal the next photo (second half). `U.t` is eased already.
-      let t = clamp(U.t, 0.0, 1.0);
-      // Avoid tiny numerical flickers at endpoints
-      if (t <= 1e-4) { return current; }
-      if (t >= 0.9999) { return next; }
-      let first = t < 0.5;
-      let t1 = clamp(t * 2.0, 0.0, 1.0);          // 0..1 over first half
-      let t2 = clamp((t - 0.5) * 2.0, 0.0, 1.0);  // 0..1 over second half
-
-      // Keep some numerical floor to avoid zero area causing banding
-      let open1 = max(1.0 - t1, 0.0); // close from 1 -> 0
-      let open2 = max(t2, 0.0);       // open from 0 -> 1
-
-      // Rotate blades gradually using provided rotate angle over the timeline
-      let rot = U.iris_rotate_rad * t;
-      let blades = max(U.iris_blades, 3u);
-
-      // Compute masks for both halves.
-      let mask_close = iris_mask(in.screen_uv, U.aspect, blades, rot, open1);
-      let mask_open  = iris_mask(in.screen_uv, U.aspect, blades, rot, open2);
-
-      // Fill and stroke uniforms
-      let fill = vec4<f32>(
-        clamp(U.params2.xyz, vec3<f32>(0.0), vec3<f32>(1.0)),
-        clamp(U.params2.w, 0.0, 1.0)
-      );
-      let stroke_col = vec4<f32>(
-        clamp(U.params3.xyz, vec3<f32>(0.0), vec3<f32>(1.0)),
-        clamp(U.params3.w, 0.0, 1.0) // if provided as alpha; otherwise 1.0
-      );
-      let stroke_px = max(U.iris_pad0, 0.0);
-
-      // Base composition over occluder fill
-      if (first) {
-        color = mix(fill, current, mask_close);
-      } else {
-        color = mix(fill, next, mask_open);
-      }
-
-      // Stroke ring: compute SDF band around boundary using current open scale
-      let open_scale = select(open2, open1, first);
-      let rvec = (in.screen_uv * 2.0 - vec2<f32>(1.0, 1.0)) * vec2<f32>(U.aspect, 1.0);
-      let p = rot2(rvec, rot);
-      let rlen = length(p);
-      let factor = iris_boundary(in.screen_uv, U.aspect, blades, rot); // 1/cos(phi)
-      let boundary = clamp(open_scale, 0.0, 1.0) * U.aspect * factor;
-      let sdf = boundary - rlen; // positive inside aperture
-
-      // Convert pixel width to our coordinate system (~y-based scale)
-      let px_to_ndc = 2.0 / max(U.screen_size.y, 1.0);
-      let half_band = max(stroke_px * px_to_ndc * 0.5, 1e-4);
-      let aa = max(fwidth(sdf), 1e-4);
-      // Band around |sdf| < half_band, anti-aliased
-      let edge = 1.0 - smoothstep(half_band, half_band + aa, abs(sdf));
-      let stroke_alpha = edge * stroke_col.a;
-      // Composite outer ring stroke over base color
-      color = mix(color, vec4<f32>(stroke_col.rgb, 1.0), stroke_alpha);
-
-      // Stroke blade seams (full length from center to boundary): thin lines at
-      // blade boundaries in angular space. This evokes the petal outlines.
-      // Distance from point to line through origin at angle m*sector is
-      // |r * sin(theta - m*sector)|. We draw a pixel-constant band.
-      let theta = atan2(p.y, p.x);
-      let sector = 6.283185307179586 / f32(blades);
-      // Reduce to nearest seam (multiple of sector)
-      let kline = round(theta / sector);
-      let seam_ang = kline * sector;
-      let ang_dist = abs(sin(theta - seam_ang));
-      // Convert stroke width to angular band: distance to line is r * sin Δ.
-      // We want a pixel width at this radius. Map pixels -> NDC and divide by r.
-      let eps_r = max(rlen, 1e-3);
-      let half_band_ang = max(stroke_px * px_to_ndc * 0.5 / eps_r, 1e-4);
-      let seam_edge = 1.0 - smoothstep(half_band_ang, half_band_ang + 1.5 * half_band_ang, ang_dist);
-      // Only draw seams on occluder (outside current aperture)
-      let occluder = select(1.0 - mask_open, 1.0 - mask_close, first);
-      let seam_alpha = seam_edge * occluder * stroke_col.a;
-      color = mix(color, vec4<f32>(stroke_col.rgb, 1.0), seam_alpha);
     }
     case 6u: {
       // Debug: stroke a single quadratic Bezier over the current image
