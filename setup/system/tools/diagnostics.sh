@@ -121,9 +121,15 @@ check_sway_config() {
     ok 'sway config present'
 
     if grep -Fxq 'exec --no-startup-id env WINIT_APP_ID=$photo_app_id RUST_LOG=info systemd-cat --identifier=rust-photo-frame /opt/photo-frame/bin/rust-photo-frame $config_path' "${config}"; then
-        ok 'rust-photo-frame launch command configured'
+        ok 'rust-photo-frame launch command configured in sway config'
     else
-        warn 'rust-photo-frame exec line missing from sway config'
+        # Accept alternate wiring via the launcher wrapper setting WINIT_APP_ID
+        local launcher="/usr/local/bin/photo-frame"
+        if [[ -f "${launcher}" ]] && grep -q 'WINIT_APP_ID' "${launcher}"; then
+            ok 'photo-frame launcher sets WINIT_APP_ID (sway config may use wrapper)'
+        else
+            warn 'rust-photo-frame exec line missing from sway config (and launcher does not set WINIT_APP_ID)'
+        fi
     fi
 }
 
@@ -133,4 +139,3 @@ check_sway_config
 check_kiosk_user
 
 exit ${FAIL}
-

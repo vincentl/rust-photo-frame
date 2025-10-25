@@ -13,6 +13,8 @@ use tokio::process::{Child, Command};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 use users::get_current_uid;
+use std::ffi::OsStr;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
 #[derive(Clone, Debug)]
 pub struct OverlayRequest {
@@ -58,18 +60,57 @@ impl OverlayController {
         let (program, args) = command_parts
             .split_first()
             .context("overlay command is empty; configure program and args")?;
+
         let mut command = Command::new(program);
-        command.args(args);
-        command.arg("--ssid").arg(&request.ssid);
-        command.arg("--password-file").arg(&request.password_file);
-        command.arg("--ui-url").arg(&request.ui_url);
-        if let Some(title) = &request.title {
-            command.arg("--title").arg(title);
+
+        // Ensure sway IPC environment and runtime dir are exported for child processes.
+        let socket = self.ensure_sway_socket_env()?;
+        command.env("SWAYSOCK", &socket);
+        if let Some(runtime_dir) = socket.parent() {
+            self.ensure_runtime_dir_env(runtime_dir);
         }
-        command.env("WINIT_APP_ID", &self.config.overlay_app_id);
-        if let Ok(socket) = self.ensure_sway_socket_env() {
-            command.env("SWAYSOCK", socket);
+
+        // When launching via swaymsg, construct a single shell-safe command line so
+        // arguments like --title with spaces survive the shell.
+        if program_basename(program) == "swaymsg" {
+            let exe = std::env::current_exe()
+                .context("failed to determine current executable path")?;
+            let mut parts: Vec<String> = Vec::new();
+            // Prefix with env to inject app_id inside the Sway session
+            parts.push("env".to_string());
+            parts.push(format!("WINIT_APP_ID={}", self.config.overlay_app_id));
+            parts.push(exe.display().to_string());
+            parts.push("overlay".to_string());
+            parts.push("--ssid".to_string());
+            parts.push(request.ssid.clone());
+            parts.push("--password-file".to_string());
+            parts.push(request.password_file.display().to_string());
+            parts.push("--ui-url".to_string());
+            parts.push(request.ui_url.clone());
+            if let Some(title) = &request.title {
+                parts.push("--title".to_string());
+                parts.push(title.clone());
+            }
+            let cmdline = parts.into_iter().map(|s| shell_escape(&s)).collect::<Vec<_>>().join(" ");
+            command.args(args);
+            command.arg("exec");
+            command.arg(cmdline);
+        } else {
+            // Direct spawn path; ensure Wayland env is sensible for winit
+            command.args(args);
+            command.arg("--ssid").arg(&request.ssid);
+            command.arg("--password-file").arg(&request.password_file);
+            command.arg("--ui-url").arg(&request.ui_url);
+            if let Some(title) = &request.title {
+                command.arg("--title").arg(title);
+            }
+            command.env("WINIT_APP_ID", &self.config.overlay_app_id);
+            // Default to wayland-0 if WAYLAND_DISPLAY is not set
+            if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+                command.env("WAYLAND_DISPLAY", "wayland-0");
+            }
         }
+
         command.stdout(Stdio::null());
         command.stderr(Stdio::null());
 
@@ -195,7 +236,23 @@ impl OverlayController {
             debug!(path = %socket.display(), "configuring sway IPC socket");
             set_env_path("SWAYSOCK", &socket);
         }
+        // Also ensure XDG_RUNTIME_DIR is aligned with the socket location (for Wayland)
+        if let Some(runtime_dir) = socket.parent() {
+            self.ensure_runtime_dir_env(runtime_dir);
+        }
         Ok(socket)
+    }
+
+    fn ensure_runtime_dir_env(&self, dir: &Path) {
+        let current = std::env::var_os("XDG_RUNTIME_DIR");
+        let needs_update = current
+            .as_ref()
+            .map(|value| Path::new(value) != dir)
+            .unwrap_or(true);
+        if needs_update {
+            debug!(path = %dir.display(), "configuring XDG_RUNTIME_DIR for overlay");
+            set_env_path("XDG_RUNTIME_DIR", dir);
+        }
     }
 
     fn locate_sway_socket(&self) -> Result<PathBuf> {
@@ -204,11 +261,28 @@ impl OverlayController {
         }
 
         if let Some(path) = std::env::var_os("SWAYSOCK") {
-            return Ok(PathBuf::from(path));
+            let p = PathBuf::from(path);
+            if is_socket(&p) {
+                return Ok(p);
+            }
         }
 
-        for dir in self.runtime_dirs() {
-            if let Some(socket) = find_socket_in_dir(&dir)? {
+        // Prefer socket tied to the running sway PID for the current user
+        let runtime_dirs = self.runtime_dirs();
+        for dir in &runtime_dirs {
+            if let Some(uid) = owner_uid(dir) {
+                if let Some(pid) = find_sway_pid(uid) {
+                    let candidate = dir.join(format!("sway-ipc.{uid}.{pid}.sock"));
+                    if is_socket(&candidate) {
+                        return Ok(candidate);
+                    }
+                }
+            }
+        }
+
+        // Fallback: scan runtime dirs for any sway-ipc.*.sock
+        for dir in &runtime_dirs {
+            if let Some(socket) = find_socket_in_dir(dir)? {
                 return Ok(socket);
             }
         }
@@ -272,9 +346,8 @@ fn find_socket_in_dir(dir: &Path) -> Result<Option<PathBuf>> {
             )
         })?;
         let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
+        // Accept only UNIX sockets
+        if !is_socket(&path) { continue; }
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
@@ -298,5 +371,69 @@ pub fn overlay_request(config: &Config) -> OverlayRequest {
     OverlayRequest {
         title: Some("Reconnect the photo frame to Wi-Fi".to_string()),
         ..OverlayRequest::from_config(config)
+    }
+}
+
+fn program_basename(program: &str) -> &str {
+    Path::new(program)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or(program)
+}
+
+fn is_socket(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(md) => md.file_type().is_socket(),
+        Err(_) => false,
+    }
+}
+
+fn owner_uid(dir: &Path) -> Option<u32> {
+    fs::metadata(dir).ok().map(|m| m.uid())
+}
+
+fn find_sway_pid(uid: u32) -> Option<u32> {
+    // Scan /proc for a process named "sway" owned by the provided uid
+    let proc = Path::new("/proc");
+    let Ok(entries) = fs::read_dir(proc) else { return None; };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if !name.chars().all(|c| c.is_ascii_digit()) { continue; }
+        let pid: u32 = match name.parse() { Ok(p) => p, Err(_) => continue };
+        let status_path = entry.path().join("status");
+        let Ok(data) = fs::read_to_string(status_path) else { continue; };
+        let mut proc_name = None;
+        let mut proc_uid = None;
+        for line in data.lines() {
+            if line.starts_with("Name:\t") {
+                proc_name = Some(line[6..].trim());
+            } else if line.starts_with("Uid:\t") {
+                // Format: Uid:\tReal\tEffective\tSavedSet\tFilesystem
+                let mut parts = line[5..].split_whitespace();
+                if let Some(real) = parts.next() {
+                    if let Ok(v) = real.parse::<u32>() { proc_uid = Some(v); }
+                }
+            }
+            if proc_name.is_some() && proc_uid.is_some() { break; }
+        }
+        if proc_name == Some("sway") && proc_uid == Some(uid) {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+fn shell_escape(arg: &str) -> String {
+    // Safe characters for shell token without quoting
+    fn is_safe(c: char) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@' | '%' | '+')
+    }
+    if arg.chars().all(is_safe) {
+        arg.to_string()
+    } else {
+        // Single-quote, escaping internal single quotes
+        let escaped = arg.replace('\'', "'\\''");
+        format!("'{}'", escaped)
     }
 }

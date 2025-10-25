@@ -26,6 +26,8 @@ The release build installs to `/opt/photo-frame/bin/wifi-manager` and exposes th
 
 Running the binary with `--help` or `--version` is permitted as root; all other modes refuse to start if `UID==0` to honour the project's "never run cargo as root" policy.
 
+Overlay presentation runs the overlay window inside the active Sway session using `swaymsg exec …` so it inherits the session's Wayland environment. The watcher discovers Sway's IPC socket by preferring the uid/pid-specific path (e.g. `/run/user/1001/sway-ipc.1001.1069.sock`) and falls back to scanning the runtime dir.
+
 ### NetworkManager permissions
 
 `wifi-manager` runs under the unprivileged `kiosk` account, so the setup pipeline installs a dedicated polkit rule (`/etc/polkit-1/rules.d/90-photoframe-nm.rules`) that grants the kiosk group the handful of NetworkManager actions required to add, modify, and activate system Wi-Fi profiles. Without this rule the manual `nm` subcommands will fail with `Insufficient privileges` even though the service is running.
@@ -49,8 +51,7 @@ ui:
   port: 8080
 overlay:
   command:
-    - /opt/photo-frame/bin/wifi-manager
-    - overlay
+    - swaymsg
   photo-app-id: rust-photo-frame
   overlay-app-id: wifi-overlay
   # sway-socket: /run/user/1000/sway-ipc.1000.123.sock
@@ -68,7 +69,7 @@ overlay:
 | `hotspot.ipv4-addr`            | Address assigned to the hotspot interface and advertised via DHCP.          |
 | `ui.bind-address`              | Bind address for the HTTP UI. Normally `0.0.0.0`.                           |
 | `ui.port`                      | HTTP UI port (default `8080`).                                              |
-| `overlay.command`              | Executable invoked to render the on-device hotspot instructions (default `wifi-manager overlay`). |
+| `overlay.command`              | Executable invoked to render the on-device hotspot instructions (default `swaymsg`; the watcher constructs an `exec …` command to run the overlay inside Sway). |
 | `overlay.photo-app-id`         | Sway `app_id` assigned to the photo frame window so it can be re-focused after recovery. |
 | `overlay.overlay-app-id`       | Sway `app_id` that the overlay binary advertises; used for focus/teardown commands. |
 | `overlay.sway-socket`          | Optional override for the Sway IPC socket. Detected automatically from `/run/user/<uid>` when omitted. |
@@ -144,6 +145,11 @@ NetworkManager rejects the credentials you can tail the service logs and
 watch for the `ONLINE → OFFLINE → HOTSPOT` transition.
 
 The systemd unit is defined in `assets/systemd/photoframe-wifi-manager.service` and runs under the `kiosk` user with `Restart=on-failure`. It depends on `network-online.target` so that the first connectivity check happens after boot networking is ready.
+
+Notes on window focus and app_id:
+
+- The slideshow is launched with `WINIT_APP_ID=rust-photo-frame` by the `/usr/local/bin/photo-frame` wrapper so Sway rules and refocus from `wifi-manager` work consistently.
+- The overlay advertises `app_id=wifi-overlay` and the watcher uses Sway IPC to focus and fullscreen it while the hotspot is active, then restores focus to the slideshow when connectivity returns.
 
 ## Acceptance test checklist
 

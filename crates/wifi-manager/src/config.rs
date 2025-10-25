@@ -139,9 +139,10 @@ fn default_ui_port() -> u16 {
 }
 
 fn default_overlay_command() -> Vec<String> {
+    // Launch overlay via sway so it inherits the session Wayland environment.
+    // The watcher will construct a single exec command line with arguments.
     vec![
-        "/opt/photo-frame/bin/wifi-manager".to_string(),
-        "overlay".to_string(),
+        "swaymsg".to_string(),
     ]
 }
 

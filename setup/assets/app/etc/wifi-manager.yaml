@@ -13,8 +13,7 @@ ui:
   port: 8080
 overlay:
   command:
-    - /opt/photo-frame/bin/wifi-manager
-    - overlay
+    - swaymsg
   photo-app-id: rust-photo-frame
   overlay-app-id: wifi-overlay
   # sway-socket: /run/user/1000/sway-ipc.1000.123.sock
