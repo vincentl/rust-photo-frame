@@ -95,7 +95,7 @@ This workflow prepares a Raspberry Pi OS (Trixie, 64-bit) image that boots direc
 
 ## Run the automated setup
 
-Run the automation in two passes. Each script is idempotent, so you can safely re-run it if the connection drops or you need to retry after a reboot.
+Run the automation in two steps. Each script is idempotent, so you can safely re-run it if the connection drops or you need to retry after a reboot.
 
 ### 1. Provision the operating system
 
@@ -103,7 +103,7 @@ Run the automation in two passes. Each script is idempotent, so you can safely r
 sudo ./setup/system/install.sh
 ```
 
-   This pipeline installs the apt dependencies, configures zram swap, and installs a system-wide Rust toolchain under `/usr/local/cargo`. It also provisions the kiosk user, greetd configuration, and supporting systemd units that launch the photo frame at boot and reserve room for the Wi-Fi overlay. Run it before building so toolchains and packages are ready; re-run it after the application install so the kiosk services start once the binaries exist in `/opt/photo-frame`.
+   This pipeline installs the apt dependencies, configures zram swap, and installs a system-wide Rust toolchain under `/usr/local/cargo`. It also provisions the kiosk user, greetd configuration, and supporting systemd units that launch the photo frame at boot and reserve room for the Wi-Fi overlay. Run it before building so toolchains and packages are ready.
 
 ### 2. Logout and Login
 
@@ -115,7 +115,7 @@ The provision step modifies shell configuration files and to pickup any environm
 ./setup/application/deploy.sh
 ```
 
-   Run this command as the unprivileged operator account. It compiles the photo frame, stages the release artifacts, and installs them into `/opt/photo-frame`. The stage verifies the kiosk service account exists and will prompt for sudo to create it (along with its primary group) when missing. The closing postcheck confirms binaries and templates are in place and will warn if the system config at `/etc/photo-frame/config.yaml` is missing; re-running the command recreates it from the staged template.
+   Run this command as the unprivileged operator account. It compiles the photo frame, stages the release artifacts, and installs them into `/opt/photo-frame`. The stage verifies the kiosk service account exists and will prompt for sudo to create it (along with its primary group) when missing. After install, it installs/updates the app’s systemd unit files and starts the kiosk services (greetd, seatd, wifi-manager, buttond) so the session comes up without re-running the system stage. The postcheck confirms binaries and templates are in place and will warn if the system config at `/etc/photo-frame/config.yaml` is missing; re-running the command recreates it from the staged template.
 
    Tip: if the first build fails with a SIGKILL from `rustc` (often `process didn't exit successfully ... (signal: 9)`), the kernel likely terminated a compiler worker under memory pressure. Re-run the command or cap parallelism explicitly:
 

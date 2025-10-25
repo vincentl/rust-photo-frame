@@ -14,6 +14,7 @@ PACKAGES=(
     clang
     cmake
     curl
+    jq
     dbus
     dbus-user-session
     git

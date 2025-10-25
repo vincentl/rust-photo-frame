@@ -20,7 +20,7 @@ The system pipeline executes its numbered modules in order and performs the foll
 - installs the greetd configuration and kiosk session wrapper at `/usr/local/bin/photoframe-session`, and
 - deploys the `photoframe-*` systemd units, enabling them and starting them when the corresponding binaries are present in `/opt/photo-frame`.
 
-Run the script before building the application so the toolchain and dependencies are ready. Re-run it after `./setup/application/deploy.sh` completes to let the kiosk services start once the binaries are installed. The modules are idempotent, so repeated invocations are safe.
+Run the script before building the application so the toolchain and dependencies are ready. After the application deploy completes, the deploy pipeline installs/updates the app unit files and starts the kiosk services automatically; re-running the system script is optional and safe but no longer required just to bring services up.
 
 ## Diagnose kiosk health
 
