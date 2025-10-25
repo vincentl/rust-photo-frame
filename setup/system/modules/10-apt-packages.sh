@@ -28,6 +28,8 @@ PACKAGES=(
     logrotate
     mesa-vulkan-drivers
     network-manager
+    fonts-dejavu-core
+    fonts-noto-core
     pkg-config
     python3
     rclone
@@ -51,4 +53,3 @@ apt-get -y autoremove
 apt-get -y autoclean
 
 log "Package installation complete"
-
