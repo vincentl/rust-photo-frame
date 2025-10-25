@@ -57,7 +57,9 @@ buttond honours a few additional knobs inside its namespaced section:
 - `screen.on-command` / `screen.off-command` — shell commands executed when buttond transitions the panel. The defaults call `powerctl`, which issues `wlr-randr` DPMS requests with a `vcgencmd` fallback.
 - `screen.display-name` — set this to the connector name reported by `wlr-randr` (for example `HDMI-A-2`). buttond appends the value to both power commands so wake/sleep do not rely on runtime auto-detection.
 
-The helper `/opt/photo-frame/bin/powerctl` bootstraps the Wayland environment, auto-detects the first connected output when no argument is supplied, and chains `vcgencmd` as a fallback. Set `buttond.screen.display-name` so buttond always calls it with an explicit connector:
+The helper `/opt/photo-frame/bin/powerctl` bootstraps the Wayland environment, auto-detects the first connected output when no argument is supplied, and chains `vcgencmd` as a fallback. buttond now prefers `powerctl` for both wake/sleep transitions and state detection whenever it sees `powerctl` configured for the screen commands. When `display-name` is omitted, the state probe targets any connected output.
+
+Set `buttond.screen.display-name` so buttond always calls it with an explicit connector:
 ```bash
 powerctl sleep          # auto-detect output (used for manual testing only)
 powerctl wake HDMI-A-2  # explicit connector provided by configuration

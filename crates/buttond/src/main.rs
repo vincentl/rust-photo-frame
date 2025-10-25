@@ -155,9 +155,36 @@ struct ButtondSettings {
 const FORCE_SHUTDOWN_FLAG: &str = "-i";
 const NO_ASK_PASSWORD_FLAG: &str = "--no-ask-password";
 
-fn configure_shutdown_args(args: &mut Vec<String>, force_shutdown: bool) {
-    configure_shutdown_flag(args, FORCE_SHUTDOWN_FLAG, force_shutdown);
-    configure_shutdown_flag(args, NO_ASK_PASSWORD_FLAG, force_shutdown);
+fn configure_shutdown_args(program: &Path, args: &mut Vec<String>, force_shutdown: bool) {
+    let program_name = program
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    // Only systemctl understands -i/--no-ask-password for poweroff.
+    let is_systemctl = program_name == "systemctl";
+
+    if is_systemctl {
+        configure_shutdown_flag(args, FORCE_SHUTDOWN_FLAG, force_shutdown);
+        configure_shutdown_flag(args, NO_ASK_PASSWORD_FLAG, force_shutdown);
+    } else {
+        // Avoid passing systemctl-specific flags to other programs (e.g., loginctl).
+        let before = args.len();
+        args.retain(|arg| arg != FORCE_SHUTDOWN_FLAG && arg != NO_ASK_PASSWORD_FLAG);
+        if before != args.len() {
+            warn!(
+                program = program_name,
+                "stripped systemctl-only shutdown flags from non-systemctl program"
+            );
+        }
+        if force_shutdown {
+            warn!(
+                program = program_name,
+                "force-shutdown enabled but program is not systemctl; ignoring flags"
+            );
+        }
+    }
 }
 
 fn configure_shutdown_flag(args: &mut Vec<String>, flag: &str, enabled: bool) {
@@ -200,7 +227,7 @@ impl ButtondSettings {
         let durations = Durations::from_millis(debounce_ms, single_window_ms, double_window_ms);
         let device = device_override.or(device);
         let mut shutdown_command = shutdown_command.into_spec("shutdown");
-        configure_shutdown_args(&mut shutdown_command.args, force_shutdown);
+        configure_shutdown_args(&shutdown_command.program, &mut shutdown_command.args, force_shutdown);
         let ScreenConfig {
             off_delay_ms,
             on_command,
@@ -382,7 +409,7 @@ impl ButtondFileConfig {
         CommandConfig {
             label: "shutdown".into(),
             program: PathBuf::from("/usr/bin/systemctl"),
-            args: vec!["poweroff".into(), "-i".into()],
+            args: vec!["poweroff".into()],
         }
     }
 }
@@ -866,9 +893,16 @@ impl SwayScreenDetector {
         }
     }
 
-    fn detect_via_powerctl(&self, program: &Path, display_name: &str) -> Result<ScreenDetection> {
+    fn detect_via_powerctl(
+        &self,
+        program: &Path,
+        display_name: Option<&str>,
+    ) -> Result<ScreenDetection> {
         let mut command = Command::new(program);
-        command.arg("state").arg(display_name);
+        command.arg("state");
+        if let Some(name) = display_name {
+            command.arg(name);
+        }
         self.env.configure(&mut command);
 
         let output = command
@@ -897,7 +931,7 @@ impl SwayScreenDetector {
         };
 
         Ok(ScreenDetection {
-            name: display_name.to_string(),
+            name: display_name.unwrap_or("auto").to_string(),
             state,
         })
     }
@@ -923,13 +957,13 @@ impl SwayScreenDetector {
 
 impl ScreenDetector for SwayScreenDetector {
     fn detect(&self, display_name: Option<&str>) -> Result<ScreenDetection> {
-        if let (Some(program), Some(name)) = (&self.powerctl_program, display_name) {
-            match self.detect_via_powerctl(program, name) {
+        if let Some(program) = &self.powerctl_program {
+            match self.detect_via_powerctl(program, display_name) {
                 Ok(detection) => return Ok(detection),
                 Err(err) => {
                     warn!(
                         program = %program.display(),
-                        %name,
+                        name = display_name.unwrap_or("auto"),
                         ?err,
                         "powerctl state detection failed; falling back to swaymsg",
                     );
@@ -1788,7 +1822,8 @@ awake-scheduled: {}
     #[test]
     fn configure_shutdown_args_adds_force_flags() {
         let mut args = vec![String::from("poweroff")];
-        configure_shutdown_args(&mut args, true);
+        let program = Path::new("/usr/bin/systemctl");
+        configure_shutdown_args(program, &mut args, true);
         assert!(args.iter().any(|arg| arg == FORCE_SHUTDOWN_FLAG));
         assert!(args.iter().any(|arg| arg == NO_ASK_PASSWORD_FLAG));
     }
@@ -1800,8 +1835,17 @@ awake-scheduled: {}
             FORCE_SHUTDOWN_FLAG.to_string(),
             NO_ASK_PASSWORD_FLAG.to_string(),
         ];
-        configure_shutdown_args(&mut args, false);
+        let program = Path::new("/usr/bin/systemctl");
+        configure_shutdown_args(program, &mut args, false);
         assert_eq!(args, vec![String::from("poweroff")]);
+    }
+
+    #[test]
+    fn configure_shutdown_args_ignore_for_loginctl() {
+        let mut args = vec![String::from("poweroff")];
+        let program = Path::new("/usr/bin/loginctl");
+        configure_shutdown_args(program, &mut args, true);
+        assert!(args.iter().all(|a| a != FORCE_SHUTDOWN_FLAG && a != NO_ASK_PASSWORD_FLAG));
     }
 
     #[derive(Default, Clone)]
@@ -2062,6 +2106,27 @@ awake-scheduled: {}
             .expect("powerctl state detection");
 
         assert_eq!(detection.name, "HDMI-A-1");
+        assert_eq!(detection.state, ScreenState::On);
+    }
+
+    #[test]
+    fn detector_uses_powerctl_state_without_display() {
+        let dir = tempdir().expect("tempdir");
+        let script_path = dir.path().join("powerctl");
+        fs::write(&script_path, "#!/usr/bin/env bash\necho on\n").expect("write script");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("set perms");
+
+        let env = Arc::new(SwayEnvironment {
+            runtime_dir: dir.path().to_path_buf(),
+            socket_path: dir.path().join("sway-ipc.test.sock"),
+        });
+
+        let detector = SwayScreenDetector::new(env, Some(script_path));
+        let detection = detector.detect(None).expect("powerctl state detection");
+
+        assert_eq!(detection.name, "auto");
         assert_eq!(detection.state, ScreenState::On);
     }
 

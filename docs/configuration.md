@@ -200,10 +200,10 @@ buttond:
   debounce-ms: 20                   # ignore chatter within this window
   single-window-ms: 250             # treat releases shorter than this as taps
   double-window-ms: 400             # wait this long for a second tap
-  force-shutdown: true              # append -i to bypass logind interactive-user veto
+  force-shutdown: true              # for systemctl: add -i and --no-ask-password
   shutdown-command:
     program: /usr/bin/systemctl
-    args: [poweroff, -i]
+    args: [poweroff]
   sleep-grace-ms: 300000             # defer scheduled sleep this long after last activity
   screen:
     off-delay-ms: 3500
@@ -218,18 +218,20 @@ buttond:
 
 Pair the block above with a top-level `awake-schedule` section to describe the desired wake windows.
 
-`force-shutdown` toggles whether buttond appends `-i` to the shutdown command. When enabled (the default) `systemctl poweroff` skips the interactive user check so a kiosk session left open on another VT cannot block shutdown. Set it to `false` if a deployment needs logind to prompt or veto a shutdown, and buttond will automatically strip `-i` even if it was present in the configured arguments.
+`force-shutdown` controls whether buttond augments a systemctl-based command with `-i` (ignore inhibitors) and `--no-ask-password`. When enabled (the default) `systemctl poweroff -i --no-ask-password` avoids interactive user veto and password prompts. If you set `force-shutdown: false`, buttond removes those flags even if they were present in the configured args.
+
+If you point `shutdown-command.program` at something other than `systemctl` (for example `loginctl`), buttond will not add these flags and will also strip them if present, since they are systemctl‑specific. The recommended, most reliable choice is `systemctl`.
 
 The installer deploys `buttond.service`, which launches `/opt/photo-frame/bin/buttond --config /etc/photo-frame/config.yaml` as the `kiosk` user. At runtime the daemon behaves as follows:
 
 - **Single press:** writes `{ "command": "ToggleState" }` to the control socket, then toggles the screen. If the display was off it immediately executes the configured wake command; if the display was on it delays for `off-delay-ms` (so the sleep screen is visible) before running the sleep command. The daemon inspects `wlr-randr` output on each press instead of relying on cached state, so restarts and manual overrides stay in sync with reality.
-- **Double press:** executes the `shutdown-command`. The default uses `systemctl poweroff -i`, bypassing logind's interactive user veto so kiosk shutdowns succeed even when a user is logged in elsewhere. Provisioning installs a polkit rule so the `kiosk` user can issue the request without prompting.
+- **Double press:** executes the `shutdown-command`. The default uses `systemctl poweroff -i --no-ask-password`, bypassing interactive user veto and password prompts so kiosk shutdowns succeed even when a user is logged in elsewhere. Provisioning installs a polkit rule so the `kiosk` user can issue the request without prompting.
 - **Long press:** bypassed so the Pi firmware can force power-off.
 - **Scheduled transitions:** when `awake-schedule` is present, buttond waits for the greeting delay, applies the schedule’s current state, and drives future wake/sleep transitions using `set-state` commands. `sleep-grace-ms` ensures recent manual activity can briefly delay an automatic sleep so the audience isn’t plunged into darkness mid-interaction.
 
 Pin `buttond.screen.display-name` to the exact `wlr-randr` output name (for example `HDMI-A-2`) when a specific connector should always be probed. The daemon still falls back to the first connected non-internal display when the field is omitted, but when set it treats that output as authoritative—even if `wlr-randr` reports it as disabled—to keep the sleep command state machine aligned with panels that power down between presses.
 
-`buttond` automatically derives `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` for its `wlr-randr` probes by scanning `/run/user/<uid>` for Wayland sockets. When the compositor is still starting it retries for a short window instead of failing the service, smoothing over race conditions between startup units.
+`buttond` prefers using `/opt/photo-frame/bin/powerctl` for display state detection when that program is referenced by the configured `screen` commands, falling back to `swaymsg -t get_outputs` only if the probe fails. When `display-name` is omitted, the powerctl state probe targets any connected output. `buttond` automatically derives `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` for its `wlr-randr`/sway probes by scanning `/run/user/<uid>` for Wayland sockets. When the compositor is still starting it retries for a short window instead of failing the service, smoothing over race conditions between startup units.
 
 Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. Set `buttond.device` if the wrong input is chosen. Provisioning also pins `HandlePowerKey=ignore` inside `/etc/systemd/logind.conf` so logind never interprets presses as global shutdown requests; only `buttond` reacts to the events.
 
