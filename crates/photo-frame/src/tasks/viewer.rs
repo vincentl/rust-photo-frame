@@ -3,8 +3,8 @@ pub mod scenes;
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
 
 use crate::config::{
-    IrisDirection, MattingConfig, MattingMode, MattingOptions, SelectedTransition,
-    TransitionConfig, TransitionKind, TransitionMode,
+    MattingConfig, MattingMode, MattingOptions, SelectedTransition, TransitionConfig,
+    TransitionKind, TransitionMode,
 };
 use crate::events::{
     Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
@@ -12,7 +12,6 @@ use crate::events::{
 use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
-// Tessellated iris removed; WGSL handles iris rendering.
 use crate::tasks::greeting_screen::GreetingScreen;
 use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
 use futures::executor::block_on;
@@ -45,15 +44,6 @@ pub(super) enum ActiveTransition {
         stripe_count: u32,
         flash_color: [f32; 3],
         noise_seed: [f32; 2],
-    },
-    Iris {
-        blades: u32,
-        rotate_radians: f32,
-        direction: IrisDirection,
-        fill_rgba: [f32; 4],
-        stroke_rgba: [f32; 4],
-        stroke_width: f32,
-        tolerance: f32,
     },
 }
 
@@ -126,15 +116,6 @@ impl TransitionState {
                     .flash_color
                     .map(|channel| (channel as f32 / 255.0).clamp(0.0, 1.0)),
                 noise_seed: [rng.random_range(0.0..=1.0), rng.random_range(0.0..=1.0)],
-            },
-            TransitionMode::Iris(cfg) => ActiveTransition::Iris {
-                blades: cfg.blades.max(1),
-                rotate_radians: cfg.rotate_radians,
-                direction: cfg.direction,
-                fill_rgba: cfg.fill_rgba,
-                stroke_rgba: cfg.stroke_rgba,
-                stroke_width: cfg.stroke_width,
-                tolerance: cfg.tolerance,
             },
         };
 
@@ -782,15 +763,7 @@ pub fn run_windowed(
         next_dest: [f32; 4],
         params0: [f32; 4],
         params1: [f32; 4],
-        params2: [f32; 4],
         params3: [f32; 4],
-        t: f32,
-        aspect: f32,
-        iris_rotate_rad: f32,
-        iris_pad0: f32,
-        iris_blades: u32,
-        iris_direction: u32,
-        iris_pad1: [u32; 2],
     }
 
     struct GpuCtx {
@@ -805,7 +778,6 @@ pub fn run_windowed(
         sampler: wgpu::Sampler,
         pipeline: wgpu::RenderPipeline,
         blank_plane: TexturePlane,
-        // tessellated iris removed
     }
 
     fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
@@ -1640,7 +1612,6 @@ pub fn run_windowed(
 
             let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
 
-
             let greeting = GreetingScene::new(GreetingScreen::new(
                 &device,
                 &queue,
@@ -1668,7 +1639,6 @@ pub fn run_windowed(
                 sampler,
                 pipeline,
                 blank_plane,
-                // no tessellated iris
             };
             if let Some(mode) = self.mode.as_mut() {
                 mode.set_overlays(Some(greeting), Some(sleep));
@@ -2400,11 +2370,6 @@ pub fn run_windowed(
                             encoder.push_debug_group("wake-draw");
                             let screen_w = gpu.config.width as f32;
                             let screen_h = gpu.config.height as f32;
-                            let aspect = if screen_h > 0.0 {
-                                screen_w / screen_h
-                            } else {
-                                1.0
-                            };
                             let mut uniforms = TransitionUniforms {
                                 screen_size: [screen_w, screen_h],
                                 progress: 0.0,
@@ -2413,20 +2378,10 @@ pub fn run_windowed(
                                 next_dest: [0.0; 4],
                                 params0: [0.0; 4],
                                 params1: [0.0; 4],
-                                params2: [0.0; 4],
                                 params3: [0.0; 4],
-                                t: 0.0,
-                                aspect,
-                                iris_rotate_rad: 0.0,
-                                iris_pad0: 0.0,
-                                iris_blades: 0,
-                                iris_direction: 0,
-                                iris_pad1: [0, 0],
                             };
                             let mut current_bind = &gpu.blank_plane.bind;
                             let mut next_bind = &gpu.blank_plane.bind;
-                            let mut current_rect = [0.0f32; 4];
-                            let mut next_rect = [0.0f32; 4];
                             let mut have_current = false;
                             let mut have_next = false;
 
@@ -2437,8 +2392,7 @@ pub fn run_windowed(
                                     gpu.config.width,
                                     gpu.config.height,
                                 );
-                                current_rect = rect_to_uniform(rect);
-                                uniforms.current_dest = current_rect;
+                                uniforms.current_dest = rect_to_uniform(rect);
                                 current_bind = &cur.plane.bind;
                                 have_current = true;
                             }
@@ -2449,8 +2403,7 @@ pub fn run_windowed(
                                     gpu.config.width,
                                     gpu.config.height,
                                 );
-                                next_rect = rect_to_uniform(rect);
-                                uniforms.next_dest = next_rect;
+                                uniforms.next_dest = rect_to_uniform(rect);
                                 next_bind = &next.plane.bind;
                                 have_next = true;
                             }
@@ -2467,107 +2420,54 @@ pub fn run_windowed(
                                 uniforms.params0 = [0.15, 0.60, 0.50, 0.25]; // P0.xy, P1.xy
                                 uniforms.params1[0] = 0.85; // P2.x
                                 uniforms.params1[1] = 0.60; // P2.y
-                                uniforms.params1[2] = 4.0;  // stroke width px
+                                uniforms.params1[2] = 4.0; // stroke width px
                                 // Red stroke by default
                                 uniforms.params3 = [1.0, 0.1, 0.1, 1.0];
                                 should_draw_quad = have_current;
                             } else if let Some(state) = wake.transition_state() {
+                                should_draw_quad = have_current || have_next;
+                                let base_progress = state.progress();
+                                let eased_progress =
+                                    base_progress * base_progress * (3.0 - 2.0 * base_progress);
+                                uniforms.progress = eased_progress;
+                                uniforms.kind = state.kind().as_index();
                                 match state.variant() {
-                                    ActiveTransition::Iris {
-                                        blades,
-                                        rotate_radians,
-                                        direction,
-                                        fill_rgba,
-                                        stroke_rgba,
-                                        stroke_width,
-                                        tolerance,
-                                    } => {
-                                        let blades = (*blades).max(3);
-                                        let rotate_radians = *rotate_radians;
-                                        let direction = *direction;
-                                        let fill_rgba = *fill_rgba;
-                                        let stroke_rgba = *stroke_rgba;
-                                        let stroke_width = *stroke_width;
-                                        let tolerance = *tolerance;
-                                        if have_current && have_next {
-                                                let base_progress = state.progress();
-                                                let eased_progress = {
-                                                    let c = base_progress.clamp(0.0, 1.0);
-                                                    c * c * (3.0 - 2.0 * c)
-                                                };
-                                                uniforms.kind = 5; // WGSL iris in viewer_quad.wgsl
-                                                uniforms.t = eased_progress;
-                                                uniforms.aspect = aspect;
-                                                uniforms.iris_blades = blades;
-                                                uniforms.iris_rotate_rad = rotate_radians;
-                                                uniforms.iris_direction =
-                                                    if matches!(direction, IrisDirection::Close) {
-                                                        1
-                                                    } else {
-                                                        0
-                                                    };
-                                                // Provide occluder fill/stroke and stroke width to WGSL path
-                                                uniforms.params2 = fill_rgba; // fill RGBA
-                                                uniforms.params3 = stroke_rgba; // stroke RGBA
-                                                uniforms.iris_pad0 = stroke_width; // stroke width in px
-                                                should_draw_quad = true;
-                                        } else {
-                                            should_draw_quad = have_current;
-                                        }
+                                    ActiveTransition::Fade { through_black } => {
+                                        uniforms.params0[0] =
+                                            if *through_black { 1.0 } else { 0.0 };
                                     }
-                                    _ => {
-                                        should_draw_quad = have_current || have_next;
-                                        let base_progress = state.progress();
-                                        let eased_progress = base_progress
-                                            * base_progress
-                                            * (3.0 - 2.0 * base_progress);
-                                        uniforms.progress = eased_progress;
-                                        uniforms.t = eased_progress;
-                                        uniforms.kind = state.kind().as_index();
-                                        match state.variant() {
-                                            ActiveTransition::Fade { through_black } => {
-                                                uniforms.params0[0] =
-                                                    if *through_black { 1.0 } else { 0.0 };
-                                            }
-                                            ActiveTransition::Wipe { normal, softness } => {
-                                                let normal = *normal;
-                                                let (min_proj, inv_span) =
-                                                    compute_wipe_span(normal, screen_w, screen_h);
-                                                uniforms.params0 =
-                                                    [normal[0], normal[1], min_proj, inv_span];
-                                                uniforms.params1[0] = *softness;
-                                            }
-                                            ActiveTransition::Push { direction } => {
-                                                let direction = *direction;
-                                                let diag = (screen_w * screen_w
-                                                    + screen_h * screen_h)
-                                                    .sqrt();
-                                                uniforms.params0[0] = direction[0] * diag;
-                                                uniforms.params0[1] = direction[1] * diag;
-                                            }
-                                            ActiveTransition::EInk {
-                                                flash_count,
-                                                reveal_portion,
-                                                stripe_count,
-                                                flash_color,
-                                                noise_seed,
-                                            } => {
-                                                let noise_seed = *noise_seed;
-                                                let flash_color = *flash_color;
-                                                uniforms.params0[0] = (*flash_count).min(6) as f32;
-                                                uniforms.params0[1] = *reveal_portion;
-                                                uniforms.params0[2] = (*stripe_count).max(1) as f32;
-                                                uniforms.params0[3] = noise_seed[0];
-                                                uniforms.params1[0] = noise_seed[1];
-                                                uniforms.params1[1] =
-                                                    flash_color[0].clamp(0.0, 1.0);
-                                                uniforms.params1[2] =
-                                                    flash_color[1].clamp(0.0, 1.0);
-                                                uniforms.params1[3] =
-                                                    flash_color[2].clamp(0.0, 1.0);
-                                            }
-                                            _ => {}
-                                        }
+                                    ActiveTransition::Wipe { normal, softness } => {
+                                        let normal = *normal;
+                                        let (min_proj, inv_span) =
+                                            compute_wipe_span(normal, screen_w, screen_h);
+                                        uniforms.params0 =
+                                            [normal[0], normal[1], min_proj, inv_span];
+                                        uniforms.params1[0] = *softness;
+                                    }
+                                    ActiveTransition::Push { direction } => {
+                                        let direction = *direction;
+                                        let diag =
+                                            (screen_w * screen_w + screen_h * screen_h).sqrt();
+                                        uniforms.params0[0] = direction[0] * diag;
+                                        uniforms.params0[1] = direction[1] * diag;
+                                    }
+                                    ActiveTransition::EInk {
+                                        flash_count,
+                                        reveal_portion,
+                                        stripe_count,
+                                        flash_color,
+                                        noise_seed,
+                                    } => {
+                                        let noise_seed = *noise_seed;
+                                        let flash_color = *flash_color;
+                                        uniforms.params0[0] = (*flash_count).min(6) as f32;
+                                        uniforms.params0[1] = *reveal_portion;
+                                        uniforms.params0[2] = (*stripe_count).max(1) as f32;
+                                        uniforms.params0[3] = noise_seed[0];
+                                        uniforms.params1[0] = noise_seed[1];
+                                        uniforms.params1[1] = flash_color[0].clamp(0.0, 1.0);
+                                        uniforms.params1[2] = flash_color[1].clamp(0.0, 1.0);
+                                        uniforms.params1[3] = flash_color[2].clamp(0.0, 1.0);
                                     }
                                 }
                             } else if have_current {
@@ -3284,13 +3184,21 @@ pub mod testkit {
         }
 
         pub async fn wait_for_ready_results(&mut self, timeout: Duration) {
-            let deadline = Instant::now() + timeout;
+            let mut deadline = Instant::now() + timeout;
+            let mut extended = false;
             loop {
                 self.drain_pipeline();
-                if (!self.ready_results.is_empty() || self.mat_inflight == 0)
-                    || Instant::now() >= deadline
-                {
+                if !self.ready_results.is_empty() || self.mat_inflight == 0 {
                     break;
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    if extended {
+                        break;
+                    }
+                    extended = true;
+                    deadline = now + timeout;
+                    continue;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -3427,8 +3335,6 @@ mod tests {
         assert_eq!(deferred_images.len(), 1);
     }
 
-    // Tessellated iris removed; WGSL path owns timing.
-
     #[test]
     fn matting_queue_starts_after_initial_surface_config() {
         let mut harness = MattingQueueHarness::new(
@@ -3464,6 +3370,4 @@ mod tests {
         );
         assert_eq!(harness.deferred_queue_len(), 0);
     }
-
-    // Removed tessellated-iris specific stage tests.
 }
