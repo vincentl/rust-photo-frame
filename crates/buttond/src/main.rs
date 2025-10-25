@@ -3,7 +3,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::os::fd::AsFd;
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -237,14 +237,10 @@ impl ButtondSettings {
         let sway_env = Arc::new(SwayEnvironment::prepare()?);
         let executor: Arc<dyn CommandExecutor> =
             Arc::new(SwayCommandExecutor::new(sway_env.clone()));
-        let powerctl_program = detect_powerctl_program(
-            &self.screen_on_command,
-            &self.screen_off_command,
-        );
-        let detector: Arc<dyn ScreenDetector> = Arc::new(SwayScreenDetector::new(
-            sway_env,
-            powerctl_program,
-        ));
+        let powerctl_program =
+            detect_powerctl_program(&self.screen_on_command, &self.screen_off_command);
+        let detector: Arc<dyn ScreenDetector> =
+            Arc::new(SwayScreenDetector::new(sway_env, powerctl_program));
 
         let screen = ScreenRuntime::new(
             self.screen_on_command,
@@ -1004,30 +1000,131 @@ fn is_socket(path: &Path) -> Result<bool> {
     }
 }
 
-fn find_sway_socket(runtime_dir: &Path) -> Result<PathBuf> {
-    let mut entries: Vec<PathBuf> = fs::read_dir(runtime_dir)
-        .with_context(|| format!("failed to list {}", runtime_dir.display()))?
-        .filter_map(|entry| {
-            entry.ok().map(|e| e.path()).filter(|path| {
-                match path.file_name().and_then(|name| name.to_str()) {
-                    Some(name) => name.starts_with("sway-ipc.") && name.ends_with(".sock"),
-                    None => false,
-                }
-            })
-        })
-        .collect();
+#[cfg(test)]
+thread_local! {
+    static PROC_ROOT_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
 
-    entries.sort();
-    for candidate in entries {
-        if is_socket(&candidate)? {
-            return Ok(candidate);
+fn find_sway_socket(runtime_dir: &Path) -> Result<PathBuf> {
+    #[cfg(test)]
+    {
+        if let Some(path) = PROC_ROOT_OVERRIDE.with(|cell| cell.borrow().clone()) {
+            return find_sway_socket_inner(runtime_dir, path.as_path());
         }
     }
 
-    bail!(
-        "failed to locate sway IPC socket in {}",
-        runtime_dir.display()
-    )
+    find_sway_socket_inner(runtime_dir, Path::new("/proc"))
+}
+
+fn find_sway_socket_inner(runtime_dir: &Path, proc_root: &Path) -> Result<PathBuf> {
+    // Runtime directories can accumulate stale sockets when sway restarts. We
+    // only trust the socket that matches the currently running sway PID to avoid
+    // attaching to an abandoned IPC endpoint.
+    let owner_uid = match fs::metadata(runtime_dir) {
+        Ok(metadata) => metadata.uid(),
+        Err(err) => {
+            let fallback_uid = unsafe { libc::getuid() as u32 };
+            warn!(
+                error = ?err,
+                fallback_uid,
+                dir = %runtime_dir.display(),
+                "failed to stat runtime directory; falling back to caller uid"
+            );
+            fallback_uid
+        }
+    };
+
+    let sway_pid = find_sway_pid(proc_root, owner_uid)
+        .with_context(|| format!("no sway process found for uid {owner_uid}"))?;
+
+    let candidate = runtime_dir.join(format!("sway-ipc.{owner_uid}.{sway_pid}.sock"));
+    if is_socket(&candidate)? {
+        Ok(candidate)
+    } else {
+        bail!(
+            "no IPC socket for sway PID {sway_pid} in {}",
+            runtime_dir.display()
+        )
+    }
+}
+
+fn find_sway_pid(proc_root: &Path, target_uid: u32) -> Result<u32> {
+    let mut matches = Vec::new();
+
+    let entries = fs::read_dir(proc_root)
+        .with_context(|| format!("failed to scan {}", proc_root.display()))?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        let pid = match entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        {
+            Some(pid) => pid,
+            None => continue,
+        };
+
+        let status_path = entry.path().join("status");
+        let status = match fs::read_to_string(&status_path) {
+            Ok(contents) => contents,
+            Err(_) => continue,
+        };
+
+        let mut name: Option<String> = None;
+        let mut uid: Option<u32> = None;
+        for line in status.lines() {
+            if line.starts_with("Name:") {
+                name = line.split_whitespace().nth(1).map(|s| s.to_owned());
+            } else if line.starts_with("Uid:") {
+                uid = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|value| value.parse::<u32>().ok());
+            }
+        }
+
+        if name.as_deref() == Some("sway") && uid == Some(target_uid) {
+            matches.push(pid);
+        }
+    }
+
+    matches.sort_unstable();
+    matches
+        .into_iter()
+        .next()
+        .context("no matching sway processes found")
+}
+
+#[cfg(test)]
+fn find_sway_socket_with_proc_root(runtime_dir: &Path, proc_root: &Path) -> Result<PathBuf> {
+    find_sway_socket_inner(runtime_dir, proc_root)
+}
+
+#[cfg(test)]
+struct ProcRootGuard;
+
+#[cfg(test)]
+fn override_proc_root(path: &Path) -> ProcRootGuard {
+    PROC_ROOT_OVERRIDE.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        *guard = Some(path.to_path_buf());
+    });
+    ProcRootGuard
+}
+
+#[cfg(test)]
+impl Drop for ProcRootGuard {
+    fn drop(&mut self) {
+        PROC_ROOT_OVERRIDE.with(|cell| {
+            cell.borrow_mut().take();
+        });
+    }
 }
 
 fn parse_sway_outputs(stdout: &[u8], display_name: Option<&str>) -> Result<ScreenDetection> {
@@ -1581,17 +1678,17 @@ mod tests {
         FORCE_SHUTDOWN_FLAG, FrameState, NO_ASK_PASSWORD_FLAG, Runtime, SchedulerCommand,
         SchedulerConfig, ScreenDetection, ScreenDetector, ScreenRuntime, ScreenState,
         SwayEnvironment, SwayScreenDetector, TransitionSource, UnixControlSocket, ViewerMode,
-        configure_shutdown_args,
+        configure_shutdown_args, find_sway_socket_with_proc_root, override_proc_root,
         parse_sway_outputs, scheduler_loop,
     };
     use config_model::AwakeScheduleConfig;
     use serde_yaml::from_str;
     use std::ffi::{OsStr, OsString};
-    use std::io::Read;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -1631,6 +1728,13 @@ mod tests {
   {"name": "HDMI-A-2", "power": "off"}
 ]
 "#;
+
+    fn write_proc_status(proc_root: &Path, pid: u32, name: &str, uid: u32) {
+        let proc_dir = proc_root.join(pid.to_string());
+        fs::create_dir_all(&proc_dir).expect("create proc entry");
+        let status = format!("Name:\t{name}\nPid:\t{pid}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n");
+        fs::write(proc_dir.join("status"), status).expect("write status");
+    }
 
     const SAMPLE_BOOL_OUTPUT: &str = r#"
 [
@@ -1823,12 +1927,61 @@ awake-scheduled: {}
     }
 
     #[test]
+    fn find_sway_socket_prefers_active_pid_socket() {
+        let runtime = tempdir().expect("runtime dir");
+        let procfs = tempdir().expect("procfs");
+        let uid = unsafe { libc::getuid() as u32 };
+
+        let stale_pid = 42420;
+        let stale_socket = runtime
+            .path()
+            .join(format!("sway-ipc.{uid}.{stale_pid}.sock"));
+        let _stale_listener = UnixListener::bind(&stale_socket).expect("create stale socket");
+
+        let foreign_socket = runtime
+            .path()
+            .join(format!("sway-ipc.{}.{stale_pid}.sock", uid + 1));
+        let _foreign_listener = UnixListener::bind(&foreign_socket).expect("create foreign socket");
+
+        let active_pid = 51515;
+        let active_socket = runtime
+            .path()
+            .join(format!("sway-ipc.{uid}.{active_pid}.sock"));
+        let _active_listener = UnixListener::bind(&active_socket).expect("create active socket");
+
+        write_proc_status(procfs.path(), active_pid, "sway", uid);
+
+        let socket = find_sway_socket_with_proc_root(runtime.path(), procfs.path())
+            .expect("discover sway socket");
+        assert_eq!(socket, active_socket);
+    }
+
+    #[test]
+    fn find_sway_socket_errors_without_matching_socket() {
+        let runtime = tempdir().expect("runtime dir");
+        let procfs = tempdir().expect("procfs");
+        let uid = unsafe { libc::getuid() as u32 };
+        let pid = 26262;
+
+        write_proc_status(procfs.path(), pid, "sway", uid);
+
+        let err = find_sway_socket_with_proc_root(runtime.path(), procfs.path())
+            .expect_err("expected missing socket error");
+        assert!(err.to_string().contains("no IPC socket"));
+    }
+
+    #[test]
     fn sway_environment_discovers_socket_in_runtime() {
         let _lock = ENV_LOCK.lock().expect("env lock poisoned");
         let runtime = tempdir().expect("tempdir");
         let runtime_path = runtime.path().to_path_buf();
-        let socket_path = runtime_path.join("sway-ipc.1234.2.sock");
+        let uid = fs::metadata(&runtime_path).expect("runtime metadata").uid();
+        let pid = 34343;
+        let socket_path = runtime_path.join(format!("sway-ipc.{uid}.{pid}.sock"));
         let _listener = UnixListener::bind(&socket_path).expect("socket created");
+        let procfs = tempdir().expect("procfs");
+        write_proc_status(procfs.path(), pid, "sway", uid);
+        let _proc_guard = override_proc_root(procfs.path());
         let _runtime_guard = EnvGuard::replace("XDG_RUNTIME_DIR", Some(runtime_path.as_os_str()));
         let _socket_guard = EnvGuard::replace("SWAYSOCK", None);
 
