@@ -95,7 +95,21 @@ This workflow prepares a Raspberry Pi OS (Trixie, 64-bit) image that boots direc
 
 ## Run the automated setup
 
-Run the automation in two steps. Each script is idempotent, so you can safely re-run it if the connection drops or you need to retry after a reboot.
+Run the automation in two steps. Each script is idempotent, so you can safely re-run it if the connection drops or you need to retry after a reboot. Alternatively, use the single-command installer below.
+
+### 0. All-in-one installer (recommended)
+
+```bash
+./setup/install-all.sh
+```
+
+This script provisions the OS (with sudo) and immediately builds and deploys the application as your unprivileged user. It also installs/updates the systemd units and starts the kiosk stack.
+
+If the build is killed by the OOM killer on low-memory boards, cap parallelism:
+
+```bash
+CARGO_BUILD_JOBS=2 ./setup/install-all.sh
+```
 
 ### 1. Provision the operating system
 
@@ -145,7 +159,15 @@ Use the following environment variables to customize an installation:
 
 ## Validate the kiosk stack
 
-Use the following checks to confirm the kiosk environment is live:
+Quick check:
+
+```bash
+./setup/tools/verify.sh
+```
+
+The verifier inspects installed binaries, configuration templates, var tree ownership, swap/zram, and the health of core services (greetd, seatd, wifi-manager, buttond, sync timer). It exits non‑zero on critical failures and prints hints for warnings.
+
+Manual checks (optional):
 
 ```bash
 systemctl status greetd

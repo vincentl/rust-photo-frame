@@ -2,6 +2,18 @@
 
 This directory houses idempotent provisioning scripts for Raspberry Pi photo frame deployments. Each stage can be re-run safely after OS updates or image refreshes.
 
+## Quick start
+
+Run both stages in one command:
+
+```bash
+./setup/install-all.sh
+```
+
+The script provisions the OS (sudo), then builds and deploys the app as your unprivileged user, and finally activates the kiosk services.
+
+Set `CARGO_BUILD_JOBS` to cap build parallelism on low-memory devices.
+
 ## System provisioning (Trixie)
 
 Provision Raspberry Pi OS (Trixie) for kiosk duty and install shared dependencies with:
