@@ -105,7 +105,11 @@ sudo ./setup/system/install.sh
 
    This pipeline installs the apt dependencies, configures zram swap, and installs a system-wide Rust toolchain under `/usr/local/cargo`. It also provisions the kiosk user, greetd configuration, and supporting systemd units that launch the photo frame at boot and reserve room for the Wi-Fi overlay. Run it before building so toolchains and packages are ready; re-run it after the application install so the kiosk services start once the binaries exist in `/opt/photo-frame`.
 
-### 2. Deploy the application
+### 2. Logout and Login
+
+The provision step modifies shell configuration files and to pickup any environment changes simply logout and then ssh back in.
+
+### 3. Deploy the application
 
 ```bash
 ./setup/application/deploy.sh
