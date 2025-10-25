@@ -41,21 +41,18 @@ SYSTEM_CARGO_HOME="/usr/local/cargo"
 SYSTEM_RUSTUP_HOME="/usr/local/rustup"
 SYSTEM_CARGO_BIN="${SYSTEM_CARGO_HOME}/bin"
 
+# Prefer the system-installed toolchain binaries if present, but keep
+# per-user Cargo/Rustup homes so the unprivileged user can write registries,
+# git checkouts, and build caches without requiring root.
 if [[ -d "${SYSTEM_CARGO_BIN}" ]]; then
-    if [[ -z "${CARGO_HOME+x}" ]]; then
-        CARGO_HOME="${SYSTEM_CARGO_HOME}"
-    fi
-    if [[ -z "${RUSTUP_HOME+x}" ]]; then
-        RUSTUP_HOME="${SYSTEM_RUSTUP_HOME}"
-    fi
     case ":${PATH}:" in
         *:"${SYSTEM_CARGO_BIN}":*) ;;
-        *)
-            export PATH="${SYSTEM_CARGO_BIN}:${PATH}"
-            ;;
+        *) export PATH="${SYSTEM_CARGO_BIN}:${PATH}" ;;
     esac
 fi
 
+# Intentionally default to per-user homes even when the toolchain lives
+# under /usr/local so registry/git databases are writable by the operator.
 CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
 RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
 

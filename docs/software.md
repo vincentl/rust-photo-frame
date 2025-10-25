@@ -117,6 +117,14 @@ The provision step modifies shell configuration files and to pickup any environm
 
    Run this command as the unprivileged operator account. It compiles the photo frame, stages the release artifacts, and installs them into `/opt/photo-frame`. The stage verifies the kiosk service account exists and will prompt for sudo to create it (along with its primary group) when missing. The closing postcheck confirms binaries and templates are in place and will warn if the system config at `/etc/photo-frame/config.yaml` is missing; re-running the command recreates it from the staged template.
 
+   Tip: if the first build fails with a SIGKILL from `rustc` (often `process didn't exit successfully ... (signal: 9)`), the kernel likely terminated a compiler worker under memory pressure. Re-run the command or cap parallelism explicitly:
+
+   ```bash
+   CARGO_BUILD_JOBS=2 ./setup/application/deploy.sh
+   ```
+
+   The build step auto-tunes jobs on lower-memory Pis, but the environment variable always wins. Also verify swap is active; `swapon --show` should list a `zram0` device after running the system setup.
+
 > **Filesystem roles**
 >
 > - `/opt/photo-frame` is treated as read-only at runtime. It contains the versioned binaries, systemd unit templates, and stock configuration files delivered by the setup scripts.
