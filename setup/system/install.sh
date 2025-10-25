@@ -47,6 +47,38 @@ for module in "${modules[@]}"; do
     echo
 done
 
+# Ensure polkit rules for kiosk are present (fallback in case a module skipped)
+ensure_polkit_rules() {
+    local src_dir="${REPO_ROOT}/setup/assets/kiosk/polkit-1/rules.d"
+    local dest_dir="/etc/polkit-1/rules.d"
+
+    if [[ ! -d "${src_dir}" ]]; then
+        log WARN "Polkit rules source not found: ${src_dir}"
+        return 0
+    fi
+
+    install -d -m 0755 "${dest_dir}"
+    local installed=0
+    local rule
+    for rule in "${src_dir}"/*.rules; do
+        [[ -f "${rule}" ]] || continue
+        install -m 0644 "${rule}" "${dest_dir}/$(basename "${rule}")"
+        installed=1
+    done
+
+    if (( installed )); then
+        log INFO "Installed polkit rules to ${dest_dir}"
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl restart polkit >/dev/null 2>&1 || true
+            log INFO "Restarted polkit to load updated rules"
+        fi
+    else
+        log INFO "No polkit rule files to install from ${src_dir}"
+    fi
+}
+
+ensure_polkit_rules
+
 # Ensure greetd owns VT1 and launches on graphical.target
 if command -v systemctl >/dev/null 2>&1; then
     log INFO "Enforcing greetd ownership of tty1"
@@ -112,5 +144,4 @@ fi
 
 
 log INFO "System provisioning complete."
-
 
