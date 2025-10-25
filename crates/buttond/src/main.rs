@@ -532,11 +532,22 @@ impl CommandExecutor for SwayCommandExecutor {
         let mut os_command = Command::new(&command.program);
         os_command.args(&command.args);
         self.env.configure(&mut os_command);
-        let status = os_command
-            .status()
+        let output = os_command
+            .output()
             .with_context(|| format!("failed to execute {}", command.program.display()))?;
-        if !status.success() {
-            bail!("{} command exited with status {}", command.label, status);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let extra = stderr.trim();
+            if extra.is_empty() {
+                bail!("{} command exited with status {}", command.label, output.status);
+            } else {
+                bail!(
+                    "{} command exited with status {}: {}",
+                    command.label,
+                    output.status,
+                    extra
+                );
+            }
         }
         Ok(())
     }
@@ -684,6 +695,9 @@ impl Runtime {
         }
 
         self.control_socket.send_set_state(ViewerMode::Asleep)?;
+        // Record the asleep mode immediately so the scheduler stops re-sending
+        // duplicate sleep commands during the off-delay window.
+        self.record_state(ViewerMode::Asleep, source);
         let delay = self.screen.off_delay();
         if !delay.is_zero() {
             info!(reason = source.as_str(), delay = %format_duration(delay), "waiting before powering screen off");
@@ -691,6 +705,7 @@ impl Runtime {
         }
         self.screen.power_off()?;
         info!(reason = source.as_str(), "frame sleep request completed");
+        // Maintain idempotence; recording again is harmless and keeps timestamps fresh.
         self.record_state(ViewerMode::Asleep, source);
         Ok(())
     }
