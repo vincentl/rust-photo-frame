@@ -138,10 +138,20 @@ if command -v systemctl >/dev/null 2>&1; then
     else
         log WARN "Failed to start greetd.service"
     fi
+
+    # Restart buttond so it rebinds to the fresh sway IPC socket after greetd restart
+    if systemctl list-unit-files buttond.service >/dev/null 2>&1; then
+        if sudo systemctl restart buttond.service >/dev/null 2>&1; then
+            log INFO "Restarted buttond.service to sync with new sway session"
+        else
+            log WARN "Failed to restart buttond.service"
+        fi
+    else
+        log INFO "buttond.service not installed; skipping restart"
+    fi
 else
     log WARN "systemctl not available; skipping greetd ownership enforcement"
 fi
 
 
 log INFO "System provisioning complete."
-

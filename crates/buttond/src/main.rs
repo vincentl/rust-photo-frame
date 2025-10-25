@@ -686,12 +686,28 @@ impl Runtime {
 
     fn go_to_sleep(&mut self, source: TransitionSource) -> Result<()> {
         if self.current_viewer_mode() == ViewerMode::Asleep {
-            info!(
-                reason = source.as_str(),
-                "sleep requested but frame already asleep"
-            );
-            self.record_state(ViewerMode::Asleep, source);
-            return Ok(());
+            // Viewer believes it's asleep; verify physical screen state.
+            if let Ok(detected) = self.screen.detect_state() {
+                if detected.state == ScreenState::Off {
+                    info!(
+                        reason = source.as_str(),
+                        "sleep requested but frame already asleep"
+                    );
+                    self.record_state(ViewerMode::Asleep, source);
+                    return Ok(());
+                }
+                // Fall through to enforce power off if the screen is still on.
+                debug!(
+                    output = %detected.name,
+                    state = detected.state.as_str(),
+                    "viewer asleep but screen still on; enforcing power off",
+                );
+            } else {
+                debug!(
+                    reason = source.as_str(),
+                    "viewer asleep; could not detect screen state, enforcing power off",
+                );
+            }
         }
 
         self.control_socket.send_set_state(ViewerMode::Asleep)?;
@@ -2226,6 +2242,41 @@ awake-scheduled: {}
             call_guard[0].1.saturating_duration_since(event_guard[0].1)
                 >= off_delay - Duration::from_millis(5)
         );
+    }
+
+    #[test]
+    fn go_to_sleep_enforces_power_off_when_viewer_thinks_asleep() {
+        let executor = RecordingExecutor::new();
+        // Detector reports the physical screen is ON, even though viewer mode is Asleep.
+        let detector = StaticDetector::new(ScreenState::On);
+        let off_delay = Duration::from_millis(10);
+
+        let screen = ScreenRuntime::new(
+            command("screen-on"),
+            command("screen-off"),
+            off_delay,
+            Some("HDMI-A-1".into()),
+            Arc::new(executor.clone()),
+            Arc::new(detector),
+        );
+
+        let control: Arc<dyn ControlSocket> = Arc::new(RecordingControlSocket::new());
+        let mut runtime = Runtime::new(
+            control,
+            command("shutdown"),
+            screen,
+            Arc::new(executor.clone()),
+            ViewerMode::Asleep,
+        );
+
+        runtime
+            .go_to_sleep(TransitionSource::Scheduled)
+            .expect("sleep should enforce power off");
+
+        let calls = executor.calls();
+        let call_guard = calls.lock().expect("executor calls poisoned");
+        assert_eq!(call_guard.len(), 1);
+        assert_eq!(call_guard[0].0, "screen-off");
     }
 
     #[test]
