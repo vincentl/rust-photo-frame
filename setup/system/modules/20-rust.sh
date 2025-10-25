@@ -37,6 +37,7 @@ env RUSTUP_HOME="${RUSTUP_HOME}" CARGO_HOME="${CARGO_HOME}" \
 log "Ensuring PATH export for system-wide cargo bin directory"
 cat <<'PROFILE' >/etc/profile.d/cargo-bin.sh
 SYSTEM_CARGO_BIN="/usr/local/cargo/bin"
+SYSTEM_RUSTUP_HOME="/usr/local/rustup"
 
 if [ "$(id -u)" -eq 0 ] && [ -f "/usr/local/cargo/env" ]; then
     # shellcheck source=/dev/null
@@ -50,11 +51,19 @@ if [ -d "${SYSTEM_CARGO_BIN}" ]; then
     esac
 fi
 
+# Default Cargo home to the unprivileged user's directory for writable caches.
 : "${CARGO_HOME:=${HOME}/.cargo}"
-export PATH CARGO_HOME
+
+# When the system toolchain is installed, default rustup state to that
+# location so the rustup/cargo proxies in /usr/local work without
+# per-user initialization.
+if [ -d "${SYSTEM_RUSTUP_HOME}" ]; then
+    : "${RUSTUP_HOME:=${SYSTEM_RUSTUP_HOME}}"
+fi
+
+export PATH CARGO_HOME RUSTUP_HOME
 PROFILE
 
 chmod 0644 /etc/profile.d/cargo-bin.sh
 
 log "Rust toolchain installation complete"
-

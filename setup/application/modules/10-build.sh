@@ -21,6 +21,22 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
+# Ensure a usable toolchain when rustup proxies are on PATH but the
+# per-user rustup state lacks a default toolchain. Prefer the system
+# installation when present.
+if command -v rustup >/dev/null 2>&1; then
+    if ! rustup show active-toolchain >/dev/null 2>&1; then
+        if [[ -z "${RUSTUP_HOME:-}" && -d "/usr/local/rustup" ]]; then
+            log INFO "No active rustup toolchain; defaulting to system toolchain at /usr/local/rustup"
+            export RUSTUP_HOME="/usr/local/rustup"
+        fi
+        if ! rustup show active-toolchain >/dev/null 2>&1; then
+            log ERROR "rustup has no default toolchain configured. Run './setup/system/install.sh' or 'rustup default stable' for this user."
+            exit 1
+        fi
+    fi
+fi
+
 profile_flag=(--profile "${CARGO_PROFILE}")
 if [[ "${CARGO_PROFILE}" == "release" ]]; then
     profile_flag=(--release)

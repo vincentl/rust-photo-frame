@@ -51,10 +51,17 @@ if [[ -d "${SYSTEM_CARGO_BIN}" ]]; then
     esac
 fi
 
-# Intentionally default to per-user homes even when the toolchain lives
-# under /usr/local so registry/git databases are writable by the operator.
+# Default to a per-user Cargo home so registries and git checkouts are
+# writable without sudo, but keep rustup state pointing at the system
+# toolchain installed by the system stage when present. This avoids the
+# "no default toolchain configured" error when using the system proxy
+# binaries from /usr/local/cargo/bin.
 CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
-RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
+if [[ -d "${SYSTEM_RUSTUP_HOME}" ]]; then
+    RUSTUP_HOME="${RUSTUP_HOME:-${SYSTEM_RUSTUP_HOME}}"
+else
+    RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
+fi
 
 STAGE_ROOT="${STAGE_ROOT:-${SCRIPT_DIR}/build}"
 export STAGE_ROOT

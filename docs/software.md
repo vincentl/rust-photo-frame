@@ -105,6 +105,12 @@ Run the automation in two steps. Each script is idempotent, so you can safely re
 
 This script provisions the OS (with sudo) and immediately builds and deploys the application as your unprivileged user. It also installs/updates the systemd units and starts the kiosk stack.
 
+### Rust toolchain behavior
+
+- The system stage installs a minimal Rust toolchain under `/usr/local/cargo` with rustup state in `/usr/local/rustup`.
+- The app deploy step prefers those system proxies and defaults `RUSTUP_HOME` to `/usr/local/rustup` so a default toolchain is available without per‑user initialization. `CARGO_HOME` remains per‑user for writable registries and caches.
+- If you encounter `rustup could not choose a version of cargo to run` during the build, ensure the system stage has been run (`sudo ./setup/system/install.sh`) or export `RUSTUP_HOME=/usr/local/rustup` in your shell and retry. Avoid overriding `RUSTUP_HOME` to `~/.rustup` unless you explicitly initialize a per‑user toolchain (`rustup default stable`).
+
 If the build is killed by the OOM killer on low-memory boards, cap parallelism:
 
 ```bash
