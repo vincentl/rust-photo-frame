@@ -138,6 +138,97 @@ ensure_boot_config_pi5() {
     fi
 }
 
+ensure_kms_cma_overlay() {
+    local module="kms-cma" config_path="${1:-}"
+    local backup_taken=0
+
+    if [[ -z "${config_path}" ]]; then
+        if [[ -f /boot/firmware/config.txt ]]; then
+            config_path="/boot/firmware/config.txt"
+        elif [[ -f /boot/config.txt ]]; then
+            config_path="/boot/config.txt"
+        else
+            log "[${module}] WARN: Unable to locate config.txt (looked in /boot/firmware and /boot)."
+            return 0
+        fi
+    fi
+
+    log "[${module}] Ensuring vc4-kms-v3d-pi5 overlay has cma-512 in ${config_path}"
+
+    local tmp
+    tmp="$(mktemp)"
+    awk '
+BEGIN { updated=0 }
+{
+  line=$0
+  # Preserve full-line comments
+  if (match(line, /^[[:space:]]*#/)) { print line; next }
+
+  # Match vc4-kms-v3d or vc4-kms-v3d-pi5 overlay lines
+  if (match(line, /^[[:space:]]*dtoverlay=(vc4-kms-v3d(-pi5)?)(.*)$/, m)) {
+    leading=""
+    # Capture leading whitespace for stable formatting
+    if (match(line, /^[[:space:]]*/)) {
+      leading=substr(line, 1, RLENGTH)
+      line=substr(line, RLENGTH+1)
+    }
+
+    # Strip key
+    sub(/^dtoverlay=/, "", line)
+
+    # Separate trailing comment if present
+    comment=""
+    if (match(line, /#.*/)) {
+      comment=substr(line, RSTART)
+      line=substr(line, 1, RSTART-1)
+    }
+
+    # Split params on comma
+    n=split(line, arr, ",")
+    base=arr[1]
+    if (base == "vc4-kms-v3d") { base = "vc4-kms-v3d-pi5" }
+    params=""
+    for (i=2; i<=n; i++) {
+      p=arr[i]
+      # trim whitespace
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", p)
+      if (p == "") continue
+      # drop existing cma-* param
+      if (p ~ /^cma-[0-9]+$/) continue
+      if (params == "") params=p; else params=params "," p
+    }
+
+    new_line=leading "dtoverlay=" base
+    if (params != "") new_line=new_line "," params
+    new_line=new_line ",cma-512"
+    if (comment != "") new_line=new_line " " comment
+
+    print new_line
+    updated=1
+    next
+  }
+
+  print $0
+}
+END {
+  if (updated==0) {
+    print "dtoverlay=vc4-kms-v3d-pi5,cma-512"
+  }
+}
+' "${config_path}" >"${tmp}"
+
+    if ! cmp -s "${config_path}" "${tmp}"; then
+        backup_boot_config "${config_path}" backup_taken
+        install -m 0644 "${tmp}" "${config_path}"
+        sync
+        log "[${module}] Set dtoverlay=vc4-kms-v3d-pi5 with cma-512"
+    else
+        log "[${module}] CMA overlay already satisfied"
+    fi
+
+    rm -f "${tmp}"
+}
+
 ensure_kiosk_packages() {
     local packages=(
         greetd
@@ -328,6 +419,7 @@ main() {
     require_commands
 
     ensure_boot_config_pi5
+    ensure_kms_cma_overlay
 
     ensure_kiosk_packages
     ensure_kiosk_user

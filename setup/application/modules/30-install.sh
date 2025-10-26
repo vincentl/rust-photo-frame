@@ -66,7 +66,7 @@ prepare_runtime() {
         run_sudo install -d -m 750 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${VAR_ROOT}"
     fi
     local subdir
-    for subdir in photos; do
+    for subdir in photos backgrounds; do
         local path="${VAR_ROOT}/${subdir}"
         if [[ ! -d "${path}" ]]; then
             run_sudo install -d -m 770 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${path}"

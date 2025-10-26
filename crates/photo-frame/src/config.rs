@@ -2302,7 +2302,13 @@ pub struct Configuration {
     /// Placeholder for the hardware button daemon's config block so that
     /// rust-photo-frame can coexist with a shared config file without
     /// accepting other unknown keys.
+    ///
+    /// This crate does not read this field; it exists solely to reserve the
+    /// `buttond` section and avoid serde `unknown field` errors due to
+    /// `deny_unknown_fields` on `Configuration` when a shared config file is
+    /// used across processes.
     #[serde(default)]
+    #[allow(dead_code)] // reserved for external consumer (buttond service)
     pub buttond: Option<YamlValue>,
 }
 

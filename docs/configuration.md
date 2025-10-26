@@ -442,6 +442,8 @@ The remaining controls depend on the mat `kind`:
   - **`path`** (string or string array, required): One or more filesystem paths to the backdrop image(s). The renderer loads referenced files at startup; an empty array disables the entry without error. Provide multiple paths (or repeat a path) to weight backgrounds after canonical expansion.
   - **`fit`** (`cover`, `contain`, or `stretch`; default `cover`): Controls how the background scales to the canvas.
 
+Note: Store operator‑managed background images under `/var/lib/photo-frame/backgrounds`. The setup pipeline treats `/opt/photo-frame` as read‑only and refreshes it on redeploy, so files placed there may be removed.
+
 ### Example: single studio mat
 
 ```yaml
@@ -483,7 +485,7 @@ matting:
     - kind: studio
       minimum-mat-percentage: 6.0
     - kind: fixed-image
-      path: [/opt/photo-frame/share/backgrounds/linen.png]
+      path: [/var/lib/photo-frame/backgrounds/linen.png]
       fit: contain
     - kind: studio
       minimum-mat-percentage: 4.0

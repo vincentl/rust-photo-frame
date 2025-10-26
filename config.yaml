@@ -167,6 +167,6 @@ matting:
       minimum-mat-percentage: 6.0
       path:
         [
-          /opt/photo-frame/share/backgrounds/blue-textured-brick-wall-background.jpg,
+          /var/lib/photo-frame/backgrounds/blue-textured-brick-wall-background.jpg,
         ]
       fit: cover # options: cover, contain, stretch

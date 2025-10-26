@@ -123,7 +123,7 @@ CARGO_BUILD_JOBS=2 ./setup/install-all.sh
 sudo ./setup/system/install.sh
 ```
 
-   This pipeline installs the apt dependencies, configures zram swap, and installs a system-wide Rust toolchain under `/usr/local/cargo`. It also provisions the kiosk user, greetd configuration, and supporting systemd units that launch the photo frame at boot and reserve room for the Wi-Fi overlay. Run it before building so toolchains and packages are ready.
+   This pipeline installs the apt dependencies, configures zram swap, and installs a system-wide Rust toolchain under `/usr/local/cargo`. It also sets `dtoverlay=vc4-kms-v3d-pi5,cma-512` in `/boot/firmware/config.txt` (or `/boot/config.txt`) so the GPU has sufficient contiguous memory for the renderer, and provisions the kiosk user, greetd configuration, and supporting systemd units that launch the photo frame at boot and reserve room for the Wi‑Fi overlay. Run it before building so toolchains and packages are ready.
 
 ### 2. Logout and Login
 

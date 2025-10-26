@@ -26,6 +26,7 @@ The system pipeline executes its numbered modules in order and performs the foll
 
 - installs base apt packages (graphics stack, build tools, networking utilities),
 - installs or updates the system-wide Rust toolchain under `/usr/local/cargo`,
+- sets `dtoverlay=vc4-kms-v3d-pi5,cma-512` in the Pi boot config to ensure sufficient CMA for the GPU,
 - replaces the legacy swapfile with `systemd-zram-generator` configured for a half-RAM zram device,
 - verifies the host is running Debian 13 (Trixie) and applies Raspberry Pi 5 boot firmware tweaks (set `ENABLE_4K_BOOT=0` before running if you need to skip the HDMI 4K60 profile),
 - ensures the locked `kiosk` user exists with membership in the `render`, `video`, and `input` groups and provisions runtime directories and polkit policy,
