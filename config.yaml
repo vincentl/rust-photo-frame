@@ -44,13 +44,11 @@ transition:
     - kind: wipe
       duration-ms: 600
       angle-list-degrees: [45.0, 225.0]
-      angle-selection: sequential
       angle-jitter-degrees: 12.0
       softness: 0.08
     - kind: push
       duration-ms: 520
       angle-list-degrees: [0.0, 180.0]
-      angle-selection: random
       angle-jitter-degrees: 8.0
     - kind: e-ink
       duration-ms: 1600

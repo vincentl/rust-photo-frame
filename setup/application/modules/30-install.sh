@@ -86,6 +86,18 @@ prepare_runtime() {
                 run_sudo chmod "${photo_mode}" "${library_path}"
             fi
         done
+
+        # Ensure group inheritance and collaborative write in the library tree
+        # - setgid bit on directories keeps group ownership as ${SERVICE_GROUP}
+        # - default ACL (when available) preserves group rwx regardless of umask
+        run_sudo chmod 2770 "${photo_root}" || true
+        for library_subdir in cloud local; do
+            run_sudo chmod 2770 "${photo_root}/${library_subdir}" || true
+        done
+        if command -v setfacl >/dev/null 2>&1; then
+            run_sudo setfacl -R -m g:"${SERVICE_GROUP}":rwx "${photo_root}" || true
+            run_sudo setfacl -R -m d:g:"${SERVICE_GROUP}":rwx "${photo_root}" || true
+        fi
     fi
     if [[ -f "${STAGE_DIR}/etc/photo-frame/config.yaml" ]]; then
         if run_sudo test -f "${CONFIG_DEST}"; then
