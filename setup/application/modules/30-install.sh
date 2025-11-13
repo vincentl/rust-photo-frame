@@ -73,6 +73,7 @@ prepare_runtime() {
         fi
     done
     local photo_root="${VAR_ROOT}/photos"
+    local backgrounds_root="${VAR_ROOT}/backgrounds"
     if [[ -d "${photo_root}" ]]; then
         local photo_mode
         photo_mode="$(run_sudo stat -c '%a' "${photo_root}")"
@@ -97,6 +98,16 @@ prepare_runtime() {
         if command -v setfacl >/dev/null 2>&1; then
             run_sudo setfacl -R -m g:"${SERVICE_GROUP}":rwx "${photo_root}" || true
             run_sudo setfacl -R -m d:g:"${SERVICE_GROUP}":rwx "${photo_root}" || true
+        fi
+    fi
+
+    # Apply the same collaborative permissions to backgrounds
+    if [[ -d "${backgrounds_root}" ]]; then
+        run_sudo chown "${SERVICE_USER}:${SERVICE_GROUP}" "${backgrounds_root}"
+        run_sudo chmod 2770 "${backgrounds_root}" || true
+        if command -v setfacl >/dev/null 2>&1; then
+            run_sudo setfacl -R -m g:"${SERVICE_GROUP}":rwx "${backgrounds_root}" || true
+            run_sudo setfacl -R -m d:g:"${SERVICE_GROUP}":rwx "${backgrounds_root}" || true
         fi
     fi
     if [[ -f "${STAGE_DIR}/etc/photo-frame/config.yaml" ]]; then
