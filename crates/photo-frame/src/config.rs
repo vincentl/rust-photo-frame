@@ -2300,7 +2300,7 @@ pub struct Configuration {
     #[serde(default)]
     pub awake_schedule: Option<AwakeScheduleConfig>,
     /// Placeholder for the hardware button daemon's config block so that
-    /// rust-photo-frame can coexist with a shared config file without
+    /// photo-frame can coexist with a shared config file without
     /// accepting other unknown keys.
     ///
     /// This crate does not read this field; it exists solely to reserve the

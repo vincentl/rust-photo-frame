@@ -42,15 +42,15 @@ dump_logs_on_failure() {
     fi
 
     set +e
-    log ERROR "Application postcheck failed; dumping rust-photo-frame journal tail"
+    log ERROR "Application postcheck failed; dumping photo-frame journal tail"
     if command -v journalctl >/dev/null 2>&1; then
         if command -v sudo >/dev/null 2>&1; then
-            sudo journalctl -t rust-photo-frame -b -n 100 || true
+            sudo journalctl -t photo-frame -b -n 100 || true
         else
-            journalctl -t rust-photo-frame -b -n 100 || true
+            journalctl -t photo-frame -b -n 100 || true
         fi
     else
-        log WARN "journalctl unavailable; cannot show rust-photo-frame logs"
+        log WARN "journalctl unavailable; cannot show photo-frame logs"
     fi
     printf '[postcheck] HINT: Temporarily set /etc/greetd/config.toml to command="/usr/bin/kmscube" for smoke tests.\n'
 }

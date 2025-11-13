@@ -1,4 +1,4 @@
-# Example configuration for rust-photo-frame
+# Example configuration for photo-frame
 # Adjust values to match your hardware, library layout, and visual preferences.
 
 # Root directory for images. Keep media in the managed subdirectories to

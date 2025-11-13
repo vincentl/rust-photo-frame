@@ -1,5 +1,5 @@
 use rand::{SeedableRng, rngs::StdRng};
-use rust_photo_frame::config::{
+use photo_frame::config::{
     Configuration, GlobalPhotoSettings, MattingKind, MattingMode, MattingSelection,
     PhotoEffectOptions, StudioMatColor, TransitionKind, TransitionSelection,
 };
@@ -63,7 +63,7 @@ matting:
     assert_eq!(selected.entry.kind, MattingKind::Studio);
     assert_eq!(selected.entry.index, 0);
     match &selected.option.style {
-        rust_photo_frame::config::MattingMode::Studio {
+        photo_frame::config::MattingMode::Studio {
             colors,
             bevel_width_px,
             bevel_color,
@@ -101,7 +101,7 @@ matting:
         .primary_selected()
         .expect("expected primary matting option");
     match selected.option.style {
-        rust_photo_frame::config::MattingMode::Studio {
+        photo_frame::config::MattingMode::Studio {
             texture_strength, ..
         } => {
             assert!((texture_strength - 0.35).abs() < f32::EPSILON);
@@ -129,7 +129,7 @@ matting:
         .primary_selected()
         .expect("expected primary matting option");
     match selected.option.style {
-        rust_photo_frame::config::MattingMode::Studio {
+        photo_frame::config::MattingMode::Studio {
             warp_period_px,
             weft_period_px,
             ..
@@ -171,7 +171,7 @@ matting:
     let selected: Vec<_> = cfg.matting.iter_selected().collect();
     assert_eq!(selected.len(), 3);
     let fixed_first = &selected[0];
-    if let rust_photo_frame::config::MattingMode::FixedColor { colors, .. } =
+    if let photo_frame::config::MattingMode::FixedColor { colors, .. } =
         &fixed_first.option.style
     {
         assert_eq!(colors.as_slice(), &[[10, 20, 30]]);
@@ -179,7 +179,7 @@ matting:
         panic!("expected fixed-color matting");
     }
     let fixed_second = &selected[1];
-    if let rust_photo_frame::config::MattingMode::FixedColor { colors, .. } =
+    if let photo_frame::config::MattingMode::FixedColor { colors, .. } =
         &fixed_second.option.style
     {
         assert_eq!(colors.as_slice(), &[[5, 15, 25]]);
@@ -187,7 +187,7 @@ matting:
         panic!("expected second fixed-color matting");
     }
     let blur = &selected[2];
-    if let rust_photo_frame::config::MattingMode::Blur { sigma, .. } = blur.option.style {
+    if let photo_frame::config::MattingMode::Blur { sigma, .. } = blur.option.style {
         assert!((sigma - 12.0).abs() < f32::EPSILON);
         assert!((blur.option.minimum_mat_percentage - 7.5).abs() < f32::EPSILON);
     } else {
@@ -301,7 +301,7 @@ matting:
         .primary_selected()
         .expect("expected fixed-color mat option");
     assert_eq!(selected.entry.kind, MattingKind::FixedColor);
-    if let rust_photo_frame::config::MattingMode::FixedColor { colors, .. } = &selected.option.style
+    if let photo_frame::config::MattingMode::FixedColor { colors, .. } = &selected.option.style
     {
         assert_eq!(colors.as_slice(), &[[17, 34, 51]]);
     } else {
@@ -378,7 +378,7 @@ matting:
     );
     assert!(matches!(
         sequence[0].option.style,
-        rust_photo_frame::config::MattingMode::FixedColor { .. }
+        photo_frame::config::MattingMode::FixedColor { .. }
     ));
 }
 
@@ -485,7 +485,7 @@ matting:
                 assert_eq!(paths, &vec![path.clone()]);
                 assert!(matches!(
                     fit,
-                    rust_photo_frame::config::FixedImageFit::Contain
+                    photo_frame::config::FixedImageFit::Contain
                 ));
             }
             other => panic!("expected fixed-image matting, got {other:?}"),
@@ -686,7 +686,7 @@ transition:
     assert_eq!(selected.entry.index, 0);
     assert_eq!(selected.option.duration().as_millis(), 750);
     match selected.option.mode() {
-        rust_photo_frame::config::TransitionMode::Fade(cfg) => {
+        photo_frame::config::TransitionMode::Fade(cfg) => {
             assert!(cfg.through_black);
         }
         _ => panic!("expected fade transition"),
@@ -729,7 +729,7 @@ transition:
     let wipe = &selected[1];
     assert_eq!(wipe.option.duration().as_millis(), 600);
     match wipe.option.mode() {
-        rust_photo_frame::config::TransitionMode::Wipe(cfg) => {
+        photo_frame::config::TransitionMode::Wipe(cfg) => {
             assert!((cfg.angles.base_deg - 90.0).abs() < f32::EPSILON);
             assert!(cfg.angles.jitter_deg.abs() < f32::EPSILON);
             assert!((cfg.softness - 0.1).abs() < f32::EPSILON);
@@ -739,7 +739,7 @@ transition:
 
     let push_first = &selected[2];
     match push_first.option.mode() {
-        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+        photo_frame::config::TransitionMode::Push(cfg) => {
             assert!((cfg.angles.base_deg - 0.0).abs() < f32::EPSILON);
             assert!(cfg.angles.jitter_deg.abs() < f32::EPSILON);
             assert_eq!(push_first.option.duration().as_millis(), 640);
@@ -749,7 +749,7 @@ transition:
 
     let push_second = &selected[3];
     match push_second.option.mode() {
-        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+        photo_frame::config::TransitionMode::Push(cfg) => {
             assert!((cfg.angles.base_deg - 180.0).abs() < f32::EPSILON);
             assert!(cfg.angles.jitter_deg.abs() < f32::EPSILON);
             assert_eq!(push_second.option.duration().as_millis(), 640);
@@ -834,7 +834,7 @@ transition:
     assert_eq!(first.entry.index, 0);
     assert_eq!(first.entry.kind, TransitionKind::Push);
     match first.option.mode() {
-        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+        photo_frame::config::TransitionMode::Push(cfg) => {
             assert!((cfg.angles.base_deg - 0.0).abs() < f32::EPSILON);
         }
         _ => panic!("expected first transition to be push"),
@@ -842,7 +842,7 @@ transition:
     assert_eq!(second.entry.index, 1);
     assert_eq!(second.entry.kind, TransitionKind::Push);
     match second.option.mode() {
-        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+        photo_frame::config::TransitionMode::Push(cfg) => {
             assert!((cfg.angles.base_deg - 180.0).abs() < f32::EPSILON);
         }
         _ => panic!("expected second transition to be push"),
@@ -850,7 +850,7 @@ transition:
     assert_eq!(third.entry.index, 2);
     assert_eq!(third.entry.kind, TransitionKind::Wipe);
     match third.option.mode() {
-        rust_photo_frame::config::TransitionMode::Wipe(cfg) => {
+        photo_frame::config::TransitionMode::Wipe(cfg) => {
             assert!((cfg.angles.base_deg - 90.0).abs() < f32::EPSILON);
         }
         _ => panic!("expected third transition to be wipe"),
@@ -858,7 +858,7 @@ transition:
     assert_eq!(fourth.entry.index, 3);
     assert_eq!(fourth.entry.kind, TransitionKind::Push);
     match fourth.option.mode() {
-        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+        photo_frame::config::TransitionMode::Push(cfg) => {
             assert!((cfg.angles.base_deg - 0.0).abs() < f32::EPSILON);
         }
         _ => panic!("expected fourth transition to be push"),
@@ -866,7 +866,7 @@ transition:
     assert_eq!(fifth.entry.index, 4);
     assert_eq!(fifth.entry.kind, TransitionKind::Push);
     match fifth.option.mode() {
-        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+        photo_frame::config::TransitionMode::Push(cfg) => {
             assert!((cfg.angles.base_deg - 180.0).abs() < f32::EPSILON);
         }
         _ => panic!("expected fifth transition to be push"),
@@ -874,7 +874,7 @@ transition:
     assert_eq!(sixth.entry.index, 0);
     assert_eq!(sixth.entry.kind, TransitionKind::Push);
     match sixth.option.mode() {
-        rust_photo_frame::config::TransitionMode::Push(cfg) => {
+        photo_frame::config::TransitionMode::Push(cfg) => {
             assert!((cfg.angles.base_deg - 0.0).abs() < f32::EPSILON);
         }
         _ => panic!("expected sixth transition to wrap to push"),
@@ -1041,13 +1041,13 @@ transition:
     assert_eq!(selected[0].option.duration().as_millis(), 725);
     assert_eq!(selected[1].option.duration().as_millis(), 725);
     match selected[0].option.mode() {
-        rust_photo_frame::config::TransitionMode::Push(push) => {
+        photo_frame::config::TransitionMode::Push(push) => {
             assert!((push.angles.base_deg - 90.0).abs() < f32::EPSILON);
         }
         _ => panic!("expected first push transition"),
     }
     match selected[1].option.mode() {
-        rust_photo_frame::config::TransitionMode::Push(push) => {
+        photo_frame::config::TransitionMode::Push(push) => {
             assert!((push.angles.base_deg - 270.0).abs() < f32::EPSILON);
         }
         _ => panic!("expected second push transition"),

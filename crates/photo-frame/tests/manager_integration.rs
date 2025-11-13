@@ -1,6 +1,6 @@
-use rust_photo_frame::config::PlaylistOptions;
-use rust_photo_frame::events::{Displayed, InventoryEvent, LoadPhoto, PhotoInfo};
-use rust_photo_frame::tasks::manager;
+use photo_frame::config::PlaylistOptions;
+use photo_frame::events::{Displayed, InventoryEvent, LoadPhoto, PhotoInfo};
+use photo_frame::tasks::manager;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};

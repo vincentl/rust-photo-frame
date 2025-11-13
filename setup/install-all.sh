@@ -42,11 +42,10 @@ cat <<'TIP'
     systemctl status photoframe-wifi-manager --no-pager
     systemctl status buttond --no-pager
 - Tail app logs:
-    journalctl -t rust-photo-frame -b -n 100
+    journalctl -t photo-frame -b -n 100
 - Edit configuration (requires sudo):
     /etc/photo-frame/config.yaml
 
 If the build was memory constrained, retry with:
     CARGO_BUILD_JOBS=2 ./setup/install-all.sh
 TIP
-

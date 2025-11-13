@@ -72,8 +72,8 @@ command -v sway >/dev/null 2>&1 || die "sway not found. Install sway."
 CONFIG_PATH="/usr/local/share/photoframe/sway/config"
 [[ -f "$CONFIG_PATH" ]] || die "sway config missing at ${CONFIG_PATH}"
 
-# 6) Launch compositor on DRM; logs to journald under rust-photo-frame
-exec systemd-cat -t rust-photo-frame -- dbus-run-session \
+# 6) Launch compositor on DRM; logs to journald under photo-frame
+exec systemd-cat -t photo-frame -- dbus-run-session \
   sway -c "$CONFIG_PATH"
 WRAPPER
     chmod 0755 "${wrapper}"
@@ -96,12 +96,12 @@ fi
 
 # Provide a stable Wayland app_id for Sway rules and focus control.
 # Allow override via environment; default matches configuration defaults.
-export WINIT_APP_ID="${WINIT_APP_ID:-rust-photo-frame}"
+export WINIT_APP_ID="${WINIT_APP_ID:-photo-frame}"
 # Control where logs go via PHOTOFRAME_LOG (journal|stdout|file:/path)
 # Defaults to journald for kiosk stability.
 case "${PHOTOFRAME_LOG:-journal}" in
   journal)
-    exec systemd-cat -t rust-photo-frame -- "${APP}" "$@"
+    exec systemd-cat -t photo-frame -- "${APP}" "$@"
     ;;
   stdout)
     exec "${APP}" "$@"
@@ -114,7 +114,7 @@ case "${PHOTOFRAME_LOG:-journal}" in
     exec "${APP}" "$@" >>"$logfile" 2>&1
     ;;
   *)
-    exec systemd-cat -t rust-photo-frame -- "${APP}" "$@"
+    exec systemd-cat -t photo-frame -- "${APP}" "$@"
     ;;
 esac
 LAUNCHER
@@ -129,7 +129,7 @@ install_sway_config() {
     cat <<'CONFIG' >"${config_file}"
 # Photo frame sway configuration
 
-set $photo_app_id rust-photo-frame
+set $photo_app_id photo-frame
 set $overlay_app_id wifi-overlay
 set $config_path /etc/photo-frame/config.yaml
 

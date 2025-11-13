@@ -147,7 +147,7 @@ fn default_overlay_command() -> Vec<String> {
 }
 
 fn default_photo_app_id() -> String {
-    "rust-photo-frame".to_string()
+    "photo-frame".to_string()
 }
 
 fn default_overlay_app_id() -> String {

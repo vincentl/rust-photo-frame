@@ -1,6 +1,6 @@
 # Memory profile and tuning
 
-This document describes how rust-photo-frame uses RAM at runtime and what
+This document describes how photo-frame uses RAM at runtime and what
 tunables help keep the footprint under control on constrained systems such as
 the Raspberry Pi. The goal is to explain why the recent matting work can push a
 4 GiB device over the limit and outline mitigation levers.
@@ -55,5 +55,5 @@ processes such as `wireplumber`, which carries a high `oom_score_adj`.
 * **Constrain source resolution.** Keeping the photo library near the panel
   resolution avoids oversized decode buffers in the loader.
 
-Monitoring the resident set size of the `rust-photo-frame` process while toggling
+Monitoring the resident set size of the `photo-frame` process while toggling
 these settings helps confirm the impact before deploying broadly.

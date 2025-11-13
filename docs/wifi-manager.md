@@ -52,7 +52,7 @@ ui:
 overlay:
   command:
     - swaymsg
-  photo-app-id: rust-photo-frame
+  photo-app-id: photo-frame
   overlay-app-id: wifi-overlay
   # sway-socket: /run/user/1000/sway-ipc.1000.123.sock
 ```
@@ -148,7 +148,7 @@ The systemd unit is defined in `assets/systemd/photoframe-wifi-manager.service` 
 
 Notes on window focus and app_id:
 
-- The slideshow is launched with `WINIT_APP_ID=rust-photo-frame` by the `/usr/local/bin/photo-frame` wrapper so Sway rules and refocus from `wifi-manager` work consistently.
+- The slideshow is launched with `WINIT_APP_ID=photo-frame` by the `/usr/local/bin/photo-frame` wrapper so Sway rules and refocus from `wifi-manager` work consistently.
 - The overlay advertises `app_id=wifi-overlay` and the watcher uses Sway IPC to focus and fullscreen it while the hotspot is active, then restores focus to the slideshow when connectivity returns.
 
 ## Acceptance test checklist

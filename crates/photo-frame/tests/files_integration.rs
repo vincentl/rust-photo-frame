@@ -1,7 +1,7 @@
 use rand::{SeedableRng, seq::SliceRandom};
-use rust_photo_frame::config::{Configuration, GlobalPhotoSettings};
-use rust_photo_frame::events::{InvalidPhoto, InventoryEvent};
-use rust_photo_frame::tasks::files;
+use photo_frame::config::{Configuration, GlobalPhotoSettings};
+use photo_frame::events::{InvalidPhoto, InventoryEvent};
+use photo_frame::tasks::files;
 use std::fs;
 use std::path::PathBuf;
 use tempfile::tempdir;

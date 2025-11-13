@@ -23,7 +23,7 @@
 
 ## Setup Roadmap
 
-This roadmap tracks the tasks required to automate the provisioning of a Raspberry Pi for the rust-photo-frame project. Checkboxes are used to indicate completion status.
+This roadmap tracks the tasks required to automate the provisioning of a Raspberry Pi for the photo-frame project. Checkboxes are used to indicate completion status.
 
 ### Completed in this iteration
 
@@ -39,7 +39,7 @@ This roadmap tracks the tasks required to automate the provisioning of a Raspber
 - [ ] Add setup module for Wi-Fi connectivity checks and captive portal configuration workflow.
 - [ ] Create module for Tailscale installation and registration guidance.
 - [ ] Provide lightweight web GUI for local configuration editing with Git-based versioning.
-- [ ] Automate configuration-driven restarts of the rust-photo-frame application.
+- [ ] Automate configuration-driven restarts of the photo-frame application.
 - [ ] Expand testing and validation steps for the full provisioning pipeline.
 
 ## Tier 1 – Must-do (MVP)

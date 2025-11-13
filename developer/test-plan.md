@@ -167,7 +167,7 @@ Exercise each axis at least once per release cycle.
   ```sh
   git fetch origin
   git checkout <release-tag>
-  cargo build --release -p rust-photo-frame
+  cargo build --release -p photo-frame
   sudo systemctl stop greetd.service
   sleep 1
   sudo systemctl start greetd.service
@@ -212,7 +212,7 @@ Exercise each axis at least once per release cycle.
   - [ ] Restart service: `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service`.
 - **Broken service (fails to start):**
   - [ ] Inspect logs: `journalctl -u greetd.service -b` and `journalctl -u photoframe-wifi-manager.service -b`.
-  - [ ] Rebuild binary: `cargo build --release -p rust-photo-frame`.
+  - [ ] Rebuild binary: `cargo build --release -p photo-frame`.
   - [ ] Validate unit file dependencies (Wayland, env vars) and run `sudo systemctl daemon-reload`.
 - **Failed update:**
   - [ ] `git checkout <previous-good>`.

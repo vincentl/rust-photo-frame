@@ -14,6 +14,6 @@ ui:
 overlay:
   command:
     - swaymsg
-  photo-app-id: rust-photo-frame
+  photo-app-id: photo-frame
   overlay-app-id: wifi-overlay
   # sway-socket: /run/user/1000/sway-ipc.1000.123.sock

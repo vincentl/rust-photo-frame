@@ -108,7 +108,7 @@ if [[ ! -x "${APP}" ]]; then
   exit 127
 fi
 
-exec systemd-cat -t rust-photo-frame -- "${APP}" "$@"
+exec systemd-cat -t photo-frame -- "${APP}" "$@"
 LAUNCHER
 sudo chmod 0755 "${launcher}"
 

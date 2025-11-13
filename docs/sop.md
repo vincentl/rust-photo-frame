@@ -4,12 +4,12 @@ This document captures routine operational procedures for the kiosk deployment.
 
 ## Viewing runtime logs
 
-The kiosk session launches the photo frame through Sway and pipes stdout/stderr into journald with `systemd-cat`. All runtime log lines carry the identifier `rust-photo-frame` and default to the `info` level.
+The kiosk session launches the photo frame through Sway and pipes stdout/stderr into journald with `systemd-cat`. All runtime log lines carry the identifier `photo-frame` and default to the `info` level.
 
 To follow the live log stream:
 
 ```bash
-sudo journalctl -t rust-photo-frame -f
+sudo journalctl -t photo-frame -f
 ```
 
 Use `Ctrl+C` to stop tailing.
@@ -42,7 +42,7 @@ sudo systemctl start greetd.service
 
 ## Manual Debug Launch (Advanced)
 
-In normal operation, the `rust-photo-frame` application is started automatically by **greetd** via the `photoframe-session` wrapper. However, for debugging or development purposes, you may wish to launch it manually under the `kiosk` account within a Wayland session.
+In normal operation, the `photo-frame` application is started automatically by **greetd** via the `photoframe-session` wrapper. However, for debugging or development purposes, you may wish to launch it manually under the `kiosk` account within a Wayland session.
 
 ### Prerequisites
 
@@ -74,7 +74,7 @@ sudo -u kiosk \
   XDG_RUNTIME_DIR="/run/user/$(id -u kiosk)" \
   dbus-run-session \
   env PHOTOFRAME_LOG=stdout \
-  env RUST_LOG='rust_photo_frame::tasks::viewer=debug,info' \
+  env RUST_LOG='photo_frame::tasks::viewer=debug,info' \
   sway -c /usr/local/share/photoframe/sway/config
 ```
 
@@ -85,7 +85,7 @@ sudo -u kiosk \
   XDG_RUNTIME_DIR="/run/user/$(id -u kiosk)" \
   dbus-run-session \
   env PHOTOFRAME_LOG='file:/var/tmp/photo-frame.log' \
-  env RUST_LOG='rust_photo_frame::tasks::viewer=debug,info' \
+  env RUST_LOG='photo_frame::tasks::viewer=debug,info' \
   sway -c /usr/local/share/photoframe/sway/config
 
 sudo tail -f /var/tmp/photo-frame.log
@@ -94,5 +94,5 @@ sudo tail -f /var/tmp/photo-frame.log
 When you’re done, remove the `PHOTOFRAME_LOG` override to return to the default journald capture. You can always watch the kiosk logs via:
 
 ```bash
-sudo journalctl -t rust-photo-frame -f
+  sudo journalctl -t photo-frame -f
 ```
