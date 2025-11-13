@@ -48,10 +48,30 @@ ensure_user_exists() {
     run_sudo useradd "${args[@]}" "${SERVICE_USER}"
 }
 
+ensure_operator_membership() {
+    # Add the invoking (deployment) user to the service group so they can
+    # manage files under /var/lib/photo-frame without sudo.
+    local operator
+    operator="$(id -un)"
+
+    # Skip root and the service user itself
+    if [[ "${operator}" == "root" || "${operator}" == "${SERVICE_USER}" ]]; then
+        return
+    fi
+
+    # If the operator is not already a member of SERVICE_GROUP, add them.
+    if ! id -Gn "${operator}" | tr ' ' '\n' | grep -Fxq "${SERVICE_GROUP}"; then
+        log INFO "Adding ${operator} to ${SERVICE_GROUP} group for collaborative library management"
+        run_sudo usermod -aG "${SERVICE_GROUP}" "${operator}"
+        log INFO "Group membership updated; ${operator} should log out/in for the new group to take effect in current sessions"
+    fi
+}
+
 main() {
     resolve_service_group
     ensure_group_exists
     ensure_user_exists
+    ensure_operator_membership
 }
 
 main "$@"
