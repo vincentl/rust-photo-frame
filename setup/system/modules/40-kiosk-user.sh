@@ -165,7 +165,7 @@ BEGIN { updated=0 }
   if (match(line, /^[[:space:]]*#/)) { print line; next }
 
   # Match vc4-kms-v3d or vc4-kms-v3d-pi5 overlay lines
-  if (match(line, /^[[:space:]]*dtoverlay=(vc4-kms-v3d(-pi5)?)(.*)$/, m)) {
+  if (match(line, /^[[:space:]]*dtoverlay=(vc4-kms-v3d(-pi5)?)(.*)$/)) {
     leading=""
     # Capture leading whitespace for stable formatting
     if (match(line, /^[[:space:]]*/)) {
