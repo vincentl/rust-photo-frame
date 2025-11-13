@@ -104,8 +104,8 @@ set -euo pipefail
 APP="/opt/photo-frame/bin/photo-frame"
 
 if [[ ! -x "${APP}" ]]; then
-    echo "[photo-frame] binary not found at ${APP}" >&2
-    exit 127
+  echo "[photo-frame] binary not found at ${APP}" >&2
+  exit 127
 fi
 
 exec systemd-cat -t rust-photo-frame -- "${APP}" "$@"

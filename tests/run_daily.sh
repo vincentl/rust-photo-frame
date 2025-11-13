@@ -11,7 +11,7 @@ main() {
   section "Service health"
   require_cmd systemctl
   run_cmd "${photo_service} is active" systemctl is-active --quiet "${photo_service}"
-  run_cmd "Process present" pidof rust-photo-frame
+  run_cmd "Process present" pidof photo-frame
   if systemctl cat "${wifi_service}" >/dev/null 2>&1; then
     run_cmd "${wifi_service} is active" systemctl is-active --quiet "${wifi_service}"
   else

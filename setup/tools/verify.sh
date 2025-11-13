@@ -25,7 +25,7 @@ warnings=0
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # Binaries and config presence
-BIN_APP="${INSTALL_ROOT}/bin/rust-photo-frame"
+BIN_APP="${INSTALL_ROOT}/bin/photo-frame"
 BIN_WIFI="${INSTALL_ROOT}/bin/wifi-manager"
 BIN_BUTTOND="${INSTALL_ROOT}/bin/buttond"
 BIN_POWERCTL="${INSTALL_ROOT}/bin/powerctl"
@@ -167,4 +167,3 @@ echo
 log INFO "Summary: ${failures} error(s), ${warnings} warning(s)"
 
 exit $(( failures > 0 ? 1 : 0 ))
-

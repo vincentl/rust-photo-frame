@@ -94,14 +94,14 @@ main() {
     vcgencmd measure_temp >"$tmpdir/runtime/temperature.txt" || true
   fi
 
-  if [ -x "$REPO_ROOT/target/release/rust-photo-frame" ]; then
-    "$REPO_ROOT/target/release/rust-photo-frame" --version >"$tmpdir/runtime/app-version.txt" || true
-  elif [ -x "$REPO_ROOT/target/debug/rust-photo-frame" ]; then
-    "$REPO_ROOT/target/debug/rust-photo-frame" --version >"$tmpdir/runtime/app-version.txt" || true
-  elif [ -x "${install_root}/bin/rust-photo-frame" ]; then
-    "${install_root}/bin/rust-photo-frame" --version >"$tmpdir/runtime/app-version.txt" || true
+  if [ -x "$REPO_ROOT/target/release/photo-frame" ]; then
+    "$REPO_ROOT/target/release/photo-frame" --version >"$tmpdir/runtime/app-version.txt" || true
+  elif [ -x "$REPO_ROOT/target/debug/photo-frame" ]; then
+    "$REPO_ROOT/target/debug/photo-frame" --version >"$tmpdir/runtime/app-version.txt" || true
+  elif [ -x "${install_root}/bin/photo-frame" ]; then
+    "${install_root}/bin/photo-frame" --version >"$tmpdir/runtime/app-version.txt" || true
   else
-    warn "rust-photo-frame binary not found; skipping --version"
+    warn "photo-frame binary not found; skipping --version"
   fi
 
   info "Copying config"

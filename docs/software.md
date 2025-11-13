@@ -105,6 +105,8 @@ Run the automation in two steps. Each script is idempotent, so you can safely re
 
 This script provisions the OS (with sudo) and immediately builds and deploys the application as your unprivileged user. It also installs/updates the systemd units and starts the kiosk stack.
 
+Note on build time: to keep memory usage stable on the Pi, the installer intentionally limits Cargo's parallel build jobs based on available RAM (or an explicit `CARGO_BUILD_JOBS`). This reduces the risk of OOM kills but makes the first build take longer than a typical desktop build.
+
 ### Rust toolchain behavior
 
 - The system stage installs a minimal Rust toolchain under `/usr/local/cargo` with rustup state in `/usr/local/rustup`.

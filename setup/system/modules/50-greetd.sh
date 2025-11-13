@@ -89,14 +89,14 @@ set -euo pipefail
 
 APP="/opt/photo-frame/bin/photo-frame"
 
+if [[ ! -x "${APP}" ]]; then
+  echo "[photo-frame] binary not found at ${APP}" >&2
+  exit 127
+fi
+
 # Provide a stable Wayland app_id for Sway rules and focus control.
 # Allow override via environment; default matches configuration defaults.
 export WINIT_APP_ID="${WINIT_APP_ID:-rust-photo-frame}"
-
-if [[ ! -x "${APP}" ]]; then
-    echo "[photo-frame] binary not found at ${APP}" >&2
-    exit 127
-fi
 # Control where logs go via PHOTOFRAME_LOG (journal|stdout|file:/path)
 # Defaults to journald for kiosk stability.
 case "${PHOTOFRAME_LOG:-journal}" in

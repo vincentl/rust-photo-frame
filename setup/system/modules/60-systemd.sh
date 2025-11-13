@@ -98,7 +98,7 @@ enable_systemd_units() {
         systemctl mask getty@tty1.service >/dev/null 2>&1 || true
     fi
 
-    local session_bin="/opt/photo-frame/bin/rust-photo-frame"
+    local session_bin="/opt/photo-frame/bin/photo-frame"
     local greetd_started=0
 
     local seatd_units=(seatd.service seatd.socket)
@@ -117,7 +117,7 @@ enable_systemd_units() {
         systemctl enable --now greetd.service >/dev/null 2>&1 || true
         greetd_started=1
     else
-        log "rust-photo-frame binary missing at ${session_bin}; enabling greetd without starting"
+        log "photo-frame binary missing at ${session_bin}; enabling greetd without starting"
         systemctl enable greetd.service >/dev/null 2>&1 || true
     fi
 
@@ -165,4 +165,3 @@ configure_logind_power_key
 enable_systemd_units
 
 log "systemd provisioning complete"
-

@@ -38,7 +38,7 @@ use events::{
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "rust-photo-frame",
+    name = "photo-frame",
     version,
     about = "photo frame minimal scaffold"
 )]

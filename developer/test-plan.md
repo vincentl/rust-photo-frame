@@ -134,7 +134,7 @@ Exercise each axis at least once per release cycle.
 - [ ] Ensure config sleep window matches local timezone.
 - [ ] Manual toggle:
   ```sh
-  kill -USR1 $(pidof rust-photo-frame)
+  kill -USR1 $(pidof photo-frame)
   ```
   Confirm screen dims / slideshow pauses; capture journal snippet.
 - [ ] Scheduled test: temporarily set sleep window to begin in ~5 minutes, reload config (restart service), observe dim-on schedule and subsequent wake.
@@ -156,7 +156,7 @@ Exercise each axis at least once per release cycle.
 - [ ] Point to tiny library (≤50). Validate EXIF orientation, mats, transitions.
 - [ ] Swap to medium library (1–3k). Allow 10–15 minutes playback, monitoring CPU/GPU/IO:
   ```sh
-  top -H -p $(pidof rust-photo-frame)
+  top -H -p $(pidof photo-frame)
   vcgencmd measure_temp
   ```
 - [ ] Watch for stutters or decode warnings in `journalctl -u greetd.service`.
@@ -172,7 +172,7 @@ Exercise each axis at least once per release cycle.
   sleep 1
   sudo systemctl start greetd.service
   ```
-- [ ] Validate new version via `rust-photo-frame --version` in logs or manual run.
+  - [ ] Validate new version via `photo-frame --version` in logs or manual run.
 - [ ] Rollback rehearsal: checkout previous known-good commit/tag, rebuild, restart service.
 - [ ] Ensure unit file remains untouched (compare with `systemctl cat greetd.service`).
 
@@ -229,7 +229,7 @@ Exercise each axis at least once per release cycle.
 - Display info: `wlr-randr`, `modetest -c`, `cat /sys/class/drm/card*/card*/modes`
 - Services: `systemctl status greetd.service`, `journalctl -u greetd.service -n 200 --no-pager`
 - Network: `nmcli dev status`, `nmcli connection show --active`
-- Signals: `kill -USR1 $(pidof rust-photo-frame)`
+- Signals: `kill -USR1 $(pidof photo-frame)`
 - Button events: `sudo evtest`
 
 ### Appendix B – Observations Log

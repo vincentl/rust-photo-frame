@@ -27,12 +27,11 @@ run_sudo() {
     sudo "$@"
 }
 
-BIN_PATH="${INSTALL_ROOT}/bin/rust-photo-frame"
+BIN_PATH="${INSTALL_ROOT}/bin/photo-frame"
 WIFI_BIN_PATH="${INSTALL_ROOT}/bin/wifi-manager"
 CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/photo-frame/config.yaml"
 WIFI_CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/wifi-manager.yaml"
 WORDLIST_PATH="${INSTALL_ROOT}/share/wordlist.txt"
-PHOTO_BIN_PATH="${INSTALL_ROOT}/bin/photo-frame"
 VAR_DIR="/var/lib/photo-frame"
 SYSTEM_CONFIG="/etc/photo-frame/config.yaml"
 
@@ -60,11 +59,6 @@ trap 'dump_logs_on_failure $?' EXIT
 
 if [[ ! -x "${BIN_PATH}" ]]; then
     log ERROR "Binary ${BIN_PATH} missing or not executable"
-    exit 1
-fi
-
-if [[ ! -x "${PHOTO_BIN_PATH}" ]]; then
-    log ERROR "Binary ${PHOTO_BIN_PATH} missing or not executable"
     exit 1
 fi
 

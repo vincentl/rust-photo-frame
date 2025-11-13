@@ -114,22 +114,10 @@ set_permissions() {
     fi
 }
 
-ensure_launcher_symlink() {
-    local target="${INSTALL_ROOT}/bin/rust-photo-frame"
-    local link="${INSTALL_ROOT}/bin/photo-frame"
-
-    if run_sudo test -x "${target}"; then
-        run_sudo ln -sf "${target}" "${link}"
-    else
-        log WARN "photo frame binary missing at ${target}; cannot update ${link}"
-    fi
-}
-
 require_stage_dir
 validate_service_principal
 install_tree
 prepare_runtime
 set_permissions
-ensure_launcher_symlink
 
 log INFO "Installation tree updated at ${INSTALL_ROOT}"
