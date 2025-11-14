@@ -92,33 +92,52 @@ main() {
   local bin=/opt/photo-frame/bin/wifi-manager
   [[ -x "$bin" ]] || err "wifi-manager not found at ${bin} (deploy application stage first)"
 
-  # Launch overlay directly (no shell quoting pitfalls); inherit Wayland env
-  log "Launching overlay for SSID='${ssid}' (UI: ${ui_url})"
-  run_as_kiosk \
-    XDG_RUNTIME_DIR="/run/user/${kiosk_uid}" \
-    SWAYSOCK="${sway_sock}" \
-    WAYLAND_DISPLAY="wayland-0" \
-    WINIT_APP_ID="wifi-overlay" \
-    "$bin" overlay \
-      --ssid "$ssid" \
-      --password-file "$pass_file" \
-      --ui-url "$ui_url" \
-      >/dev/null 2>&1 &
+  # Determine Wayland display socket under XDG_RUNTIME_DIR
+  local wl_sock wl_display
+  wl_sock=$(ls "/run/user/${kiosk_uid}"/wayland-* 2>/dev/null | head -n1 || true)
+  if [[ -S "${wl_sock:-/nonexistent}" ]]; then
+    wl_display="$(basename "$wl_sock")"
+  else
+    # Fallback to wayland-0; winit will error if unavailable
+    wl_display="wayland-0"
+  fi
+
+  # Prefer launching inside Sway's environment via 'swaymsg exec' to avoid Wayland env pitfalls
+  shell_escape() {
+    # bash single-quote escape: close ', insert '\'' for each ', reopen '
+    local s="$1"
+    printf "'%s'" "${s//\'/'\''}"
+  }
+
+  local cmd_parts=(
+    systemd-cat -t wifi-overlay env WINIT_APP_ID=wifi-overlay "$bin" overlay
+    --ssid "$ssid" --password-file "$pass_file" --ui-url "$ui_url"
+  )
+  local cmdline=""
+  for part in "${cmd_parts[@]}"; do
+    if [[ -z "$cmdline" ]]; then
+      cmdline=$(shell_escape "$part")
+    else
+      cmdline+=" "$(shell_escape "$part")
+    fi
+  done
+  log "Launching overlay via sway: ${cmdline}"
+  run_sway exec "$cmdline" >/dev/null 2>&1 || true
 
   # Give Sway a moment to map the window, then verify presence
-  sleep 0.5
+  sleep 0.8
   if run_sway -t get_tree | grep -qi '"app_id"\s*:\s*"wifi-overlay"'; then
     log "Overlay is visible and mapped (app_id=wifi-overlay)"
     exit 0
   fi
 
   # Retry once after a short delay
-  sleep 0.5
+  sleep 1
   if run_sway -t get_tree | grep -qi '"app_id"\s*:\s*"wifi-overlay"'; then
     log "Overlay is visible after retry"
     exit 0
   else
-    err "failed to detect overlay window; check Sway logs and SWAYSOCK"
+    err "failed to detect overlay window; check Sway logs and SWAYSOCK; view logs with: journalctl -t wifi-overlay -n 100 --no-pager"
   fi
 }
 
