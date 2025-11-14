@@ -102,27 +102,19 @@ main() {
     wl_display="wayland-0"
   fi
 
-  # Prefer launching inside Sway's environment via 'swaymsg exec' to avoid Wayland env pitfalls
-  shell_escape() {
-    # bash single-quote escape: close ', insert '\'' for each ', reopen '
-    local s="$1"
-    printf "'%s'" "${s//\'/'\''}"
-  }
-
-  local cmd_parts=(
-    systemd-cat -t wifi-overlay env WINIT_APP_ID=wifi-overlay "$bin" overlay
-    --ssid "$ssid" --password-file "$pass_file" --ui-url "$ui_url"
-  )
-  local cmdline=""
-  for part in "${cmd_parts[@]}"; do
-    if [[ -z "$cmdline" ]]; then
-      cmdline=$(shell_escape "$part")
-    else
-      cmdline+=" "$(shell_escape "$part")
-    fi
-  done
-  log "Launching overlay via sway: ${cmdline}"
-  run_sway exec "$cmdline" >/dev/null 2>&1 || true
+  # Launch overlay directly with proper Wayland + IPC env
+  log "Launching overlay (direct) for SSID='${ssid}' (UI: ${ui_url}); WAYLAND_DISPLAY=${wl_display}"
+  run_as_kiosk \
+    XDG_RUNTIME_DIR="/run/user/${kiosk_uid}" \
+    SWAYSOCK="${sway_sock}" \
+    WAYLAND_DISPLAY="${wl_display}" \
+    WINIT_APP_ID="wifi-overlay" \
+    systemd-cat -t wifi-overlay -- \
+    "$bin" overlay \
+      --ssid "$ssid" \
+      --password-file "$pass_file" \
+      --ui-url "$ui_url" \
+      >/dev/null 2>&1 &
 
   # Give Sway a moment to map the window, then verify presence
   sleep 0.8
