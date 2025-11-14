@@ -5,11 +5,11 @@ Wants=greetd.service
 
 [Service]
 Type=oneshot
-# Run as root; the script will drop to the kiosk user for sway via sudo -u kiosk
+User=kiosk
+Group=kiosk
 ExecStart=/usr/local/bin/overlay-test
 StandardOutput=journal
 StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-

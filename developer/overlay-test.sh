@@ -31,8 +31,9 @@ main() {
   need timeout || true
 
   # Resolve kiosk user + Sway IPC
-  local kiosk_uid
+  local kiosk_uid current_uid
   kiosk_uid=$(id -u kiosk 2>/dev/null || true)
+  current_uid=$(id -u)
   [[ -n "$kiosk_uid" ]] || err "user 'kiosk' not found"
 
   local sway_sock
@@ -40,11 +41,16 @@ main() {
   [[ -S "${sway_sock:-/nonexistent}" ]] || err "failed to locate Sway IPC socket for kiosk (is greetd/sway running?)"
 
   # Helper to run swaymsg as kiosk with proper env
+  run_as_kiosk() {
+    if [[ "$current_uid" == "$kiosk_uid" ]]; then
+      env "$@"
+    else
+      sudo -u kiosk env "$@"
+    fi
+  }
+
   run_sway() {
-    sudo -u kiosk env \
-      XDG_RUNTIME_DIR="/run/user/${kiosk_uid}" \
-      SWAYSOCK="${sway_sock}" \
-      swaymsg "$@"
+    run_as_kiosk XDG_RUNTIME_DIR="/run/user/${kiosk_uid}" SWAYSOCK="${sway_sock}" swaymsg "$@"
   }
 
   case "$action" in
@@ -88,7 +94,7 @@ main() {
 
   # Launch overlay directly (no shell quoting pitfalls); inherit Wayland env
   log "Launching overlay for SSID='${ssid}' (UI: ${ui_url})"
-  sudo -u kiosk env \
+  run_as_kiosk \
     XDG_RUNTIME_DIR="/run/user/${kiosk_uid}" \
     SWAYSOCK="${sway_sock}" \
     WAYLAND_DISPLAY="wayland-0" \
@@ -117,4 +123,3 @@ main() {
 }
 
 main "$@"
-
