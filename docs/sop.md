@@ -94,5 +94,26 @@ sudo tail -f /var/tmp/photo-frame.log
 When you’re done, remove the `PHOTOFRAME_LOG` override to return to the default journald capture. You can always watch the kiosk logs via:
 
 ```bash
-  sudo journalctl -t photo-frame -f
+sudo journalctl -t photo-frame -f
 ```
+
+## Overlay Takeover Test (dev)
+
+Use this to verify the overlay can steal focus/fullscreen over the slideshow before testing Wi‑Fi flows.
+
+- Install the helper (one time):
+  - `sudo install -D -m 0755 developer/overlay-test.sh /usr/local/bin/overlay-test`
+  - `sudo install -D -m 0644 developer/systemd/wifi-overlay-test.service /etc/systemd/system/wifi-overlay-test.service`
+  - `sudo systemctl daemon-reload`
+
+- Run the test (start overlay):
+  - `sudo systemctl start wifi-overlay-test.service`
+  - Verify: `sudo -u kiosk bash developer/overlay-test.sh status` (exits 0 when present)
+
+- Hide overlay:
+  - `sudo -u kiosk bash developer/overlay-test.sh hide`
+
+- Troubleshooting:
+  - Ensure Sway is running as kiosk: `systemctl status greetd`
+  - Check SWAYSOCK detection: `sudo -u kiosk ls /run/user/$(id -u kiosk)/sway-ipc.*.sock`
+  - Review journal: `journalctl -u wifi-overlay-test.service -n 50 --no-pager`
