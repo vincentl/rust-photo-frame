@@ -84,8 +84,8 @@ main() {
   # Ensure a password file exists (do not overwrite hotspot password)
   if [[ ! -f "$pass_file" ]]; then
     log "Creating test password file at ${pass_file}"
-    echo 'Test-Overlay-1234' | sudo tee "$pass_file" >/dev/null
-    sudo chmod 600 "$pass_file" || true
+    echo 'Test-Overlay-1234' > "$pass_file"
+    chmod 600 "$pass_file" || true
   fi
 
   # Ensure the overlay binary exists
