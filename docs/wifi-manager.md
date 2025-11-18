@@ -165,8 +165,50 @@ These behavioural checks validate the full provisioning lifecycle:
 
 - **Hotspot never appears:** confirm `journalctl -u photoframe-wifi-manager.service` shows the `OFFLINE → HOTSPOT` transition. If not, verify the interface name in the config matches the Pi's Wi-Fi adapter (often `wlan0`).
 - **Portal unreachable:** ensure the UI port is free (`sudo lsof -iTCP:8080 -sTCP:LISTEN`). The daemon logs whenever it binds the HTTP server.
-- **Overlay never appears:** verify Sway IPC is reachable from the service (`SWAYSOCK` points to `sway-ipc.<uid>.<pid>.sock`). Also ensure at least one system font is installed (e.g. `fonts-dejavu-core` or `fonts-noto-core`) — the overlay refuses to start without a font. For a manual check: `sudo -u kiosk SWAYSOCK=$(ls /run/user/$(id -u kiosk)/sway-ipc.*.sock | head -1) swaymsg exec 'env WINIT_APP_ID=wifi-overlay /opt/photo-frame/bin/wifi-manager overlay --ssid Test --password-file /var/lib/photo-frame/hotspot-password.txt --ui-url http://192.168.4.1:8080/'`.
+- **Overlay never appears:** verify Sway IPC is reachable from the service (`SWAYSOCK` points to `sway-ipc.<uid>.<pid>.sock`). Also ensure at least one system font is installed (e.g. `fonts-dejavu-core` or `fonts-noto-core`) — the overlay refuses to start without a font. For a manual check (ensure the glob expands inside the kiosk shell):
+
+  ```bash
+  sudo -u kiosk sh -lc '
+    SWAYSOCK="$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -type s -name "sway-ipc.*.sock" -print -quit)"
+    swaymsg -s "$SWAYSOCK" exec "env WINIT_APP_ID=wifi-overlay /opt/photo-frame/bin/wifi-manager overlay --ssid Test --password-file /var/lib/photo-frame/hotspot-password.txt --ui-url http://192.168.4.1:8080/"
+  '
+  ```
 - **Provisioning fails repeatedly:** inspect `/var/lib/photo-frame/wifi-last.json` for masked SSIDs and error codes. Run `sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid <name> --psk <pass>` manually to confirm NetworkManager feedback (if this reports `Insufficient privileges`, re-run the kiosk provisioning script to reinstall the polkit rule).
 - **Wordlist missing:** rerun `setup/application/modules/20-stage.sh` and `30-install.sh` to restore `/opt/photo-frame/share/wordlist.txt`; the manager refuses to start without it so that hotspot passwords are never empty.
 
 With the Wi-Fi manager in place, the frame can recover from outages autonomously and guide users through reconnecting without opening the enclosure or attaching keyboards.
+
+## Disable permanently
+
+If you don’t want the Wi‑Fi manager to ever start on an existing install, disable and mask its systemd unit. Masking ensures it stays off even if you rerun the setup scripts (which try to enable it):
+
+```bash
+# Stop the service if it’s running
+sudo systemctl stop photoframe-wifi-manager.service
+
+# Disable at boot
+sudo systemctl disable photoframe-wifi-manager.service
+
+# Prevent any start (including from installers or dependencies)
+sudo systemctl mask photoframe-wifi-manager.service
+
+# Optional: shut down and remove the recovery hotspot profile
+sudo nmcli connection down pf-hotspot || true
+sudo nmcli connection delete pf-hotspot || true
+
+# Verify status
+systemctl is-enabled photoframe-wifi-manager.service   # masked
+systemctl is-active photoframe-wifi-manager.service    # inactive
+```
+
+To re‑enable later:
+
+```bash
+sudo systemctl unmask photoframe-wifi-manager.service
+sudo systemctl enable --now photoframe-wifi-manager.service
+```
+
+Notes:
+
+- The setup pipeline (`setup/system/modules/60-systemd.sh`) enables this unit when present, but a masked unit will not start. Leaving it masked keeps it off across upgrades.
+- Removing the NetworkManager polkit rule is optional; it is harmless to keep. If desired: `sudo rm -f /etc/polkit-1/rules.d/90-photoframe-nm.rules`.

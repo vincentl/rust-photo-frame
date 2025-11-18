@@ -115,5 +115,5 @@ Use this to verify the overlay can steal focus/fullscreen over the slideshow bef
 
 - Troubleshooting:
   - Ensure Sway is running as kiosk: `systemctl status greetd`
-  - Check SWAYSOCK detection: `sudo -u kiosk ls /run/user/$(id -u kiosk)/sway-ipc.*.sock`
+  - Check SWAYSOCK detection (expand glob in kiosk’s shell): `sudo -u kiosk sh -lc 'ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock'`
   - Review journal: `journalctl -u wifi-overlay-test.service -n 50 --no-pager`
