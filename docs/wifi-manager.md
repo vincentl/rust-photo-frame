@@ -168,11 +168,18 @@ These behavioural checks validate the full provisioning lifecycle:
 - **Overlay never appears:** verify Sway IPC is reachable from the service (`SWAYSOCK` points to `sway-ipc.<uid>.<pid>.sock`). Also ensure at least one system font is installed (e.g. `fonts-dejavu-core` or `fonts-noto-core`) — the overlay refuses to start without a font. For a manual check (ensure the glob expands inside the kiosk shell):
 
   ```bash
-  sudo -u kiosk sh -lc '
-    SWAYSOCK="$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -type s -name "sway-ipc.*.sock" -print -quit)"
-    swaymsg -s "$SWAYSOCK" exec "env WINIT_APP_ID=wifi-overlay /opt/photo-frame/bin/wifi-manager overlay --ssid Test --password-file /var/lib/photo-frame/hotspot-password.txt --ui-url http://192.168.4.1:8080/"
+  sudo sh -lc '
+    RUNDIR="/run/user/$(id -u kiosk)";
+    SWAYSOCK="$(find "$RUNDIR" -maxdepth 1 -type s -name "sway-ipc.*.sock" -print -quit)";
+    [ -S "$SWAYSOCK" ] || { echo "No Sway IPC socket for kiosk (is greetd/Sway running?)" >&2; exit 1; };
+    sudo -u kiosk SWAYSOCK="$SWAYSOCK" swaymsg -s "$SWAYSOCK" exec 'env WINIT_APP_ID=wifi-overlay /opt/photo-frame/bin/wifi-manager overlay --ssid Test --password-file /var/lib/photo-frame/hotspot-password.txt --ui-url http://192.168.4.1:8080/'
   '
   ```
+
+  If `/run/user/$(id -u kiosk)` does not exist, start the kiosk session or enable lingering for the kiosk user so a runtime dir is created:
+
+  - Start/verify greetd: `sudo systemctl status greetd` (start if inactive)
+  - Allow lingering: `sudo loginctl enable-linger kiosk`
 - **Provisioning fails repeatedly:** inspect `/var/lib/photo-frame/wifi-last.json` for masked SSIDs and error codes. Run `sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid <name> --psk <pass>` manually to confirm NetworkManager feedback (if this reports `Insufficient privileges`, re-run the kiosk provisioning script to reinstall the polkit rule).
 - **Wordlist missing:** rerun `setup/application/modules/20-stage.sh` and `30-install.sh` to restore `/opt/photo-frame/share/wordlist.txt`; the manager refuses to start without it so that hotspot passwords are never empty.
 

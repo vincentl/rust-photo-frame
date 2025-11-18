@@ -81,11 +81,17 @@ main() {
   ui_url="${UI_URL:-$UI_URL_DEFAULT}"
   pass_file="${PASS_FILE:-$PASS_FILE_DEFAULT}"
 
-  # Ensure a password file exists (do not overwrite hotspot password)
+  # Ensure a password file exists and is readable by kiosk
   if [[ ! -f "$pass_file" ]]; then
-    log "Creating test password file at ${pass_file}"
-    echo 'Test-Overlay-1234' > "$pass_file"
-    chmod 600 "$pass_file" || true
+    log "Creating test password file as kiosk at ${pass_file}"
+    run_as_kiosk sh -lc "umask 077; printf '%s\n' 'Test-Overlay-1234' > \"${pass_file}\""
+  else
+    # If the file exists but isn't readable by kiosk, repair ownership/permissions
+    if ! run_as_kiosk test -r "$pass_file"; then
+      log "Adjusting ownership/permissions on ${pass_file} for kiosk"
+      chown kiosk:kiosk "$pass_file" || true
+      chmod 600 "$pass_file" || true
+    fi
   fi
 
   # Ensure the overlay binary exists
