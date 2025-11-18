@@ -122,8 +122,10 @@ main() {
       --ui-url "$ui_url" \
       >/dev/null 2>&1 &
 
-  # Give Sway a moment to map the window, then verify presence
-  sleep 0.8
+  # Give Sway a moment to map the window, try to focus/fullscreen it, then verify presence
+  sleep 0.6
+  run_sway '[app_id="wifi-overlay"] focus, fullscreen enable' || true
+  sleep 0.2
   if run_sway -t get_tree | grep -qi '"app_id"\s*:\s*"wifi-overlay"'; then
     log "Overlay is visible and mapped (app_id=wifi-overlay)"
     exit 0
@@ -131,6 +133,7 @@ main() {
 
   # Retry once after a short delay
   sleep 1
+  run_sway '[app_id="wifi-overlay"] focus, fullscreen enable' || true
   if run_sway -t get_tree | grep -qi '"app_id"\s*:\s*"wifi-overlay"'; then
     log "Overlay is visible after retry"
     exit 0
