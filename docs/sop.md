@@ -2,8 +2,10 @@
 
 This runbook covers day-2 operations for deployed frames.
 
+Command context: run commands as your operator account over SSH and use `sudo` where shown.
+
 - Fresh install and first-time Wi-Fi recovery test: [`software.md`](software.md)
-- Full release validation matrix: [`../developer/test-plan.md`](../developer/test-plan.md)
+- Full validation matrix: [`../developer/test-plan.md`](../developer/test-plan.md)
 - Advanced Sway/kiosk debugging workflows: [`../developer/kiosk-debug.md`](../developer/kiosk-debug.md)
 - Deep Wi-Fi service operations and troubleshooting: [`wifi-manager.md`](wifi-manager.md#service-management)
 
@@ -17,6 +19,8 @@ Run these first before deeper debugging:
 sudo systemctl status greetd.service
 sudo systemctl status photoframe-wifi-manager.service
 ```
+
+Expected outcome: both services report `active (running)` and `print-status.sh` completes without errors.
 
 ## Viewing runtime logs
 
@@ -61,7 +65,7 @@ When recovery is stuck, gather these artifacts before changing config:
    - `nmcli dev status`
    - `nmcli connection show --active`
 4. Verify kiosk session/Sway reachability:
-   - `systemctl status greetd.service`
+   - `sudo systemctl status greetd.service`
    - `sudo sh -lc 'uid=$(id -u kiosk); ls "/run/user/$uid"/sway-ipc.*.sock'`
 5. Validate credential apply path manually:
    - `sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid "<ssid>" --psk "<password>"`

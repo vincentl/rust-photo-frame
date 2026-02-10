@@ -4,6 +4,8 @@ The `wifi-manager` crate is the frame's single entry point for Wi-Fi monitoring,
 
 This document is the implementation/reference guide. For fresh-install validation use [`software.md`](software.md), for full QA coverage use [`../developer/test-plan.md`](../developer/test-plan.md), and for incident triage use [`sop.md`](sop.md).
 
+Command context: run commands as your operator account over SSH and use `sudo` where shown. Commands that operate Wi-Fi credentials directly should run as `kiosk` via `sudo -u kiosk`.
+
 ## Quick operational checks
 
 Use this sequence for a quick sanity check after changing Wi-Fi logic:
@@ -18,6 +20,8 @@ Use this sequence for a quick sanity check after changing Wi-Fi logic:
 4. If it fails, follow:
    - [`sop.md#wi-fi-failure-triage`](sop.md#wi-fi-failure-triage)
 
+Expected outcome: the watcher service is `active (running)` and `print-status.sh` reports coherent connectivity/hotspot state.
+
 ## Capabilities at a glance
 
 - Detects connectivity loss by polling NetworkManager for the interface's connection state.
@@ -30,7 +34,7 @@ Use this sequence for a quick sanity check after changing Wi-Fi logic:
 
 ## Binary layout and subcommands
 
-The release build installs to `/opt/photo-frame/bin/wifi-manager` and exposes the following subcommands:
+The deployed runtime installs to `/opt/photo-frame/bin/wifi-manager` and exposes the following subcommands:
 
 | Subcommand | Purpose                                                                                                                                        |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -149,7 +153,7 @@ Re-running the scripts is idempotent: binaries are replaced in place, configs ar
 ## Validation entry points
 
 - Fresh-install acceptance flow: [`software.md#fresh-install-wi-fi-recovery-test`](software.md#fresh-install-wi-fi-recovery-test)
-- Full Wi-Fi validation matrix (release QA): [`../developer/test-plan.md#phase-7--wi-fi-provisioning--watcher`](../developer/test-plan.md#phase-7--wi-fi-provisioning--watcher)
+- Full Wi-Fi validation matrix: [`../developer/test-plan.md#phase-7--wi-fi-provisioning--watcher`](../developer/test-plan.md#phase-7--wi-fi-provisioning--watcher)
 - Day-2 failure triage: [`sop.md#wi-fi-failure-triage`](sop.md#wi-fi-failure-triage)
 
 ## Service management
@@ -158,7 +162,7 @@ Common operational commands:
 
 ```bash
 # Tail live logs
-journalctl -u photoframe-wifi-manager.service -f
+sudo journalctl -u photoframe-wifi-manager.service -f
 
 # Restart watcher after editing config
 sudo systemctl restart photoframe-wifi-manager.service
@@ -260,8 +264,8 @@ sudo nmcli connection down pf-hotspot || true
 sudo nmcli connection delete pf-hotspot || true
 
 # Verify status
-systemctl is-enabled photoframe-wifi-manager.service   # masked
-systemctl is-active photoframe-wifi-manager.service    # inactive
+sudo systemctl is-enabled photoframe-wifi-manager.service   # masked
+sudo systemctl is-active photoframe-wifi-manager.service    # inactive
 ```
 
 Re-enable later:

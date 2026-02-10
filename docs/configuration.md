@@ -1,8 +1,8 @@
 # Configuration
 
-The repository ships with a sample [`config.yaml`](../config.yaml) that you can copy or edit directly. Place a YAML file alongside the binary (or somewhere readable) and pass its path as the CLI argument.
+The repository ships with a sample [`config.yaml`](../config.yaml) that you can copy or edit directly. On installed systems, edit `/etc/photo-frame/config.yaml`; when running from source, pass a config path on the CLI.
 
-> **Breaking change:** The `transition`, `matting`, and `photo-effect` blocks now expect `selection` + `active` entries. Configurations that still rely on the legacy `types`/`options` layout will fail to load until they are migrated.
+The visual feature blocks (`transition`, `matting`, and `photo-effect`) use a shared `selection` + `active` structure throughout this guide.
 
 ## Quick start
 
@@ -153,7 +153,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Type:** mapping (see [Photo effect configuration](#photo-effect-configuration))
 - **Default:** disabled (`active: []`)
 - **What it does:** Inserts an optional post-processing stage between the loader and viewer. The built-in `print-simulation` effect relights each frame with directional shading and paper sheen inspired by _3D Simulation of Prints for Improved Soft Proofing_. Add it to `active` when you want that treatment; leaving the list empty keeps the stage off.
-- **When to change it:** Enable when you want the frame to mimic how ink interacts with paper under gallery lighting, or when you add additional effects in future releases.
+- **When to change it:** Enable when you want the frame to mimic how ink interacts with paper under gallery lighting, or when you add additional effects in future updates.
 
 ### `greeting-screen`
 
@@ -300,8 +300,6 @@ The optional `photo-effect` task sits between the loader and the viewer. When en
 | `selection` | Optional  | `fixed` when `active` has one entry, otherwise `random`       | `fixed`, `random`, `sequential` | Controls how the viewer iterates through `active`. `fixed` locks to the first entry, `random` chooses independently per slide, and `sequential` advances in order and loops. |
 | `active`    | Yes       | —                                                             | Array of effect entry maps | Declares the effect variants that are eligible. Repeat entries—including duplicates of the same `kind`—to weight the random picker or alternate presets in sequential mode. |
 
-> Legacy `photo-effect.types` and `photo-effect.options` keys are no longer supported. Copy each prior option into the `active` list with an explicit `kind` field to migrate.
-
 Example recipes are in [Photo-effect examples](#photo-effect-examples).
 
 ### Print-simulation effect
@@ -323,8 +321,6 @@ The `transition` block controls how the viewer blends between photos. Supply one
 | ----------- | --------- | ------------------------------------------------------------- | ----------------------------------------- | ------ |
 | `selection` | Optional  | `fixed` when `active` has one entry, otherwise `random`       | `fixed`, `random`, or `sequential`        | Controls how the viewer iterates through `active`. `fixed` locks to the first entry, `random` chooses independently per slide, and `sequential` advances in order and loops. |
 | `active`    | Yes       | —                                                             | Array of transition entry maps            | Declares the transition variants that are eligible. Repeat entries—including duplicates of the same `kind`—to weight the random picker or to alternate presets in sequential mode. |
-
-> Legacy `transition.types` and `transition.options` keys are no longer supported. Migrate by copying each old option into the `active` list and moving the former map key into a `kind` field.
 
 When `selection` is omitted, the runtime infers it: a single entry becomes `fixed`; multiple entries default to `random`. `selection: fixed` requires exactly one entry, while `selection: sequential` or `selection: random` accept any list length greater than zero.
 
@@ -366,8 +362,6 @@ The `matting` block prepares the background behind each photo. During parsing th
 | ----------- | --------- | ----------------------------------------------------- | ------------------------------ | ------ |
 | `selection` | Optional  | `fixed` when the canonical list has one slot; otherwise `random` | `fixed`, `random`, or `sequential` | Governs how the viewer iterates through the canonical mat list. `fixed` locks to the first slot, `random` samples independently for each slide, and `sequential` steps through the list in order before looping. |
 | `active`    | Yes       | —                                                     | Array of mat entry maps        | Declares the mat variants that expand into the canonical slot list (including per-entry color or path arrays). Duplicate swatches or paths expand into multiple canonical slots, weighting the preset for `random` selection and repeating it when `sequential` mode loops. |
-
-> Legacy `matting.types` and `matting.options` keys are no longer accepted. Copy each prior option into the `active` list with an explicit `kind` field to migrate.
 
 When `selection` is omitted, the runtime infers it: a single canonical slot becomes `fixed`; multiple slots default to `random`. `selection: fixed` requires exactly one slot; the other modes accept any non-empty list.
 

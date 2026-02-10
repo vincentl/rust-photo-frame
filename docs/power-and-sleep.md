@@ -2,6 +2,8 @@
 
 buttond now owns wake/sleep scheduling for the frame. It evaluates the shared `awake-schedule` block, drives the slideshow state via the control socket, and executes DPMS commands to blank or revive the panel. This guide walks through the required packages, configuration snippets, and verification steps.
 
+Command context: run commands as your operator account over SSH and use `sudo` where shown. Commands that touch Wayland session state run as `kiosk`.
+
 ## Quick setup
 
 Use this quick sequence for a working schedule + power setup:
@@ -12,8 +14,10 @@ Use this quick sequence for a working schedule + power setup:
 3. Restart daemon:
    - `sudo systemctl restart buttond.service`
 4. Verify:
-   - `journalctl -u buttond.service -f`
+   - `sudo journalctl -u buttond.service -f`
    - `echo '{"command":"set-state","state":"awake"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photo-frame/control.sock`
+
+Expected outcome: buttond logs show schedule evaluation and the frame wakes when the control command is sent.
 
 ## Setup steps
 
@@ -51,7 +55,7 @@ Use this quick sequence for a working schedule + power setup:
    ```
 5. Confirm scheduling works by watching the logs and issuing a manual wake:
    ```bash
-   journalctl -u buttond.service -f
+   sudo journalctl -u buttond.service -f
    echo '{"command": "set-state", "state": "awake"}' \
      | sudo -u kiosk socat - UNIX-CONNECT:/run/photo-frame/control.sock
    ```
@@ -74,8 +78,8 @@ The helper `/opt/photo-frame/bin/powerctl` bootstraps the Wayland environment, a
 
 Set `buttond.screen.display-name` so buttond always calls it with an explicit connector:
 ```bash
-powerctl sleep          # auto-detect output (used for manual testing only)
-powerctl wake HDMI-A-2  # explicit connector provided by configuration
+sudo -u kiosk /opt/photo-frame/bin/powerctl sleep
+sudo -u kiosk /opt/photo-frame/bin/powerctl wake HDMI-A-2
 ```
 
 ## Manual overrides
@@ -106,7 +110,7 @@ Verification checklist:
 
 1. Run sleep command; monitor LED should turn amber and panel should blank.
 2. Wait a few seconds, then run wake command; screen should resync to expected mode.
-3. Watch `journalctl -u buttond.service` for scheduled transitions and power command execution.
+3. Watch `sudo journalctl -u buttond.service` for scheduled transitions and power command execution.
 
 ## Troubleshooting matrix
 
@@ -120,7 +124,7 @@ Verification checklist:
 
 ## Operational tips
 
-- Use `journalctl -u buttond.service -f` to watch schedule boundaries, DPMS actions, and manual overrides.
+- Use `sudo journalctl -u buttond.service -f` to watch schedule boundaries, DPMS actions, and manual overrides.
 - For interactive tests, send `{"command":"set-state","state":"awake"}` over the control socket instead of restarting services.
 - Keep custom power scripts under `/opt/photo-frame/bin` and reference absolute paths in `buttond.screen`.
 - Debounce physical button wiring before writing to the control socket to avoid accidental double toggles.

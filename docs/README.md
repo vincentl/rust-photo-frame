@@ -2,6 +2,15 @@
 
 Use this page as the map for Photo Frame documentation.
 
+## First-time path (in order)
+
+If this is your first time setting up the project, read these in sequence:
+
+1. Hardware planning and bill of materials: [`hardware.md`](hardware.md)
+2. Full Raspberry Pi provisioning and install workflow: [`software.md`](software.md)
+3. Runtime tuning and YAML reference: [`configuration.md`](configuration.md)
+4. Daily operations and troubleshooting: [`sop.md`](sop.md)
+
 ## Start here by role
 
 ### Operator

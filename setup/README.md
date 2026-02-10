@@ -40,7 +40,7 @@ Run this from the device when display login fails or the kiosk session will not 
 
 ## Application deployment
 
-Build and install release artifacts from an unprivileged shell:
+Build and install optimized runtime artifacts from an unprivileged shell:
 
 ```bash
 ./setup/application/deploy.sh
@@ -52,7 +52,7 @@ The application stage compiles the workspace, stages binaries and documentation 
 
 - Daily operations and triage: [`../docs/sop.md`](../docs/sop.md)
 - Fresh-install + Wi-Fi recovery validation: [`../docs/software.md`](../docs/software.md)
-- Full validation matrix for release testing: [`../developer/test-plan.md`](../developer/test-plan.md)
+- Full system validation matrix: [`../developer/test-plan.md`](../developer/test-plan.md)
 
 The kiosk account is unprivileged; use your operator account (for example `frame`) for maintenance commands.
 
@@ -63,7 +63,7 @@ The kiosk account is unprivileged; use your operator account (for example `frame
 - Installs base apt packages (graphics stack, build tools, networking utilities).
 - Installs or updates system-wide Rust toolchain under `/usr/local/cargo`.
 - Sets `dtoverlay=vc4-kms-v3d-pi5,cma-512` in boot config for GPU CMA.
-- Replaces legacy swapfile with `systemd-zram-generator` (half-RAM zram target).
+- Replaces the default swapfile with `systemd-zram-generator` (half-RAM zram target).
 - Verifies Debian 13 (Trixie) and applies Pi 5 firmware tweaks.
 - Ensures locked `kiosk` user with `render`, `video`, and `input` group membership.
 - Provisions runtime directories and polkit policy.

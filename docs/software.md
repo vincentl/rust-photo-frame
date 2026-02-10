@@ -1,12 +1,14 @@
 # Raspberry Pi Provisioning and Installation
 
-These instructions cover the full workflow for preparing a Raspberry Pi to run the Photo Frame project, from creating the SD card image to verifying the kiosk session.
+These instructions cover the full workflow for preparing a Raspberry Pi to run the Photo Frame project, from creating the SD card image to verifying the kiosk session and showing your first slideshow.
 
 Audience: operator/installer. For setup module internals see `setup/README.md`.
 
+Command context: run commands as your operator account over SSH unless noted otherwise. Use `sudo` for system changes and service inspection.
+
 ## Quick install checklist
 
-Use this if you just want a working fresh install quickly:
+Use this if you want a first slideshow quickly:
 
 1. Flash Raspberry Pi OS (Trixie, 64-bit) with SSH + Wi-Fi enabled.
 2. SSH into the Pi as your operator account (example `frame`).
@@ -18,12 +20,18 @@ Use this if you just want a working fresh install quickly:
    - `./setup/install-all.sh`
 6. Verify services:
    - `./setup/tools/verify.sh`
-7. Run Wi-Fi recovery acceptance test:
+7. Add photos to the default library path:
+   - Copy images into `/var/lib/photo-frame/photos/local`
+8. Wake the frame if it is sleeping:
+   - `echo '{"command":"set-state","state":"awake"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photo-frame/control.sock`
+9. (Recommended) Run Wi-Fi recovery acceptance test:
    - `make -f tests/Makefile wifi-recovery`
+
+Expected outcome: the frame boots into the kiosk session, accepts a wake command, and begins cycling through photos from `/var/lib/photo-frame/photos`.
 
 ## Before you image: prepare SSH keys
 
-Recent releases of Raspberry Pi Imager (v1.8 and newer) prompt for customization _after_ you choose the OS and storage. Because you will need an SSH public key at that point, confirm that one is available before you begin flashing the card. Commands in this section are examples that should work on macOS or Linux. Consult documentation about your computer's OS for details about how to carry out these steps. See `ssh-keygen` documentation to choose appropriate parameters if you generate a new ssh key.
+Current versions of Raspberry Pi Imager (v1.8 and newer) prompt for customization _after_ you choose the OS and storage. Because you will need an SSH public key at that point, confirm that one is available before you begin flashing the card. Commands in this section are examples that should work on macOS or Linux. Consult documentation about your computer's OS for details about how to carry out these steps. See `ssh-keygen` documentation to choose appropriate parameters if you generate a new ssh key.
 
 1. Check for an existing public SSH key.
 
@@ -59,7 +67,7 @@ This workflow prepares a Raspberry Pi OS (Trixie, 64-bit) image that boots direc
 1. **Choose Device:** Raspberry Pi 5
 1. **Choose OS:** select _Raspberry Pi OS (64-bit)_ (Trixie).
 1. **Choose Storage:** pick the microSD card.
-1. Click **Next**. When prompted to apply OS customization, choose **Edit Settings**. The older gear icon has been replaced with this dialog in recent releases.
+1. Click **Next**. When prompted to apply OS customization, choose **Edit Settings**.
 1. In **General** settings:
    - **Hostname:** `photoframe`
    - **Username / Password:** create a dedicated user (e.g., `frame`) with a strong password.
@@ -87,7 +95,7 @@ This workflow prepares a Raspberry Pi OS (Trixie, 64-bit) image that boots direc
    grep VERSION_CODENAME /etc/os-release
    ```
 
-   The output must include `VERSION_CODENAME=trixie`. Earlier Debian releases are no longer supported by the setup scripts.
+   The output must include `VERSION_CODENAME=trixie`. The setup scripts target Debian 13 (Trixie).
 
 1. (Recommended) Update the package cache and upgrade packages before running the automation. Although the setup scripts will also check for OS updates, the first update after a fresh install can be more involved and may include user prompts.
 
@@ -134,7 +142,7 @@ sudo ./setup/system/install.sh
 
 ### 2. Logout and Login
 
-The provision step modifies shell configuration files and to pickup any environment changes simply logout and then ssh back in.
+The provision step modifies shell configuration files. To pick up environment changes, log out and then SSH back in.
 
 ### 3. Deploy the application
 
@@ -142,7 +150,7 @@ The provision step modifies shell configuration files and to pickup any environm
 ./setup/application/deploy.sh
 ```
 
-   Run this command as the unprivileged operator account. It compiles the photo frame, stages the release artifacts, and installs them into `/opt/photo-frame`. The stage verifies the kiosk service account exists and will prompt for sudo to create it (along with its primary group) when missing. After install, it installs/updates the app’s systemd unit files and starts the kiosk services (greetd, seatd, wifi-manager, buttond) so the session comes up without re-running the system stage. The postcheck confirms binaries and templates are in place and will warn if the system config at `/etc/photo-frame/config.yaml` is missing; re-running the command recreates it from the staged template.
+   Run this command as the unprivileged operator account. It compiles the photo frame, stages the runtime artifacts, and installs them into `/opt/photo-frame`. The stage verifies the kiosk service account exists and will prompt for sudo to create it (along with its primary group) when missing. After install, it installs/updates the app’s systemd unit files and starts the kiosk services (greetd, seatd, wifi-manager, buttond) so the session comes up without re-running the system stage. The postcheck confirms binaries and templates are in place and will warn if the system config at `/etc/photo-frame/config.yaml` is missing; re-running the command recreates it from the staged template.
 
 ## Validate the kiosk stack
 
@@ -157,12 +165,50 @@ The verifier inspects installed binaries, configuration templates, var tree owne
 Manual checks (optional):
 
 ```bash
-systemctl status greetd
-systemctl status display-manager
-journalctl -u greetd -b
+sudo systemctl status greetd
+sudo systemctl status display-manager
+sudo journalctl -u greetd -b
 ```
 
 `systemctl status` should report `active (running)` and show `/usr/local/bin/photoframe-session` in the command line. The journal should contain the photo frame application logs for the current boot. Once these checks pass, reboot the device to land directly in the fullscreen photo frame experience.
+
+## Load photos and show the first slideshow
+
+After the kiosk stack is healthy, copy at least a few photos into the default library and wake the frame.
+
+1. Ensure the local library directory exists with kiosk ownership:
+
+   ```bash
+   sudo install -d -m 2775 -o kiosk -g kiosk /var/lib/photo-frame/photos/local
+   ```
+
+2. Copy photos into the local library:
+
+   ```bash
+   sudo cp /path/to/photos/* /var/lib/photo-frame/photos/local/
+   sudo chown kiosk:kiosk /var/lib/photo-frame/photos/local/*
+   ```
+
+3. Confirm files are present:
+
+   ```bash
+   find /var/lib/photo-frame/photos -type f | head
+   ```
+
+4. Wake the frame if it is currently asleep:
+
+   ```bash
+   echo '{"command":"set-state","state":"awake"}' \
+     | sudo -u kiosk socat - UNIX-CONNECT:/run/photo-frame/control.sock
+   ```
+
+5. Watch recent app logs:
+
+   ```bash
+   sudo journalctl -t photo-frame -n 50 --no-pager
+   ```
+
+Expected outcome: within a few seconds the display leaves the greeting/sleep card and begins cycling through your photos.
 
 ## Fresh Install Wi-Fi Recovery Test
 
@@ -209,7 +255,7 @@ After completing a fresh microSD install and successful deployment, run this end
    sudo journalctl -u photoframe-wifi-manager.service --since "10 min ago"
    ```
 
-For the full release validation matrix, use [`../developer/test-plan.md`](../developer/test-plan.md) (Phase 7). For day-2 incident triage, use [`sop.md`](sop.md).
+For the full validation matrix, use [`../developer/test-plan.md`](../developer/test-plan.md) (Phase 7). For day-2 incident triage, use [`sop.md`](sop.md).
 
 ## Kiosk session reference
 

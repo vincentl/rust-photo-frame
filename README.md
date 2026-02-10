@@ -12,16 +12,28 @@ A digital photo frame driver implemented in Rust with a pipeline tuned for Raspb
 
 ## Table of Contents
 
-1. [Hardware](#hardware)
-2. [Software Setup](#software-setup)
-3. [Wi-Fi Recovery & Provisioning](#wi-fi-recovery--provisioning)
-4. [Documentation Guide](#documentation-guide)
-5. [Features](#features)
-6. [Architecture Overview](#architecture-overview)
-7. [Configuration](#configuration)
-8. [Fabrication](#fabrication)
-9. [References](#references)
-10. [License](#license)
+1. [New to Photo Frame?](#new-to-photo-frame)
+2. [Hardware](#hardware)
+3. [Software Setup](#software-setup)
+4. [Wi-Fi Recovery & Provisioning](#wi-fi-recovery--provisioning)
+5. [Documentation Guide](#documentation-guide)
+6. [Features](#features)
+7. [Architecture Overview](#architecture-overview)
+8. [Configuration](#configuration)
+9. [Fabrication](#fabrication)
+10. [References](#references)
+11. [License](#license)
+
+## New to Photo Frame?
+
+Use this reading order for a first install:
+
+1. Plan hardware: [docs/hardware.md](docs/hardware.md)
+2. Provision and install software: [docs/software.md](docs/software.md)
+3. Tune runtime behavior: [docs/configuration.md](docs/configuration.md)
+4. Operate and troubleshoot: [docs/sop.md](docs/sop.md)
+
+If you follow `docs/software.md` from top to bottom, you will finish with an installed kiosk session and a running slideshow.
 
 ## Hardware
 
@@ -34,7 +46,7 @@ Setup pipeline internals and helper-library notes are in [setup/README.md](setup
 
 > **Install layout at a glance**
 >
-> - `/opt/photo-frame` holds the read-only release artifacts that ship with the project: compiled binaries, unit files, and the pristine configuration templates staged by the setup scripts.
+> - `/opt/photo-frame` holds the read-only runtime artifacts that ship with the project: compiled binaries, unit files, and the pristine configuration templates staged by the setup scripts.
 > - `/var/lib/photo-frame` carries the live state: logs, caches, hotspot artifacts, and any synchronized media. Treat this tree as the working area that systemd services mutate at runtime.
 > - `/etc/photo-frame/config.yaml` holds the active configuration the services consume. Edit this copy (with `sudo`) to adjust library paths or button behavior.
 >
@@ -104,8 +116,6 @@ flowchart LR
 ## Configuration
 
 All configuration options—from playlist weighting and greeting screens to transition tuning—are documented in depth, including starter YAML, per-key reference tables, and copy/paste recipes. [Reference →](docs/configuration.md)
-
-> **Breaking change:** The `transition`, `matting`, and `photo-effect` blocks now use a `selection` + `active` schema. Older `types`/`options` layouts no longer parse—recreate those entries with explicit `kind` fields as shown in the updated configuration guide.
 
 > **Matting at a glance:** The viewer walks `matting.active` from top to bottom, expanding inline palettes (such as `colors` arrays) into a canonical list of presets. Random and sequential selection both operate on that expanded list, so weighting or rotation happens after the inline swatches unfold. See the [full matting documentation](docs/configuration.md#matting-configuration) for details and examples.
 

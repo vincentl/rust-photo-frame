@@ -4,6 +4,8 @@ The photo frame boots straight into the Wayland app using a greetd-managed sessi
 
 This document is the kiosk stack reference (greetd/Sway wiring and expected system state). For fresh install steps use [`software.md`](software.md), and for day-2 operations use [`sop.md`](sop.md).
 
+Command context: run commands as your operator account over SSH and use `sudo` for service inspection.
+
 ## Provisioning sequence
 
 Use this sequence for a standard kiosk bring-up:
@@ -12,9 +14,9 @@ Use this sequence for a standard kiosk bring-up:
 sudo ./setup/system/install.sh
 ./setup/application/deploy.sh
 ./setup/tools/verify.sh
-systemctl status greetd
-systemctl status display-manager
-journalctl -u greetd -b
+sudo systemctl status greetd
+sudo systemctl status display-manager
+sudo journalctl -u greetd -b
 ```
 
 If `greetd` is active and `photoframe-session` appears in the unit command line, kiosk wiring is healthy.
@@ -71,9 +73,9 @@ Re-running provisioning after OS/app updates is expected and safe. On systems al
 
 ```bash
 grep VERSION_CODENAME /etc/os-release
-systemctl status greetd
-systemctl status display-manager
-journalctl -u greetd -b
+sudo systemctl status greetd
+sudo systemctl status display-manager
+sudo journalctl -u greetd -b
 ```
 
 Expected:
