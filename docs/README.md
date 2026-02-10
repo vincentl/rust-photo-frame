@@ -1,66 +1,43 @@
 # Documentation Guide
 
-Use this page as the map for all Photo Frame documentation.
+Use this page as the map for Photo Frame documentation.
 
-## Reading paths
+## Start here by role
 
 ### Operator
 
-- Fresh install from blank microSD: [`software.md`](software.md)
-- Software install appendix (toolchain/OOM/layout/env): [`software-notes.md`](software-notes.md)
-- Day-2 operations and incident triage: [`sop.md`](sop.md)
-- Power/sleep tuning and diagnostics: [`power-and-sleep.md`](power-and-sleep.md)
-- Power/sleep hardware notes and troubleshooting appendix: [`power-and-sleep-notes.md`](power-and-sleep-notes.md)
-- Runtime configuration reference: [`configuration.md`](configuration.md)
-- Copy/paste configuration recipes: [`configuration-examples.md`](configuration-examples.md)
+1. Fresh install from blank microSD: [`software.md`](software.md)
+2. Day-2 operations and incident triage: [`sop.md`](sop.md)
+3. Wi-Fi recovery behavior and troubleshooting: [`wifi-manager.md`](wifi-manager.md)
+4. Display power/sleep setup and diagnostics: [`power-and-sleep.md`](power-and-sleep.md)
+5. Runtime configuration reference and examples: [`configuration.md`](configuration.md)
 
 ### Maintainer
 
-- Kiosk stack architecture and greetd/Sway wiring: [`kiosk.md`](kiosk.md)
-- Kiosk provisioning internals and deep verification notes: [`kiosk-notes.md`](kiosk-notes.md)
-- Wi-Fi manager behavior, config, and troubleshooting: [`wifi-manager.md`](wifi-manager.md)
-- Wi-Fi manager service operations and deep troubleshooting: [`wifi-manager-operations.md`](wifi-manager-operations.md)
-- Setup pipeline internals appendix: [`../setup/NOTES.md`](../setup/NOTES.md)
+1. Kiosk stack architecture and provisioning details: [`kiosk.md`](kiosk.md)
+2. Setup pipeline internals and module behavior: [`../setup/README.md`](../setup/README.md)
+3. Wi-Fi manager service lifecycle and runbooks: [`wifi-manager.md`](wifi-manager.md)
 
 ### Developer
 
-- Full system validation matrix: [`../developer/test-plan.md`](../developer/test-plan.md)
-- Advanced kiosk/Sway debugging workflows: [`../developer/kiosk-debug.md`](../developer/kiosk-debug.md)
+1. Full system validation matrix: [`../developer/test-plan.md`](../developer/test-plan.md)
+2. Advanced kiosk/Sway debugging workflows: [`../developer/kiosk-debug.md`](../developer/kiosk-debug.md)
 
 ### Maker
 
-- Hardware BOM and planning: [`hardware.md`](hardware.md)
-- Hardware accessories and planning appendix: [`hardware-notes.md`](hardware-notes.md)
-- Physical build/fabrication: [`../maker/fabrication.md`](../maker/fabrication.md)
+1. Hardware BOM, accessories, and planning: [`hardware.md`](hardware.md)
+2. Physical build/fabrication: [`../maker/fabrication.md`](../maker/fabrication.md)
 
-## Canonical ownership
+## Canonical docs
 
-### Operator-owned runbooks
-
-- Installation workflow and first boot checks: [`software.md`](software.md)
-- Install edge cases and advanced notes: [`software-notes.md`](software-notes.md)
-- Routine runtime operations and recovery triage: [`sop.md`](sop.md)
-- Display power/sleep setup: [`power-and-sleep.md`](power-and-sleep.md)
-- Display power/sleep advanced notes: [`power-and-sleep-notes.md`](power-and-sleep-notes.md)
-- Runtime configuration reference and examples: [`configuration.md`](configuration.md), [`configuration-examples.md`](configuration-examples.md)
-
-### Maintainer-owned references
-
-- Kiosk stack advanced notes: [`kiosk-notes.md`](kiosk-notes.md)
-- Wi-Fi manager internals and service mechanics: [`wifi-manager.md`](wifi-manager.md)
-- Wi-Fi manager operational runbook: [`wifi-manager-operations.md`](wifi-manager-operations.md)
-- Setup script internals and module behavior: [`../setup/README.md`](../setup/README.md)
-- Setup helper-library and module appendix: [`../setup/NOTES.md`](../setup/NOTES.md)
-
-### Developer-owned references
-
-- Exhaustive release validation checklist: [`../developer/test-plan.md`](../developer/test-plan.md)
-- Advanced kiosk/Sway debugging workflows: [`../developer/kiosk-debug.md`](../developer/kiosk-debug.md)
-
-### Maker-owned references
-
-- Hardware planning and accessory notes: [`hardware-notes.md`](hardware-notes.md)
-- Physical build/fabrication: [`../maker/fabrication.md`](../maker/fabrication.md)
+- Install + provisioning workflow: [`software.md`](software.md)
+- Runtime operations SOP: [`sop.md`](sop.md)
+- Wi-Fi recovery architecture + operations: [`wifi-manager.md`](wifi-manager.md)
+- Kiosk stack reference: [`kiosk.md`](kiosk.md)
+- Display power/sleep guide: [`power-and-sleep.md`](power-and-sleep.md)
+- Runtime configuration (reference + examples): [`configuration.md`](configuration.md)
+- Setup script internals: [`../setup/README.md`](../setup/README.md)
+- Hardware planning: [`hardware.md`](hardware.md)
 
 ## Account glossary
 

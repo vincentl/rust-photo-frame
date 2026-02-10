@@ -3,9 +3,9 @@
 ## Overview
 The photo frame targets Raspberry Pi hardware and a wall-mounted display. This guide collects the bill of materials and planning notes so you can source parts with confidence before starting the software setup.
 
-## Fast path
+## Core components
 
-Gather these before starting software setup:
+Gather these before starting software setup.
 
 1. Raspberry Pi 5 (4 GiB+)
 2. Portrait-capable 4K monitor
@@ -14,8 +14,6 @@ Gather these before starting software setup:
 5. High-endurance microSD card
 6. Normally-open momentary pushbutton for Pi 5 power pads
 7. Mounting method + frame/enclosure plan
-
-## Core components
 
 | Component | Why it matters |
 | --- | --- |
@@ -27,6 +25,16 @@ Gather these before starting software setup:
 | High-endurance SD card | Improves longevity for always-on deployments. |
 | Mounting + enclosure plan | Drives cable routing, thermals, and serviceability. |
 
-## Advanced notes
+## Optional accessories
 
-For accessory options, cable routing, airflow, and planning notes, use [`hardware-notes.md`](hardware-notes.md).
+- Active cooling (fan or heatsink) for enclosures with limited airflow.
+- Cable sleeves or channels to hide HDMI and power lines.
+- VESA mount hardware for flush wall installations.
+
+## Planning tips
+
+- Map power and network access before assembly; pre-routed cables and nearby outlets simplify final installation.
+- Reserve GPIO access if you plan to add sensors, status LEDs, or extra buttons later.
+- Plan enclosure passthrough points for future wiring so upgrades do not require disassembling the frame.
+- Keep thermals in mind early; tightly sealed enclosures need deliberate airflow strategy.
+- Keep service access to SD card, power connector, and button wiring for maintenance.

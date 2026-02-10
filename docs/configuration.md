@@ -2,9 +2,9 @@
 
 The repository ships with a sample [`config.yaml`](../config.yaml) that you can copy or edit directly. Place a YAML file alongside the binary (or somewhere readable) and pass its path as the CLI argument.
 
-> **Breaking change:** The `transition` and `matting` blocks now expect `selection` + `active` entries. Configurations that still rely on the legacy `types`/`options` layout will fail to load until they are migrated.
+> **Breaking change:** The `transition`, `matting`, and `photo-effect` blocks now expect `selection` + `active` entries. Configurations that still rely on the legacy `types`/`options` layout will fail to load until they are migrated.
 
-## Fast path
+## Quick start
 
 Use this sequence when you only need the most common edits:
 
@@ -17,8 +17,6 @@ Use this sequence when you only need the most common edits:
 ```bash
 cargo run -p photo-frame -- --playlist-dry-run 1
 ```
-
-For copy/paste recipes, use [`configuration-examples.md`](configuration-examples.md).
 
 ## Starter configuration
 
@@ -153,8 +151,8 @@ Use the quick reference below to locate the knobs you care about, then dive into
 ### `photo-effect`
 
 - **Type:** mapping (see [Photo effect configuration](#photo-effect-configuration))
-- **Default:** disabled (`types: []`)
-- **What it does:** Inserts an optional post-processing stage between the loader and viewer. The built-in `print-simulation` effect relights each frame with directional shading and paper sheen inspired by _3D Simulation of Prints for Improved Soft Proofing_. Add it to `types` when you want that treatment; leaving the list empty keeps the stage off.
+- **Default:** disabled (`active: []`)
+- **What it does:** Inserts an optional post-processing stage between the loader and viewer. The built-in `print-simulation` effect relights each frame with directional shading and paper sheen inspired by _3D Simulation of Prints for Improved Soft Proofing_. Add it to `active` when you want that treatment; leaving the list empty keeps the stage off.
 - **When to change it:** Enable when you want the frame to mimic how ink interacts with paper under gallery lighting, or when you add additional effects in future releases.
 
 ### `greeting-screen`
@@ -304,7 +302,7 @@ The optional `photo-effect` task sits between the loader and the viewer. When en
 
 > Legacy `photo-effect.types` and `photo-effect.options` keys are no longer supported. Copy each prior option into the `active` list with an explicit `kind` field to migrate.
 
-Example recipes live in [`configuration-examples.md#photo-effect-examples`](configuration-examples.md#photo-effect-examples).
+Example recipes are in [Photo-effect examples](#photo-effect-examples).
 
 ### Print-simulation effect
 
@@ -351,7 +349,7 @@ The remaining knobs depend on the transition family.
   - **`stripe-count`** (integer ≥ 1, default `24`): How many horizontal bands sweep in; higher counts mimic a finer e-ink refresh.
   - **`flash-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB color used for the bright flash phases before the black inversion. Channels outside `0–255` are clamped.
 
-Example recipes live in [`configuration-examples.md#transition-examples`](configuration-examples.md#transition-examples).
+Example recipes are in [Transition examples](#transition-examples).
 
 
 ## Matting configuration
@@ -399,4 +397,121 @@ The remaining controls depend on the mat `kind`:
 
 Note: Store operator‑managed background images under `/var/lib/photo-frame/backgrounds`. The setup pipeline treats `/opt/photo-frame` as read‑only and refreshes it on redeploy, so files placed there may be removed.
 
-Example recipes live in [`configuration-examples.md#matting-examples`](configuration-examples.md#matting-examples).
+Example recipes are in [Matting examples](#matting-examples).
+
+## Photo-effect examples
+
+### Sequential print-simulation presets
+
+```yaml
+photo-effect:
+  selection: sequential
+  active:
+    - kind: print-simulation
+      light-angle-degrees: 110.0
+    - kind: print-simulation
+      light-angle-degrees: 60.0
+      debug: true
+```
+
+## Transition examples
+
+### Single inline fade
+
+```yaml
+transition:
+  active:
+    - kind: fade
+      duration-ms: 600
+      through-black: true
+```
+
+Omitting `selection` with one entry locks the viewer to that transition.
+
+### Weighted random mix
+
+```yaml
+transition:
+  selection: random
+  active:
+    - kind: fade
+      duration-ms: 450
+    - kind: push
+      duration-ms: 520
+      angle-list-degrees: [0.0]
+    - kind: push
+      duration-ms: 520
+      angle-list-degrees: [180.0]
+```
+
+Repeating the `push` entry gives that family twice the draw weight versus `fade`, while still allowing different presets for horizontal and vertical motion.
+
+### Sequential rotation with duplicates
+
+```yaml
+transition:
+  selection: sequential
+  active:
+    - kind: push
+      duration-ms: 520
+      angle-list-degrees: [0.0]
+    - kind: wipe
+      duration-ms: 520
+      angle-list-degrees: [90.0]
+    - kind: push
+      duration-ms: 520
+      angle-list-degrees: [180.0]
+```
+
+Sequential mode loops through the entries exactly as written, so repeating `push` forces a `push -> wipe -> push` cadence before returning to the first entry.
+
+## Matting examples
+
+### Single studio mat
+
+```yaml
+matting:
+  active:
+    - kind: studio
+      minimum-mat-percentage: 3.5
+      bevel-width-px: 4.0
+```
+
+### Weighted random palette with duplicates
+
+```yaml
+matting:
+  selection: random
+  active:
+    - kind: fixed-color
+      colors:
+        - [0, 0, 0]
+        - [32, 32, 32]
+    - kind: fixed-color
+      colors:
+        - [210, 210, 210]
+        - [240, 240, 240]
+      minimum-mat-percentage: 6.0
+    - kind: blur
+      minimum-mat-percentage: 7.5
+      sigma: 18.0
+```
+
+The first entry contributes two canonical slots (dark swatches), the second adds two more (light swatches), and the blur entry adds one slot. With `selection: random`, four out of five draws land on a solid mat while blur shows roughly 20% of the time.
+
+### Sequential rotation with duplicates
+
+```yaml
+matting:
+  selection: sequential
+  active:
+    - kind: studio
+      minimum-mat-percentage: 6.0
+    - kind: fixed-image
+      path: [/var/lib/photo-frame/backgrounds/linen.png]
+      fit: contain
+    - kind: studio
+      minimum-mat-percentage: 4.0
+```
+
+Sequential mode walks the list in order and loops, so repeating `studio` enforces a `studio -> fixed-image -> studio` cadence.

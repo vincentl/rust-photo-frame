@@ -5,7 +5,7 @@ This runbook covers day-2 operations for deployed frames.
 - Fresh install and first-time Wi-Fi recovery test: [`software.md`](software.md)
 - Full release validation matrix: [`../developer/test-plan.md`](../developer/test-plan.md)
 - Advanced Sway/kiosk debugging workflows: [`../developer/kiosk-debug.md`](../developer/kiosk-debug.md)
-- Deep Wi-Fi service operations and troubleshooting: [`wifi-manager-operations.md`](wifi-manager-operations.md)
+- Deep Wi-Fi service operations and troubleshooting: [`wifi-manager.md`](wifi-manager.md#service-management)
 
 ## Daily health snapshot
 
