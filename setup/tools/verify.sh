@@ -7,7 +7,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=../lib/systemd.sh
 source "${SCRIPT_DIR}/../lib/systemd.sh"
 
-INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
+INSTALL_ROOT="${INSTALL_ROOT:-/opt/photoframe}"
 SERVICE_USER="${SERVICE_USER:-kiosk}"
 
 log() {
@@ -25,18 +25,18 @@ warnings=0
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # Binaries and config presence
-BIN_APP="${INSTALL_ROOT}/bin/photo-frame"
+BIN_APP="${INSTALL_ROOT}/bin/photoframe"
 BIN_WIFI="${INSTALL_ROOT}/bin/wifi-manager"
 BIN_BUTTOND="${INSTALL_ROOT}/bin/buttond"
 BIN_POWERCTL="${INSTALL_ROOT}/bin/powerctl"
-CONF_TEMPLATE="${INSTALL_ROOT}/etc/photo-frame/config.yaml"
-CONF_ACTIVE="/etc/photo-frame/config.yaml"
+CONF_TEMPLATE="${INSTALL_ROOT}/etc/photoframe/config.yaml"
+CONF_ACTIVE="/etc/photoframe/config.yaml"
 WORDLIST_PATH="${INSTALL_ROOT}/share/wordlist.txt"
 
 if [[ -x "${BIN_APP}" ]]; then
-  ok "photo-frame binary present: ${BIN_APP}"
+  ok "photoframe binary present: ${BIN_APP}"
 else
-  err "photo-frame binary missing: ${BIN_APP}"
+  err "photoframe binary missing: ${BIN_APP}"
   failures=$((failures+1))
 fi
 
@@ -83,7 +83,7 @@ else
 fi
 
 # Var tree and ownership
-VAR_DIR="/var/lib/photo-frame"
+VAR_DIR="/var/lib/photoframe"
 if [[ -d "${VAR_DIR}" ]]; then
   owner="$(stat -c %U "${VAR_DIR}")"
   group="$(stat -c %G "${VAR_DIR}")"
@@ -144,9 +144,55 @@ if systemd_available; then
     esac
   }
 
+  check_seatd() {
+    local socket_exists=0
+    local socket_active=0
+    local service_exists=0
+    local service_active=0
+
+    if systemd_unit_exists seatd.socket; then
+      socket_exists=1
+      if systemd_is_active seatd.socket; then
+        socket_active=1
+      fi
+    fi
+
+    if systemd_unit_exists seatd.service; then
+      service_exists=1
+      if systemd_is_active seatd.service; then
+        service_active=1
+      fi
+    fi
+
+    if (( socket_exists == 0 && service_exists == 0 )); then
+      err "seatd not installed (seatd.socket/seatd.service missing)"
+      failures=$((failures+1))
+      return
+    fi
+
+    if (( socket_active == 1 || service_active == 1 )); then
+      if (( socket_active == 1 && service_active == 1 )); then
+        ok "seatd.socket and seatd.service active"
+      elif (( socket_active == 1 )); then
+        ok "seatd.socket active"
+      else
+        ok "seatd.service active"
+      fi
+      return
+    fi
+
+    if (( socket_exists == 1 )); then
+      systemd_status seatd.socket || true
+    fi
+    if (( service_exists == 1 )); then
+      systemd_status seatd.service || true
+    fi
+    err "seatd installed but not active (expected seatd.socket or seatd.service)"
+    failures=$((failures+1))
+  }
+
   check_unit greetd.service ERROR "set via system install"
-  check_unit seatd.socket ERROR "required for DRM access"
-  check_unit seatd.service WARN "socket activation may suffice"
+  check_seatd
   check_unit photoframe-wifi-manager.service ERROR "installed by app deploy"
   check_unit buttond.service WARN "optional, installed by app deploy"
   check_unit photoframe-sync.timer WARN "optional periodic sync"

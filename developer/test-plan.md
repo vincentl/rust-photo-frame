@@ -40,7 +40,7 @@ Exercise each axis at least once per release cycle.
   cargo check --workspace
   cargo test --workspace
   ```
-  Both commands should finish without warnings or failures. This validates the `photo-frame`, `buttond`, and `wifi-manager` crates prior to deploying to a Raspberry Pi.
+  Both commands should finish without warnings or failures. This validates the `photoframe`, `buttond`, and `wifi-manager` crates prior to deploying to a Raspberry Pi.
 
 ## Phase 1 – Blank-Pi Install
 - [ ] Flash the latest Raspberry Pi OS (Trixie, 64-bit) onto a reliable microSD using Raspberry Pi Imager (preload hostname, user, Wi-Fi, SSH key).
@@ -51,8 +51,8 @@ Exercise each axis at least once per release cycle.
 ## Phase 2 – Project Setup Pipeline
 - [ ] Clone repo:
   ```sh
-  git clone https://github.com/<org>/rust-photo-frame.git
-  cd rust-photo-frame
+  git clone https://github.com/<org>/rust-photo-frame.git photoframe
+  cd photoframe
   ```
 - [ ] Run the system provisioning pipeline (installs dependencies, greetd/Sway, creates the kiosk user, configures zram, and stages helper units):
   ```sh
@@ -60,13 +60,13 @@ Exercise each axis at least once per release cycle.
   ```
 - [ ] After reconnecting, rerun the repo checkout if necessary and execute the application deployment stage (build + install + systemd wiring). Expect 5–7 minutes for the release build on a Pi 5 with active cooling:
   ```sh
-  cd ~/rust-photo-frame
+  cd ~/photoframe
   ./setup/application/deploy.sh
   ```
-  This stage copies binaries into `/opt/photo-frame`, installs the Google “Macondo” font system-wide, and prepares documentation/config templates. Re-run `sudo ./setup/system/install.sh` afterwards (or start the services manually) so the kiosk helpers and greetd pick up the freshly installed binaries.
-- [ ] Customize the system config at `/etc/photo-frame/config.yaml` (requires sudo). Minimal example:
+  This stage copies binaries into `/opt/photoframe`, installs the Google “Macondo” font system-wide, and prepares documentation/config templates. Re-run `sudo ./setup/system/install.sh` afterwards (or start the services manually) so the kiosk helpers and greetd pick up the freshly installed binaries.
+- [ ] Customize the system config at `/etc/photoframe/config.yaml` (requires sudo). Minimal example:
   ```yaml
-  photo-library-path: /var/lib/photo-frame/photos
+  photo-library-path: /var/lib/photoframe/photos
   # ├── cloud/  # sync target (rclone, Nextcloud, etc.)
   # └── local/  # manual USB/SSH drops kept outside sync
   greeting-screen:
@@ -81,13 +81,13 @@ Exercise each axis at least once per release cycle.
     screen:
       off-delay-ms: 3500
       on-command:
-        program: /opt/photo-frame/bin/powerctl
+        program: /opt/photoframe/bin/powerctl
         args: [wake]
       off-command:
-        program: /opt/photo-frame/bin/powerctl
+        program: /opt/photoframe/bin/powerctl
         args: [sleep]
   ```
-- [ ] Populate `/var/lib/photo-frame/photos/cloud` via your sync pipeline for mirrored libraries and `/var/lib/photo-frame/photos/local` for ad-hoc media (or the equivalent subdirectories under the configured library path) according to the test matrix scenario.
+- [ ] Populate `/var/lib/photoframe/photos/cloud` via your sync pipeline for mirrored libraries and `/var/lib/photoframe/photos/local` for ad-hoc media (or the equivalent subdirectories under the configured library path) according to the test matrix scenario.
 
 ## Phase 3 – Kiosk Autostart & Services
 - [ ] Confirm the setup script enabled expected units:
@@ -96,7 +96,7 @@ Exercise each axis at least once per release cycle.
   systemctl status photoframe-wifi-manager.service   # hotspot + provisioning
   systemctl status photoframe-sync.timer       # optional if library sync configured
   ```
-  Use `/opt/photo-frame/bin/print-status.sh` for a consolidated view.
+  Use `/opt/photoframe/bin/print-status.sh` for a consolidated view.
 - [ ] Reboot (`sudo reboot`) and confirm `greetd.service` claims `/dev/tty1` (no login prompt) and the app launches full-screen on HDMI-1.
 - [ ] Check logs for a clean startup:
   ```sh
@@ -134,7 +134,7 @@ Exercise each axis at least once per release cycle.
 - [ ] Ensure config sleep window matches local timezone.
 - [ ] Manual toggle:
   ```sh
-  kill -USR1 $(pidof photo-frame)
+  kill -USR1 $(pidof photoframe)
   ```
   Confirm screen dims / slideshow pauses; capture journal snippet.
 - [ ] Scheduled test: temporarily set sleep window to begin in ~5 minutes, reload config (restart service), observe dim-on schedule and subsequent wake.
@@ -160,7 +160,7 @@ Exercise each axis at least once per release cycle.
 - [ ] Point to tiny library (≤50). Validate EXIF orientation, mats, transitions.
 - [ ] Swap to medium library (1–3k). Allow 10–15 minutes playback, monitoring CPU/GPU/IO:
   ```sh
-  top -H -p $(pidof photo-frame)
+  top -H -p $(pidof photoframe)
   vcgencmd measure_temp
   ```
 - [ ] Watch for stutters or decode warnings in `journalctl -u greetd.service`.
@@ -171,12 +171,12 @@ Exercise each axis at least once per release cycle.
   ```sh
   git fetch origin
   git checkout <release-tag>
-  cargo build --release -p photo-frame
+  cargo build --release -p photoframe
   sudo systemctl stop greetd.service
   sleep 1
   sudo systemctl start greetd.service
   ```
-  - [ ] Validate new version via `photo-frame --version` in logs or manual run.
+  - [ ] Validate new version via `photoframe --version` in logs or manual run.
 - [ ] Rollback rehearsal: checkout previous known-good commit/tag, rebuild, restart service.
 - [ ] Ensure unit file remains untouched (compare with `systemctl cat greetd.service`).
 
@@ -195,7 +195,7 @@ Exercise each axis at least once per release cycle.
   tests/collect_logs.sh
   ```
 - [ ] Verify artifact present: `ls artifacts/FRAME-logs-*.tar.gz`.
-- [ ] Bundle includes: system metadata, boot journal, `greetd.service` + `photoframe-wifi-manager.service` journals/status, optional sync unit details, NetworkManager snapshots, DRM modes + EDID, runtime metrics (top, temperature, binary `--version`), `/etc/photo-frame/config.yaml`, `/opt/photo-frame/etc/wifi-manager.yaml`, and `print-status` output.
+- [ ] Bundle includes: system metadata, boot journal, `greetd.service` + `photoframe-wifi-manager.service` journals/status, optional sync unit details, NetworkManager snapshots, DRM modes + EDID, runtime metrics (top, temperature, binary `--version`), `/etc/photoframe/config.yaml`, `/opt/photoframe/etc/wifi-manager.yaml`, and `print-status` output.
 - [ ] Attach bundle to issue tracker entry with notes on observed behavior.
 
 ## Acceptance Criteria
@@ -211,12 +211,12 @@ Exercise each axis at least once per release cycle.
 
 ## Recovery & Rollback Notes
 - **Bad config.yaml:**
-  - [ ] Restore last-known-good from backup (`sudo cp /etc/photo-frame/config.yaml.bak /etc/photo-frame/config.yaml`).
-  - [ ] Validate YAML syntax with `yamllint` (if installed) or `python3 -c "import yaml,sys; yaml.safe_load(open('/etc/photo-frame/config.yaml'))"`.
+  - [ ] Restore last-known-good from backup (`sudo cp /etc/photoframe/config.yaml.bak /etc/photoframe/config.yaml`).
+  - [ ] Validate YAML syntax with `yamllint` (if installed) or `python3 -c "import yaml,sys; yaml.safe_load(open('/etc/photoframe/config.yaml'))"`.
   - [ ] Restart service: `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service`.
 - **Broken service (fails to start):**
   - [ ] Inspect logs: `journalctl -u greetd.service -b` and `journalctl -u photoframe-wifi-manager.service -b`.
-  - [ ] Rebuild binary: `cargo build --release -p photo-frame`.
+  - [ ] Rebuild binary: `cargo build --release -p photoframe`.
   - [ ] Validate unit file dependencies (Wayland, env vars) and run `sudo systemctl daemon-reload`.
 - **Failed update:**
   - [ ] `git checkout <previous-good>`.
@@ -233,7 +233,7 @@ Exercise each axis at least once per release cycle.
 - Display info: `wlr-randr`, `modetest -c`, `cat /sys/class/drm/card*/card*/modes`
 - Services: `systemctl status greetd.service`, `journalctl -u greetd.service -n 200 --no-pager`
 - Network: `nmcli dev status`, `nmcli connection show --active`
-- Signals: `kill -USR1 $(pidof photo-frame)`
+- Signals: `kill -USR1 $(pidof photoframe)`
 - Button events: `sudo evtest`
 
 ### Appendix B – Observations Log

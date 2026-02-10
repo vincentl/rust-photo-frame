@@ -1,14 +1,14 @@
-# Example configuration for photo-frame
+# Example configuration for photoframe
 # Adjust values to match your hardware, library layout, and visual preferences.
 
 # Root directory for images. Keep media in the managed subdirectories to
 # separate synced libraries from ad-hoc drops:
 #   cloud/ — populated by rclone or other sync jobs; safe to wipe/reseed.
 #   local/ — manual imports (USB, scp) that should persist across syncs.
-photo-library-path: /var/lib/photo-frame/photos
+photo-library-path: /var/lib/photoframe/photos
 
 # Unix domain socket path for runtime control commands
-control-socket-path: /run/photo-frame/control.sock
+control-socket-path: /run/photoframe/control.sock
 
 # Hardware button daemon configuration
 buttond:
@@ -26,10 +26,10 @@ buttond:
     off-delay-ms: 3500
     display-name: null # Optional wlr-randr output name
     on-command:
-      program: /opt/photo-frame/bin/powerctl
+      program: /opt/photoframe/bin/powerctl
       args: [wake]
     off-command:
-      program: /opt/photo-frame/bin/powerctl
+      program: /opt/photoframe/bin/powerctl
       args: [sleep]
 
 # Render/transition settings
@@ -165,6 +165,6 @@ matting:
       minimum-mat-percentage: 6.0
       path:
         [
-          /var/lib/photo-frame/backgrounds/blue-textured-brick-wall-background.jpg,
+          /var/lib/photoframe/backgrounds/blue-textured-brick-wall-background.jpg,
         ]
       fit: cover # options: cover, contain, stretch

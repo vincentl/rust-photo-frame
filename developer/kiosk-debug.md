@@ -6,7 +6,7 @@ For routine operations use [`../docs/sop.md`](../docs/sop.md).
 
 ## Manual debug launch (advanced)
 
-In normal operation the `photo-frame` app is started by greetd via `/usr/local/bin/photoframe-session`.
+In normal operation the `photoframe` app is started by greetd via `/usr/local/bin/photoframe-session`.
 For low-level debugging you can run a standalone Sway session as `kiosk`.
 
 ### Prerequisite
@@ -33,7 +33,7 @@ sudo -u kiosk \
   XDG_RUNTIME_DIR="/run/user/$(id -u kiosk)" \
   dbus-run-session \
   env PHOTOFRAME_LOG=stdout \
-  env RUST_LOG='photo_frame::tasks::viewer=debug,info' \
+  env RUST_LOG='photoframe::tasks::viewer=debug,info' \
   sway -c /usr/local/share/photoframe/sway/config
 ```
 
@@ -43,11 +43,11 @@ Write logs to a file:
 sudo -u kiosk \
   XDG_RUNTIME_DIR="/run/user/$(id -u kiosk)" \
   dbus-run-session \
-  env PHOTOFRAME_LOG='file:/var/tmp/photo-frame.log' \
-  env RUST_LOG='photo_frame::tasks::viewer=debug,info' \
+  env PHOTOFRAME_LOG='file:/var/tmp/photoframe.log' \
+  env RUST_LOG='photoframe::tasks::viewer=debug,info' \
   sway -c /usr/local/share/photoframe/sway/config
 
-sudo tail -f /var/tmp/photo-frame.log
+sudo tail -f /var/tmp/photoframe.log
 ```
 
 ## Overlay takeover test (dev)

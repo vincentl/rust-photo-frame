@@ -38,7 +38,7 @@ use events::{
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "photo-frame",
+    name = "photoframe",
     version,
     about = "photo frame minimal scaffold"
 )]

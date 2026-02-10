@@ -1,6 +1,6 @@
 # Memory profile and tuning
 
-This document describes how photo-frame uses RAM at runtime and what
+This document describes how photoframe uses RAM at runtime and what
 tunables help keep the footprint under control on constrained systems such as
 the Raspberry Pi. The goal is to explain why the recent matting work can push a
 4 GiB device over the limit and outline mitigation levers.
@@ -14,22 +14,22 @@ can spike.
 1. **Loader decode buffer.** The loader converts source photos into raw RGBA8
    byte arrays (`PreparedImageCpu`). The `tokio` channel between the manager,
    loader, and viewer is sized by `viewer-preload-count`, so the system keeps
-   that many decoded frames alive even before any matting work begins.【F:crates/photo-frame/src/main.rs†L118-L131】【F:crates/photo-frame/src/events.rs†L13-L32】【F:crates/photo-frame/src/tasks/loader.rs†L51-L111】
+   that many decoded frames alive even before any matting work begins.【F:crates/photoframe/src/main.rs†L118-L131】【F:crates/photoframe/src/events.rs†L13-L32】【F:crates/photoframe/src/tasks/loader.rs†L51-L111】
 2. **Matting worker input.** Each queued frame is cloned into a `MatTask` so the
    CPU matting pipeline can resize and decorate it before display. This retains
-   another RGBA copy while the worker thread is active.【F:crates/photo-frame/src/tasks/viewer.rs†L231-L334】
+   another RGBA copy while the worker thread is active.【F:crates/photoframe/src/tasks/viewer.rs†L231-L334】
 3. **Matting output canvas.** The worker renders a full-screen canvas (`ImagePlane`)
    per frame. The canvas dimensions track the display resolution and the
    `oversample` setting, so 4K panels or aggressive oversampling can easily
-   generate tens of megabytes per image.【F:crates/photo-frame/src/tasks/viewer.rs†L296-L389】
+   generate tens of megabytes per image.【F:crates/photoframe/src/tasks/viewer.rs†L296-L389】
 4. **GPU upload staging.** When the viewer uploads the matted canvas to the
    GPU, it may allocate an additional padded staging buffer to satisfy WGPU row
    alignment requirements. This allocation lives until the upload completes on
-   the GPU queue.【F:crates/photo-frame/src/tasks/viewer.rs†L600-L677】
+   the GPU queue.【F:crates/photoframe/src/tasks/viewer.rs†L600-L677】
 5. **Fixed-image backgrounds.** When the `fixed-image` matting mode is enabled,
    each configured background is decoded once and cached indefinitely at the
    canvas resolution. Large background images or long background lists can
-   therefore multiply steady-state memory usage.【F:crates/photo-frame/src/processing/fixed_image.rs†L13-L123】
+   therefore multiply steady-state memory usage.【F:crates/photoframe/src/processing/fixed_image.rs†L13-L123】
 
 In the current configuration it is common to have three frames in flight. On a
 3840×2160 display with `global-photo-settings.oversample: 1.0`, a single RGBA image consumes roughly
@@ -55,5 +55,5 @@ processes such as `wireplumber`, which carries a high `oom_score_adj`.
 * **Constrain source resolution.** Keeping the photo library near the panel
   resolution avoids oversized decode buffers in the loader.
 
-Monitoring the resident set size of the `photo-frame` process while toggling
+Monitoring the resident set size of the `photoframe` process while toggling
 these settings helps confirm the impact before deploying broadly.

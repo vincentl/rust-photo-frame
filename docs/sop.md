@@ -15,7 +15,7 @@ Run these first before deeper debugging:
 
 ```bash
 ./setup/tools/verify.sh
-/opt/photo-frame/bin/print-status.sh
+/opt/photoframe/bin/print-status.sh
 sudo systemctl status greetd.service
 sudo systemctl status photoframe-wifi-manager.service
 ```
@@ -27,7 +27,7 @@ Expected outcome: both services report `active (running)` and `print-status.sh` 
 The kiosk session launches the photo frame through Sway and pipes stdout/stderr into journald with `systemd-cat`.
 
 ```bash
-sudo journalctl -t photo-frame -f
+sudo journalctl -t photoframe -f
 ```
 
 For Wi-Fi watcher logs:
@@ -56,11 +56,11 @@ Use one of these canonical procedures:
 When recovery is stuck, gather these artifacts before changing config:
 
 1. Snapshot operational state:
-   - `/opt/photo-frame/bin/print-status.sh`
+   - `/opt/photoframe/bin/print-status.sh`
 2. Inspect watcher state files:
-   - `sudo cat /var/lib/photo-frame/wifi-state.json`
-   - `sudo cat /var/lib/photo-frame/wifi-last.json`
-   - `sudo ls -l /var/lib/photo-frame/wifi-request.json` (if present)
+   - `sudo cat /var/lib/photoframe/wifi-state.json`
+   - `sudo cat /var/lib/photoframe/wifi-last.json`
+   - `sudo ls -l /var/lib/photoframe/wifi-request.json` (if present)
 3. Inspect NetworkManager:
    - `nmcli dev status`
    - `nmcli connection show --active`
@@ -68,7 +68,7 @@ When recovery is stuck, gather these artifacts before changing config:
    - `sudo systemctl status greetd.service`
    - `sudo sh -lc 'uid=$(id -u kiosk); ls "/run/user/$uid"/sway-ipc.*.sock'`
 5. Validate credential apply path manually:
-   - `sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid "<ssid>" --psk "<password>"`
+   - `sudo -u kiosk /opt/photoframe/bin/wifi-manager nm add --ssid "<ssid>" --psk "<password>"`
 
 If triage still fails, collect bundle + journals and attach to issue triage:
 

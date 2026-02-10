@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODULE="app:30-install"
-INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
+INSTALL_ROOT="${INSTALL_ROOT:-/opt/photoframe}"
 SERVICE_USER="${SERVICE_USER:-kiosk}"
 SERVICE_GROUP="${SERVICE_GROUP:-}"
 if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
@@ -12,8 +12,8 @@ SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE_ROOT="${STAGE_ROOT:-${SCRIPT_DIR}/../build}"
 STAGE_DIR="${STAGE_ROOT}/stage"
-VAR_ROOT="/var/lib/photo-frame"
-CONFIG_DEST="/etc/photo-frame/config.yaml"
+VAR_ROOT="/var/lib/photoframe"
+CONFIG_DEST="/etc/photoframe/config.yaml"
 
 log() {
     local level="$1"; shift
@@ -110,7 +110,7 @@ prepare_runtime() {
             run_sudo setfacl -R -m d:g:"${SERVICE_GROUP}":rwx "${backgrounds_root}" || true
         fi
     fi
-    if [[ -f "${STAGE_DIR}/etc/photo-frame/config.yaml" ]]; then
+    if [[ -f "${STAGE_DIR}/etc/photoframe/config.yaml" ]]; then
         if run_sudo test -f "${CONFIG_DEST}"; then
             log INFO "Preserving existing system config at ${CONFIG_DEST}"
         else
@@ -118,7 +118,7 @@ prepare_runtime() {
             config_dir="$(dirname "${CONFIG_DEST}")"
             run_sudo install -d -m 755 "${config_dir}"
             run_sudo install -m 660 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" \
-                "${STAGE_DIR}/etc/photo-frame/config.yaml" "${CONFIG_DEST}"
+                "${STAGE_DIR}/etc/photoframe/config.yaml" "${CONFIG_DEST}"
             log INFO "Seeded default config at ${CONFIG_DEST}"
         fi
     fi

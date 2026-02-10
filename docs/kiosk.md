@@ -30,7 +30,7 @@ If `greetd` is active and `photoframe-session` appears in the unit command line,
 - Installs Wayland/kiosk dependencies including `greetd`, `sway`, `swaybg`, `swayidle`, `swaylock`, and `wayland-protocols`.
 - Ensures `dbus-run-session` tooling is present (`dbus` and `dbus-user-session`).
 - Creates locked `kiosk` user and ensures membership in `video`, `render`, and `input`.
-- Provisions `/run/photo-frame` as `kiosk:kiosk` with mode `0770` plus tmpfiles entry for boot-time creation.
+- Provisions `/run/photoframe` as `kiosk:kiosk` with mode `0770` plus tmpfiles entry for boot-time creation.
 - Installs `/usr/local/bin/photoframe-session`.
 - Writes `/etc/greetd/config.toml` so tty1 runs `photoframe-session` as `kiosk`.
 - Disables competing display managers (`gdm3`, `sddm`, `lightdm`), enables `greetd` as `display-manager`, and masks `getty@tty1.service`.

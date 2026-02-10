@@ -98,7 +98,7 @@ enable_systemd_units() {
         systemctl mask getty@tty1.service >/dev/null 2>&1 || true
     fi
 
-    local session_bin="/opt/photo-frame/bin/photo-frame"
+    local session_bin="/opt/photoframe/bin/photoframe"
     local greetd_started=0
 
     local seatd_units=(seatd.service seatd.socket)
@@ -117,7 +117,7 @@ enable_systemd_units() {
         systemctl enable --now greetd.service >/dev/null 2>&1 || true
         greetd_started=1
     else
-        log "photo-frame binary missing at ${session_bin}; enabling greetd without starting"
+        log "photoframe binary missing at ${session_bin}; enabling greetd without starting"
         systemctl enable greetd.service >/dev/null 2>&1 || true
     fi
 
@@ -128,8 +128,8 @@ enable_systemd_units() {
         log "Skipping display-manager status until application binaries are installed"
     fi
 
-    local wifi_bin="/opt/photo-frame/bin/wifi-manager"
-    local button_bin="/opt/photo-frame/bin/buttond"
+    local wifi_bin="/opt/photoframe/bin/wifi-manager"
+    local button_bin="/opt/photoframe/bin/buttond"
     local unit
     for unit in photoframe-wifi-manager.service buttond.service; do
         if systemctl list-unit-files "${unit}" >/dev/null 2>&1; then

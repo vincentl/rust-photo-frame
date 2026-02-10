@@ -10,12 +10,12 @@ Use this quick sequence for a working schedule + power setup:
 
 1. Install tool:
    - `sudo apt update && sudo apt install wlr-randr`
-2. Configure `awake-schedule` and `buttond.screen` in `/etc/photo-frame/config.yaml`.
+2. Configure `awake-schedule` and `buttond.screen` in `/etc/photoframe/config.yaml`.
 3. Restart daemon:
    - `sudo systemctl restart buttond.service`
 4. Verify:
    - `sudo journalctl -u buttond.service -f`
-   - `echo '{"command":"set-state","state":"awake"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photo-frame/control.sock`
+   - `echo '{"command":"set-state","state":"awake"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock`
 
 Expected outcome: buttond logs show schedule evaluation and the frame wakes when the control command is sent.
 
@@ -26,8 +26,8 @@ Expected outcome: buttond logs show schedule evaluation and the frame wakes when
    sudo apt update
    sudo apt install wlr-randr
    ```
-2. (Optional) Deploy the application bundle (`./setup/application/deploy.sh`) so `/opt/photo-frame/bin/powerctl` and the systemd units land on the device. The helper mirrors the default inline commands and can be referenced once the staged tree has been installed under `/opt`.
-3. Edit `/etc/photo-frame/config.yaml` so it includes an awake schedule and display power commands:
+2. (Optional) Deploy the application bundle (`./setup/application/deploy.sh`) so `/opt/photoframe/bin/powerctl` and the systemd units land on the device. The helper mirrors the default inline commands and can be referenced once the staged tree has been installed under `/opt`.
+3. Edit `/etc/photoframe/config.yaml` so it includes an awake schedule and display power commands:
    ```yaml
    awake-schedule:
      timezone: America/New_York
@@ -43,10 +43,10 @@ Expected outcome: buttond logs show schedule evaluation and the frame wakes when
        off-delay-ms: 3500
        display-name: HDMI-A-2
        on-command:
-         program: /opt/photo-frame/bin/powerctl
+         program: /opt/photoframe/bin/powerctl
          args: [wake]
        off-command:
-         program: /opt/photo-frame/bin/powerctl
+         program: /opt/photoframe/bin/powerctl
          args: [sleep]
    ```
 4. Restart the daemon so it picks up the edits:
@@ -57,7 +57,7 @@ Expected outcome: buttond logs show schedule evaluation and the frame wakes when
    ```bash
    sudo journalctl -u buttond.service -f
    echo '{"command": "set-state", "state": "awake"}' \
-     | sudo -u kiosk socat - UNIX-CONNECT:/run/photo-frame/control.sock
+     | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock
    ```
    buttond applies the configured schedule after the greeting delay, then continues driving wake/sleep transitions automatically.
 
@@ -74,17 +74,17 @@ buttond honours a few additional knobs inside its namespaced section:
 - `screen.on-command` / `screen.off-command` — shell commands executed when buttond transitions the panel. The defaults call `powerctl`, which issues `wlr-randr` DPMS requests with a `vcgencmd` fallback.
 - `screen.display-name` — set this to the connector name reported by `wlr-randr` (for example `HDMI-A-2`). buttond appends the value to both power commands so wake/sleep do not rely on runtime auto-detection.
 
-The helper `/opt/photo-frame/bin/powerctl` bootstraps the Wayland environment, auto-detects the first connected output when no argument is supplied, and chains `vcgencmd` as a fallback. buttond now prefers `powerctl` for both wake/sleep transitions and state detection whenever it sees `powerctl` configured for the screen commands. When `display-name` is omitted, the state probe targets any connected output.
+The helper `/opt/photoframe/bin/powerctl` bootstraps the Wayland environment, auto-detects the first connected output when no argument is supplied, and chains `vcgencmd` as a fallback. buttond now prefers `powerctl` for both wake/sleep transitions and state detection whenever it sees `powerctl` configured for the screen commands. When `display-name` is omitted, the state probe targets any connected output.
 
 Set `buttond.screen.display-name` so buttond always calls it with an explicit connector:
 ```bash
-sudo -u kiosk /opt/photo-frame/bin/powerctl sleep
-sudo -u kiosk /opt/photo-frame/bin/powerctl wake HDMI-A-2
+sudo -u kiosk /opt/photoframe/bin/powerctl sleep
+sudo -u kiosk /opt/photoframe/bin/powerctl wake HDMI-A-2
 ```
 
 ## Manual overrides
 
-The frame remains asleep after the greeting until it receives a control command. Pipe JSON to the Unix socket (default `/run/photo-frame/control.sock`):
+The frame remains asleep after the greeting until it receives a control command. Pipe JSON to the Unix socket (default `/run/photoframe/control.sock`):
 
 - `{"command":"set-state","state":"awake"}` — force wake mode.
 - `{"command":"set-state","state":"asleep"}` — force sleep mode.
@@ -126,5 +126,5 @@ Verification checklist:
 
 - Use `sudo journalctl -u buttond.service -f` to watch schedule boundaries, DPMS actions, and manual overrides.
 - For interactive tests, send `{"command":"set-state","state":"awake"}` over the control socket instead of restarting services.
-- Keep custom power scripts under `/opt/photo-frame/bin` and reference absolute paths in `buttond.screen`.
+- Keep custom power scripts under `/opt/photoframe/bin` and reference absolute paths in `buttond.screen`.
 - Debounce physical button wiring before writing to the control socket to avoid accidental double toggles.

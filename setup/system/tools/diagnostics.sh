@@ -120,10 +120,10 @@ check_sway_config() {
 
     ok 'sway config present'
 
-    if grep -Fq '/usr/local/bin/photo-frame' "${config}"; then
-        ok 'sway config launches /usr/local/bin/photo-frame'
+    if grep -Fq '/usr/local/bin/photoframe' "${config}"; then
+        ok 'sway config launches /usr/local/bin/photoframe'
     else
-        warn 'sway config missing /usr/local/bin/photo-frame exec line'
+        warn 'sway config missing /usr/local/bin/photoframe exec line'
     fi
 }
 

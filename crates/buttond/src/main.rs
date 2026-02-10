@@ -31,7 +31,7 @@ use tracing_subscriber::EnvFilter;
 )]
 struct Args {
     /// Path to the shared configuration file.
-    #[arg(long, default_value = "/etc/photo-frame/config.yaml")]
+    #[arg(long, default_value = "/etc/photoframe/config.yaml")]
     config: PathBuf,
 
     /// Input device path (evdev). Auto-detects when omitted.
@@ -359,7 +359,7 @@ impl FileConfig {
     }
 
     fn default_control_socket_path() -> PathBuf {
-        PathBuf::from("/run/photo-frame/control.sock")
+        PathBuf::from("/run/photoframe/control.sock")
     }
 }
 
@@ -461,7 +461,7 @@ impl ScreenConfig {
     fn default_on_command() -> CommandConfig {
         CommandConfig {
             label: "screen-on".into(),
-            program: PathBuf::from("/opt/photo-frame/bin/powerctl"),
+            program: PathBuf::from("/opt/photoframe/bin/powerctl"),
             args: vec!["wake".into()],
         }
     }
@@ -469,7 +469,7 @@ impl ScreenConfig {
     fn default_off_command() -> CommandConfig {
         CommandConfig {
             label: "screen-off".into(),
-            program: PathBuf::from("/opt/photo-frame/bin/powerctl"),
+            program: PathBuf::from("/opt/photoframe/bin/powerctl"),
             args: vec!["sleep".into()],
         }
     }

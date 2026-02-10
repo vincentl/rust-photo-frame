@@ -1,12 +1,12 @@
 [package]
-name = "photo-frame"
+name = "photoframe"
 version = "0.1.0"
 edition = "2024"
 autobins = false
-default-run = "photo-frame"
+default-run = "photoframe"
 
 [[bin]]
-name = "photo-frame"
+name = "photoframe"
 path = "src/main.rs"
 
 [dependencies]

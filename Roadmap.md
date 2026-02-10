@@ -1,116 +1,92 @@
-# Photo Frame Project Roadmap
+# Photo Frame Public Release Roadmap (Maker-Focused)
 
-## Software Subproject
+## Release Goal
+A technically capable maker can:
+1. Flash Raspberry Pi OS.
+2. Run one install path.
+3. Load photos.
+4. Wake/sleep and recover Wi-Fi reliably.
+5. Operate the frame remotely with documented, optional remote-admin tooling.
 
-- [ ] **Remote administration & observability**
-  - [ ] Bundle Tailscale install + login flow into the setup script.
-  - [ ] Harden SSH: authorized_keys provisioning, disable password auth, document recovery.
-  - [ ] Capture baseline diagnostics (journalctl, `tail -f` scripts) for remote troubleshooting.
-  - [ ] Document day-two ops playbook: reboot, service restart, system updates.
-- [ ] **Power & button control**
-  - [ ] Implement GPIO daemon translating short/long press into viewer events.
-  - [ ] Wire short press to screen sleep/wake handling in the app.
-  - [ ] Wire long press to an ordered shutdown (viewer → manager → OS `poweroff`).
-  - [ ] Add async test coverage for button → event propagation and debounce timing.
-- [ ] **Content synchronization**
-  - [ ] Choose cloud storage target + auth strategy (fileshare vs API).
-  - [ ] Design sync cadence: periodic pull, manual trigger, conflict handling policy.
-  - [ ] Implement sync worker (hashing, temp staging, graceful failover when offline).
-  - [ ] Surface manual sync trigger (button event + future web UI hook).
-- [x] **Configuration & UX**
-  - [x] Expand config schema to cover matting, schedules, sync, admin settings.
-  - [x] Define UX flows for first-run wifi setup and device naming.
+## Scope
+### In Scope (v1 release)
+- Install reliability and first-run success.
+- Runtime/service consistency.
+- Wi-Fi recovery reliability and diagnostics.
+- Operator documentation completeness.
+- Optional sync setup guidance (not mandatory for first run).
 
-## Setup Roadmap
+### Out of Scope (v1 release)
+- Bundling VPN services in installer.
+- New local configuration web UI.
+- Additional rendering effects/features unrelated to install/ops reliability.
+- Fabrication expansion beyond existing maker docs.
 
-This roadmap tracks the tasks required to automate the provisioning of a Raspberry Pi for the photo-frame project. Checkboxes are used to indicate completion status.
+## Milestone 1 - Clean Install Reliability (Release Blocker)
+- [x] Standardize runtime namespace to `photoframe` for control socket/runtime directory usage.
+- [x] Normalize all runtime socket/runtime-directory references to `/run/photoframe/...`.
+- [x] Ensure deployment starts a kiosk session that creates the control socket without requiring manual reboot.
+- [x] Add explicit post-deploy readiness check for control socket presence.
+- [x] Fix `setup/tools/verify.sh` seatd checks to avoid false warnings on service-only seatd installs.
+- [x] Update install docs with clear operator flow:
+- [x] When logout/login is required to pick up group membership.
+- [x] How to add photos to `local/` and `cloud/`.
+- [x] `scp` examples including custom key usage (`-i ~/.ssh/<key>`).
 
-### Completed in this iteration
+Exit criteria:
+1. Fresh Pi install completes with `./setup/install-all.sh`.
+2. `./setup/tools/verify.sh` returns no misleading warnings on supported baseline.
+3. Control socket exists immediately after install flow completes (no reboot workaround).
 
-- [x] Establish initial `setup/` directory structure and module loader scaffolding.
-- [x] Draft initial instructions covering Raspberry Pi imaging, SSH setup, repository cloning, and invoking automation scripts.
-- [x] Create base setup modules for OS updates, display boot configuration, and Rust installation.
+## Milestone 2 - Wi-Fi Recovery Reliability (Release Blocker)
+- [x] Harden `tests/run_wifi_recovery.sh` preflight:
+- [x] Validate monitored interface from active wifi-manager config.
+- [x] Confirm interface has an active infrastructure connection before fault injection.
+- [x] Abort early with clear remediation if preconditions fail.
+- [x] Make `developer/suspend-wifi.sh` fault injection deterministic for acceptance testing.
+- [x] Improve recovery test output to show why transition to `RecoveryHotspotActive` did not happen.
+- [x] Fix `print-status.sh` active connection reporting so operators can trust status snapshots.
+- [x] Add triage appendix for "recovery test hangs" in operator docs.
 
-### TODO
+Exit criteria:
+1. Wi-Fi recovery acceptance passes on fresh install in documented supported scenario.
+2. Failure mode output is actionable without code reading.
+3. Status tools correctly report active Wi-Fi state.
 
-- [ ] Document kiosk mode configuration and automation of the `greetd` workflow.
-- [ ] Implement background sync service configuration from cloud storage providers.
-- [ ] Add setup module for button monitor service deployment and systemd integration.
-- [ ] Add setup module for Wi-Fi connectivity checks and captive portal configuration workflow.
-- [ ] Create module for Tailscale installation and registration guidance.
-- [ ] Provide lightweight web GUI for local configuration editing with Git-based versioning.
-- [ ] Automate configuration-driven restarts of the photo-frame application.
-- [ ] Expand testing and validation steps for the full provisioning pipeline.
+## Milestone 3 - Operations Completeness (Must Ship)
+- [x] Publish remote administration guidance (optional) covering:
+- [x] SSH hardening baseline.
+- [x] Tailscale option.
+- [x] Raspberry Pi Connect option.
+- [x] Recovery path if remote access is lost.
+- [x] Document sync service configuration:
+- [x] How to enable `photoframe-sync` safely.
+- [x] Required env file variables and examples.
+- [x] Expected timer/service statuses.
+- [ ] Decide and implement sync default posture:
+- [ ] Disabled by default until configured, or
+- [ ] Enabled with no-noise behavior when unconfigured.
+- [x] Ensure SOP includes one canonical "daily health check" sequence and expected outputs.
 
-## Tier 1 – Must-do (MVP)
+Exit criteria:
+1. Operator can configure optional remote admin and sync by following docs only.
+2. Sync does not generate confusing default-state noise.
+3. SOP and software guide are consistent and complete for day-0/day-2 operations.
 
-- [ ] **Frame hardware**
-  - [x] Assemble Pi board with cooler + power hat (always-on switch engaged).
-  - [x] Wire GPIO momentary button to Pi (for screen/shutdown).
-  - [x] Connect Pi to Dell monitor (USB-C power, HDMI video).
-  - [ ] Design + cut acrylic plates for open case.
-  - [ ] Mount Pi assembly behind monitor.
-- [ ] **Pi OS**
-  - [x] Flash Raspberry Pi OS to microSD (macOS laptop).
-  - [ ] Write setup script: update OS, install required packages.
-  - [ ] Install Rust, build Rust project, enable auto-start (systemd service).
-  - [ ] Configure button → key events with `gpio-shutdown` overlay.
-  - [ ] Add SSH authorized_keys for remote admin via Tailscale.
-- [ ] **Rust project core**
-  - [x] Scan photo directories + display scaled images full screen.
-  - [x] Handle startup without crashing if photo list is empty/missing.
-  - [x] Simple circular buffer of photos (no weighting yet).
+## Milestone 4 - Release Candidate Validation
+- [ ] Run full link checker for docs and fix all broken anchors/paths.
+- [ ] Execute smoke, daily, and wifi-recovery test scripts on a clean image.
+- [ ] Capture and archive log bundle from validation run.
+- [ ] Perform at least two independent clean-install rehearsals using docs only.
+- [ ] Convert validation findings into final doc/script fixes before tagging release.
 
-## Intermediate Milestone – Cross-platform Image Display
+Exit criteria:
+1. Two successful clean-install runs with no undocumented workaround.
+2. Test scripts complete in expected path and produce expected evidence.
+3. Documentation is sufficient for a new maker with software experience.
 
-- [x] **GPU viewer shows decoded photo**
-  - [x] Upload `PreparedImageCpu` to a wgpu texture and render a full-screen quad.
-  - [x] Unit test verifies EXIF orientation is applied during load.
-- [x] **macOS demo**
-  - [x] Build & run on macOS, confirming a window renders the first photo.
-  - [x] Document minimal run steps and dependencies.
-- [x] **Raspberry Pi demo**
-  - [x] Build & run the same viewer code on Raspberry Pi.
-  - [x] Document any Pi-specific configuration.
-- [x] **Quality gates**
-  - [x] Keep `cargo build`, `cargo clippy -- -D warnings`, and `cargo test` clean.
-
-## Tier 2 – Should-do (reliability & usability)
-
-- [ ] **Frame hardware**
-  - [ ] Design + build wooden frame around monitor.
-  - [ ] Design + 3D print French cleat wall mount.
-  - [ ] Acquire + paint wall channel to hide power cord.
-- [ ] **Pi OS**
-  - [ ] Automate Tailscale install + login during setup.
-  - [ ] Add wifi configuration utility (form → wpa_supplicant update).
-- [ ] **Rust project features**
-  - [x] Circular buffer weighting (half-life replication for new photos).
-    - [x] Exponential half-life weighting keeps recent additions repeating while ensuring every photo appears each cycle.
-  - [x] Graceful removal of deleted photos from list.
-  - [x] Randomized list at boot with configurable seed.
-  - [ ] Event system:
-    - [ ] Short button press → toggle screen.
-    - [ ] Long button press → shutdown.
-    - [ ] Screen sleep/wake at set times.
-    - [ ] Manual cloud sync trigger.
-
-## Tier 3 – Nice-to-have (polish & extras)
-
-- [ ] **Photo rendering**
-  - [ ] Matting options:
-    - [x] Fixed color mat (configurable).
-    - [x] Studio mat (average color + textured bevel).
-    - [x] Blur mat (scaled background fill).
-    - [x] Configurable minimum mat size.
-    - [x] Fixed background image that is scaled to fit screen and images are overlayed
-- [ ] **User web interface**
-  - [ ] Local web server for configuration (cloud, mats, screen schedule, photo timing).
-  - [ ] Access limited to local network.
-  - [ ] Display QR code sticker with config URL.
-  - [ ] Photo delay options (fixed seconds or Poisson distribution).
-- [ ] **Wifi setup polish**
-  - [ ] Host AP if no wifi on boot.
-  - [ ] Serve SSID/password form over local http.
-  - [ ] mDNS for `frame.local`.
-  - [ ] Display QR code with access URL.
+## Deferred Backlog (Post-v1)
+- [ ] Config web UI.
+- [ ] Additional rendering experiments/presets.
+- [ ] Curated starter background image pack.
+- [ ] Expanded hardware/fabrication productionization work.

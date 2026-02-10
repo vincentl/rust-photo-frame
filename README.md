@@ -46,9 +46,9 @@ Setup pipeline internals and helper-library notes are in [setup/README.md](setup
 
 > **Install layout at a glance**
 >
-> - `/opt/photo-frame` holds the read-only runtime artifacts that ship with the project: compiled binaries, unit files, and the pristine configuration templates staged by the setup scripts.
-> - `/var/lib/photo-frame` carries the live state: logs, caches, hotspot artifacts, and any synchronized media. Treat this tree as the working area that systemd services mutate at runtime.
-> - `/etc/photo-frame/config.yaml` holds the active configuration the services consume. Edit this copy (with `sudo`) to adjust library paths or button behavior.
+> - `/opt/photoframe` holds the read-only runtime artifacts that ship with the project: compiled binaries, unit files, and the pristine configuration templates staged by the setup scripts.
+> - `/var/lib/photoframe` carries the live state: logs, caches, hotspot artifacts, and any synchronized media. Treat this tree as the working area that systemd services mutate at runtime.
+> - `/etc/photoframe/config.yaml` holds the active configuration the services consume. Edit this copy (with `sudo`) to adjust library paths or button behavior.
 >
 > This split keeps upgrades simple—rerunning the installer refreshes `/opt` without clobbering the operator-managed data living under `/var`.
 
@@ -60,7 +60,7 @@ When Wi-Fi drops, the frame pivots into a self-service recovery flow handled by 
 
 - **Automatic hotspot:** offline detection after a configurable grace period launches the **PhotoFrame-Setup** access point secured with a random three-word passphrase.
 - **Guided UI:** the on-device web server (default `http://192.168.4.1:8080/`) collects the replacement SSID/password and reports provisioning progress live.
-- **Systemd integration:** `photoframe-wifi-manager.service` runs as the `kiosk` user, restarts on failure, and keeps operational breadcrumbs in `/var/lib/photo-frame` (hotspot password, QR image, last provisioning attempt).
+- **Systemd integration:** `photoframe-wifi-manager.service` runs as the `kiosk` user, restarts on failure, and keeps operational breadcrumbs in `/var/lib/photoframe` (hotspot password, QR image, last provisioning attempt).
 
 Full operating procedures, configuration options, and troubleshooting steps are documented in [docs/wifi-manager.md](docs/wifi-manager.md).
 
@@ -70,7 +70,7 @@ Use [docs/README.md](docs/README.md) for a role-based map (fresh install, day-2 
 
 ## Repository Layout
 
-- `crates/photo-frame`: primary slideshow application crate.
+- `crates/photoframe`: primary slideshow application crate.
 - `crates/buttond`: systemd-friendly hardware button daemon.
 - `crates/wifi-manager`: captive portal and Wi-Fi recovery agent.
 - `setup/`: provisioning scripts used during Pi imaging.

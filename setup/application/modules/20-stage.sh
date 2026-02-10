@@ -60,7 +60,7 @@ create_stage_layout
 
 TARGET_DIR="$(get_target_dir)"
 
-stage_binary "${TARGET_DIR}/photo-frame" "${STAGE_DIR}/bin/photo-frame" "photo-frame"
+stage_binary "${TARGET_DIR}/photoframe" "${STAGE_DIR}/bin/photoframe" "photoframe"
 stage_binary "${TARGET_DIR}/wifi-manager" "${STAGE_DIR}/bin/wifi-manager" "wifi-manager"
 if [[ -f "${TARGET_DIR}/buttond" ]]; then
     stage_binary "${TARGET_DIR}/buttond" "${STAGE_DIR}/bin/buttond" "buttond"
@@ -77,7 +77,7 @@ if [[ -f "${ASSETS_APP_ROOT}/share/wordlist.txt" ]]; then
 fi
 
 if [[ -f "${REPO_ROOT}/config.yaml" ]]; then
-    install -Dm644 "${REPO_ROOT}/config.yaml" "${STAGE_DIR}/etc/photo-frame/config.yaml"
+    install -Dm644 "${REPO_ROOT}/config.yaml" "${STAGE_DIR}/etc/photoframe/config.yaml"
 else
     log WARN "Default config.yaml not found at repo root"
 fi

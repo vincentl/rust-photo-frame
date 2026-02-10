@@ -28,7 +28,7 @@ fi
 
 # Pass through commonly overridden env vars; defaults are handled by deploy.sh
 env \
-  INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}" \
+  INSTALL_ROOT="${INSTALL_ROOT:-/opt/photoframe}" \
   SERVICE_USER="${SERVICE_USER:-kiosk}" \
   SERVICE_GROUP="${SERVICE_GROUP:-}" \
   CARGO_PROFILE="${CARGO_PROFILE:-release}" \
@@ -42,9 +42,9 @@ cat <<'TIP'
     systemctl status photoframe-wifi-manager --no-pager
     systemctl status buttond --no-pager
 - Tail app logs:
-    journalctl -t photo-frame -b -n 100
+    journalctl -t photoframe -b -n 100
 - Edit configuration (requires sudo):
-    /etc/photo-frame/config.yaml
+    /etc/photoframe/config.yaml
 
 If the build was memory constrained, retry with:
     CARGO_BUILD_JOBS=2 ./setup/install-all.sh

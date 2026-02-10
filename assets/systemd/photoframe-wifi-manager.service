@@ -8,9 +8,9 @@ Wants=network-online.target
 Type=simple
 User=kiosk
 Group=kiosk
-WorkingDirectory=/var/lib/photo-frame
+WorkingDirectory=/var/lib/photoframe
 Environment=RUST_LOG=info
-ExecStart=/opt/photo-frame/bin/wifi-manager watch --config /opt/photo-frame/etc/wifi-manager.yaml
+ExecStart=/opt/photoframe/bin/wifi-manager watch --config /opt/photoframe/etc/wifi-manager.yaml
 Restart=on-failure
 RestartSec=2s
 

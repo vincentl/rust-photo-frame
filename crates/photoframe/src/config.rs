@@ -18,7 +18,7 @@ pub use config_model::{
     AwakeScheduleConfig, GreetingScreenConfig, ScreenMessageConfig, SleepScreenConfig,
 };
 
-pub const DEFAULT_CONTROL_SOCKET_PATH: &str = "/run/photo-frame/control.sock";
+pub const DEFAULT_CONTROL_SOCKET_PATH: &str = "/run/photoframe/control.sock";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
@@ -2300,7 +2300,7 @@ pub struct Configuration {
     #[serde(default)]
     pub awake_schedule: Option<AwakeScheduleConfig>,
     /// Placeholder for the hardware button daemon's config block so that
-    /// photo-frame can coexist with a shared config file without
+    /// photoframe can coexist with a shared config file without
     /// accepting other unknown keys.
     ///
     /// This crate does not read this field; it exists solely to reserve the

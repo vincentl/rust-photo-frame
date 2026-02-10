@@ -11,7 +11,7 @@ main() {
   section "Service health"
   require_cmd systemctl
   run_cmd "${photo_service} is active" systemctl is-active --quiet "${photo_service}"
-  run_cmd "Process present" pidof photo-frame
+  run_cmd "Process present" pidof photoframe
   if systemctl cat "${wifi_service}" >/dev/null 2>&1; then
     run_cmd "${wifi_service} is active" systemctl is-active --quiet "${wifi_service}"
   else
@@ -30,9 +30,9 @@ main() {
     warn "nmcli not available; skipping network detail"
   fi
 
-  if [ -x /opt/photo-frame/bin/print-status.sh ]; then
+  if [ -x /opt/photoframe/bin/print-status.sh ]; then
     section "Fleet status snapshot"
-    run_cmd "print-status" /opt/photo-frame/bin/print-status.sh
+    run_cmd "print-status" /opt/photoframe/bin/print-status.sh
   fi
 
   section "Sleep schedule"

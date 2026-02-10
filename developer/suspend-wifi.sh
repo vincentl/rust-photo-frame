@@ -33,7 +33,7 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 IFACE="${1:-wlan0}"
-BAD_NAME="wifi-bad"
+BAD_NAME="wifi-bad-${IFACE}"
 BAD_PSK="wrong-password"
 DELAY_MIN=5
 NMCLI="$(command -v nmcli || echo /usr/bin/nmcli)"
@@ -88,11 +88,21 @@ nmcli connection delete "$BAD_NAME" >/dev/null 2>&1 || true
 nmcli connection add type wifi ifname "$IFACE" con-name "$BAD_NAME" ssid "$SSID" >/dev/null
 nmcli connection modify "$BAD_NAME" wifi-sec.key-mgmt wpa-psk
 nmcli connection modify "$BAD_NAME" wifi-sec.psk "$BAD_PSK"
+nmcli connection modify "$BAD_NAME" connection.autoconnect no
 log "Created '$BAD_NAME' for SSID '$SSID' with bad PSK"
 
 nmcli connection down "$ACTIVE_CONN" || true
-nmcli connection up "$BAD_NAME" || true
-log "Switched to '$BAD_NAME' (auth should fail)."
+nmcli device disconnect "$IFACE" >/dev/null 2>&1 || true
+nmcli connection up "$BAD_NAME" ifname "$IFACE" || true
+
+ACTIVE_AFTER=$(nmcli -g GENERAL.CONNECTION device show "$IFACE" 2>/dev/null | head -n1 | tr -d '\r')
+if [[ "$ACTIVE_AFTER" == "$ACTIVE_CONN" ]]; then
+  log "Warning: interface remained on '$ACTIVE_CONN'; forcing disconnect"
+  nmcli device disconnect "$IFACE" >/dev/null 2>&1 || true
+fi
+
+STATE_AFTER=$(nmcli -t -f DEVICE,STATE device status | awk -F: -v i="$IFACE" '$1==i {print $2; exit}')
+log "Injected bad credential profile '$BAD_NAME'; interface state now '${STATE_AFTER:-unknown}'."
 if [[ -n "$SCHEDULED_UNIT" ]]; then
   log "Restore timer logs: sudo journalctl -u $SCHEDULED_UNIT"
 fi

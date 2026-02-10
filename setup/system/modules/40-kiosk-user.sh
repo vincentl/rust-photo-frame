@@ -294,8 +294,8 @@ ensure_kiosk_user() {
 }
 
 ensure_runtime_dirs() {
-    local runtime_dir="/run/photo-frame"
-    local tmpfiles_conf="/etc/tmpfiles.d/photo-frame.conf"
+    local runtime_dir="/run/photoframe"
+    local tmpfiles_conf="/etc/tmpfiles.d/photoframe.conf"
     local kiosk_uid
 
     kiosk_uid="$(id -u kiosk)"
@@ -306,8 +306,8 @@ ensure_runtime_dirs() {
     log "Writing tmpfiles.d entry ${tmpfiles_conf}"
     install -d -m 0755 "$(dirname "${tmpfiles_conf}")"
     cat <<TMPFILES >"${tmpfiles_conf}"
-# photo-frame runtime directories
-d /run/photo-frame 0770 kiosk kiosk -
+# photoframe runtime directories
+d /run/photoframe 0770 kiosk kiosk -
 d /run/user/${kiosk_uid} 0700 kiosk kiosk -
 TMPFILES
 

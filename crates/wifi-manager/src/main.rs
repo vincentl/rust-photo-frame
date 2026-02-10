@@ -64,7 +64,7 @@ async fn try_main() -> Result<()> {
 
     let config_path = cli
         .config
-        .unwrap_or_else(|| PathBuf::from("/opt/photo-frame/etc/wifi-manager.yaml"));
+        .unwrap_or_else(|| PathBuf::from("/opt/photoframe/etc/wifi-manager.yaml"));
     let config = Config::load(&config_path)?;
     // Updating the process environment is an unsafe operation on Rust 2024.
     // We only expose the configuration path to child processes, so the single

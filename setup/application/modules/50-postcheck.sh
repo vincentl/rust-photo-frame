@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODULE="app:50-postcheck"
-INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
+INSTALL_ROOT="${INSTALL_ROOT:-/opt/photoframe}"
 SERVICE_USER="${SERVICE_USER:-kiosk}"
 if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
     SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn "${SERVICE_USER}")}"
@@ -27,13 +27,14 @@ run_sudo() {
     sudo "$@"
 }
 
-BIN_PATH="${INSTALL_ROOT}/bin/photo-frame"
+BIN_PATH="${INSTALL_ROOT}/bin/photoframe"
 WIFI_BIN_PATH="${INSTALL_ROOT}/bin/wifi-manager"
-CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/photo-frame/config.yaml"
+CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/photoframe/config.yaml"
 WIFI_CONFIG_TEMPLATE="${INSTALL_ROOT}/etc/wifi-manager.yaml"
 WORDLIST_PATH="${INSTALL_ROOT}/share/wordlist.txt"
-VAR_DIR="/var/lib/photo-frame"
-SYSTEM_CONFIG="/etc/photo-frame/config.yaml"
+VAR_DIR="/var/lib/photoframe"
+SYSTEM_CONFIG="/etc/photoframe/config.yaml"
+DEFAULT_CONTROL_SOCKET_PATH="/run/photoframe/control.sock"
 
 dump_logs_on_failure() {
     local status=$1
@@ -42,20 +43,55 @@ dump_logs_on_failure() {
     fi
 
     set +e
-    log ERROR "Application postcheck failed; dumping photo-frame journal tail"
+    log ERROR "Application postcheck failed; dumping photoframe journal tail"
     if command -v journalctl >/dev/null 2>&1; then
         if command -v sudo >/dev/null 2>&1; then
-            sudo journalctl -t photo-frame -b -n 100 || true
+            sudo journalctl -t photoframe -b -n 100 || true
         else
-            journalctl -t photo-frame -b -n 100 || true
+            journalctl -t photoframe -b -n 100 || true
         fi
     else
-        log WARN "journalctl unavailable; cannot show photo-frame logs"
+        log WARN "journalctl unavailable; cannot show photoframe logs"
     fi
     printf '[postcheck] HINT: Temporarily set /etc/greetd/config.toml to command="/usr/bin/kmscube" for smoke tests.\n'
 }
 
 trap 'dump_logs_on_failure $?' EXIT
+
+resolve_control_socket_path() {
+    local socket_path="${DEFAULT_CONTROL_SOCKET_PATH}"
+    if [[ -f "${SYSTEM_CONFIG}" ]]; then
+        local configured
+        configured="$(run_sudo awk -F ':' '
+            /^[[:space:]]*control-socket-path:[[:space:]]*/ {
+                value=$2
+                sub(/^[[:space:]]+/, "", value)
+                sub(/[[:space:]]+#.*/, "", value)
+                gsub(/["[:space:]]/, "", value)
+                print value
+                exit
+            }
+        ' "${SYSTEM_CONFIG}" 2>/dev/null || true)"
+        if [[ -n "${configured}" ]]; then
+            socket_path="${configured}"
+        fi
+    fi
+    printf '%s' "${socket_path}"
+}
+
+wait_for_control_socket() {
+    local socket_path="$1"
+    local timeout_sec="${2:-20}"
+    local elapsed=0
+    while (( elapsed < timeout_sec )); do
+        if run_sudo test -S "${socket_path}"; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
 
 if [[ ! -x "${BIN_PATH}" ]]; then
     log ERROR "Binary ${BIN_PATH} missing or not executable"
@@ -164,6 +200,26 @@ else
     log WARN "systemctl not available; skipping service state checks"
 fi
 
+control_socket_path="$(resolve_control_socket_path)"
+control_socket_status="not checked"
+if systemd_available && systemd_unit_exists "${KIOSK_SERVICE}"; then
+    log INFO "Checking control socket readiness at ${control_socket_path}"
+    if wait_for_control_socket "${control_socket_path}" 15; then
+        control_socket_status="ready"
+    else
+        log WARN "Control socket not present yet; restarting ${KIOSK_SERVICE} once"
+        run_sudo systemctl stop "${KIOSK_SERVICE}" >/dev/null 2>&1 || true
+        sleep 1
+        run_sudo systemctl start "${KIOSK_SERVICE}" >/dev/null 2>&1 || true
+        if wait_for_control_socket "${control_socket_path}" 25; then
+            control_socket_status="ready-after-restart"
+        else
+            log ERROR "Control socket not found at ${control_socket_path}. Check ${KIOSK_SERVICE} logs."
+            exit 1
+        fi
+    fi
+fi
+
 rustc_version=$(rustc --version 2>/dev/null || echo "rustc unavailable")
 cargo_version=$(cargo --version 2>/dev/null || echo "cargo unavailable")
 
@@ -193,6 +249,7 @@ Config (active)  : ${SYSTEM_CONFIG}
 Wi-Fi binary : ${WIFI_BIN_PATH}
 Wi-Fi config : ${WIFI_CONFIG_TEMPLATE}
 Wi-Fi wordlist: ${WORDLIST_PATH}
+Control socket: ${control_socket_path} (${control_socket_status})
 rustc        : ${rustc_version}
 cargo        : ${cargo_version}
 ${KIOSK_SERVICE} : ${service_status}

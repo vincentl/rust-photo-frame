@@ -95,7 +95,7 @@ main() {
   fi
 
   # Ensure the overlay binary exists
-  local bin=/opt/photo-frame/bin/wifi-manager
+  local bin=/opt/photoframe/bin/wifi-manager
   [[ -x "$bin" ]] || err "wifi-manager not found at ${bin} (deploy application stage first)"
 
   # Determine Wayland display socket under XDG_RUNTIME_DIR

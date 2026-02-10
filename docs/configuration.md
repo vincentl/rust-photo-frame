@@ -1,6 +1,6 @@
 # Configuration
 
-The repository ships with a sample [`config.yaml`](../config.yaml) that you can copy or edit directly. On installed systems, edit `/etc/photo-frame/config.yaml`; when running from source, pass a config path on the CLI.
+The repository ships with a sample [`config.yaml`](../config.yaml) that you can copy or edit directly. On installed systems, edit `/etc/photoframe/config.yaml`; when running from source, pass a config path on the CLI.
 
 The visual feature blocks (`transition`, `matting`, and `photo-effect`) use a shared `selection` + `active` structure throughout this guide.
 
@@ -15,7 +15,7 @@ Use this sequence when you only need the most common edits:
 5. Validate syntax without launching the viewer:
 
 ```bash
-cargo run -p photo-frame -- --playlist-dry-run 1
+cargo run -p photoframe -- --playlist-dry-run 1
 ```
 
 ## Starter configuration
@@ -23,7 +23,7 @@ cargo run -p photo-frame -- --playlist-dry-run 1
 The example below targets a Pi driving a 4K portrait display backed by a NAS-mounted photo library. Inline comments explain why each value matters and what to tweak for common scenarios.
 
 ```yaml
-photo-library-path: /var/lib/photo-frame/photos
+photo-library-path: /var/lib/photoframe/photos
 # ├── cloud/  # managed by sync jobs; safe to resync or replace wholesale
 # └── local/  # manual drops (USB, scp) that should survive sync resets
 
@@ -61,7 +61,7 @@ matting:
       backend: neon
 ```
 
-If the frame launches to a black screen, double-check that `photo-library-path` points to a directory the runtime can read and that the user account has permission to access mounted network shares. The directory should contain `cloud` and `local` subdirectories—the runtime merges both so that cloud syncs can refresh `cloud/` while USB or ad-hoc transfers live under `local/`. You can validate a YAML edit quickly with `cargo run -p photo-frame -- --playlist-dry-run 1`, which parses the config without opening the render window.
+If the frame launches to a black screen, double-check that `photo-library-path` points to a directory the runtime can read and that the user account has permission to access mounted network shares. The directory should contain `cloud` and `local` subdirectories—the runtime merges both so that cloud syncs can refresh `cloud/` while USB or ad-hoc transfers live under `local/`. You can validate a YAML edit quickly with `cargo run -p photoframe -- --playlist-dry-run 1`, which parses the config without opening the render window.
 
 ## Top-level keys
 
@@ -84,17 +84,17 @@ Use the quick reference below to locate the knobs you care about, then dive into
 
 - **Purpose:** Sets the root directory that will be scanned recursively for supported photo formats.
 - **Required?** Yes. Leave it unset and the application has no images to display.
-- **Accepted values & defaults:** Any absolute or relative filesystem path. The setup pipeline provisions `/var/lib/photo-frame/photos` with `cloud/` and `local/` subdirectories and points the default configuration there so both the runtime and any cloud sync job start from a known location.
+- **Accepted values & defaults:** Any absolute or relative filesystem path. The setup pipeline provisions `/var/lib/photoframe/photos` with `cloud/` and `local/` subdirectories and points the default configuration there so both the runtime and any cloud sync job start from a known location.
 - **Effect on behavior:** Switching the path changes the library the watcher monitors; the viewer reloads the playlist when the directory contents change.
-- **Notes:** Keep the `cloud/` and `local/` folders under the configured root so the runtime can merge them. Use `cloud/` for content that will be overwritten by sync jobs (e.g., rclone, Nextcloud), and reserve `local/` for manual imports you do not want the sync job to prune. After the installer seeds `/etc/photo-frame/config.yaml`, update that system copy (via `sudo`) to move the library elsewhere if you do not want to keep photos under `/var/lib/photo-frame/photos`.
+- **Notes:** Keep the `cloud/` and `local/` folders under the configured root so the runtime can merge them. Use `cloud/` for content that will be overwritten by sync jobs (e.g., rclone, Nextcloud), and reserve `local/` for manual imports you do not want the sync job to prune. After the installer seeds `/etc/photoframe/config.yaml`, update that system copy (via `sudo`) to move the library elsewhere if you do not want to keep photos under `/var/lib/photoframe/photos`.
 
 ### `control-socket-path`
 
 - **Purpose:** Selects where the application exposes its Unix domain control socket for runtime commands (sleep toggles, future remote controls).
-- **Required?** Optional; defaults to `/run/photo-frame/control.sock`.
+- **Required?** Optional; defaults to `/run/photoframe/control.sock`.
 - **Accepted values & defaults:** Any filesystem path, typically under `/run`, `/run/user/<uid>`, or another writable runtime directory.
 - **Effect on behavior:** The path is created on startup and removed on shutdown, but the parent directory must already exist with permissions that allow the kiosk user to create the socket. External helpers such as `buttond` connect to this socket to send JSON commands.
-- **Notes:** The kiosk provisioning script creates `/run/photo-frame` (mode `0770`, owned by `kiosk:kiosk`) and installs an `/etc/tmpfiles.d/photo-frame.conf` entry so the directory exists after every boot. If you override the setting, make sure to pre-create the directory portion of the path with matching ownership, e.g. `sudo install -d -m 0770 -o kiosk -g kiosk /var/lib/photo-frame/runtime`. Systems running the frame under a different user should adjust the ownership in that command accordingly. Permission errors during startup mean the process could not create the socket—double-check the directory permissions or point `control-socket-path` at a writable location like `/run/user/1000/photo-frame/control.sock`.
+- **Notes:** The kiosk provisioning script creates `/run/photoframe` (mode `0770`, owned by `kiosk:kiosk`) and installs an `/etc/tmpfiles.d/photoframe.conf` entry so the directory exists after every boot. If you override the setting, make sure to pre-create the directory portion of the path with matching ownership, e.g. `sudo install -d -m 0770 -o kiosk -g kiosk /var/lib/photoframe/runtime`. Systems running the frame under a different user should adjust the ownership in that command accordingly. Permission errors during startup mean the process could not create the socket—double-check the directory permissions or point `control-socket-path` at a writable location like `/run/user/1000/photoframe/control.sock`.
 
 ### `transition`
 
@@ -187,7 +187,7 @@ Use the quick reference below to locate the knobs you care about, then dive into
 - **Purpose:** Coordinates when the slideshow runs and when the panel naps.
 - **Required?** Optional; without outside input the frame shows the greeting screen, transitions into sleep, and waits indefinitely.
 - **How it works:** The application no longer owns an internal schedule. After startup it remains asleep until another client sends `set-state` or `ToggleState` commands over the control socket.
-- **Manual control:** Pipe JSON such as `{"command":"set-state","state":"awake"}` or `{"command":"ToggleState"}` to `/run/photo-frame/control.sock` (override via `control-socket-path`). The chosen state persists until the next command arrives.
+- **Manual control:** Pipe JSON such as `{"command":"set-state","state":"awake"}` or `{"command":"ToggleState"}` to `/run/photoframe/control.sock` (override via `control-socket-path`). The chosen state persists until the next command arrives.
 - **Automation:** Deploy [`buttond`](#power-button-daemon) and populate the shared `awake-schedule` block. buttond evaluates the schedule, issues `set-state` commands at the appropriate boundaries, and runs display power hooks on your behalf.
 
 Example schedule fragment consumed by `buttond`:
@@ -223,10 +223,10 @@ buttond:
     off-delay-ms: 3500
     display-name: null               # optional wlr-randr output name to monitor
     on-command:
-      program: /opt/photo-frame/bin/powerctl
+      program: /opt/photoframe/bin/powerctl
       args: [wake]
     off-command:
-      program: /opt/photo-frame/bin/powerctl
+      program: /opt/photoframe/bin/powerctl
       args: [sleep]
 ```
 
@@ -236,7 +236,7 @@ Pair the block above with a top-level `awake-schedule` section to describe the d
 
 If you point `shutdown-command.program` at something other than `systemctl` (for example `loginctl`), buttond will not add these flags and will also strip them if present, since they are systemctl‑specific. The recommended, most reliable choice is `systemctl`.
 
-The installer deploys `buttond.service`, which launches `/opt/photo-frame/bin/buttond --config /etc/photo-frame/config.yaml` as the `kiosk` user. At runtime the daemon behaves as follows:
+The installer deploys `buttond.service`, which launches `/opt/photoframe/bin/buttond --config /etc/photoframe/config.yaml` as the `kiosk` user. At runtime the daemon behaves as follows:
 
 - **Single press:** writes `{ "command": "ToggleState" }` to the control socket, then toggles the screen. If the display was off it immediately executes the configured wake command; if the display was on it delays for `off-delay-ms` (so the sleep screen is visible) before running the sleep command. The daemon inspects `wlr-randr` output on each press instead of relying on cached state, so restarts and manual overrides stay in sync with reality.
 - **Double press:** executes the `shutdown-command`. The default uses `systemctl poweroff -i --no-ask-password`, bypassing interactive user veto and password prompts so kiosk shutdowns succeed even when a user is logged in elsewhere. Provisioning installs a polkit rule so the `kiosk` user can issue the request without prompting.
@@ -245,7 +245,7 @@ The installer deploys `buttond.service`, which launches `/opt/photo-frame/bin/bu
 
 Pin `buttond.screen.display-name` to the exact `wlr-randr` output name (for example `HDMI-A-2`) when a specific connector should always be probed. The daemon still falls back to the first connected non-internal display when the field is omitted, but when set it treats that output as authoritative—even if `wlr-randr` reports it as disabled—to keep the sleep command state machine aligned with panels that power down between presses.
 
-`buttond` prefers using `/opt/photo-frame/bin/powerctl` for display state detection when that program is referenced by the configured `screen` commands, falling back to `swaymsg -t get_outputs` only if the probe fails. When `display-name` is omitted, the powerctl state probe targets any connected output. `buttond` automatically derives `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` for its `wlr-randr`/sway probes by scanning `/run/user/<uid>` for Wayland sockets. When the compositor is still starting it retries for a short window instead of failing the service, smoothing over race conditions between startup units.
+`buttond` prefers using `/opt/photoframe/bin/powerctl` for display state detection when that program is referenced by the configured `screen` commands, falling back to `swaymsg -t get_outputs` only if the probe fails. When `display-name` is omitted, the powerctl state probe targets any connected output. `buttond` automatically derives `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` for its `wlr-randr`/sway probes by scanning `/run/user/<uid>` for Wayland sockets. When the compositor is still starting it retries for a short window instead of failing the service, smoothing over race conditions between startup units.
 
 Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. Set `buttond.device` if the wrong input is chosen. Provisioning also pins `HandlePowerKey=ignore` inside `/etc/systemd/logind.conf` so logind never interprets presses as global shutdown requests; only `buttond` reacts to the events.
 
@@ -273,7 +273,7 @@ Where `age` is the difference between the active playlist clock and the photo's 
 Use the dry-run tooling to validate a configuration without launching the UI:
 
 ```bash
-cargo run -p photo-frame --release -- \
+cargo run -p photoframe --release -- \
   config.yaml \
   --playlist-now 2025-01-01T00:00:00Z \
   --playlist-dry-run 32 \
@@ -389,7 +389,7 @@ The remaining controls depend on the mat `kind`:
   - **`path`** (string or string array, required): One or more filesystem paths to the backdrop image(s). The renderer loads referenced files at startup; an empty array disables the entry without error. Provide multiple paths (or repeat a path) to weight backgrounds after canonical expansion.
   - **`fit`** (`cover`, `contain`, or `stretch`; default `cover`): Controls how the background scales to the canvas.
 
-Note: Store operator‑managed background images under `/var/lib/photo-frame/backgrounds`. The setup pipeline treats `/opt/photo-frame` as read‑only and refreshes it on redeploy, so files placed there may be removed.
+Note: Store operator‑managed background images under `/var/lib/photoframe/backgrounds`. The setup pipeline treats `/opt/photoframe` as read‑only and refreshes it on redeploy, so files placed there may be removed.
 
 Example recipes are in [Matting examples](#matting-examples).
 
@@ -502,7 +502,7 @@ matting:
     - kind: studio
       minimum-mat-percentage: 6.0
     - kind: fixed-image
-      path: [/var/lib/photo-frame/backgrounds/linen.png]
+      path: [/var/lib/photoframe/backgrounds/linen.png]
       fit: contain
     - kind: studio
       minimum-mat-percentage: 4.0

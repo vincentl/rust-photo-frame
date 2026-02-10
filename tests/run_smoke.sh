@@ -19,7 +19,7 @@ main() {
   require_cmd systemctl
   run_cmd "${photo_service} is active" systemctl is-active --quiet "${photo_service}"
   run_cmd "${photo_service} enabled" systemctl is-enabled --quiet "${photo_service}"
-  run_cmd "Process present" pidof photo-frame
+  run_cmd "Process present" pidof photoframe
   if systemctl cat "${wifi_service}" >/dev/null 2>&1; then
     run_cmd "${wifi_service} is active" systemctl is-active --quiet "${wifi_service}"
   else
@@ -50,14 +50,14 @@ main() {
   fi
 
   section "Sleep toggle via control socket"
-  info "Sending ToggleState command via /run/photo-frame/control.sock"
+  info "Sending ToggleState command via /run/photoframe/control.sock"
   run_cmd "Send ToggleState" python3 - <<'PY'
 import socket
 
 payload = b'{"command":"ToggleState"}'
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 try:
-    sock.connect("/run/photo-frame/control.sock")
+    sock.connect("/run/photoframe/control.sock")
     sock.sendall(payload)
 finally:
     sock.close()

@@ -1,6 +1,6 @@
 # Wi-Fi Manager
 
-The `wifi-manager` crate is the frame's single entry point for Wi-Fi monitoring, hotspot recovery, and captive portal provisioning. It wraps NetworkManager's `nmcli` tooling, spawns the recovery web UI, and persists all operational breadcrumbs under `/var/lib/photo-frame`.
+The `wifi-manager` crate is the frame's single entry point for Wi-Fi monitoring, hotspot recovery, and captive portal provisioning. It wraps NetworkManager's `nmcli` tooling, spawns the recovery web UI, and persists all operational breadcrumbs under `/var/lib/photoframe`.
 
 This document is the implementation/reference guide. For fresh-install validation use [`software.md`](software.md), for full QA coverage use [`../developer/test-plan.md`](../developer/test-plan.md), and for incident triage use [`sop.md`](sop.md).
 
@@ -12,8 +12,8 @@ Use this sequence for a quick sanity check after changing Wi-Fi logic:
 
 1. Verify watcher health:
    - `sudo systemctl status photoframe-wifi-manager.service`
-   - `/opt/photo-frame/bin/print-status.sh`
-2. Confirm configuration values in `/opt/photo-frame/etc/wifi-manager.yaml` and restart watcher:
+   - `/opt/photoframe/bin/print-status.sh`
+2. Confirm configuration values in `/opt/photoframe/etc/wifi-manager.yaml` and restart watcher:
    - `sudo systemctl restart photoframe-wifi-manager.service`
 3. Run the fresh-install acceptance flow:
    - [`software.md#fresh-install-wi-fi-recovery-test`](software.md#fresh-install-wi-fi-recovery-test)
@@ -34,13 +34,13 @@ Expected outcome: the watcher service is `active (running)` and `print-status.sh
 
 ## Binary layout and subcommands
 
-The deployed runtime installs to `/opt/photo-frame/bin/wifi-manager` and exposes the following subcommands:
+The deployed runtime installs to `/opt/photoframe/bin/wifi-manager` and exposes the following subcommands:
 
 | Subcommand | Purpose                                                                                                                                        |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `watch`    | Default daemon mode. Monitors connectivity, raises the hotspot/UI when offline, and reconnects when provisioning succeeds.                     |
 | `ui`       | Runs only the HTTP UI server. This is spawned automatically by `watch` when the hotspot is active but can be used independently for debugging. |
-| `qr`       | Generates `/var/lib/photo-frame/wifi-qr.png`, a QR code pointing to the configured UI URL.                                                     |
+| `qr`       | Generates `/var/lib/photoframe/wifi-qr.png`, a QR code pointing to the configured UI URL.                                                     |
 | `nm`       | Thin wrapper around `nmcli` operations (`add`, `modify`, `connect`) used internally. Safe to run manually for diagnostics.                     |
 | `overlay`  | Renders the on-device recovery overlay window. Invoked automatically by the watcher; exposed for manual testing.                                |
 
@@ -54,7 +54,7 @@ Overlay presentation runs the overlay window inside the active Sway session usin
 
 ## Configuration reference
 
-The template lives at `/opt/photo-frame/etc/wifi-manager.yaml` and is staged from `setup/assets/app/etc/wifi-manager.yaml`. All keys use kebab-case to match the repository conventions.
+The template lives at `/opt/photoframe/etc/wifi-manager.yaml` and is staged from `setup/assets/app/etc/wifi-manager.yaml`. All keys use kebab-case to match the repository conventions.
 
 ```yaml
 interface: wlan0
@@ -63,8 +63,8 @@ offline-grace-sec: 30
 recovery-mode: app-handoff
 recovery-reconnect-probe-sec: 60
 recovery-connect-timeout-sec: 20
-wordlist-path: /opt/photo-frame/share/wordlist.txt
-var-dir: /var/lib/photo-frame
+wordlist-path: /opt/photoframe/share/wordlist.txt
+var-dir: /var/lib/photoframe
 hotspot:
   connection-id: pf-hotspot
   ssid: PhotoFrame-Setup
@@ -74,13 +74,13 @@ ui:
   port: 8080
 photo-app:
   launch-command:
-    - /usr/local/bin/photo-frame
-    - /etc/photo-frame/config.yaml
-  app-id: photo-frame
+    - /usr/local/bin/photoframe
+    - /etc/photoframe/config.yaml
+  app-id: photoframe
 overlay:
   command:
     - swaymsg
-  photo-app-id: photo-frame
+  photo-app-id: photoframe
   overlay-app-id: wifi-overlay
   # sway-socket: /run/user/1000/sway-ipc.1000.123.sock
 ```
@@ -111,7 +111,7 @@ Whenever you change the config, run `sudo systemctl restart photoframe-wifi-mana
 
 ## Runtime files
 
-All mutable state lives under `/var/lib/photo-frame` and is owned by the `kiosk` user (0755 directory permissions). Key files include:
+All mutable state lives under `/var/lib/photoframe` and is owned by the `kiosk` user (0755 directory permissions). Key files include:
 
 - `hotspot-password.txt` – the currently active random passphrase for **PhotoFrame-Setup**.
 - `wifi-qr.png` – QR code pointing to `http://<hotspot-ip>:<port>/`.
@@ -124,8 +124,8 @@ All mutable state lives under `/var/lib/photo-frame` and is owned by the `kiosk`
 
 1. The `watch` loop transitions `Online → OfflineGrace` after NetworkManager reports the interface disconnected. If connectivity remains down for `offline-grace-sec`, it enters `RecoveryHotspotActive`.
 2. The hotspot profile (`pf-hotspot`) is ensured, then activated on the configured interface with WPA2-PSK security. The watcher launches the `wifi-manager overlay` subcommand via Sway IPC and brings the web UI online so the on-device instructions, QR code, and portal stay in sync.
-3. A random three-word passphrase is selected from the bundled wordlist and written to `/var/lib/photo-frame/hotspot-password.txt`.
-4. The QR code generator produces `/var/lib/photo-frame/wifi-qr.png`, embedding the configured UI URL (default `http://192.168.4.1:8080/`).
+3. A random three-word passphrase is selected from the bundled wordlist and written to `/var/lib/photoframe/hotspot-password.txt`.
+4. The QR code generator produces `/var/lib/photoframe/wifi-qr.png`, embedding the configured UI URL (default `http://192.168.4.1:8080/`).
 5. The HTTP UI binds to `0.0.0.0:<port>` and serves:
    - `GET /` – single-page HTML form for SSID + password entry with inline guidance and QR instructions.
    - `POST /submit` – validates inputs and writes `wifi-request.json`; the watcher consumes the request and performs `nmcli` operations.
@@ -140,13 +140,13 @@ All mutable state lives under `/var/lib/photo-frame` and is owned by the `kiosk`
 The Wi-Fi manager is wired into the refreshed setup pipeline:
 
 - `setup/system/modules/10-apt-packages.sh` pulls in NetworkManager, Sway, GPU drivers, and build prerequisites.
-- `setup/system/modules/20-rust.sh` installs the system-wide Rust toolchain used to build the binaries under `/opt/photo-frame`.
+- `setup/system/modules/20-rust.sh` installs the system-wide Rust toolchain used to build the binaries under `/opt/photoframe`.
 - `setup/system/modules/40-kiosk-user.sh` provisions the kiosk user, runtime directories, and polkit rule that unlocks NetworkManager access for `kiosk`.
 - `setup/system/modules/50-greetd.sh` installs the Sway session wrapper greetd launches on tty1.
 - `setup/system/modules/60-systemd.sh` installs and enables `/etc/systemd/system/photoframe-wifi-manager.service` alongside the other kiosk units once the binaries exist.
 - `setup/application/modules/10-build.sh` compiles `wifi-manager` in release mode as the invoking user (never root).
 - `setup/application/modules/20-stage.sh` stages the binary, config template, wordlist, and docs.
-- `setup/application/modules/30-install.sh` installs artifacts into `/opt/photo-frame` and seeds `/etc/photo-frame/config.yaml` if missing.
+- `setup/application/modules/30-install.sh` installs artifacts into `/opt/photoframe` and seeds `/etc/photoframe/config.yaml` if missing.
 
 Re-running the scripts is idempotent: binaries are replaced in place, configs are preserved, ACLs stay intact, and systemd units reload cleanly.
 
@@ -168,10 +168,10 @@ sudo journalctl -u photoframe-wifi-manager.service -f
 sudo systemctl restart photoframe-wifi-manager.service
 
 # Check summary status (hotspot profile, active connection, artifacts)
-/opt/photo-frame/bin/print-status.sh
+/opt/photoframe/bin/print-status.sh
 
 # Manually seed a connection via helper subcommand (requires polkit rule)
-sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid "HomeWiFi" --psk "correct-horse-battery-staple"
+sudo -u kiosk /opt/photoframe/bin/wifi-manager nm add --ssid "HomeWiFi" --psk "correct-horse-battery-staple"
 
 # Force recovery hotspot for testing
 sudo nmcli connection up pf-hotspot
@@ -190,18 +190,18 @@ When recovery is stuck, run this in order:
 
 1. Snapshot service state:
    - `sudo systemctl status photoframe-wifi-manager.service`
-   - `/opt/photo-frame/bin/print-status.sh`
+   - `/opt/photoframe/bin/print-status.sh`
 2. Inspect persisted state:
-   - `sudo cat /var/lib/photo-frame/wifi-state.json`
-   - `sudo cat /var/lib/photo-frame/wifi-last.json`
-   - `sudo ls -l /var/lib/photo-frame/wifi-request.json`
+   - `sudo cat /var/lib/photoframe/wifi-state.json`
+   - `sudo cat /var/lib/photoframe/wifi-last.json`
+   - `sudo ls -l /var/lib/photoframe/wifi-request.json`
 3. Check NetworkManager:
    - `nmcli dev status`
    - `nmcli connection show --active`
 4. Confirm Sway socket exists:
    - `sudo sh -lc 'uid=$(id -u kiosk); ls "/run/user/$uid"/sway-ipc.*.sock'`
 5. Validate manual credential apply path:
-   - `sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid "<ssid>" --psk "<password>"`
+   - `sudo -u kiosk /opt/photoframe/bin/wifi-manager nm add --ssid "<ssid>" --psk "<password>"`
 
 ## Troubleshooting
 
@@ -225,7 +225,7 @@ sudo sh -lc '
   RUNDIR="/run/user/$(id -u kiosk)";
   SWAYSOCK="$(find "$RUNDIR" -maxdepth 1 -type s -name "sway-ipc.*.sock" -print -quit)";
   [ -S "$SWAYSOCK" ] || { echo "No Sway IPC socket for kiosk (is greetd/Sway running?)" >&2; exit 1; };
-  sudo -u kiosk SWAYSOCK="$SWAYSOCK" swaymsg -s "$SWAYSOCK" exec "env WINIT_APP_ID=wifi-overlay /opt/photo-frame/bin/wifi-manager overlay --ssid Test --password-file /var/lib/photo-frame/hotspot-password.txt --ui-url http://192.168.4.1:8080/"
+  sudo -u kiosk SWAYSOCK="$SWAYSOCK" swaymsg -s "$SWAYSOCK" exec "env WINIT_APP_ID=wifi-overlay /opt/photoframe/bin/wifi-manager overlay --ssid Test --password-file /var/lib/photoframe/hotspot-password.txt --ui-url http://192.168.4.1:8080/"
 '
 ```
 
@@ -236,14 +236,14 @@ If `/run/user/$(id -u kiosk)` does not exist:
 
 ### Provisioning fails repeatedly
 
-- Inspect `/var/lib/photo-frame/wifi-last.json` and `/var/lib/photo-frame/wifi-state.json`.
+- Inspect `/var/lib/photoframe/wifi-last.json` and `/var/lib/photoframe/wifi-state.json`.
 - Run manual credential apply path:
-  - `sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid <name> --psk <pass>`
+  - `sudo -u kiosk /opt/photoframe/bin/wifi-manager nm add --ssid <name> --psk <pass>`
 - If it reports `Insufficient privileges`, re-run provisioning to reinstall the polkit rule.
 
 ### Wordlist missing
 
-- Re-run `setup/application/modules/20-stage.sh` and `setup/application/modules/30-install.sh` to restore `/opt/photo-frame/share/wordlist.txt`.
+- Re-run `setup/application/modules/20-stage.sh` and `setup/application/modules/30-install.sh` to restore `/opt/photoframe/share/wordlist.txt`.
 
 ## Disable or re-enable service
 

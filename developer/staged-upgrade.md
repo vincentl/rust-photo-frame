@@ -37,7 +37,7 @@ sudo ./setup/system/install.sh
 ```bash
 cargo update -w
 cargo check --workspace
-cargo test -p photo-frame -- --nocapture
+cargo test -p photoframe -- --nocapture
 cargo test -p wifi-manager -- --nocapture
 cargo clippy -p wifi-manager -- -D warnings
 ```

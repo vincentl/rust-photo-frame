@@ -156,11 +156,11 @@ fn default_recovery_connect_timeout() -> u64 {
 }
 
 fn default_wordlist_path() -> PathBuf {
-    PathBuf::from("/opt/photo-frame/share/wordlist.txt")
+    PathBuf::from("/opt/photoframe/share/wordlist.txt")
 }
 
 fn default_var_dir() -> PathBuf {
-    PathBuf::from("/var/lib/photo-frame")
+    PathBuf::from("/var/lib/photoframe")
 }
 
 fn default_hotspot_connection_id() -> String {
@@ -185,8 +185,8 @@ fn default_ui_port() -> u16 {
 
 fn default_photo_app_launch_command() -> Vec<String> {
     vec![
-        "/usr/local/bin/photo-frame".to_string(),
-        "/etc/photo-frame/config.yaml".to_string(),
+        "/usr/local/bin/photoframe".to_string(),
+        "/etc/photoframe/config.yaml".to_string(),
     ]
 }
 
@@ -197,7 +197,7 @@ fn default_overlay_command() -> Vec<String> {
 }
 
 fn default_photo_app_id() -> String {
-    "photo-frame".to_string()
+    "photoframe".to_string()
 }
 
 fn default_overlay_app_id() -> String {
@@ -214,12 +214,12 @@ mod tests {
         assert_eq!(cfg.recovery_mode, RecoveryMode::AppHandoff);
         assert_eq!(cfg.recovery_reconnect_probe_sec, 60);
         assert_eq!(cfg.recovery_connect_timeout_sec, 20);
-        assert_eq!(cfg.photo_app.app_id, "photo-frame");
+        assert_eq!(cfg.photo_app.app_id, "photoframe");
         assert_eq!(
             cfg.photo_app.launch_command,
             vec![
-                "/usr/local/bin/photo-frame".to_string(),
-                "/etc/photo-frame/config.yaml".to_string()
+                "/usr/local/bin/photoframe".to_string(),
+                "/etc/photoframe/config.yaml".to_string()
             ]
         );
     }

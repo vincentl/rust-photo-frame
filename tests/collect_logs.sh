@@ -5,7 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$REPO_ROOT/tests/lib/assert.sh"
 
 main() {
-  local install_root="${INSTALL_ROOT:-/opt/photo-frame}"
+  local install_root="${INSTALL_ROOT:-/opt/photoframe}"
   local photo_service="${PHOTO_SERVICE:-greetd.service}"
   local wifi_service="${WIFI_SERVICE:-photoframe-wifi-manager.service}"
   local sync_service="${SYNC_SERVICE:-photoframe-sync.service}"
@@ -94,28 +94,28 @@ main() {
     vcgencmd measure_temp >"$tmpdir/runtime/temperature.txt" || true
   fi
 
-  if [ -x "$REPO_ROOT/target/release/photo-frame" ]; then
-    "$REPO_ROOT/target/release/photo-frame" --version >"$tmpdir/runtime/app-version.txt" || true
-  elif [ -x "$REPO_ROOT/target/debug/photo-frame" ]; then
-    "$REPO_ROOT/target/debug/photo-frame" --version >"$tmpdir/runtime/app-version.txt" || true
-  elif [ -x "${install_root}/bin/photo-frame" ]; then
-    "${install_root}/bin/photo-frame" --version >"$tmpdir/runtime/app-version.txt" || true
+  if [ -x "$REPO_ROOT/target/release/photoframe" ]; then
+    "$REPO_ROOT/target/release/photoframe" --version >"$tmpdir/runtime/app-version.txt" || true
+  elif [ -x "$REPO_ROOT/target/debug/photoframe" ]; then
+    "$REPO_ROOT/target/debug/photoframe" --version >"$tmpdir/runtime/app-version.txt" || true
+  elif [ -x "${install_root}/bin/photoframe" ]; then
+    "${install_root}/bin/photoframe" --version >"$tmpdir/runtime/app-version.txt" || true
   else
-    warn "photo-frame binary not found; skipping --version"
+    warn "photoframe binary not found; skipping --version"
   fi
 
   info "Copying config"
   local etc_config
   if [ "${install_root}" = "/" ]; then
-    etc_config="/etc/photo-frame/config.yaml"
+    etc_config="/etc/photoframe/config.yaml"
   else
-    etc_config="${install_root%/}/etc/photo-frame/config.yaml"
+    etc_config="${install_root%/}/etc/photoframe/config.yaml"
   fi
 
   if [ -f "$etc_config" ]; then
     cp "$etc_config" "$tmpdir/runtime/config.yaml"
-  elif [ "${install_root}" != "/" ] && [ -f "/etc/photo-frame/config.yaml" ]; then
-    cp "/etc/photo-frame/config.yaml" "$tmpdir/runtime/config.yaml"
+  elif [ "${install_root}" != "/" ] && [ -f "/etc/photoframe/config.yaml" ]; then
+    cp "/etc/photoframe/config.yaml" "$tmpdir/runtime/config.yaml"
   elif [ -f "$REPO_ROOT/config.yaml" ]; then
     cp "$REPO_ROOT/config.yaml" "$tmpdir/runtime/config.yaml"
   fi

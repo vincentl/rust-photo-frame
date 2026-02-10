@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 MODULE_DIR="${SCRIPT_DIR}/modules"
 SCRIPT_NAME="$(basename "$0")"
 
-INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
+INSTALL_ROOT="${INSTALL_ROOT:-/opt/photoframe}"
 DEFAULT_SERVICE_USER="kiosk"
 if id -u "${DEFAULT_SERVICE_USER}" >/dev/null 2>&1; then
     DEFAULT_SERVICE_GROUP="$(id -gn "${DEFAULT_SERVICE_USER}")"
@@ -94,21 +94,21 @@ for module in "${modules[@]}"; do
     echo
 done
 
-launcher="/usr/local/bin/photo-frame"
+launcher="/usr/local/bin/photoframe"
 log INFO "Updating ${launcher} helper"
 sudo install -d -m 0755 "$(dirname "${launcher}")"
 sudo tee "${launcher}" >/dev/null <<'LAUNCHER'
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP="/opt/photo-frame/bin/photo-frame"
+APP="/opt/photoframe/bin/photoframe"
 
 if [[ ! -x "${APP}" ]]; then
-  echo "[photo-frame] binary not found at ${APP}" >&2
+  echo "[photoframe] binary not found at ${APP}" >&2
   exit 127
 fi
 
-exec systemd-cat -t photo-frame -- "${APP}" "$@"
+exec systemd-cat -t photoframe -- "${APP}" "$@"
 LAUNCHER
 sudo chmod 0755 "${launcher}"
 

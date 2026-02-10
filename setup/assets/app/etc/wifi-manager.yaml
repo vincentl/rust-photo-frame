@@ -5,8 +5,8 @@ offline-grace-sec: 30
 recovery-mode: app-handoff
 recovery-reconnect-probe-sec: 60
 recovery-connect-timeout-sec: 20
-wordlist-path: /opt/photo-frame/share/wordlist.txt
-var-dir: /var/lib/photo-frame
+wordlist-path: /opt/photoframe/share/wordlist.txt
+var-dir: /var/lib/photoframe
 hotspot:
   connection-id: pf-hotspot
   ssid: PhotoFrame-Setup
@@ -16,12 +16,12 @@ ui:
   port: 8080
 photo-app:
   launch-command:
-    - /usr/local/bin/photo-frame
-    - /etc/photo-frame/config.yaml
-  app-id: photo-frame
+    - /usr/local/bin/photoframe
+    - /etc/photoframe/config.yaml
+  app-id: photoframe
 overlay:
   command:
     - swaymsg
-  photo-app-id: photo-frame
+  photo-app-id: photoframe
   overlay-app-id: wifi-overlay
   # sway-socket: /run/user/1000/sway-ipc.1000.123.sock

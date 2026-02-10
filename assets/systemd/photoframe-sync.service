@@ -8,8 +8,8 @@ Wants=network-online.target
 Type=oneshot
 User=kiosk
 Group=kiosk
-WorkingDirectory=/var/lib/photo-frame
-Environment=PHOTO_LIBRARY_PATH=/var/lib/photo-frame/photos
+WorkingDirectory=/var/lib/photoframe
+Environment=PHOTO_LIBRARY_PATH=/var/lib/photoframe/photos
 Environment=SYNC_TOOL=rclone
 Environment="RCLONE_FLAGS=--checkers=8 --transfers=4 --retries=5 --copy-links"
 Environment="RSYNC_FLAGS=-av --delete"

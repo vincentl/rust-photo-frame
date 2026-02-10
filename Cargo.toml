@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "crates/photo-frame",
+    "crates/photoframe",
     "crates/buttond",
     "crates/wifi-manager",
     "crates/config-model",

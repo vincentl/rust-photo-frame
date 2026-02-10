@@ -46,7 +46,7 @@ Build and install optimized runtime artifacts from an unprivileged shell:
 ./setup/application/deploy.sh
 ```
 
-The application stage compiles the workspace, stages binaries and documentation under `setup/application/build/stage`, ensures the kiosk service user exists, and installs the artifacts into `/opt/photo-frame`.
+The application stage compiles the workspace, stages binaries and documentation under `setup/application/build/stage`, ensures the kiosk service user exists, and installs the artifacts into `/opt/photoframe`.
 
 ## Operator quick reference
 

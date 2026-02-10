@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODULE="app:45-activate-services"
-INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
+INSTALL_ROOT="${INSTALL_ROOT:-/opt/photoframe}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/systemd.sh
 source "${SCRIPT_DIR}/../../lib/systemd.sh"
@@ -44,11 +44,15 @@ for seatd_unit in seatd.socket seatd.service; do
     fi
 done
 
-# Enable and start greetd now that binaries are present
+# Enable and restart greetd now that binaries are present.
+# A clean restart ensures the kiosk session picks up freshly installed binaries
+# and recreates the control socket without requiring a reboot.
 if run_sudo systemctl list-unit-files greetd.service >/dev/null 2>&1; then
     log INFO "Enabling greetd.service"
     run_sudo systemctl enable greetd.service >/dev/null 2>&1 || true
-    log INFO "Starting greetd.service"
+    log INFO "Restarting greetd.service with stop/sleep/start sequence"
+    run_sudo systemctl stop greetd.service >/dev/null 2>&1 || true
+    sleep 1
     run_sudo systemctl start greetd.service >/dev/null 2>&1 || true
 fi
 
@@ -63,4 +67,3 @@ for unit in photoframe-wifi-manager.service buttond.service photoframe-sync.time
 done
 
 log INFO "Kiosk services activated"
-

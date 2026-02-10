@@ -72,36 +72,36 @@ command -v sway >/dev/null 2>&1 || die "sway not found. Install sway."
 CONFIG_PATH="/usr/local/share/photoframe/sway/config"
 [[ -f "$CONFIG_PATH" ]] || die "sway config missing at ${CONFIG_PATH}"
 
-# 6) Launch compositor on DRM; logs to journald under photo-frame
-exec systemd-cat -t photo-frame -- dbus-run-session \
+# 6) Launch compositor on DRM; logs to journald under photoframe
+exec systemd-cat -t photoframe -- dbus-run-session \
   sway -c "$CONFIG_PATH"
 WRAPPER
     chmod 0755 "${wrapper}"
 }
 
 install_photo_launcher() {
-    local launcher="/usr/local/bin/photo-frame"
+    local launcher="/usr/local/bin/photoframe"
     log "Installing ${launcher}"
     install -d -m 0755 "$(dirname "${launcher}")"
     cat <<'LAUNCHER' >"${launcher}"
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP="/opt/photo-frame/bin/photo-frame"
+APP="/opt/photoframe/bin/photoframe"
 
 if [[ ! -x "${APP}" ]]; then
-  echo "[photo-frame] binary not found at ${APP}" >&2
+  echo "[photoframe] binary not found at ${APP}" >&2
   exit 127
 fi
 
 # Provide a stable Wayland app_id for Sway rules and focus control.
 # Allow override via environment; default matches configuration defaults.
-export WINIT_APP_ID="${WINIT_APP_ID:-photo-frame}"
+export WINIT_APP_ID="${WINIT_APP_ID:-photoframe}"
 # Control where logs go via PHOTOFRAME_LOG (journal|stdout|file:/path)
 # Defaults to journald for kiosk stability.
 case "${PHOTOFRAME_LOG:-journal}" in
   journal)
-    exec systemd-cat -t photo-frame -- "${APP}" "$@"
+    exec systemd-cat -t photoframe -- "${APP}" "$@"
     ;;
   stdout)
     exec "${APP}" "$@"
@@ -114,7 +114,7 @@ case "${PHOTOFRAME_LOG:-journal}" in
     exec "${APP}" "$@" >>"$logfile" 2>&1
     ;;
   *)
-    exec systemd-cat -t photo-frame -- "${APP}" "$@"
+    exec systemd-cat -t photoframe -- "${APP}" "$@"
     ;;
 esac
 LAUNCHER
@@ -129,9 +129,9 @@ install_sway_config() {
     cat <<'CONFIG' >"${config_file}"
 # Photo frame sway configuration
 
-set $photo_app_id photo-frame
+set $photo_app_id photoframe
 set $overlay_app_id wifi-overlay
-set $config_path /etc/photo-frame/config.yaml
+set $config_path /etc/photoframe/config.yaml
 
 focus_follows_mouse no
 mouse_warping none
@@ -157,7 +157,7 @@ bar {
 
 exec_always swaybg -m solid_color -c '#000000'
 # Launch the app fullscreen
-exec_always /usr/local/bin/photo-frame "$config_path"
+exec_always /usr/local/bin/photoframe "$config_path"
 CONFIG
     chmod 0644 "${config_file}"
 }

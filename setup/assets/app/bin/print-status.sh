@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALL_ROOT="${INSTALL_ROOT:-/opt/photo-frame}"
-VAR_DIR="${VAR_DIR:-/var/lib/photo-frame}"
+INSTALL_ROOT="${INSTALL_ROOT:-/opt/photoframe}"
+VAR_DIR="${VAR_DIR:-/var/lib/photoframe}"
 CONFIG_PATH="${CONFIG_PATH:-${INSTALL_ROOT}/etc/wifi-manager.yaml}"
 SERVICE_NAME="${SERVICE_NAME:-photoframe-wifi-manager.service}"
 SERVICE_USER="${SERVICE_USER:-$(id -un)}"
@@ -65,7 +65,18 @@ if command -v nmcli >/dev/null 2>&1; then
     fi
     ACTIVE_FILE="${TMP_DIR}/active"
     if nmcli -t -f NAME,DEVICE,TYPE connection show --active >"${ACTIVE_FILE}" 2>/dev/null; then
-        ACTIVE_WIFI="$(awk -F: '$3=="wifi" {print $1 " on " $2}' "${ACTIVE_FILE}" | head -n1)"
+        ACTIVE_WIFI="$(awk -F: '$3 ~ /^(wifi|802-11-wireless)$/ {print $1 " on " $2; exit}' "${ACTIVE_FILE}")"
+        if [[ -z "${ACTIVE_WIFI}" ]]; then
+            ACTIVE_DEVICE="$(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null | awk -F: '$2 ~ /^(wifi|802-11-wireless)$/ && $3 ~ /^(connected|activated|full)$/ {print $1; exit}')"
+            if [[ -n "${ACTIVE_DEVICE}" ]]; then
+                ACTIVE_NAME="$(nmcli -g GENERAL.CONNECTION device show "${ACTIVE_DEVICE}" 2>/dev/null | head -n1 | tr -d '\r')"
+                if [[ -n "${ACTIVE_NAME}" && "${ACTIVE_NAME}" != "--" ]]; then
+                    ACTIVE_WIFI="${ACTIVE_NAME} on ${ACTIVE_DEVICE}"
+                else
+                    ACTIVE_WIFI="(unnamed) on ${ACTIVE_DEVICE}"
+                fi
+            fi
+        fi
         printf 'Active connection: %s\n' "${ACTIVE_WIFI:-none}"
     else
         printf 'Active connection: error querying nmcli\n'

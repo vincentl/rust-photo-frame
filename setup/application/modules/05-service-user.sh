@@ -50,7 +50,7 @@ ensure_user_exists() {
 
 ensure_operator_membership() {
     # Add the invoking (deployment) user to the service group so they can
-    # manage files under /var/lib/photo-frame without sudo.
+    # manage files under /var/lib/photoframe without sudo.
     local operator
     operator="$(id -un)"
 

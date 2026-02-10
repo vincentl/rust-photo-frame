@@ -1,6 +1,6 @@
-use photo_frame::config::PlaylistOptions;
-use photo_frame::events::{Displayed, InventoryEvent, LoadPhoto, PhotoInfo};
-use photo_frame::tasks::manager;
+use photoframe::config::PlaylistOptions;
+use photoframe::events::{Displayed, InventoryEvent, LoadPhoto, PhotoInfo};
+use photoframe::tasks::manager;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
