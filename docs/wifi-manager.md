@@ -2,14 +2,33 @@
 
 The `wifi-manager` crate is the frame's single entry point for Wi-Fi monitoring, hotspot recovery, and captive portal provisioning. It wraps NetworkManager's `nmcli` tooling, spawns the recovery web UI, and persists all operational breadcrumbs under `/var/lib/photo-frame`.
 
+This document is the implementation/reference guide. For fresh-install validation use [`software.md`](software.md), for full QA coverage use [`../developer/test-plan.md`](../developer/test-plan.md), and for incident triage use [`sop.md`](sop.md).
+
+## Fast path
+
+Use this sequence for a quick sanity check after changing Wi-Fi logic:
+
+1. Verify watcher health:
+   - `sudo systemctl status photoframe-wifi-manager.service`
+   - `/opt/photo-frame/bin/print-status.sh`
+2. Confirm configuration values in `/opt/photo-frame/etc/wifi-manager.yaml` and restart watcher:
+   - `sudo systemctl restart photoframe-wifi-manager.service`
+3. Run the fresh-install acceptance flow:
+   - [`software.md#fresh-install-wi-fi-recovery-test`](software.md#fresh-install-wi-fi-recovery-test)
+4. If it fails, follow:
+   - [`sop.md#wi-fi-failure-triage`](sop.md#wi-fi-failure-triage)
+5. For deeper operational commands and troubleshooting:
+   - [`wifi-manager-operations.md`](wifi-manager-operations.md)
+
 ## Capabilities at a glance
 
 - Detects connectivity loss by polling NetworkManager for the interface's connection state.
+- Treats Wi-Fi as online when the interface is associated to an infrastructure SSID (link-level), without requiring internet reachability.
 - Creates or updates an idempotent hotspot profile (`pf-hotspot`) and brings it online with a random three-word passphrase.
-- Serves a lightweight HTTP UI for submitting replacement SSID/password credentials, then provisions them via `nmcli`.
+- Serves a lightweight HTTP UI for submitting replacement SSID/password credentials by writing an ephemeral provisioning request file for the watcher.
 - Renders a QR code that points to the recovery portal so phones can jump directly to the setup page.
-- Uses Sway IPC to present a fullscreen overlay with hotspot instructions whenever Wi-Fi needs attention.
-- Emits structured logs for every state transition (`ONLINE`, `OFFLINE`, `HOTSPOT`, `PROVISIONING`) and stores the last provisioning attempt in JSON.
+- Uses Sway IPC to present a fullscreen overlay with hotspot instructions whenever Wi-Fi needs attention, and can hand off by stopping/relaunching the photo app.
+- Emits structured logs for deterministic watcher states (`Online`, `OfflineGrace`, `RecoveryHotspotActive`, `ProvisioningAttempt`, `RecoveryBackoff`) and stores state/attempt records in JSON.
 
 ## Binary layout and subcommands
 
@@ -21,8 +40,7 @@ The release build installs to `/opt/photo-frame/bin/wifi-manager` and exposes th
 | `ui`       | Runs only the HTTP UI server. This is spawned automatically by `watch` when the hotspot is active but can be used independently for debugging. |
 | `qr`       | Generates `/var/lib/photo-frame/wifi-qr.png`, a QR code pointing to the configured UI URL.                                                     |
 | `nm`       | Thin wrapper around `nmcli` operations (`add`, `modify`, `connect`) used internally. Safe to run manually for diagnostics.                     |
-| `overlay`  | Renders the on-device recovery overlay window. Invoked automatically by the watcher; exposed for manual testing.
-                              |
+| `overlay`  | Renders the on-device recovery overlay window. Invoked automatically by the watcher; exposed for manual testing.                                |
 
 Running the binary with `--help` or `--version` is permitted as root; all other modes refuse to start if `UID==0` to honour the project's "never run cargo as root" policy.
 
@@ -40,6 +58,9 @@ The template lives at `/opt/photo-frame/etc/wifi-manager.yaml` and is staged fro
 interface: wlan0
 check-interval-sec: 5
 offline-grace-sec: 30
+recovery-mode: app-handoff
+recovery-reconnect-probe-sec: 60
+recovery-connect-timeout-sec: 20
 wordlist-path: /opt/photo-frame/share/wordlist.txt
 var-dir: /var/lib/photo-frame
 hotspot:
@@ -49,6 +70,11 @@ hotspot:
 ui:
   bind-address: 0.0.0.0
   port: 8080
+photo-app:
+  launch-command:
+    - /usr/local/bin/photo-frame
+    - /etc/photo-frame/config.yaml
+  app-id: photo-frame
 overlay:
   command:
     - swaymsg
@@ -62,6 +88,9 @@ overlay:
 | `interface`                    | Wireless device monitored for connectivity (default `wlan0`).             |
 | `check-interval-sec`           | Base delay between connectivity probes. A small jitter is added internally. |
 | `offline-grace-sec`            | Seconds the frame must remain offline before the hotspot is activated.     |
+| `recovery-mode`                | Recovery strategy: `app-handoff` (default) stops/relaunches photo app, `overlay` keeps slideshow running under overlay. |
+| `recovery-reconnect-probe-sec` | Seconds between auto-reconnect probes while hotspot mode is active. |
+| `recovery-connect-timeout-sec` | Maximum wait time for infrastructure association when applying credentials or running reconnect probes. |
 | `wordlist-path`                | Source file for the random three-word hotspot passphrase. Installed via setup. |
 | `var-dir`                      | Directory for runtime artifacts (password file, QR PNG, status JSON, temp sockets). |
 | `hotspot.connection-id`        | NetworkManager profile name used for the AP. The manager will create or update it automatically. |
@@ -69,6 +98,8 @@ overlay:
 | `hotspot.ipv4-addr`            | Address assigned to the hotspot interface and advertised via DHCP.          |
 | `ui.bind-address`              | Bind address for the HTTP UI. Normally `0.0.0.0`.                           |
 | `ui.port`                      | HTTP UI port (default `8080`).                                              |
+| `photo-app.launch-command`     | Command launched inside Sway after recovery completes in `app-handoff` mode. |
+| `photo-app.app-id`             | Sway `app_id` for the slideshow window that watcher kill/relaunch targets. |
 | `overlay.command`              | Executable invoked to render the on-device hotspot instructions (default `swaymsg`; the watcher constructs an `exec …` command to run the overlay inside Sway). |
 | `overlay.photo-app-id`         | Sway `app_id` assigned to the photo frame window so it can be re-focused after recovery. |
 | `overlay.overlay-app-id`       | Sway `app_id` that the overlay binary advertises; used for focus/teardown commands. |
@@ -78,25 +109,29 @@ Whenever you change the config, run `sudo systemctl restart photoframe-wifi-mana
 
 ## Runtime files
 
-All mutable state lives under `/var/lib/photo-frame` and is owned by the `photo-frame` user (0755 directory permissions). Key files include:
+All mutable state lives under `/var/lib/photo-frame` and is owned by the `kiosk` user (0755 directory permissions). Key files include:
 
 - `hotspot-password.txt` – the currently active random passphrase for **PhotoFrame-Setup**.
 - `wifi-qr.png` – QR code pointing to `http://<hotspot-ip>:<port>/`.
+- `wifi-request.json` – ephemeral credential request written by `POST /submit` and consumed by the watcher (mode `0600`).
 - `wifi-last.json` – JSON log of the latest provisioning attempt (inputs masked, result + timestamps recorded).
+- `wifi-state.json` – watcher state record (`state`, `reason`, optional `attempt_id`) for operator diagnostics.
 - `wifi-manager.log` (optional) – when configured, the service can redirect logs here for offline analysis; otherwise use `journalctl`.
 
 ## Web provisioning flow
 
-1. The `watch` loop marks the frame `OFFLINE` after `offline-grace-sec` seconds of NetworkManager reporting the interface disconnected.
-2. The hotspot profile (`pf-hotspot`) is ensured, then activated on the configured interface with WPA2-PSK security. The watcher simultaneously launches the `wifi-manager overlay` subcommand via Sway IPC and brings the web UI online so the on-device instructions, QR code, and portal stay in sync.
+1. The `watch` loop transitions `Online → OfflineGrace` after NetworkManager reports the interface disconnected. If connectivity remains down for `offline-grace-sec`, it enters `RecoveryHotspotActive`.
+2. The hotspot profile (`pf-hotspot`) is ensured, then activated on the configured interface with WPA2-PSK security. The watcher launches the `wifi-manager overlay` subcommand via Sway IPC and brings the web UI online so the on-device instructions, QR code, and portal stay in sync.
 3. A random three-word passphrase is selected from the bundled wordlist and written to `/var/lib/photo-frame/hotspot-password.txt`.
 4. The QR code generator produces `/var/lib/photo-frame/wifi-qr.png`, embedding the configured UI URL (default `http://192.168.4.1:8080/`).
 5. The HTTP UI binds to `0.0.0.0:<port>` and serves:
    - `GET /` – single-page HTML form for SSID + password entry with inline guidance and QR instructions.
-   - `POST /submit` – validates inputs, uses `nmcli` to add/modify the connection, and reports progress.
+   - `POST /submit` – validates inputs and writes `wifi-request.json`; the watcher consumes the request and performs `nmcli` operations.
    - A status polling endpoint so the UI can reflect provisioning progress in near real time.
-6. On success, the hotspot is torn down only after NetworkManager confirms association and DHCP success on the new SSID. At that point the watcher hides the overlay, refocuses the photo frame window, and continues monitoring online. Failures leave the hotspot active for another attempt.
-7. Results (masked SSID, status, timestamps) are appended to `wifi-last.json` for later support review.
+6. When a request exists, watcher transitions `RecoveryHotspotActive → ProvisioningAttempt`, applies credentials, temporarily brings hotspot down, and waits up to `recovery-connect-timeout-sec` for infrastructure association.
+7. On success, watcher finalizes recovery (`ProvisioningAttempt → Online`), hides overlay, and in `app-handoff` mode relaunches the photo app via `photo-app.launch-command`.
+8. On failure, watcher restores hotspot and transitions through `RecoveryBackoff` before returning to `RecoveryHotspotActive` for retry.
+9. While hotspot mode is active and no request is pending, watcher runs reconnect probes every `recovery-reconnect-probe-sec` to recover automatically when the original AP comes back.
 
 ## Setup automation
 
@@ -113,109 +148,12 @@ The Wi-Fi manager is wired into the refreshed setup pipeline:
 
 Re-running the scripts is idempotent: binaries are replaced in place, configs are preserved, ACLs stay intact, and systemd units reload cleanly.
 
-## Service management
+## Validation entry points
 
-Common operational commands:
+- Fresh-install acceptance flow: [`software.md#fresh-install-wi-fi-recovery-test`](software.md#fresh-install-wi-fi-recovery-test)
+- Full Wi-Fi validation matrix (release QA): [`../developer/test-plan.md#phase-7--wi-fi-provisioning--watcher`](../developer/test-plan.md#phase-7--wi-fi-provisioning--watcher)
+- Day-2 failure triage: [`sop.md#wi-fi-failure-triage`](sop.md#wi-fi-failure-triage)
 
-```bash
-# Tail live logs
-journalctl -u photoframe-wifi-manager.service -f
+## Advanced notes
 
-# Restart the watcher after editing the config
-sudo systemctl restart photoframe-wifi-manager.service
-
-# Check summary status (hotspot profile, active connection, artifacts)
-/opt/photo-frame/bin/print-status.sh
-
-# Manually seed a connection via the helper subcommand (requires the polkit rule)
-sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid "HomeWiFi" --psk "correct-horse-battery-staple"
-
-# Force the recovery hotspot for testing
-sudo nmcli connection up pf-hotspot
-
-# Simulate a bad PSK without losing your SSH session
-sudo nohup bash developer/suspend-wifi.sh wlan0 >/tmp/wifi-test.log 2>&1 & disown
-```
-
-The helper script stashes the active profile's keyfile, swaps in a Wi-Fi
-connection with a deliberately wrong PSK, and tries to activate it. Run it
-from a terminal multiplexer or with `nohup` as shown so the process
-survives your SSH session dropping when the interface goes offline. Once
-NetworkManager rejects the credentials you can tail the service logs and
-watch for the `ONLINE → OFFLINE → HOTSPOT` transition.
-
-The systemd unit is defined in `assets/systemd/photoframe-wifi-manager.service` and runs under the `kiosk` user with `Restart=on-failure`. It depends on `network-online.target` so that the first connectivity check happens after boot networking is ready.
-
-Notes on window focus and app_id:
-
-- The slideshow is launched with `WINIT_APP_ID=photo-frame` by the `/usr/local/bin/photo-frame` wrapper so Sway rules and refocus from `wifi-manager` work consistently.
-- The overlay advertises `app_id=wifi-overlay` and the watcher uses Sway IPC to focus and fullscreen it while the hotspot is active, then restores focus to the slideshow when connectivity returns.
-
-## Acceptance test checklist
-
-These behavioural checks validate the full provisioning lifecycle:
-
-1. **Cold boot with no Wi-Fi configured** – within 30–60 seconds the hotspot appears, the QR code launches the UI, and submitting valid credentials connects the frame to the new network while shutting down the hotspot.
-2. **Incorrect stored password** – when the saved SSID fails to authenticate, the service transitions through `OFFLINE → HOTSPOT`, accepts updated credentials, and resumes watching online once they succeed.
-3. **Boot with valid Wi-Fi** – the hotspot never starts; `wifi-manager` logs remain in the `ONLINE` state while monitoring.
-4. **Service restarts** – `systemctl restart photoframe-wifi-manager.service` leaves no stray hotspot or UI processes; monitoring resumes cleanly.
-5. **Idempotent setup** – rerunning the setup scripts rebuilds and reinstalls `wifi-manager` without invoking `cargo` as root and without duplicating systemd units.
-
-## Troubleshooting
-
-- **Hotspot never appears:** confirm `journalctl -u photoframe-wifi-manager.service` shows the `OFFLINE → HOTSPOT` transition. If not, verify the interface name in the config matches the Pi's Wi-Fi adapter (often `wlan0`).
-- **Portal unreachable:** ensure the UI port is free (`sudo lsof -iTCP:8080 -sTCP:LISTEN`). The daemon logs whenever it binds the HTTP server.
-- **Overlay never appears:** verify Sway IPC is reachable from the service (`SWAYSOCK` points to `sway-ipc.<uid>.<pid>.sock`). Also ensure at least one system font is installed (e.g. `fonts-dejavu-core` or `fonts-noto-core`) — the overlay refuses to start without a font. For a manual check (ensure the glob expands inside the kiosk shell):
-
-  ```bash
-  sudo sh -lc '
-    RUNDIR="/run/user/$(id -u kiosk)";
-    SWAYSOCK="$(find "$RUNDIR" -maxdepth 1 -type s -name "sway-ipc.*.sock" -print -quit)";
-    [ -S "$SWAYSOCK" ] || { echo "No Sway IPC socket for kiosk (is greetd/Sway running?)" >&2; exit 1; };
-    sudo -u kiosk SWAYSOCK="$SWAYSOCK" swaymsg -s "$SWAYSOCK" exec 'env WINIT_APP_ID=wifi-overlay /opt/photo-frame/bin/wifi-manager overlay --ssid Test --password-file /var/lib/photo-frame/hotspot-password.txt --ui-url http://192.168.4.1:8080/'
-  '
-  ```
-
-  If `/run/user/$(id -u kiosk)` does not exist, start the kiosk session or enable lingering for the kiosk user so a runtime dir is created:
-
-  - Start/verify greetd: `sudo systemctl status greetd` (start if inactive)
-  - Allow lingering: `sudo loginctl enable-linger kiosk`
-- **Provisioning fails repeatedly:** inspect `/var/lib/photo-frame/wifi-last.json` for masked SSIDs and error codes. Run `sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid <name> --psk <pass>` manually to confirm NetworkManager feedback (if this reports `Insufficient privileges`, re-run the kiosk provisioning script to reinstall the polkit rule).
-- **Wordlist missing:** rerun `setup/application/modules/20-stage.sh` and `30-install.sh` to restore `/opt/photo-frame/share/wordlist.txt`; the manager refuses to start without it so that hotspot passwords are never empty.
-
-With the Wi-Fi manager in place, the frame can recover from outages autonomously and guide users through reconnecting without opening the enclosure or attaching keyboards.
-
-## Disable permanently
-
-If you don’t want the Wi‑Fi manager to ever start on an existing install, disable and mask its systemd unit. Masking ensures it stays off even if you rerun the setup scripts (which try to enable it):
-
-```bash
-# Stop the service if it’s running
-sudo systemctl stop photoframe-wifi-manager.service
-
-# Disable at boot
-sudo systemctl disable photoframe-wifi-manager.service
-
-# Prevent any start (including from installers or dependencies)
-sudo systemctl mask photoframe-wifi-manager.service
-
-# Optional: shut down and remove the recovery hotspot profile
-sudo nmcli connection down pf-hotspot || true
-sudo nmcli connection delete pf-hotspot || true
-
-# Verify status
-systemctl is-enabled photoframe-wifi-manager.service   # masked
-systemctl is-active photoframe-wifi-manager.service    # inactive
-```
-
-To re‑enable later:
-
-```bash
-sudo systemctl unmask photoframe-wifi-manager.service
-sudo systemctl enable --now photoframe-wifi-manager.service
-```
-
-Notes:
-
-- The setup pipeline (`setup/system/modules/60-systemd.sh`) enables this unit when present, but a masked unit will not start. Leaving it masked keeps it off across upgrades.
-- Removing the NetworkManager polkit rule is optional; it is harmless to keep. If desired: `sudo rm -f /etc/polkit-1/rules.d/90-photoframe-nm.rules`.
+For service commands, deep troubleshooting, and disable/reenable procedures, use [`wifi-manager-operations.md`](wifi-manager-operations.md).

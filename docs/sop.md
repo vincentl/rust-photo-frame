@@ -1,119 +1,74 @@
 # Operations SOP
 
-This document captures routine operational procedures for the kiosk deployment.
+This runbook covers day-2 operations for deployed frames.
+
+- Fresh install and first-time Wi-Fi recovery test: [`software.md`](software.md)
+- Full release validation matrix: [`../developer/test-plan.md`](../developer/test-plan.md)
+- Advanced Sway/kiosk debugging workflows: [`../developer/kiosk-debug.md`](../developer/kiosk-debug.md)
+- Deep Wi-Fi service operations and troubleshooting: [`wifi-manager-operations.md`](wifi-manager-operations.md)
+
+## Daily health snapshot
+
+Run these first before deeper debugging:
+
+```bash
+./setup/tools/verify.sh
+/opt/photo-frame/bin/print-status.sh
+sudo systemctl status greetd.service
+sudo systemctl status photoframe-wifi-manager.service
+```
 
 ## Viewing runtime logs
 
-The kiosk session launches the photo frame through Sway and pipes stdout/stderr into journald with `systemd-cat`. All runtime log lines carry the identifier `photo-frame` and default to the `info` level.
-
-To follow the live log stream:
+The kiosk session launches the photo frame through Sway and pipes stdout/stderr into journald with `systemd-cat`.
 
 ```bash
 sudo journalctl -t photo-frame -f
 ```
 
-Use `Ctrl+C` to stop tailing.
-
-## Increasing log verbosity
-
-When additional detail is required, edit `/etc/greetd/config.toml` so the launch command exports a higher `RUST_LOG` level. For example, swap the default `RUST_LOG=info` for `RUST_LOG=debug`:
-
-```toml
-[default_session]
-command = "/usr/local/bin/photoframe-session"
-user = "kiosk"
-```
-
-Apply the change by bouncing the kiosk session:
+For Wi-Fi watcher logs:
 
 ```bash
-sudo systemctl stop greetd.service
-sleep 1
-sudo systemctl start greetd.service
+sudo journalctl -u photoframe-wifi-manager.service -f
 ```
-
-`systemctl restart` tends to race with logind releasing tty1/DRM to the new session; inserting a short pause keeps the relaunch reliable. Revert the command to `RUST_LOG=info` once troubleshooting is complete to reduce noise in the journal.
 
 ## Starting, stopping, and restarting the viewer
 
-- **Stop**: `sudo systemctl stop greetd.service` - immediately tears down the kiosk session and blanks the display.
-- **Start**: `sudo systemctl start greetd.service` - brings greetd back on tty1, which in turn launches Sway and the photo frame.
-- **Restart**: `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service` - give logind a moment to release the seat before greetd grabs it again.
+- Stop: `sudo systemctl stop greetd.service`
+- Start: `sudo systemctl start greetd.service`
+- Restart (preferred): `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service`
 
-## Manual Debug Launch (Advanced)
+`systemctl restart greetd` can race with logind seat handoff on tty1. The stop/sleep/start sequence is more reliable.
 
-In normal operation, the `photo-frame` application is started automatically by **greetd** via the `photoframe-session` wrapper. However, for debugging or development purposes, you may wish to launch it manually under the `kiosk` account within a Wayland session.
+## Wi-Fi recovery validation
 
-### Prerequisites
+Use one of these canonical procedures:
 
-Ensure the `kiosk` user is permitted to run lingering user sessions (so its runtime directory is preserved):
+- Fresh image acceptance flow: [`software.md#fresh-install-wi-fi-recovery-test`](software.md#fresh-install-wi-fi-recovery-test)
+- Full QA matrix (including WAN-down and AP outage scenarios): [`../developer/test-plan.md#phase-7--wi-fi-provisioning--watcher`](../developer/test-plan.md#phase-7--wi-fi-provisioning--watcher)
 
-```bash
-sudo loginctl enable-linger kiosk
-```
+## Wi-Fi failure triage
 
-### Launch Command
+When recovery is stuck, gather these artifacts before changing config:
 
-Use the following command to start a standalone Sway session and run the photo-frame stack manually:
+1. Snapshot operational state:
+   - `/opt/photo-frame/bin/print-status.sh`
+2. Inspect watcher state files:
+   - `sudo cat /var/lib/photo-frame/wifi-state.json`
+   - `sudo cat /var/lib/photo-frame/wifi-last.json`
+   - `sudo ls -l /var/lib/photo-frame/wifi-request.json` (if present)
+3. Inspect NetworkManager:
+   - `nmcli dev status`
+   - `nmcli connection show --active`
+4. Verify kiosk session/Sway reachability:
+   - `systemctl status greetd.service`
+   - `sudo sh -lc 'uid=$(id -u kiosk); ls "/run/user/$uid"/sway-ipc.*.sock'`
+5. Validate credential apply path manually:
+   - `sudo -u kiosk /opt/photo-frame/bin/wifi-manager nm add --ssid "<ssid>" --psk "<password>"`
 
-```bash
-sudo -u kiosk \
-  XDG_RUNTIME_DIR="/run/user/$(id -u kiosk)" \
-  dbus-run-session \
-sway -c /usr/local/share/photoframe/sway/config
-```
-
-### Debugging without journald capture
-
-By default, the Sway config launches the app via `/usr/local/bin/photo-frame`, which pipes logs to journald using `systemd-cat`. For iterative debugging you can direct logs to stdout or a file without editing the binary:
-
-- To print logs to the terminal (stdout) and control verbosity with `RUST_LOG`:
-
-```bash
-sudo -u kiosk \
-  XDG_RUNTIME_DIR="/run/user/$(id -u kiosk)" \
-  dbus-run-session \
-  env PHOTOFRAME_LOG=stdout \
-  env RUST_LOG='photo_frame::tasks::viewer=debug,info' \
-  sway -c /usr/local/share/photoframe/sway/config
-```
-
-- To write logs to a file you can tail:
+If triage still fails, collect bundle + journals and attach to issue triage:
 
 ```bash
-sudo -u kiosk \
-  XDG_RUNTIME_DIR="/run/user/$(id -u kiosk)" \
-  dbus-run-session \
-  env PHOTOFRAME_LOG='file:/var/tmp/photo-frame.log' \
-  env RUST_LOG='photo_frame::tasks::viewer=debug,info' \
-  sway -c /usr/local/share/photoframe/sway/config
-
-sudo tail -f /var/tmp/photo-frame.log
+tests/collect_logs.sh
+sudo journalctl -u photoframe-wifi-manager.service --since "15 min ago"
 ```
-
-When you’re done, remove the `PHOTOFRAME_LOG` override to return to the default journald capture. You can always watch the kiosk logs via:
-
-```bash
-sudo journalctl -t photo-frame -f
-```
-
-## Overlay Takeover Test (dev)
-
-Use this to verify the overlay can steal focus/fullscreen over the slideshow before testing Wi‑Fi flows.
-
-- Install the helper (one time):
-  - `sudo install -D -m 0755 developer/overlay-test.sh /usr/local/bin/overlay-test`
-  - `sudo install -D -m 0644 developer/systemd/wifi-overlay-test.service /etc/systemd/system/wifi-overlay-test.service`
-  - `sudo systemctl daemon-reload`
-
-- Run the test (start overlay):
-  - `sudo systemctl start wifi-overlay-test.service`
-  - Verify: `sudo -u kiosk bash developer/overlay-test.sh status` (exits 0 when present)
-
-- Hide overlay:
-  - `sudo -u kiosk bash developer/overlay-test.sh hide`
-
-- Troubleshooting:
-  - Ensure Sway is running as kiosk: `systemctl status greetd`
-  - Check SWAYSOCK detection (don’t rely on XDG_RUNTIME_DIR): `sudo sh -lc 'uid=$(id -u kiosk); ls "/run/user/$uid"/sway-ipc.*.sock'`
-  - Review journal: `journalctl -u wifi-overlay-test.service -n 50 --no-pager`

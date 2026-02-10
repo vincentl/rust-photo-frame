@@ -2,7 +2,22 @@
 
 buttond now owns wake/sleep scheduling for the frame. It evaluates the shared `awake-schedule` block, drives the slideshow state via the control socket, and executes DPMS commands to blank or revive the panel. This guide walks through the required packages, configuration snippets, and verification steps.
 
-## Quick start
+## Fast path
+
+Use this quick sequence for a working schedule + power setup:
+
+1. Install tool:
+   - `sudo apt update && sudo apt install wlr-randr`
+2. Configure `awake-schedule` and `buttond.screen` in `/etc/photo-frame/config.yaml`.
+3. Restart daemon:
+   - `sudo systemctl restart buttond.service`
+4. Verify:
+   - `journalctl -u buttond.service -f`
+   - `echo '{"command":"set-state","state":"awake"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photo-frame/control.sock`
+
+For platform-specific notes, deeper troubleshooting, and operator tips, use [`power-and-sleep-notes.md`](power-and-sleep-notes.md).
+
+## Setup steps
 
 1. Install the wlroots command-line utilities:
    ```bash
@@ -75,35 +90,10 @@ The frame remains asleep after the greeting until it receives a control command.
 
 Manual toggles persist until another command arrives. When a schedule is configured, buttond resets the state at the next boundary after respecting `sleep-grace-ms`.
 
-## Raspberry Pi 5 + Dell S2725QC notes
+## Advanced notes
 
-- **Skip `/sys/class/backlight`.** External HDMI panels do not expose a kernel backlight interface—writing to `/sys/class/backlight/*` is a no-op.
-- **Primary method:** `wlr-randr --output <NAME> --off|--on`. Install `wlr-randr` and ensure buttond runs inside the same user Wayland session as the compositor so the command inherits a valid `WAYLAND_DISPLAY`.
-- **Fallback:** `vcgencmd display_power 0|1` still works on the Pi 5’s KMS stack. The default commands chain both approaches.
-- **CEC support:** Dell monitors (including the S2725QC) do not implement HDMI-CEC. Tools such as `cec-ctl` will not power them down.
-- **Connector names:** Expect `HDMI-A-1` or `HDMI-A-2`. List outputs with:
-  ```bash
-  wlr-randr | grep -E '^(.* connected|.)'
-  ```
-- **Wayland session scope:** `wlr-randr` must run under the same user session as Wayfire. When the app runs as a user service (`systemd --user`), no extra environment tweaks are needed. When running as a system service, export `WAYLAND_DISPLAY` (for example `WAYLAND_DISPLAY=wayland-1`) and forward the compositor’s socket via `BindPaths=`.
-- **Verification checklist:**
-  1. Run the sleep command; the Dell’s LED should turn amber and the panel should blank.
-  2. Wait a few seconds, then run the wake command; the screen should resync at 3840×2160 @ 60 Hz.
-  3. Watch `journalctl -u buttond.service` to confirm scheduled transitions and power commands execute as expected.
+Use [`power-and-sleep-notes.md`](power-and-sleep-notes.md) for:
 
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
-| ------- | ------------ | --- |
-| `wlr-randr: cannot connect to display` | Command running outside the compositor’s Wayland session | Ensure buttond runs as the login user or export `WAYLAND_DISPLAY` to match the compositor. |
-| Commands run but the monitor stays on | Output name mismatch | Use `wlr-randr | grep connected` to find the connector, or rely on the default `@OUTPUT@` placeholder/powerctl helper. |
-| Mode changes after wake | External scripts forcing a resolution | Remove any explicit `--mode` flags; rely on the compositor to remember the previous mode. |
-| `wlr-randr` not installed | Package missing | `sudo apt install wlr-randr`. |
-| Commands fail and the log reports “display power action failed” | DPMS not supported by the panel | The viewer falls back to dimming only; leave the commands configured for future hardware or remove the block to silence warnings. |
-
-## Additional tips
-
-- Use `journalctl -u buttond.service -f` to watch upcoming schedule boundaries, DPMS commands, and manual overrides.
-- When experimenting interactively, send `{"command":"set-state","state":"awake"}` from an SSH session instead of power-cycling the service.
-- Store custom power scripts alongside `powerctl` in `/opt/photo-frame/bin` and reference them via absolute paths inside `buttond.screen`.
-- Pair button presses with a debouncer before writing to the control socket to avoid accidental double toggles.
+- Raspberry Pi 5 + Dell S2725QC specifics
+- troubleshooting matrix
+- operational tips and caveats

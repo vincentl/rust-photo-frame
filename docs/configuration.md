@@ -4,6 +4,22 @@ The repository ships with a sample [`config.yaml`](../config.yaml) that you can 
 
 > **Breaking change:** The `transition` and `matting` blocks now expect `selection` + `active` entries. Configurations that still rely on the legacy `types`/`options` layout will fail to load until they are migrated.
 
+## Fast path
+
+Use this sequence when you only need the most common edits:
+
+1. Set `photo-library-path` to your actual photo root.
+2. Tune slide pacing with `global-photo-settings.dwell-ms`.
+3. Pick one transition preset in `transition.active`.
+4. Pick one mat preset in `matting.active`.
+5. Validate syntax without launching the viewer:
+
+```bash
+cargo run -p photo-frame -- --playlist-dry-run 1
+```
+
+For copy/paste recipes, use [`configuration-examples.md`](configuration-examples.md).
+
 ## Starter configuration
 
 The example below targets a Pi driving a 4K portrait display backed by a NAS-mounted photo library. Inline comments explain why each value matters and what to tweak for common scenarios.
@@ -28,11 +44,7 @@ loader-max-concurrent-decodes: 4 # Concurrent decodes in the loader
 startup-shuffle-seed: null # Optional deterministic seed for initial shuffle
 
 photo-effect:
-  types: [] # Optional effects; add entries (e.g., print-simulation) to enable
-  options:
-    print-simulation:
-      relief-strength: 0.35
-      sheen-strength: 0.22
+  active: [] # Optional effects; add entries (e.g., print-simulation) to enable
 
 playlist:
   new-multiplicity: 3 # How many copies of a brand-new photo to schedule per cycle
@@ -292,18 +304,7 @@ The optional `photo-effect` task sits between the loader and the viewer. When en
 
 > Legacy `photo-effect.types` and `photo-effect.options` keys are no longer supported. Copy each prior option into the `active` list with an explicit `kind` field to migrate.
 
-Example: enable the print-simulation effect and alternate between two lighting presets when the stage runs in sequential mode.
-
-```yaml
-photo-effect:
-  selection: sequential
-  active:
-    - kind: print-simulation
-      light-angle-degrees: 110.0
-    - kind: print-simulation
-      light-angle-degrees: 60.0
-      debug: true
-```
+Example recipes live in [`configuration-examples.md#photo-effect-examples`](configuration-examples.md#photo-effect-examples).
 
 ### Print-simulation effect
 
@@ -349,54 +350,8 @@ The remaining knobs depend on the transition family.
   - **`reveal-portion`** (float, default `0.55`, clamped to `0.05–0.95`): Fraction of the timeline spent flashing before the stripes start uncovering the next slide.
   - **`stripe-count`** (integer ≥ 1, default `24`): How many horizontal bands sweep in; higher counts mimic a finer e-ink refresh.
   - **`flash-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB color used for the bright flash phases before the black inversion. Channels outside `0–255` are clamped.
-### Example: single inline fade
 
-```yaml
-transition:
-  active:
-    - kind: fade
-      duration-ms: 600
-      through-black: true
-```
-
-Omitting `selection` with one entry locks the viewer to that transition.
-
-### Example: weighted random mix
-
-```yaml
-transition:
-  selection: random
-  active:
-    - kind: fade
-      duration-ms: 450
-    - kind: push
-      duration-ms: 520
-      angle-list-degrees: [0.0]
-    - kind: push
-      duration-ms: 520
-      angle-list-degrees: [180.0]
-```
-
-Repeating the `push` entry gives that family twice the draw weight versus `fade`, while still allowing different presets for horizontal and vertical motion.
-
-### Example: sequential rotation with duplicates
-
-```yaml
-transition:
-  selection: sequential
-  active:
-    - kind: push
-      duration-ms: 520
-      angle-list-degrees: [0.0]
-    - kind: wipe
-      duration-ms: 520
-      angle-list-degrees: [90.0]
-    - kind: push
-      duration-ms: 520
-      angle-list-degrees: [180.0]
-```
-
-Sequential mode loops through the entries exactly as written, so repeating `push` forces a push → wipe → push cadence before returning to the first entry.
+Example recipes live in [`configuration-examples.md#transition-examples`](configuration-examples.md#transition-examples).
 
 
 ## Matting configuration
@@ -444,51 +399,4 @@ The remaining controls depend on the mat `kind`:
 
 Note: Store operator‑managed background images under `/var/lib/photo-frame/backgrounds`. The setup pipeline treats `/opt/photo-frame` as read‑only and refreshes it on redeploy, so files placed there may be removed.
 
-### Example: single studio mat
-
-```yaml
-matting:
-  active:
-    - kind: studio
-      minimum-mat-percentage: 3.5
-      bevel-width-px: 4.0
-```
-
-### Example: weighted random palette with duplicates
-
-```yaml
-matting:
-  selection: random
-  active:
-    - kind: fixed-color
-      colors:
-        - [0, 0, 0]
-        - [32, 32, 32]
-    - kind: fixed-color
-      colors:
-        - [210, 210, 210]
-        - [240, 240, 240]
-      minimum-mat-percentage: 6.0
-    - kind: blur
-      minimum-mat-percentage: 7.5
-      sigma: 18.0
-```
-
-The first entry contributes two canonical slots (dark swatches), the second adds two more (light swatches), and the blur entry adds a single slot. With `selection: random`, four out of five draws land on a solid mat while blur shows roughly 20 % of the time. Sequential sampling would step through the expanded list—dark → dark → light → light → blur—before looping.
-
-### Example: sequential rotation with duplicates
-
-```yaml
-matting:
-  selection: sequential
-  active:
-    - kind: studio
-      minimum-mat-percentage: 6.0
-    - kind: fixed-image
-      path: [/var/lib/photo-frame/backgrounds/linen.png]
-      fit: contain
-    - kind: studio
-      minimum-mat-percentage: 4.0
-```
-
-Sequential mode walks the list in order and loops, so repeating `studio` enforces a studio → fixed-image → studio cadence.
+Example recipes live in [`configuration-examples.md#matting-examples`](configuration-examples.md#matting-examples).

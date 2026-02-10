@@ -2,6 +2,25 @@
 
 These instructions cover the full workflow for preparing a Raspberry Pi to run the Photo Frame project, from creating the SD card image to verifying the kiosk session.
 
+Audience: operator/installer. For setup module internals see `setup/README.md`.
+
+## Fast path
+
+Use this if you just want a working fresh install quickly:
+
+1. Flash Raspberry Pi OS (Trixie, 64-bit) with SSH + Wi-Fi enabled.
+2. SSH into the Pi as your operator account (example `frame`).
+3. Verify OS codename:
+   - `grep VERSION_CODENAME /etc/os-release` (must be `trixie`)
+4. Clone and enter repo:
+   - `git clone https://github.com/vincentl/rust-photo-frame.git && cd rust-photo-frame`
+5. Run installer:
+   - `./setup/install-all.sh`
+6. Verify services:
+   - `./setup/tools/verify.sh`
+7. Run Wi-Fi recovery acceptance test:
+   - `make -f tests/Makefile wifi-recovery`
+
 ## Before you image: prepare SSH keys
 
 Recent releases of Raspberry Pi Imager (v1.8 and newer) prompt for customization _after_ you choose the OS and storage. Because you will need an SSH public key at that point, confirm that one is available before you begin flashing the card. Commands in this section are examples that should work on macOS or Linux. Consult documentation about your computer's OS for details about how to carry out these steps. See `ssh-keygen` documentation to choose appropriate parameters if you generate a new ssh key.
@@ -105,20 +124,6 @@ Run the automation in two steps. Each script is idempotent, so you can safely re
 
 This script provisions the OS (with sudo) and immediately builds and deploys the application as your unprivileged user. It also installs/updates the systemd units and starts the kiosk stack.
 
-Note on build time: to keep memory usage stable on the Pi, the installer intentionally limits Cargo's parallel build jobs based on available RAM (or an explicit `CARGO_BUILD_JOBS`). This reduces the risk of OOM kills but makes the first build take longer than a typical desktop build.
-
-### Rust toolchain behavior
-
-- The system stage installs a minimal Rust toolchain under `/usr/local/cargo` with rustup state in `/usr/local/rustup`.
-- The app deploy step prefers those system proxies and defaults `RUSTUP_HOME` to `/usr/local/rustup` so a default toolchain is available without per‑user initialization. `CARGO_HOME` remains per‑user for writable registries and caches.
-- If you encounter `rustup could not choose a version of cargo to run` during the build, ensure the system stage has been run (`sudo ./setup/system/install.sh`) or export `RUSTUP_HOME=/usr/local/rustup` in your shell and retry. Avoid overriding `RUSTUP_HOME` to `~/.rustup` unless you explicitly initialize a per‑user toolchain (`rustup default stable`).
-
-If the build is killed by the OOM killer on low-memory boards, cap parallelism:
-
-```bash
-CARGO_BUILD_JOBS=2 ./setup/install-all.sh
-```
-
 ### 1. Provision the operating system
 
 ```bash
@@ -138,32 +143,6 @@ The provision step modifies shell configuration files and to pickup any environm
 ```
 
    Run this command as the unprivileged operator account. It compiles the photo frame, stages the release artifacts, and installs them into `/opt/photo-frame`. The stage verifies the kiosk service account exists and will prompt for sudo to create it (along with its primary group) when missing. After install, it installs/updates the app’s systemd unit files and starts the kiosk services (greetd, seatd, wifi-manager, buttond) so the session comes up without re-running the system stage. The postcheck confirms binaries and templates are in place and will warn if the system config at `/etc/photo-frame/config.yaml` is missing; re-running the command recreates it from the staged template.
-
-   Tip: if the first build fails with a SIGKILL from `rustc` (often `process didn't exit successfully ... (signal: 9)`), the kernel likely terminated a compiler worker under memory pressure. Re-run the command or cap parallelism explicitly:
-
-   ```bash
-   CARGO_BUILD_JOBS=2 ./setup/application/deploy.sh
-   ```
-
-   The build step auto-tunes jobs on lower-memory Pis, but the environment variable always wins. Also verify swap is active; `swapon --show` should list a `zram0` device after running the system setup.
-
-> **Filesystem roles**
->
-> - `/opt/photo-frame` is treated as read-only at runtime. It contains the versioned binaries, systemd unit templates, and stock configuration files delivered by the setup scripts.
-> - `/var/lib/photo-frame` is writable and owned by the service account. Configuration overrides, logs, hotspot artifacts, and synchronized media all live here. Systemd services expect to mutate this tree, so backups and troubleshooting should start in `/var`.
->
-> Keeping code and mutable state separate allows updates to replace the staged artifacts in `/opt` without disturbing operator-managed data in `/var/lib/photo-frame`.
-
-   The postcheck defers systemd validation until the kiosk environment is provisioned. Expect warnings about `greetd.service` and related helper units until you rerun the system pipeline after the application install.
-
-Use the following environment variables to customize an installation:
-
-| Variable        | Default            | Notes |
-| --------------- | ------------------ | ----- |
-| `INSTALL_ROOT`  | `/opt/photo-frame` | Target installation prefix. |
-| `SERVICE_USER`  | `kiosk`            | The systemd account that owns `/var/lib/photo-frame`. The app stage creates it on demand before installing artifacts. |
-| `SERVICE_GROUP` | `kiosk` (or the primary group for `SERVICE_USER`) | Group that owns `/var/lib/photo-frame` alongside `SERVICE_USER`. |
-| `CARGO_PROFILE` | `release`          | Cargo profile passed to `cargo build`. |
 
 ## Validate the kiosk stack
 
@@ -185,15 +164,59 @@ journalctl -u greetd -b
 
 `systemctl status` should report `active (running)` and show `/usr/local/bin/photoframe-session` in the command line. The journal should contain the photo frame application logs for the current boot. Once these checks pass, reboot the device to land directly in the fullscreen photo frame experience.
 
+## Fresh Install Wi-Fi Recovery Test
+
+After completing a fresh microSD install and successful deployment, run this end-to-end validation to confirm recovery works before mounting the frame.
+
+1. Confirm core services are healthy:
+
+   ```bash
+   ./setup/tools/verify.sh
+   /opt/photo-frame/bin/print-status.sh
+   ```
+
+2. Run the automated Wi-Fi recovery acceptance script:
+
+   ```bash
+   make -f tests/Makefile wifi-recovery
+   ```
+
+   Or directly:
+
+   ```bash
+   tests/run_wifi_recovery.sh
+   ```
+
+   The script will:
+
+   - deliberately inject a wrong Wi-Fi password (`developer/suspend-wifi.sh`),
+   - wait for watcher transition into `RecoveryHotspotActive`,
+   - prompt you to join the hotspot and submit real credentials,
+   - verify transition back to online,
+   - ensure hotspot is torn down and `wifi-request.json` is cleared.
+
+3. Optional second scenario: temporary AP outage with unchanged credentials.
+
+   - power off or disconnect the Wi-Fi access point for longer than `offline-grace-sec`,
+   - wait for hotspot mode to appear,
+   - restore the AP without submitting new credentials,
+   - verify watcher returns to `Online` from reconnect probe.
+
+4. Capture logs/artifacts if anything fails:
+
+   ```bash
+   tests/collect_logs.sh
+   sudo journalctl -u photoframe-wifi-manager.service --since "10 min ago"
+   ```
+
+For the full release validation matrix, use [`../developer/test-plan.md`](../developer/test-plan.md) (Phase 7). For day-2 incident triage, use [`sop.md`](sop.md).
+
 ## Kiosk session reference
 
-When both setup stages complete successfully the Raspberry Pi is ready to boot directly into a kiosk session:
+When both setup stages complete successfully the Pi boots into a greetd-managed Sway session that launches the slideshow as `kiosk`. The full kiosk architecture reference (unit wiring, expected config, and compositor assumptions) lives in [`kiosk.md`](kiosk.md).
 
-- `/etc/greetd/config.toml` binds greetd to virtual terminal 1 and runs `/usr/local/bin/photoframe-session` as the `kiosk` user. The wrapper launches Sway via `dbus-run-session`/`seatd-launch`, applies the HDMI 4K60 layout through the provisioned Sway config, and streams the photo frame logs into journald with `systemd-cat`. greetd creates the login session so `XDG_RUNTIME_DIR` points at `/run/user/<uid>` while `/var/lib/photo-frame` remains writable by the kiosk account.
-- Device access comes from the `kiosk` user belonging to the `render`, `video`, and `input` groups. The setup stage wires this up so Vulkan/GL stacks can open `/dev/dri/renderD128` without any extra udev hacks.
-- The kiosk stack relies on `greetd` + Sway; no display-manager compatibility targets or tty autologin services are installed.
-- The Sway rules mark the photo frame window (`photo-frame`) as fullscreen and reserve the overlay app ID (`wifi-overlay`) for the Wi-Fi manager. When connectivity drops the overlay is promoted to fullscreen on top of the slideshow so users immediately see the hotspot instructions, then it yields focus back to the photo app once provisioning succeeds.
+Operational commands (restart sequence, logs, and control socket checks) are maintained in [`sop.md`](sop.md).
 
-For smoke testing, temporarily modify `/etc/greetd/config.toml` to run `kmscube` instead of the photo frame binary. A spinning cube on HDMI verifies DRM, GBM, and input permissions before deploying the full app.
+## Advanced notes
 
-To pause the slideshow for maintenance, SSH into the Pi and run `sudo systemctl stop greetd`. Start it again with `sudo systemctl start greetd` when you are ready to resume playback.
+For installer internals, toolchain behavior, memory/OOM mitigation, filesystem roles, and environment-variable overrides, use [`software-notes.md`](software-notes.md).

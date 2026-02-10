@@ -15,20 +15,24 @@ A digital photo frame driver implemented in Rust with a pipeline tuned for Raspb
 1. [Hardware](#hardware)
 2. [Software Setup](#software-setup)
 3. [Wi-Fi Recovery & Provisioning](#wi-fi-recovery--provisioning)
-4. [Features](#features)
-5. [Architecture Overview](#architecture-overview)
-6. [Configuration](#configuration)
-7. [Fabrication](#fabrication)
-8. [References](#references)
-9. [License](#license)
+4. [Documentation Guide](#documentation-guide)
+5. [Features](#features)
+6. [Architecture Overview](#architecture-overview)
+7. [Configuration](#configuration)
+8. [Fabrication](#fabrication)
+9. [References](#references)
+10. [License](#license)
 
 ## Hardware
 
 Plan your build around a Raspberry Pi 5, a portrait-capable 4K monitor, and mounting hardware that hides cables while keeping airflow open. The dedicated hardware guide covers the recommended bill of materials plus optional accessories and planning tips. [Full details →](docs/hardware.md)
+Extended hardware planning/accessory notes are in [docs/hardware-notes.md](docs/hardware-notes.md).
 
 ## Software Setup
 
 From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync services, the setup guide walks through every command you need to bring the slideshow online. It also documents CLI flags for local debugging and a quickstart checklist for provisioning. [Full details →](docs/software.md)
+Advanced installer/toolchain notes (OOM mitigation, filesystem layout, and env overrides) are in [docs/software-notes.md](docs/software-notes.md).
+Setup pipeline internals and helper-library notes are in [setup/NOTES.md](setup/NOTES.md).
 
 > **Install layout at a glance**
 >
@@ -39,6 +43,7 @@ From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync servic
 > This split keeps upgrades simple—rerunning the installer refreshes `/opt` without clobbering the operator-managed data living under `/var`.
 
 Looking for the Pi 5 kiosk recipe? The Trixie-specific instructions live in [docs/kiosk.md](docs/kiosk.md).
+Detailed kiosk provisioning and verification notes are in [docs/kiosk-notes.md](docs/kiosk-notes.md).
 
 ## Wi-Fi Recovery & Provisioning
 
@@ -49,6 +54,11 @@ When Wi-Fi drops, the frame pivots into a self-service recovery flow handled by 
 - **Systemd integration:** `photoframe-wifi-manager.service` runs as the `kiosk` user, restarts on failure, and keeps operational breadcrumbs in `/var/lib/photo-frame` (hotspot password, QR image, last provisioning attempt).
 
 Full operating procedures, configuration options, and troubleshooting steps are documented in [docs/wifi-manager.md](docs/wifi-manager.md).
+Deep service commands and disable/reenable runbooks are in [docs/wifi-manager-operations.md](docs/wifi-manager-operations.md).
+
+## Documentation Guide
+
+Use [docs/README.md](docs/README.md) for a role-based map (fresh install, day-2 ops, Wi-Fi internals, and developer validation).
 
 ## Repository Layout
 
@@ -97,21 +107,22 @@ flowchart LR
 
 ## Configuration
 
-All configuration options—from playlist weighting and greeting screens to transition tuning—are documented in depth, including starter YAML examples and per-key reference tables. [Full details →](docs/configuration.md)
+All configuration options—from playlist weighting and greeting screens to transition tuning—are documented in depth, including starter YAML and per-key reference tables. For copy/paste recipes, see the companion examples doc. [Reference →](docs/configuration.md) · [Examples →](docs/configuration-examples.md)
 
 > **Breaking change:** The `transition` and `matting` blocks now use a `selection` + `active` schema. Older `types`/`options` layouts no longer parse—recreate those entries with explicit `kind` fields as shown in the updated configuration guide.
 
 > **Matting at a glance:** The viewer walks `matting.active` from top to bottom, expanding inline palettes (such as `colors` arrays) into a canonical list of presets. Random and sequential selection both operate on that expanded list, so weighting or rotation happens after the inline swatches unfold. See the [full matting documentation](docs/configuration.md#matting-configuration) for details and examples.
 
 Need help wiring buttond's wake/sleep schedule to Raspberry Pi + Dell HDMI hardware? The dedicated power guide covers DPMS commands, troubleshooting, and verification steps. [Power & sleep details →](docs/power-and-sleep.md)
+Platform-specific caveats and troubleshooting matrices are in [docs/power-and-sleep-notes.md](docs/power-and-sleep-notes.md).
 
 ## Fabrication
 
-Plan the physical build of the frame with dedicated fabrication guidance that covers laser cutting, 3D-printed brackets, cabinetry, and a final assembly checklist. [Full details →](docs/fabrication.md)
+Plan the physical build of the frame with dedicated fabrication guidance that covers laser cutting, 3D-printed brackets, cabinetry, and a final assembly checklist. [Full details →](maker/fabrication.md)
 
 ## Credits
 
-See [assets/backgrounds/Credits.md](assets/backgrounds/Credits.md) for image attributions.
+See [docs/credits.md](docs/credits.md) for image attributions.
 
 ## References
 
