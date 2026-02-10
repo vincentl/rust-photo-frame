@@ -1,3 +1,7 @@
+// The overlay renderer deliberately passes explicit geometry/color arguments
+// between small drawing helpers to keep allocations out of the hot path.
+#![allow(clippy::too_many_arguments)]
+
 use std::fs;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -71,10 +75,9 @@ fn load_font() -> Result<FontArc> {
         if let Some(id) = db.query(&Query {
             families: &[family],
             ..Default::default()
-        }) {
-            if let Some(font) = load_face(&db, id)? {
-                return Ok(font);
-            }
+        }) && let Some(font) = load_face(&db, id)?
+        {
+            return Ok(font);
         }
     }
 
@@ -200,14 +203,14 @@ impl OverlayApp {
     }
 
     fn handle_resize(&mut self, size: PhysicalSize<u32>) {
-        if let Some(surface) = self.surface.as_mut() {
-            if let (Some(width), Some(height)) = (
+        if let Some(surface) = self.surface.as_mut()
+            && let (Some(width), Some(height)) = (
                 NonZeroU32::new(size.width.max(1)),
                 NonZeroU32::new(size.height.max(1)),
-            ) {
-                let _ = surface.resize(width, height);
-                self.needs_redraw = true;
-            }
+            )
+        {
+            let _ = surface.resize(width, height);
+            self.needs_redraw = true;
         }
     }
 
@@ -646,7 +649,7 @@ fn draw_highlight(
     cursor_y
 }
 
-fn wrap_text<'a>(text: &'a str, font: &FontArc, scale: PxScale, max_width: f32) -> Vec<String> {
+fn wrap_text(text: &str, font: &FontArc, scale: PxScale, max_width: f32) -> Vec<String> {
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut lines = Vec::new();
     let mut current_line = String::new();

@@ -114,7 +114,7 @@ Exercise each axis at least once per release cycle.
   cat /sys/class/drm/card*/card*/modes
   ```
 - [ ] Capture short (≤10 s) phone video to document refresh smoothness.
-- [ ] Note any tearing/flicker and add to `docs/test-plan.md` observations section (Appendix B).
+- [ ] Note any tearing/flicker in Appendix B observations below.
 
 ## Phase 5 – Button & Power Behavior
 - [ ] Identify button input device:
@@ -141,7 +141,11 @@ Exercise each axis at least once per release cycle.
 - [ ] Evidence: screen photo with timestamp, journal entries referencing scheduler actions.
 
 ## Phase 7 – Wi-Fi Provisioning & Watcher
-- [ ] Trigger first-run provisioning portal or local page (follow project-specific instructions). Confirm phone/laptop can join hotspot and submit credentials.
+- [ ] Run the Wi-Fi recovery acceptance script from a deployed system:
+  ```sh
+  make -f tests/Makefile wifi-recovery
+  ```
+  Confirm phone/laptop can join hotspot and submit credentials during the scripted prompt.
 - [ ] After provisioning, ensure Pi joins target Wi-Fi (`nmcli dev status`).
 - [ ] LAN-up/Internet-down: block WAN (e.g., override DNS `/etc/hosts` or router rule) while keeping Wi-Fi up. Confirm slideshow keeps advancing and `wifi-manager` logs retries without pausing playback.
 - [ ] Wi-Fi down: power off AP or change SSID. Observe manager retry cadence and any UI hints. Restore AP and ensure automatic reconnection.

@@ -5,6 +5,7 @@ mod nm;
 mod overlay;
 mod password;
 mod qr;
+mod status;
 mod watch;
 mod web;
 

@@ -129,8 +129,29 @@ LAST_JSON="${VAR_DIR}/wifi-last.json"
 if [[ -f "${LAST_JSON}" ]]; then
     MOD_TIME="$(stat -c '%y' "${LAST_JSON}" 2>/dev/null || echo 'unknown')"
     printf 'Last provisioning record: %s (updated %s)\n' "${LAST_JSON}" "${MOD_TIME}"
+    if command -v jq >/dev/null 2>&1; then
+        LAST_STATUS="$(jq -r '.status // "unknown"' "${LAST_JSON}" 2>/dev/null || echo 'unknown')"
+        LAST_MESSAGE="$(jq -r '.message // "n/a"' "${LAST_JSON}" 2>/dev/null || echo 'n/a')"
+        LAST_ATTEMPT_ID="$(jq -r '.attempt_id // "-"' "${LAST_JSON}" 2>/dev/null || echo '-')"
+        printf 'Last provisioning outcome: %s (attempt: %s)\n' "${LAST_STATUS}" "${LAST_ATTEMPT_ID}"
+        printf 'Last provisioning message: %s\n' "${LAST_MESSAGE}"
+    fi
 else
     printf 'Last provisioning record: %s (not recorded yet)\n' "${LAST_JSON}"
+fi
+
+STATE_JSON="${VAR_DIR}/wifi-state.json"
+if [[ -f "${STATE_JSON}" ]]; then
+    if command -v jq >/dev/null 2>&1; then
+        RECOVERY_STATE="$(jq -r '.state // "unknown"' "${STATE_JSON}" 2>/dev/null || echo 'unknown')"
+        RECOVERY_REASON="$(jq -r '.reason // "unknown"' "${STATE_JSON}" 2>/dev/null || echo 'unknown')"
+        RECOVERY_ATTEMPT_ID="$(jq -r '.attempt_id // "-"' "${STATE_JSON}" 2>/dev/null || echo '-')"
+        printf 'Recovery state: %s (reason: %s, attempt: %s)\n' "${RECOVERY_STATE}" "${RECOVERY_REASON}" "${RECOVERY_ATTEMPT_ID}"
+    else
+        printf 'Recovery state record: %s (install jq for parsed output)\n' "${STATE_JSON}"
+    fi
+else
+    printf 'Recovery state record: %s (not recorded yet)\n' "${STATE_JSON}"
 fi
 
 print_header "Photo Frame"

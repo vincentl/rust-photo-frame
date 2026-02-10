@@ -2,6 +2,9 @@
 interface: wlan0
 check-interval-sec: 5
 offline-grace-sec: 30
+recovery-mode: app-handoff
+recovery-reconnect-probe-sec: 60
+recovery-connect-timeout-sec: 20
 wordlist-path: /opt/photo-frame/share/wordlist.txt
 var-dir: /var/lib/photo-frame
 hotspot:
@@ -11,6 +14,11 @@ hotspot:
 ui:
   bind-address: 0.0.0.0
   port: 8080
+photo-app:
+  launch-command:
+    - /usr/local/bin/photo-frame
+    - /etc/photo-frame/config.yaml
+  app-id: photo-frame
 overlay:
   command:
     - swaymsg

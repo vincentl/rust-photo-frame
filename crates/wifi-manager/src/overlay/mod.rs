@@ -3,8 +3,10 @@ pub mod ui;
 use crate::config::{Config, OverlayConfig};
 use crate::hotspot;
 use anyhow::{Context, Result, bail};
+use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -13,8 +15,6 @@ use tokio::process::{Child, Command};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 use users::get_current_uid;
-use std::ffi::OsStr;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
 #[derive(Clone, Debug)]
 pub struct OverlayRequest {
@@ -73,8 +73,8 @@ impl OverlayController {
         // When launching via swaymsg, construct a single shell-safe command line so
         // arguments like --title with spaces survive the shell.
         if program_basename(program) == "swaymsg" {
-            let exe = std::env::current_exe()
-                .context("failed to determine current executable path")?;
+            let exe =
+                std::env::current_exe().context("failed to determine current executable path")?;
             let mut parts: Vec<String> = Vec::new();
             // Prefix with env to inject app_id inside the Sway session
             parts.push("env".to_string());
@@ -91,7 +91,11 @@ impl OverlayController {
                 parts.push("--title".to_string());
                 parts.push(title.clone());
             }
-            let cmdline = parts.into_iter().map(|s| shell_escape(&s)).collect::<Vec<_>>().join(" ");
+            let cmdline = parts
+                .into_iter()
+                .map(|s| shell_escape(&s))
+                .collect::<Vec<_>>()
+                .join(" ");
             command.args(args);
             command.arg("exec");
             command.arg(cmdline);
@@ -159,12 +163,45 @@ impl OverlayController {
         Ok(())
     }
 
+    pub async fn kill_app(&self, app_id: &str) -> Result<()> {
+        self.run_commands(vec![format!("[app_id=\"{app_id}\"] kill")])
+            .await
+    }
+
+    pub async fn launch_app(&self, app_id: &str, launch_command: &[String]) -> Result<()> {
+        if launch_command.is_empty() {
+            bail!("photo app launch-command is empty");
+        }
+        let mut parts = Vec::with_capacity(launch_command.len() + 2);
+        parts.push("env".to_string());
+        parts.push(format!("WINIT_APP_ID={app_id}"));
+        parts.extend(launch_command.iter().cloned());
+        let cmdline = parts
+            .into_iter()
+            .map(|part| shell_escape(&part))
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.run_commands(vec![format!("exec {cmdline}")]).await
+    }
+
+    pub async fn app_present(&self, app_id: &str) -> Result<bool> {
+        let app = app_id.to_string();
+        self.ensure_sway_socket_env()
+            .context("failed to configure sway IPC environment")?;
+        tokio::task::spawn_blocking(move || -> Result<bool> {
+            let mut conn = Connection::new().context("failed to connect to sway IPC")?;
+            let tree = conn.get_tree().context("failed to query sway tree")?;
+            Ok(find_app(&tree, &app))
+        })
+        .await?
+    }
+
     fn prune_exited(&mut self) -> Result<()> {
-        if let Some(child) = &mut self.child {
-            if let Some(status) = child.try_wait()? {
-                debug!(?status, "wifi overlay process exited");
-                self.child = None;
-            }
+        if let Some(child) = &mut self.child
+            && let Some(status) = child.try_wait()?
+        {
+            debug!(?status, "wifi overlay process exited");
+            self.child = None;
         }
         Ok(())
     }
@@ -205,22 +242,10 @@ impl OverlayController {
         // (like hide) see the expected tree state.
         sleep(Duration::from_millis(50)).await;
         // Extra debug log to help trace overlay presence when troubleshooting.
-        if let Ok(true) = self.overlay_present().await {
+        if let Ok(true) = self.app_present(&overlay_app).await {
             debug!(app_id = %overlay_app, "overlay window present after command");
         }
         Ok(())
-    }
-
-    async fn overlay_present(&self) -> Result<bool> {
-        let app_id = self.config.overlay_app_id.clone();
-        self.ensure_sway_socket_env()
-            .context("failed to configure sway IPC environment")?;
-        Ok(tokio::task::spawn_blocking(move || -> Result<bool> {
-            let mut conn = Connection::new().context("failed to connect to sway IPC")?;
-            let tree = conn.get_tree().context("failed to query sway tree")?;
-            Ok(find_app(&tree, &app_id))
-        })
-        .await??)
     }
 }
 
@@ -270,12 +295,12 @@ impl OverlayController {
         // Prefer socket tied to the running sway PID for the current user
         let runtime_dirs = self.runtime_dirs();
         for dir in &runtime_dirs {
-            if let Some(uid) = owner_uid(dir) {
-                if let Some(pid) = find_sway_pid(uid) {
-                    let candidate = dir.join(format!("sway-ipc.{uid}.{pid}.sock"));
-                    if is_socket(&candidate) {
-                        return Ok(candidate);
-                    }
+            if let Some(uid) = owner_uid(dir)
+                && let Some(pid) = find_sway_pid(uid)
+            {
+                let candidate = dir.join(format!("sway-ipc.{uid}.{pid}.sock"));
+                if is_socket(&candidate) {
+                    return Ok(candidate);
                 }
             }
         }
@@ -347,7 +372,9 @@ fn find_socket_in_dir(dir: &Path) -> Result<Option<PathBuf>> {
         })?;
         let path = entry.path();
         // Accept only UNIX sockets
-        if !is_socket(&path) { continue; }
+        if !is_socket(&path) {
+            continue;
+        }
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
@@ -395,27 +422,40 @@ fn owner_uid(dir: &Path) -> Option<u32> {
 fn find_sway_pid(uid: u32) -> Option<u32> {
     // Scan /proc for a process named "sway" owned by the provided uid
     let proc = Path::new("/proc");
-    let Ok(entries) = fs::read_dir(proc) else { return None; };
+    let Ok(entries) = fs::read_dir(proc) else {
+        return None;
+    };
     for entry in entries.flatten() {
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
-        if !name.chars().all(|c| c.is_ascii_digit()) { continue; }
-        let pid: u32 = match name.parse() { Ok(p) => p, Err(_) => continue };
+        if !name.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let pid: u32 = match name.parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
         let status_path = entry.path().join("status");
-        let Ok(data) = fs::read_to_string(status_path) else { continue; };
+        let Ok(data) = fs::read_to_string(status_path) else {
+            continue;
+        };
         let mut proc_name = None;
         let mut proc_uid = None;
         for line in data.lines() {
-            if line.starts_with("Name:\t") {
-                proc_name = Some(line[6..].trim());
-            } else if line.starts_with("Uid:\t") {
+            if let Some(stripped) = line.strip_prefix("Name:\t") {
+                proc_name = Some(stripped.trim());
+            } else if let Some(stripped) = line.strip_prefix("Uid:\t") {
                 // Format: Uid:\tReal\tEffective\tSavedSet\tFilesystem
-                let mut parts = line[5..].split_whitespace();
-                if let Some(real) = parts.next() {
-                    if let Ok(v) = real.parse::<u32>() { proc_uid = Some(v); }
+                let mut parts = stripped.split_whitespace();
+                if let Some(real) = parts.next()
+                    && let Ok(v) = real.parse::<u32>()
+                {
+                    proc_uid = Some(v);
                 }
             }
-            if proc_name.is_some() && proc_uid.is_some() { break; }
+            if proc_name.is_some() && proc_uid.is_some() {
+                break;
+            }
         }
         if proc_name == Some("sway") && proc_uid == Some(uid) {
             return Some(pid);

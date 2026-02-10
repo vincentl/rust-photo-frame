@@ -44,10 +44,10 @@ pub async fn device_connected(interface: &str) -> Result<bool> {
     let output = nmcli(&["-t", "-f", "DEVICE,STATE", "device", "status"]).await?;
     for line in output.lines() {
         let mut parts = line.split(':');
-        if let (Some(dev), Some(state)) = (parts.next(), parts.next()) {
-            if dev == interface {
-                return Ok(state == "connected" || state == "activated" || state == "full");
-            }
+        if let (Some(dev), Some(state)) = (parts.next(), parts.next())
+            && dev == interface
+        {
+            return Ok(state == "connected" || state == "activated" || state == "full");
         }
     }
     Ok(false)
@@ -477,7 +477,7 @@ fn display_args(args: &[&str]) -> String {
             skip_next = false;
             continue;
         }
-        if matches!(arg.as_ref(), "wifi-sec.psk" | "psk") {
+        if matches!(*arg, "wifi-sec.psk" | "psk") {
             masked.push(arg);
             skip_next = true;
         } else {

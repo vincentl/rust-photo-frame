@@ -13,6 +13,12 @@ pub struct Config {
     pub check_interval_sec: u64,
     #[serde(default = "default_offline_grace")]
     pub offline_grace_sec: u64,
+    #[serde(default = "default_recovery_mode")]
+    pub recovery_mode: RecoveryMode,
+    #[serde(default = "default_recovery_reconnect_probe")]
+    pub recovery_reconnect_probe_sec: u64,
+    #[serde(default = "default_recovery_connect_timeout")]
+    pub recovery_connect_timeout_sec: u64,
     #[serde(default = "default_wordlist_path")]
     pub wordlist_path: PathBuf,
     #[serde(default = "default_var_dir")]
@@ -22,7 +28,16 @@ pub struct Config {
     #[serde(default)]
     pub ui: UiConfig,
     #[serde(default)]
+    pub photo_app: PhotoAppConfig,
+    #[serde(default)]
     pub overlay: OverlayConfig,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecoveryMode {
+    AppHandoff,
+    Overlay,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,6 +58,15 @@ pub struct UiConfig {
     pub bind_address: String,
     #[serde(default = "default_ui_port")]
     pub port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct PhotoAppConfig {
+    #[serde(default = "default_photo_app_launch_command")]
+    pub launch_command: Vec<String>,
+    #[serde(default = "default_photo_app_id")]
+    pub app_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -87,6 +111,15 @@ impl Default for UiConfig {
     }
 }
 
+impl Default for PhotoAppConfig {
+    fn default() -> Self {
+        Self {
+            launch_command: default_photo_app_launch_command(),
+            app_id: default_photo_app_id(),
+        }
+    }
+}
+
 impl Default for OverlayConfig {
     fn default() -> Self {
         Self {
@@ -108,6 +141,18 @@ fn default_check_interval() -> u64 {
 
 fn default_offline_grace() -> u64 {
     30
+}
+
+fn default_recovery_mode() -> RecoveryMode {
+    RecoveryMode::AppHandoff
+}
+
+fn default_recovery_reconnect_probe() -> u64 {
+    60
+}
+
+fn default_recovery_connect_timeout() -> u64 {
+    20
 }
 
 fn default_wordlist_path() -> PathBuf {
@@ -138,12 +183,17 @@ fn default_ui_port() -> u16 {
     8080
 }
 
+fn default_photo_app_launch_command() -> Vec<String> {
+    vec![
+        "/usr/local/bin/photo-frame".to_string(),
+        "/etc/photo-frame/config.yaml".to_string(),
+    ]
+}
+
 fn default_overlay_command() -> Vec<String> {
     // Launch overlay via sway so it inherits the session Wayland environment.
     // The watcher will construct a single exec command line with arguments.
-    vec![
-        "swaymsg".to_string(),
-    ]
+    vec!["swaymsg".to_string()]
 }
 
 fn default_photo_app_id() -> String {
@@ -152,4 +202,53 @@ fn default_photo_app_id() -> String {
 
 fn default_overlay_app_id() -> String {
     "wifi-overlay".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, RecoveryMode};
+
+    #[test]
+    fn defaults_include_recovery_settings() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse config");
+        assert_eq!(cfg.recovery_mode, RecoveryMode::AppHandoff);
+        assert_eq!(cfg.recovery_reconnect_probe_sec, 60);
+        assert_eq!(cfg.recovery_connect_timeout_sec, 20);
+        assert_eq!(cfg.photo_app.app_id, "photo-frame");
+        assert_eq!(
+            cfg.photo_app.launch_command,
+            vec![
+                "/usr/local/bin/photo-frame".to_string(),
+                "/etc/photo-frame/config.yaml".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_overlay_recovery_mode() {
+        let cfg: Config = serde_yaml::from_str(
+            r#"
+recovery-mode: overlay
+recovery-reconnect-probe-sec: 90
+recovery-connect-timeout-sec: 25
+photo-app:
+  app-id: custom-photo
+  launch-command:
+    - /opt/custom/photo
+    - /etc/custom.yaml
+"#,
+        )
+        .expect("parse config");
+        assert_eq!(cfg.recovery_mode, RecoveryMode::Overlay);
+        assert_eq!(cfg.recovery_reconnect_probe_sec, 90);
+        assert_eq!(cfg.recovery_connect_timeout_sec, 25);
+        assert_eq!(cfg.photo_app.app_id, "custom-photo");
+        assert_eq!(
+            cfg.photo_app.launch_command,
+            vec![
+                "/opt/custom/photo".to_string(),
+                "/etc/custom.yaml".to_string()
+            ]
+        );
+    }
 }
