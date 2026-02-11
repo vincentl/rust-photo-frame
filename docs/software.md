@@ -20,8 +20,10 @@ Use this if you want a first slideshow quickly:
    - `./setup/install-all.sh`
 6. Verify services:
    - `./setup/tools/verify.sh`
+   - No reboot should be required; the installer restarts kiosk services and validates control socket readiness.
 7. Add photos to the default library path:
    - Copy images into `/var/lib/photoframe/photos/local` (manual imports) or `/var/lib/photoframe/photos/cloud` (sync-managed imports)
+   - If writes to `/var/lib/photoframe/photos` fail with permissions, log out and SSH back in once to pick up new group membership.
 8. Wake the frame if it is sleeping:
    - `echo '{"command":"set-state","state":"awake"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock`
 9. (Recommended) Run Wi-Fi recovery acceptance test:
