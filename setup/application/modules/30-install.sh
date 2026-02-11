@@ -74,6 +74,12 @@ prepare_runtime() {
     done
     local photo_root="${VAR_ROOT}/photos"
     local backgrounds_root="${VAR_ROOT}/backgrounds"
+
+    # Ensure canonical library paths always exist, even if prior provisioning
+    # left a partial tree.
+    run_sudo install -d -m 2770 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" \
+        "${photo_root}" "${photo_root}/cloud" "${photo_root}/local"
+
     if [[ -d "${photo_root}" ]]; then
         local photo_mode
         photo_mode="$(run_sudo stat -c '%a' "${photo_root}")"

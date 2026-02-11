@@ -44,6 +44,27 @@ dump_recovery_debug() {
   sudo journalctl -u "$wifi_service" --since "$start_iso" -n 200 --no-pager || true
 }
 
+wait_for_fault_injection() {
+  local helper_log="$1"
+  local timeout="${2:-45}"
+  local deadline
+
+  deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if [[ -f "${helper_log}" ]]; then
+      if grep -Eq 'STATUS: fault-injected' "${helper_log}"; then
+        return 0
+      fi
+      if grep -Eq 'systemd-run is required|This script must run as root|No active Wi-Fi on' "${helper_log}"; then
+        return 2
+      fi
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
 wait_for_hotspot_transition() {
   local service="$1"
   local since="$2"
@@ -86,6 +107,7 @@ main() {
   local active_connection=""
   local device_state=""
   local start_iso
+  local helper_log="/tmp/wifi-recovery-test.log"
 
   section "Pre-flight"
   require_cmd systemctl
@@ -138,8 +160,26 @@ main() {
   section "Trigger recovery"
   run_cmd \
     "Inject wrong PSK on ${wifi_interface}" \
-    sudo bash -lc "nohup bash '$REPO_ROOT/developer/suspend-wifi.sh' '${wifi_interface}' >/tmp/wifi-recovery-test.log 2>&1 &"
-  info "Helper output: /tmp/wifi-recovery-test.log"
+    sudo bash -lc "nohup bash '$REPO_ROOT/developer/suspend-wifi.sh' '${wifi_interface}' >'${helper_log}' 2>&1 &"
+  info "Helper output: ${helper_log}"
+
+  if wait_for_fault_injection "${helper_log}" 45; then
+    pass "Fault injection helper reported success"
+  else
+    rc=$?
+    section "Fault injection helper output"
+    if [[ -f "${helper_log}" ]]; then
+      log_cmd sudo cat "${helper_log}"
+      sudo cat "${helper_log}" || true
+    else
+      warn "Helper log not found: ${helper_log}"
+    fi
+
+    if [[ ${rc} -eq 2 ]]; then
+      fail "Fault injection helper reported a fatal setup error"
+    fi
+    fail "Fault injection helper did not confirm success within 45s"
+  fi
 
   section "Wait for hotspot transition"
   if wait_for_hotspot_transition "$wifi_service" "$start_iso" "$wait_hotspot_sec"; then

@@ -44,13 +44,22 @@ schedule_restore() {
   local backup="$1"; shift
   local conn_name="$1"; shift
   local delay_min="$1"; shift
+  local autoconnect="$1"; shift
+  local bad_name="$1"; shift
   local when="${delay_min}m"
   # Absolute path for nmcli and backup file; minimal environment in timers.
-  local cmd="$NMCLI connection import type wifi file '$backup' >/dev/null 2>&1 || true; $NMCLI connection up '$conn_name' >/dev/null 2>&1 || true"
+  local cmd=""
+
+  if [[ -n "${backup}" ]]; then
+    cmd+="$NMCLI connection import type wifi file '$backup' >/dev/null 2>&1 || true; "
+  fi
+  cmd+="$NMCLI connection modify '$conn_name' connection.autoconnect '$autoconnect' >/dev/null 2>&1 || true; "
+  cmd+="$NMCLI connection up '$conn_name' >/dev/null 2>&1 || true; "
+  cmd+="$NMCLI connection delete '$bad_name' >/dev/null 2>&1 || true"
 
   if ! command -v systemd-run >/dev/null 2>&1; then
     log "systemd-run is required to schedule auto-restore. Aborting to avoid stranding Wi‑Fi."
-    log "Manual restore would be: $NMCLI connection import type wifi file $backup; $NMCLI connection up '$conn_name'"
+    log "Manual restore would be: $NMCLI connection modify '$conn_name' connection.autoconnect '$autoconnect'; $NMCLI connection up '$conn_name'; $NMCLI connection delete '$bad_name'"
     exit 2
   fi
 
@@ -61,7 +70,22 @@ schedule_restore() {
     /bin/sh -lc "$cmd" >/dev/null 2>&1 || true
   SCHEDULED_UNIT="$unit"
   log "Auto-restore scheduled in ${delay_min} min via systemd-run ($unit)"
-  }
+}
+
+find_keyfile_by_uuid() {
+  local uuid="$1"
+  local keyfile=""
+  local base_dir
+  for base_dir in /etc/NetworkManager/system-connections /run/NetworkManager/system-connections; do
+    [[ -d "${base_dir}" ]] || continue
+    keyfile="$(grep -rl "uuid=${uuid}" "${base_dir}" 2>/dev/null | head -1 || true)"
+    if [[ -n "${keyfile}" ]]; then
+      printf '%s' "${keyfile}"
+      return 0
+    fi
+  done
+  return 1
+}
 
 ACTIVE_CONN=$(nmcli -t -f NAME,TYPE,DEVICE connection show --active \
   | awk -F: -v i="$IFACE" '$3==i && ($2=="802-11-wireless" || $2=="wifi"){print $1; exit}')
@@ -71,17 +95,24 @@ if [[ -z "$ACTIVE_CONN" ]]; then
 fi
 log "Active: $ACTIVE_CONN on $IFACE"
 
-UUID=$(nmcli -g connection.uuid connection show "$ACTIVE_CONN")
-KEYFILE=$(grep -rl "uuid=$UUID" /etc/NetworkManager/system-connections/ | head -1)
-if [[ -z "$KEYFILE" ]]; then
-  log "Could not find keyfile for $ACTIVE_CONN"
-  exit 1
+ORIG_AUTOCONNECT="$($NMCLI -g connection.autoconnect connection show "$ACTIVE_CONN" 2>/dev/null | head -n1 | tr -d '\r')"
+if [[ -z "${ORIG_AUTOCONNECT}" ]]; then
+  ORIG_AUTOCONNECT="yes"
 fi
-cp "$KEYFILE" "$BACKUP"
-chmod 600 "$BACKUP"
-log "Backup: $BACKUP"
+log "Original autoconnect for '$ACTIVE_CONN': ${ORIG_AUTOCONNECT}"
 
-schedule_restore "$BACKUP" "$ACTIVE_CONN" "$DELAY_MIN"
+UUID=$(nmcli -g connection.uuid connection show "$ACTIVE_CONN")
+KEYFILE="$(find_keyfile_by_uuid "$UUID" || true)"
+if [[ -n "$KEYFILE" ]]; then
+  cp "$KEYFILE" "$BACKUP"
+  chmod 600 "$BACKUP"
+  log "Backup: $BACKUP"
+else
+  BACKUP=""
+  log "Warning: could not find keyfile for '$ACTIVE_CONN' (uuid=$UUID); proceeding without keyfile backup"
+fi
+
+schedule_restore "$BACKUP" "$ACTIVE_CONN" "$DELAY_MIN" "$ORIG_AUTOCONNECT" "$BAD_NAME"
 
 SSID=$(nmcli -g 802-11-wireless.ssid connection show "$ACTIVE_CONN")
 nmcli connection delete "$BAD_NAME" >/dev/null 2>&1 || true
@@ -90,6 +121,9 @@ nmcli connection modify "$BAD_NAME" wifi-sec.key-mgmt wpa-psk
 nmcli connection modify "$BAD_NAME" wifi-sec.psk "$BAD_PSK"
 nmcli connection modify "$BAD_NAME" connection.autoconnect no
 log "Created '$BAD_NAME' for SSID '$SSID' with bad PSK"
+
+nmcli connection modify "$ACTIVE_CONN" connection.autoconnect no || true
+log "Temporarily disabled autoconnect on '$ACTIVE_CONN' to force offline transition"
 
 nmcli connection down "$ACTIVE_CONN" || true
 nmcli device disconnect "$IFACE" >/dev/null 2>&1 || true
@@ -106,5 +140,6 @@ log "Injected bad credential profile '$BAD_NAME'; interface state now '${STATE_A
 if [[ -n "$SCHEDULED_UNIT" ]]; then
   log "Restore timer logs: sudo journalctl -u $SCHEDULED_UNIT"
 fi
+log "STATUS: fault-injected"
 log "Logs: sudo journalctl -fu photoframe-wifi-manager.service    and    sudo journalctl -fu NetworkManager"
 log "Restore: nmcli connection delete \"$BAD_NAME\"; nmcli connection import type wifi file $BACKUP; nmcli connection up \"$ACTIVE_CONN\""

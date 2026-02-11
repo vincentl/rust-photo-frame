@@ -23,6 +23,7 @@ Use this if you want a first slideshow quickly:
    - No reboot should be required; the installer restarts kiosk services and validates control socket readiness.
 7. Add photos to the default library path:
    - Copy images into `/var/lib/photoframe/photos/local` (manual imports) or `/var/lib/photoframe/photos/cloud` (sync-managed imports)
+   - If those directories are missing, create them: `sudo install -d -m 2775 -o kiosk -g kiosk /var/lib/photoframe/photos/local /var/lib/photoframe/photos/cloud`
    - If writes to `/var/lib/photoframe/photos` fail with permissions, log out and SSH back in once to pick up new group membership.
 8. Wake the frame if it is sleeping:
    - `echo '{"command":"set-state","state":"awake"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock`

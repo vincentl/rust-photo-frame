@@ -99,6 +99,19 @@ else
   failures=$((failures+1))
 fi
 
+# Default media library directories (informational; may differ for custom layouts)
+PHOTO_ROOT="${VAR_DIR}/photos"
+PHOTO_LOCAL="${PHOTO_ROOT}/local"
+PHOTO_CLOUD="${PHOTO_ROOT}/cloud"
+for dir in "${PHOTO_ROOT}" "${PHOTO_LOCAL}" "${PHOTO_CLOUD}"; do
+  if [[ -d "${dir}" ]]; then
+    ok "library directory present: ${dir}"
+  else
+    warn "library directory missing: ${dir} (run: sudo install -d -m 2775 -o ${SERVICE_USER} -g ${SERVICE_USER} ${PHOTO_LOCAL} ${PHOTO_CLOUD})"
+    warnings=$((warnings+1))
+  fi
+done
+
 # Toolchain versions (informational)
 rustc_v=$(rustc --version 2>/dev/null || echo "rustc unavailable")
 cargo_v=$(cargo --version 2>/dev/null || echo "cargo unavailable")
