@@ -8,6 +8,7 @@ SERVICE_NAME="${SERVICE_NAME:-photoframe-wifi-manager.service}"
 SERVICE_USER="${SERVICE_USER:-$(id -un)}"
 MANAGER_BIN="${MANAGER_BIN:-${INSTALL_ROOT}/bin/wifi-manager}"
 HOTSPOT_ID="${HOTSPOT_ID:-pf-hotspot}"
+SYNC_ENV_PATH="${SYNC_ENV_PATH:-/etc/photoframe/sync.env}"
 TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t wifi-status)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
@@ -52,6 +53,44 @@ unit_enabled() {
     else
         echo "not-found"
     fi
+}
+
+read_env_value() {
+    local key="$1"
+    local file="$2"
+    awk -v key="${key}" '
+        /^[[:space:]]*#/ { next }
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            value = $0
+            sub(/^[[:space:]]*[^=]+=[[:space:]]*/, "", value)
+            sub(/[[:space:]]+#.*/, "", value)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            sub(/^"/, "", value)
+            sub(/"$/, "", value)
+            print value
+            exit
+        }
+    ' "${file}"
+}
+
+sync_source_status() {
+    local rclone_remote=""
+    local rsync_source=""
+    if [[ ! -f "${SYNC_ENV_PATH}" ]]; then
+        printf 'not configured (%s missing)' "${SYNC_ENV_PATH}"
+        return
+    fi
+    rclone_remote="$(read_env_value "RCLONE_REMOTE" "${SYNC_ENV_PATH}")"
+    rsync_source="$(read_env_value "RSYNC_SOURCE" "${SYNC_ENV_PATH}")"
+    if [[ -n "${rclone_remote}" ]]; then
+        printf 'configured (RCLONE_REMOTE)'
+        return
+    fi
+    if [[ -n "${rsync_source}" ]]; then
+        printf 'configured (RSYNC_SOURCE)'
+        return
+    fi
+    printf 'not configured (%s missing RCLONE_REMOTE/RSYNC_SOURCE)' "${SYNC_ENV_PATH}"
 }
 
 print_header "Wi-Fi Connectivity"
@@ -174,6 +213,7 @@ PHOTO_ENABLED="$(unit_enabled "${PHOTO_SERVICE}")"
 printf '%s: %s (enabled: %s)\n' "${PHOTO_SERVICE}" "${PHOTO_STATUS}" "${PHOTO_ENABLED}"
 
 print_header "Sync"
+printf 'Sync source: %s\n' "$(sync_source_status)"
 if [[ -z "${SYNC_SERVICE:-}" ]]; then
     if unit_exists "photoframe-sync.service"; then
         SYNC_SERVICE="photoframe-sync.service"

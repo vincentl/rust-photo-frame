@@ -77,6 +77,60 @@ configure_logind_power_key() {
     systemctl restart systemd-logind
 }
 
+read_env_value() {
+    local key="$1"
+    local file="$2"
+    awk -v key="${key}" '
+        /^[[:space:]]*#/ { next }
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            value = $0
+            sub(/^[[:space:]]*[^=]+=[[:space:]]*/, "", value)
+            sub(/[[:space:]]+#.*/, "", value)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            sub(/^"/, "", value)
+            sub(/"$/, "", value)
+            print value
+            exit
+        }
+    ' "${file}"
+}
+
+sync_is_configured() {
+    local sync_env="$1"
+    local rclone_remote=""
+    local rsync_source=""
+    if [[ ! -f "${sync_env}" ]]; then
+        return 1
+    fi
+    rclone_remote="$(read_env_value "RCLONE_REMOTE" "${sync_env}")"
+    rsync_source="$(read_env_value "RSYNC_SOURCE" "${sync_env}")"
+    [[ -n "${rclone_remote}" || -n "${rsync_source}" ]]
+}
+
+configure_sync_timer() {
+    local sync_timer="photoframe-sync.timer"
+    local sync_service="photoframe-sync.service"
+    local sync_env="/etc/photoframe/sync.env"
+
+    if ! systemctl list-unit-files "${sync_timer}" >/dev/null 2>&1; then
+        log "${sync_timer} not installed; skipping sync timer activation"
+        return
+    fi
+
+    if sync_is_configured "${sync_env}"; then
+        log "Sync source configured; enabling ${sync_timer}"
+        systemctl enable "${sync_timer}" >/dev/null 2>&1 || true
+        systemctl start "${sync_timer}" >/dev/null 2>&1 || true
+        return
+    fi
+
+    log "Sync source not configured in ${sync_env}; keeping ${sync_timer} disabled"
+    systemctl disable "${sync_timer}" >/dev/null 2>&1 || true
+    systemctl stop "${sync_timer}" >/dev/null 2>&1 || true
+    systemctl stop "${sync_service}" >/dev/null 2>&1 || true
+    systemctl reset-failed "${sync_service}" "${sync_timer}" >/dev/null 2>&1 || true
+}
+
 enable_systemd_units() {
     log "Enabling kiosk services"
     systemctl daemon-reload
@@ -153,10 +207,7 @@ enable_systemd_units() {
         fi
     done
 
-    if systemctl list-unit-files photoframe-sync.timer >/dev/null 2>&1; then
-        systemctl enable photoframe-sync.timer
-        systemctl start photoframe-sync.timer || true
-    fi
+    configure_sync_timer
 }
 
 install_auxiliary_units

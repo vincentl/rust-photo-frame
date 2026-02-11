@@ -15,7 +15,7 @@ A digital photo frame driver implemented in Rust with a pipeline tuned for Raspb
 1. [New to Photo Frame?](#new-to-photo-frame)
 2. [Hardware](#hardware)
 3. [Software Setup](#software-setup)
-4. [Wi-Fi Recovery & Provisioning](#wi-fi-recovery--provisioning)
+4. [Wi-Fi Recovery & Provisioning](#wi-fi-recovery-provisioning)
 5. [Documentation Guide](#documentation-guide)
 6. [Features](#features)
 7. [Architecture Overview](#architecture-overview)

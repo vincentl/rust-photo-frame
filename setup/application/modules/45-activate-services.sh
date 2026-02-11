@@ -3,6 +3,9 @@ set -euo pipefail
 
 MODULE="app:45-activate-services"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photoframe}"
+SYNC_ENV_PATH="${SYNC_ENV_PATH:-/etc/photoframe/sync.env}"
+SYNC_TIMER="${SYNC_TIMER:-photoframe-sync.timer}"
+SYNC_SERVICE="${SYNC_SERVICE:-photoframe-sync.service}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/systemd.sh
 source "${SCRIPT_DIR}/../../lib/systemd.sh"
@@ -14,6 +17,56 @@ log() {
 
 run_sudo() {
     sudo "$@"
+}
+
+read_env_value() {
+    local key="$1"
+    local file="$2"
+    awk -v key="${key}" '
+        /^[[:space:]]*#/ { next }
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            value = $0
+            sub(/^[[:space:]]*[^=]+=[[:space:]]*/, "", value)
+            sub(/[[:space:]]+#.*/, "", value)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            sub(/^"/, "", value)
+            sub(/"$/, "", value)
+            print value
+            exit
+        }
+    ' "${file}"
+}
+
+sync_is_configured() {
+    local sync_env="$1"
+    local rclone_remote=""
+    local rsync_source=""
+    if [[ ! -f "${sync_env}" ]]; then
+        return 1
+    fi
+    rclone_remote="$(read_env_value "RCLONE_REMOTE" "${sync_env}")"
+    rsync_source="$(read_env_value "RSYNC_SOURCE" "${sync_env}")"
+    [[ -n "${rclone_remote}" || -n "${rsync_source}" ]]
+}
+
+configure_sync_timer() {
+    if ! run_sudo systemctl list-unit-files "${SYNC_TIMER}" >/dev/null 2>&1; then
+        log INFO "${SYNC_TIMER} not installed; skipping sync timer activation"
+        return
+    fi
+
+    if sync_is_configured "${SYNC_ENV_PATH}"; then
+        log INFO "Sync source configured; enabling ${SYNC_TIMER}"
+        run_sudo systemctl enable "${SYNC_TIMER}" >/dev/null 2>&1 || true
+        run_sudo systemctl start "${SYNC_TIMER}" >/dev/null 2>&1 || true
+        return
+    fi
+
+    log INFO "Sync source not configured in ${SYNC_ENV_PATH}; keeping ${SYNC_TIMER} disabled"
+    run_sudo systemctl disable "${SYNC_TIMER}" >/dev/null 2>&1 || true
+    run_sudo systemctl stop "${SYNC_TIMER}" >/dev/null 2>&1 || true
+    run_sudo systemctl stop "${SYNC_SERVICE}" >/dev/null 2>&1 || true
+    run_sudo systemctl reset-failed "${SYNC_SERVICE}" "${SYNC_TIMER}" >/dev/null 2>&1 || true
 }
 
 if ! systemd_available; then
@@ -57,7 +110,7 @@ if run_sudo systemctl list-unit-files greetd.service >/dev/null 2>&1; then
 fi
 
 # Enable and start app-specific services if present
-for unit in photoframe-wifi-manager.service buttond.service photoframe-sync.timer; do
+for unit in photoframe-wifi-manager.service buttond.service; do
     if run_sudo systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
         log INFO "Enabling ${unit}"
         run_sudo systemctl enable "${unit}" >/dev/null 2>&1 || true
@@ -65,5 +118,7 @@ for unit in photoframe-wifi-manager.service buttond.service photoframe-sync.time
         run_sudo systemctl start "${unit}" >/dev/null 2>&1 || true
     fi
 done
+
+configure_sync_timer
 
 log INFO "Kiosk services activated"

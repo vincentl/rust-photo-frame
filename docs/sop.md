@@ -49,7 +49,7 @@ sudo journalctl -u photoframe-wifi-manager.service -f
 Use one of these canonical procedures:
 
 - Fresh image acceptance flow: [`software.md#fresh-install-wi-fi-recovery-test`](software.md#fresh-install-wi-fi-recovery-test)
-- Full QA matrix (including WAN-down and AP outage scenarios): [`../developer/test-plan.md#phase-7--wi-fi-provisioning--watcher`](../developer/test-plan.md#phase-7--wi-fi-provisioning--watcher)
+- Full QA matrix (including WAN-down and AP outage scenarios): [`../developer/test-plan.md#phase-7-wi-fi-provisioning-watcher`](../developer/test-plan.md#phase-7-wi-fi-provisioning-watcher)
 
 ## Wi-Fi failure triage
 

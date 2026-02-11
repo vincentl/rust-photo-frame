@@ -63,8 +63,8 @@ Exit criteria:
 - [x] How to enable `photoframe-sync` safely.
 - [x] Required env file variables and examples.
 - [x] Expected timer/service statuses.
-- [ ] Decide and implement sync default posture:
-- [ ] Disabled by default until configured, or
+- [x] Decide and implement sync default posture:
+- [x] Disabled by default until configured, or
 - [ ] Enabled with no-noise behavior when unconfigured.
 - [x] Ensure SOP includes one canonical "daily health check" sequence and expected outputs.
 
@@ -74,7 +74,7 @@ Exit criteria:
 3. SOP and software guide are consistent and complete for day-0/day-2 operations.
 
 ## Milestone 4 - Release Candidate Validation
-- [ ] Run full link checker for docs and fix all broken anchors/paths.
+- [x] Run full link checker for docs and fix all broken anchors/paths.
 - [ ] Execute smoke, daily, and wifi-recovery test scripts on a clean image.
 - [ ] Capture and archive log bundle from validation run.
 - [ ] Perform at least two independent clean-install rehearsals using docs only.

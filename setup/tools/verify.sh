@@ -32,6 +32,7 @@ BIN_POWERCTL="${INSTALL_ROOT}/bin/powerctl"
 CONF_TEMPLATE="${INSTALL_ROOT}/etc/photoframe/config.yaml"
 CONF_ACTIVE="/etc/photoframe/config.yaml"
 WORDLIST_PATH="${INSTALL_ROOT}/share/wordlist.txt"
+SYNC_ENV_PATH="${SYNC_ENV_PATH:-/etc/photoframe/sync.env}"
 
 if [[ -x "${BIN_APP}" ]]; then
   ok "photoframe binary present: ${BIN_APP}"
@@ -124,6 +125,35 @@ if [[ -x "${BIN_POWERCTL}" ]]; then
   }
 fi
 
+read_env_value() {
+  local key="$1"
+  local file="$2"
+  awk -v key="${key}" '
+    /^[[:space:]]*#/ { next }
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      value = $0
+      sub(/^[[:space:]]*[^=]+=[[:space:]]*/, "", value)
+      sub(/[[:space:]]+#.*/, "", value)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      sub(/^"/, "", value)
+      sub(/"$/, "", value)
+      print value
+      exit
+    }
+  ' "${file}"
+}
+
+sync_is_configured() {
+  local rclone_remote=""
+  local rsync_source=""
+  if [[ ! -f "${SYNC_ENV_PATH}" ]]; then
+    return 1
+  fi
+  rclone_remote="$(read_env_value "RCLONE_REMOTE" "${SYNC_ENV_PATH}")"
+  rsync_source="$(read_env_value "RSYNC_SOURCE" "${SYNC_ENV_PATH}")"
+  [[ -n "${rclone_remote}" || -n "${rsync_source}" ]]
+}
+
 # systemd service health
 if systemd_available; then
   check_unit() {
@@ -195,7 +225,20 @@ if systemd_available; then
   check_seatd
   check_unit photoframe-wifi-manager.service ERROR "installed by app deploy"
   check_unit buttond.service WARN "optional, installed by app deploy"
-  check_unit photoframe-sync.timer WARN "optional periodic sync"
+  if sync_is_configured; then
+    check_unit photoframe-sync.timer WARN "run 'sudo systemctl enable --now photoframe-sync.timer' after configuring ${SYNC_ENV_PATH}"
+  else
+    if systemd_unit_exists photoframe-sync.timer; then
+      if systemd_is_active photoframe-sync.timer || systemd_is_enabled photoframe-sync.timer; then
+        warn "photoframe-sync.timer active but ${SYNC_ENV_PATH} is not configured (missing RCLONE_REMOTE/RSYNC_SOURCE)"
+        warnings=$((warnings+1))
+      else
+        ok "photoframe-sync.timer disabled (sync source not configured)"
+      fi
+    else
+      ok "photoframe-sync.timer not installed (optional)"
+    fi
+  fi
 
   # display-manager alias (informational)
   if systemctl status display-manager.service --no-pager >/dev/null 2>&1; then

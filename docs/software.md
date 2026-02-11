@@ -315,7 +315,8 @@ Document whichever approach you choose in your site runbook so future maintenanc
 
 ## Optional Library Sync Service
 
-The repository ships `photoframe-sync.service` + `photoframe-sync.timer`, but you must configure a source before expecting synced media.
+The repository ships `photoframe-sync.service` + `photoframe-sync.timer`.
+The timer is disabled by default and should remain disabled until a sync source is configured.
 
 1. Create `/etc/photoframe/sync.env`:
 
@@ -329,14 +330,20 @@ The repository ships `photoframe-sync.service` + `photoframe-sync.timer`, but yo
    EOF
    ```
 
-2. Confirm timer/service status:
+2. Enable sync timer after configuration:
+
+   ```bash
+   sudo systemctl enable --now photoframe-sync.timer
+   ```
+
+3. Confirm timer/service status:
 
    ```bash
    sudo systemctl status photoframe-sync.timer --no-pager
    sudo systemctl status photoframe-sync.service --no-pager
    ```
 
-3. Validate that synced files land in `/var/lib/photoframe/photos/cloud`.
+4. Validate that synced files land in `/var/lib/photoframe/photos/cloud`.
 
 ## Rust toolchain behavior
 

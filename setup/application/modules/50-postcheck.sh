@@ -35,6 +35,7 @@ WORDLIST_PATH="${INSTALL_ROOT}/share/wordlist.txt"
 VAR_DIR="/var/lib/photoframe"
 SYSTEM_CONFIG="/etc/photoframe/config.yaml"
 DEFAULT_CONTROL_SOCKET_PATH="/run/photoframe/control.sock"
+SYNC_ENV_PATH="${SYNC_ENV_PATH:-/etc/photoframe/sync.env}"
 
 dump_logs_on_failure() {
     local status=$1
@@ -91,6 +92,35 @@ wait_for_control_socket() {
         elapsed=$((elapsed + 1))
     done
     return 1
+}
+
+read_env_value() {
+    local key="$1"
+    local file="$2"
+    awk -v key="${key}" '
+        /^[[:space:]]*#/ { next }
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            value = $0
+            sub(/^[[:space:]]*[^=]+=[[:space:]]*/, "", value)
+            sub(/[[:space:]]+#.*/, "", value)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            sub(/^"/, "", value)
+            sub(/"$/, "", value)
+            print value
+            exit
+        }
+    ' "${file}"
+}
+
+sync_is_configured() {
+    local rclone_remote=""
+    local rsync_source=""
+    if [[ ! -f "${SYNC_ENV_PATH}" ]]; then
+        return 1
+    fi
+    rclone_remote="$(read_env_value "RCLONE_REMOTE" "${SYNC_ENV_PATH}")"
+    rsync_source="$(read_env_value "RSYNC_SOURCE" "${SYNC_ENV_PATH}")"
+    [[ -n "${rclone_remote}" || -n "${rsync_source}" ]]
 }
 
 if [[ ! -x "${BIN_PATH}" ]]; then
@@ -195,7 +225,19 @@ if systemd_available; then
     check_enabled "${WIFI_SERVICE}" "${kiosk_hint}"
 
     check_service "${BUTTON_SERVICE}" "WARN" "${kiosk_hint}"
-    check_service "${SYNC_TIMER}" "WARN" "${kiosk_hint}"
+    if sync_is_configured; then
+        check_service "${SYNC_TIMER}" "WARN" "run 'sudo systemctl enable --now ${SYNC_TIMER}' after configuring ${SYNC_ENV_PATH}"
+    else
+        if systemd_unit_exists "${SYNC_TIMER}"; then
+            if systemd_is_active "${SYNC_TIMER}" || systemd_is_enabled "${SYNC_TIMER}"; then
+                log WARN "${SYNC_TIMER} is active but ${SYNC_ENV_PATH} is not configured (missing RCLONE_REMOTE/RSYNC_SOURCE)"
+            else
+                log INFO "${SYNC_TIMER} disabled (sync source not configured)"
+            fi
+        else
+            log INFO "${SYNC_TIMER} not installed"
+        fi
+    fi
 else
     log WARN "systemctl not available; skipping service state checks"
 fi
@@ -237,6 +279,12 @@ else
     seatd_status="not checked (systemctl unavailable)"
 fi
 
+if sync_is_configured; then
+    sync_config_status="configured (${SYNC_ENV_PATH})"
+else
+    sync_config_status="not configured (${SYNC_ENV_PATH}; set RCLONE_REMOTE or RSYNC_SOURCE)"
+fi
+
 log INFO "Deployment summary:"
 cat <<SUMMARY
 ----------------------------------------
@@ -257,6 +305,7 @@ ${WIFI_SERVICE}: ${wifi_service_status}
 ${BUTTON_SERVICE}: ${button_status}
 ${SYNC_TIMER}: ${sync_status}
 ${SEATD_SERVICE}: ${seatd_status}
+Sync source : ${sync_config_status}
 Next steps:
   - Customize ${SYSTEM_CONFIG} for your site (requires sudo).
   - Review journal logs with 'journalctl -u ${KIOSK_SERVICE} -f'.

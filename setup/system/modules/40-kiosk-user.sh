@@ -333,6 +333,60 @@ install_polkit_rules() {
     done
 }
 
+read_env_value() {
+    local key="$1"
+    local file="$2"
+    awk -v key="${key}" '
+        /^[[:space:]]*#/ { next }
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            value = $0
+            sub(/^[[:space:]]*[^=]+=[[:space:]]*/, "", value)
+            sub(/[[:space:]]+#.*/, "", value)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            sub(/^"/, "", value)
+            sub(/"$/, "", value)
+            print value
+            exit
+        }
+    ' "${file}"
+}
+
+sync_is_configured() {
+    local sync_env="$1"
+    local rclone_remote=""
+    local rsync_source=""
+    if [[ ! -f "${sync_env}" ]]; then
+        return 1
+    fi
+    rclone_remote="$(read_env_value "RCLONE_REMOTE" "${sync_env}")"
+    rsync_source="$(read_env_value "RSYNC_SOURCE" "${sync_env}")"
+    [[ -n "${rclone_remote}" || -n "${rsync_source}" ]]
+}
+
+configure_sync_timer() {
+    local sync_timer="photoframe-sync.timer"
+    local sync_service="photoframe-sync.service"
+    local sync_env="/etc/photoframe/sync.env"
+
+    if ! systemd_unit_exists "${sync_timer}"; then
+        log "${sync_timer} not installed; skipping sync timer activation"
+        return
+    fi
+
+    if sync_is_configured "${sync_env}"; then
+        log "Sync source configured; enabling ${sync_timer}"
+        systemd_enable_unit "${sync_timer}" >/dev/null 2>&1 || true
+        systemd_start_unit "${sync_timer}" >/dev/null 2>&1 || true
+        return
+    fi
+
+    log "Sync source not configured in ${sync_env}; keeping ${sync_timer} disabled"
+    systemd_disable_unit "${sync_timer}" >/dev/null 2>&1 || true
+    systemd_stop_unit "${sync_timer}" >/dev/null 2>&1 || true
+    systemd_stop_unit "${sync_service}" >/dev/null 2>&1 || true
+    systemctl reset-failed "${sync_service}" "${sync_timer}" >/dev/null 2>&1 || true
+}
+
 enable_systemd_units() {
     log "Enabling kiosk services"
     if ! systemd_available; then
@@ -371,10 +425,7 @@ enable_systemd_units() {
         fi
     done
 
-    if systemd_unit_exists photoframe-sync.timer; then
-        systemd_enable_unit photoframe-sync.timer
-        systemd_start_unit photoframe-sync.timer || true
-    fi
+    configure_sync_timer
 }
 
 ensure_persistent_journald() {

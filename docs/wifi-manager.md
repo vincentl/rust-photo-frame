@@ -153,7 +153,7 @@ Re-running the scripts is idempotent: binaries are replaced in place, configs ar
 ## Validation entry points
 
 - Fresh-install acceptance flow: [`software.md#fresh-install-wi-fi-recovery-test`](software.md#fresh-install-wi-fi-recovery-test)
-- Full Wi-Fi validation matrix: [`../developer/test-plan.md#phase-7--wi-fi-provisioning--watcher`](../developer/test-plan.md#phase-7--wi-fi-provisioning--watcher)
+- Full Wi-Fi validation matrix: [`../developer/test-plan.md#phase-7-wi-fi-provisioning-watcher`](../developer/test-plan.md#phase-7-wi-fi-provisioning-watcher)
 - Day-2 failure triage: [`sop.md#wi-fi-failure-triage`](sop.md#wi-fi-failure-triage)
 
 ## Service management
