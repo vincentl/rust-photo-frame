@@ -36,10 +36,6 @@ main() {
   current_uid=$(id -u)
   [[ -n "$kiosk_uid" ]] || err "user 'kiosk' not found"
 
-  local sway_sock
-  sway_sock=$(ls /run/user/${kiosk_uid}/sway-ipc.*.sock 2>/dev/null | head -n1 || true)
-  [[ -S "${sway_sock:-/nonexistent}" ]] || err "failed to locate Sway IPC socket for kiosk (is greetd/sway running?)"
-
   # Helper to run swaymsg as kiosk with proper env
   run_as_kiosk() {
     if [[ "$current_uid" == "$kiosk_uid" ]]; then
@@ -52,6 +48,24 @@ main() {
   run_sway() {
     run_as_kiosk XDG_RUNTIME_DIR="/run/user/${kiosk_uid}" SWAYSOCK="${sway_sock}" swaymsg "$@"
   }
+
+  select_sway_socket() {
+    local runtime_dir="/run/user/${kiosk_uid}"
+    local candidate
+    for candidate in "${runtime_dir}"/sway-ipc.*.sock; do
+      [[ -S "${candidate}" ]] || continue
+      if run_as_kiosk XDG_RUNTIME_DIR="${runtime_dir}" SWAYSOCK="${candidate}" \
+        swaymsg -s "${candidate}" -t get_version >/dev/null 2>&1; then
+        printf '%s\n' "${candidate}"
+        return 0
+      fi
+    done
+    return 1
+  }
+
+  local sway_sock
+  sway_sock=$(select_sway_socket || true)
+  [[ -n "${sway_sock:-}" ]] || err "failed to locate a live Sway IPC socket for kiosk (is greetd/sway running?)"
 
   case "$action" in
     hide)

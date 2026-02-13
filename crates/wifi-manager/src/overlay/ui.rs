@@ -16,7 +16,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalSize, Size};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::window::{Window, WindowAttributes, WindowButtons, WindowId};
+use winit::window::{Fullscreen, Window, WindowAttributes, WindowButtons, WindowId};
 
 #[derive(Args, Debug)]
 #[command(
@@ -200,12 +200,15 @@ impl OverlayApp {
             Window::default_attributes()
                 .with_title("Photo Frame Wi-Fi Recovery")
                 .with_decorations(false)
-                .with_resizable(true)
+                .with_resizable(false)
+                .with_fullscreen(Some(Fullscreen::Borderless(None)))
                 .with_active(true),
         );
         let window = event_loop
             .create_window(attrs)
             .expect("failed to create window");
+        // Request fullscreen again after map so kiosk flows don't depend solely on sway rules.
+        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
         window.set_cursor_visible(false);
         window.set_enabled_buttons(WindowButtons::empty());
         window.set_min_inner_size(Some(Size::Physical(PhysicalSize::new(640, 480))));
@@ -219,6 +222,7 @@ impl OverlayApp {
         self.context = Some(context);
         self.surface = Some(surface);
         self.renderer.scale_factor = window.scale_factor() as f32;
+        self.handle_resize(window.inner_size());
         self.window = Some(window);
         self.needs_redraw = true;
     }

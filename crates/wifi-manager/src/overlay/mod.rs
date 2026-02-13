@@ -7,6 +7,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -282,12 +283,18 @@ impl OverlayController {
 
     fn locate_sway_socket(&self) -> Result<PathBuf> {
         if let Some(path) = &self.config.sway_socket {
-            return Ok(path.clone());
+            if is_live_sway_socket(path) {
+                return Ok(path.clone());
+            }
+            bail!(
+                "configured sway socket is unavailable: {}",
+                path.display()
+            );
         }
 
         if let Some(path) = std::env::var_os("SWAYSOCK") {
             let p = PathBuf::from(path);
-            if is_socket(&p) {
+            if is_live_sway_socket(&p) {
                 return Ok(p);
             }
         }
@@ -299,7 +306,7 @@ impl OverlayController {
                 && let Some(pid) = find_sway_pid(uid)
             {
                 let candidate = dir.join(format!("sway-ipc.{uid}.{pid}.sock"));
-                if is_socket(&candidate) {
+                if is_live_sway_socket(&candidate) {
                     return Ok(candidate);
                 }
             }
@@ -378,7 +385,8 @@ fn find_socket_in_dir(dir: &Path) -> Result<Option<PathBuf>> {
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
-        if name.starts_with("sway-ipc.") && name.ends_with(".sock") {
+        if name.starts_with("sway-ipc.") && name.ends_with(".sock") && is_live_sway_socket(&path)
+        {
             return Ok(Some(path));
         }
     }
@@ -413,6 +421,13 @@ fn is_socket(path: &Path) -> bool {
         Ok(md) => md.file_type().is_socket(),
         Err(_) => false,
     }
+}
+
+fn is_live_sway_socket(path: &Path) -> bool {
+    if !is_socket(path) {
+        return false;
+    }
+    UnixStream::connect(path).is_ok()
 }
 
 fn owner_uid(dir: &Path) -> Option<u32> {
