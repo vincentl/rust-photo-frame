@@ -94,8 +94,8 @@ if [[ ! -x "${APP}" ]]; then
   exit 127
 fi
 
-# Provide a stable Wayland app_id for Sway rules and focus control.
-# Allow override via environment; default matches configuration defaults.
+# Keep WINIT_APP_ID for compatibility with older builds.
+# Current binaries set Wayland app_id via winit window attributes.
 export WINIT_APP_ID="${WINIT_APP_ID:-photoframe}"
 # Control where logs go via PHOTOFRAME_LOG (journal|stdout|file:/path)
 # Defaults to journald for kiosk stability.

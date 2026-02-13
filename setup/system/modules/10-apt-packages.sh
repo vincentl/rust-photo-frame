@@ -40,6 +40,7 @@ PACKAGES=(
     swaybg
     swayidle
     swaylock
+    tmux
     vulkan-tools
 )
 

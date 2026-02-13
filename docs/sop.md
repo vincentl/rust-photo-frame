@@ -51,6 +51,8 @@ Use one of these canonical procedures:
 - Fresh image acceptance flow: [`software.md#fresh-install-wi-fi-recovery-test`](software.md#fresh-install-wi-fi-recovery-test)
 - Full QA matrix (including WAN-down and AP outage scenarios): [`../developer/test-plan.md#phase-7-wi-fi-provisioning-watcher`](../developer/test-plan.md#phase-7-wi-fi-provisioning-watcher)
 
+If fault injection will disrupt your current SSH transport (for example, SSH over `wlan0` while testing `wlan0`), run recovery tests inside `tmux` so the test process survives disconnects.
+
 ## Wi-Fi failure triage
 
 When recovery is stuck, gather these artifacts before changing config:

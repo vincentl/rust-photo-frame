@@ -21,6 +21,36 @@ parse_wifi_interface_from_config() {
   ' "${config_path}" 2>/dev/null || true
 }
 
+ssh_route_interface() {
+  local ssh_client_ip=""
+  local route_line=""
+  if [[ -z "${SSH_CONNECTION:-}" ]]; then
+    return 1
+  fi
+  if ! command -v ip >/dev/null 2>&1; then
+    return 1
+  fi
+
+  ssh_client_ip="$(awk '{print $1}' <<< "${SSH_CONNECTION}" 2>/dev/null || true)"
+  if [[ -z "${ssh_client_ip}" ]]; then
+    return 1
+  fi
+
+  route_line="$(ip -o route get "${ssh_client_ip}" 2>/dev/null | head -n1 || true)"
+  if [[ -z "${route_line}" ]]; then
+    return 1
+  fi
+
+  awk '{
+    for (i = 1; i <= NF; i++) {
+      if ($i == "dev" && (i + 1) <= NF) {
+        print $(i + 1)
+        exit
+      }
+    }
+  }' <<< "${route_line}"
+}
+
 dump_recovery_debug() {
   local wifi_service="$1"
   local start_iso="$2"
@@ -106,6 +136,7 @@ main() {
   local config_interface=""
   local active_connection=""
   local device_state=""
+  local ssh_iface=""
   local start_iso
   local helper_log="/tmp/wifi-recovery-test.log"
 
@@ -125,6 +156,14 @@ main() {
     fail "WIFI_INTERFACE (${wifi_interface}) does not match wifi-manager config interface (${config_interface}). Set ALLOW_INTERFACE_MISMATCH=1 to override."
   fi
   info "Using Wi-Fi interface: ${wifi_interface}"
+
+  ssh_iface="$(ssh_route_interface || true)"
+  if [[ -n "${ssh_iface}" && "${ssh_iface}" == "${wifi_interface}" ]]; then
+    if [[ "${ALLOW_WIFI_SSH_DROP:-0}" != "1" ]]; then
+      fail "Current SSH session routes over ${wifi_interface}; this test will disconnect SSH. Run from local console/alternate management path, or run inside tmux and rerun with ALLOW_WIFI_SSH_DROP=1."
+    fi
+    warn "SSH is routed over ${wifi_interface}; disconnect is expected during fault injection."
+  fi
 
   if ! nmcli -t -f DEVICE device status | grep -Fxq "${wifi_interface}"; then
     fail "Interface ${wifi_interface} not found in nmcli output. Confirm /opt/photoframe/etc/wifi-manager.yaml interface value."

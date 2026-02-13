@@ -225,7 +225,7 @@ sudo sh -lc '
   RUNDIR="/run/user/$(id -u kiosk)";
   SWAYSOCK="$(find "$RUNDIR" -maxdepth 1 -type s -name "sway-ipc.*.sock" -print -quit)";
   [ -S "$SWAYSOCK" ] || { echo "No Sway IPC socket for kiosk (is greetd/Sway running?)" >&2; exit 1; };
-  sudo -u kiosk SWAYSOCK="$SWAYSOCK" swaymsg -s "$SWAYSOCK" exec "env WINIT_APP_ID=wifi-overlay /opt/photoframe/bin/wifi-manager overlay --ssid Test --password-file /var/lib/photoframe/hotspot-password.txt --ui-url http://192.168.4.1:8080/"
+  sudo -u kiosk SWAYSOCK="$SWAYSOCK" swaymsg -s "$SWAYSOCK" exec "/opt/photoframe/bin/wifi-manager overlay --ssid Test --password-file /var/lib/photoframe/hotspot-password.txt --ui-url http://192.168.4.1:8080/"
 '
 ```
 

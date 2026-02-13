@@ -16,7 +16,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalSize, Size};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::window::{Window, WindowButtons, WindowId};
+use winit::window::{Window, WindowAttributes, WindowButtons, WindowId};
 
 #[derive(Args, Debug)]
 #[command(
@@ -46,6 +46,31 @@ pub fn run(args: OverlayCli) -> Result<()> {
     let mut app = OverlayApp::new(font, content);
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+fn with_overlay_app_id(attrs: WindowAttributes) -> WindowAttributes {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    {
+        use winit::platform::wayland::WindowAttributesExtWayland;
+        return attrs.with_name("wifi-overlay", "wifi-overlay");
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )))]
+    {
+        attrs
+    }
 }
 
 fn read_password(path: &Path) -> Result<String> {
@@ -171,11 +196,13 @@ impl OverlayApp {
             return;
         }
 
-        let attrs = Window::default_attributes()
-            .with_title("Photo Frame Wi-Fi Recovery")
-            .with_decorations(false)
-            .with_resizable(true)
-            .with_active(true);
+        let attrs = with_overlay_app_id(
+            Window::default_attributes()
+                .with_title("Photo Frame Wi-Fi Recovery")
+                .with_decorations(false)
+                .with_resizable(true)
+                .with_active(true),
+        );
         let window = event_loop
             .create_window(attrs)
             .expect("failed to create window");

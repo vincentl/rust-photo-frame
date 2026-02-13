@@ -114,7 +114,6 @@ main() {
     XDG_RUNTIME_DIR="/run/user/${kiosk_uid}" \
     SWAYSOCK="${sway_sock}" \
     WAYLAND_DISPLAY="${wl_display}" \
-    WINIT_APP_ID="wifi-overlay" \
     systemd-cat -t wifi-overlay -- \
     "$bin" overlay \
       --ssid "$ssid" \

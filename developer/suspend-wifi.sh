@@ -45,6 +45,8 @@ schedule_restore() {
   local conn_name="$1"; shift
   local delay_min="$1"; shift
   local autoconnect="$1"; shift
+  local device_autoconnect="$1"; shift
+  local iface="$1"; shift
   local bad_name="$1"; shift
   local when="${delay_min}m"
   # Absolute path for nmcli and backup file; minimal environment in timers.
@@ -53,13 +55,14 @@ schedule_restore() {
   if [[ -n "${backup}" ]]; then
     cmd+="$NMCLI connection import type wifi file '$backup' >/dev/null 2>&1 || true; "
   fi
+  cmd+="$NMCLI device set '$iface' autoconnect '$device_autoconnect' >/dev/null 2>&1 || true; "
   cmd+="$NMCLI connection modify '$conn_name' connection.autoconnect '$autoconnect' >/dev/null 2>&1 || true; "
   cmd+="$NMCLI connection up '$conn_name' >/dev/null 2>&1 || true; "
   cmd+="$NMCLI connection delete '$bad_name' >/dev/null 2>&1 || true"
 
   if ! command -v systemd-run >/dev/null 2>&1; then
     log "systemd-run is required to schedule auto-restore. Aborting to avoid stranding Wi‑Fi."
-    log "Manual restore would be: $NMCLI connection modify '$conn_name' connection.autoconnect '$autoconnect'; $NMCLI connection up '$conn_name'; $NMCLI connection delete '$bad_name'"
+    log "Manual restore would be: $NMCLI device set '$iface' autoconnect '$device_autoconnect'; $NMCLI connection modify '$conn_name' connection.autoconnect '$autoconnect'; $NMCLI connection up '$conn_name'; $NMCLI connection delete '$bad_name'"
     exit 2
   fi
 
@@ -101,6 +104,12 @@ if [[ -z "${ORIG_AUTOCONNECT}" ]]; then
 fi
 log "Original autoconnect for '$ACTIVE_CONN': ${ORIG_AUTOCONNECT}"
 
+ORIG_DEVICE_AUTOCONNECT="$($NMCLI -g GENERAL.AUTOCONNECT device show "$IFACE" 2>/dev/null | head -n1 | tr -d '\r' | awk '{print $1}')"
+if [[ -z "${ORIG_DEVICE_AUTOCONNECT}" ]]; then
+  ORIG_DEVICE_AUTOCONNECT="yes"
+fi
+log "Original device autoconnect for '$IFACE': ${ORIG_DEVICE_AUTOCONNECT}"
+
 UUID=$(nmcli -g connection.uuid connection show "$ACTIVE_CONN")
 KEYFILE="$(find_keyfile_by_uuid "$UUID" || true)"
 if [[ -n "$KEYFILE" ]]; then
@@ -112,7 +121,7 @@ else
   log "Warning: could not find keyfile for '$ACTIVE_CONN' (uuid=$UUID); proceeding without keyfile backup"
 fi
 
-schedule_restore "$BACKUP" "$ACTIVE_CONN" "$DELAY_MIN" "$ORIG_AUTOCONNECT" "$BAD_NAME"
+schedule_restore "$BACKUP" "$ACTIVE_CONN" "$DELAY_MIN" "$ORIG_AUTOCONNECT" "$ORIG_DEVICE_AUTOCONNECT" "$IFACE" "$BAD_NAME"
 
 SSID=$(nmcli -g 802-11-wireless.ssid connection show "$ACTIVE_CONN")
 nmcli connection delete "$BAD_NAME" >/dev/null 2>&1 || true
@@ -123,6 +132,7 @@ nmcli connection modify "$BAD_NAME" connection.autoconnect no
 log "Created '$BAD_NAME' for SSID '$SSID' with bad PSK"
 
 nmcli connection modify "$ACTIVE_CONN" connection.autoconnect no || true
+nmcli device set "$IFACE" autoconnect no || true
 log "Temporarily disabled autoconnect on '$ACTIVE_CONN' to force offline transition"
 
 nmcli connection down "$ACTIVE_CONN" || true

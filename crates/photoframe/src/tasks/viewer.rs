@@ -755,7 +755,32 @@ pub fn run_windowed(
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
     use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
-    use winit::window::{Fullscreen, Window, WindowId};
+    use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
+
+    fn with_photo_app_id(attrs: WindowAttributes) -> WindowAttributes {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        ))]
+        {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            return attrs.with_name("photoframe", "photoframe");
+        }
+
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "dragonfly",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd"
+        )))]
+        {
+            attrs
+        }
+    }
 
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1737,7 +1762,7 @@ pub fn run_windowed(
                 return Some(window);
             }
 
-            let attrs = Window::default_attributes().with_title("Photo Frame");
+            let attrs = with_photo_app_id(Window::default_attributes().with_title("Photo Frame"));
             let window = match event_loop.create_window(attrs) {
                 Ok(window) => Arc::new(window),
                 Err(err) => {

@@ -248,6 +248,18 @@ After completing a fresh microSD install and successful deployment, run this end
    tests/run_wifi_recovery.sh
    ```
 
+   Important: if your SSH session is currently routed over the same Wi-Fi interface under test (for example `wlan0`), fault injection will drop SSH. Run from a local console or an alternate management path (Ethernet, second NIC, or remote agent). The script now fails early in this case unless you explicitly set `ALLOW_WIFI_SSH_DROP=1`.
+
+   Recommended for Wi-Fi-only remote sessions: run the test in `tmux` so the process survives SSH disconnects.
+   The setup pipeline installs `tmux`; if it is missing on an older image, install it with `sudo apt install -y tmux`.
+
+   ```bash
+   tmux new -s wifi-recovery
+   ALLOW_WIFI_SSH_DROP=1 make -f tests/Makefile wifi-recovery
+   # After reconnecting over SSH:
+   tmux attach -t wifi-recovery
+   ```
+
    The script will:
 
    - deliberately inject a wrong Wi-Fi password (`developer/suspend-wifi.sh`),
