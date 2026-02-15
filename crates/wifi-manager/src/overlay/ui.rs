@@ -7,10 +7,11 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
+use ab_glyph::{point, Font, FontArc, PxScale, ScaleFont};
 use anyhow::{anyhow, Context, Result};
 use clap::Args;
 use fontdb::{Database, Family, Query, Source};
+use image::ImageReader;
 use softbuffer::{Context as SoftContext, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalSize, Size};
@@ -40,7 +41,8 @@ pub struct OverlayCli {
 
 pub fn run(args: OverlayCli) -> Result<()> {
     let password = read_password(&args.password_file)?;
-    let content = OverlayContent::new(args, password);
+    let qr_asset = read_qr_asset_for_overlay(&args.password_file);
+    let content = OverlayContent::new(args, password, qr_asset);
     let font = load_font()?;
     let event_loop = EventLoop::new()?;
     let mut app = OverlayApp::new(font, content);
@@ -82,6 +84,34 @@ fn read_password(path: &Path) -> Result<String> {
     } else {
         Ok(password)
     }
+}
+
+#[derive(Clone)]
+struct QrAsset {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+impl QrAsset {
+    fn sample_luma(&self, sx: u32, sy: u32) -> u8 {
+        let clamped_x = sx.min(self.width.saturating_sub(1));
+        let clamped_y = sy.min(self.height.saturating_sub(1));
+        let index = (clamped_y * self.width + clamped_x) as usize;
+        self.pixels.get(index).copied().unwrap_or(255)
+    }
+}
+
+fn read_qr_asset_for_overlay(password_file: &Path) -> Option<QrAsset> {
+    let qr_path = password_file.parent()?.join("wifi-qr.png");
+    let reader = ImageReader::open(&qr_path).ok()?;
+    let image = reader.decode().ok()?;
+    let luma = image.to_luma8();
+    Some(QrAsset {
+        width: luma.width(),
+        height: luma.height(),
+        pixels: luma.into_raw(),
+    })
 }
 
 fn load_font() -> Result<FontArc> {
@@ -150,10 +180,11 @@ struct OverlayContent {
     password: String,
     ui_url: String,
     footer: String,
+    qr_asset: Option<QrAsset>,
 }
 
 impl OverlayContent {
-    fn new(cli: OverlayCli, password: String) -> Self {
+    fn new(cli: OverlayCli, password: String, qr_asset: Option<QrAsset>) -> Self {
         let title = cli
             .title
             .unwrap_or_else(|| "Reconnect the photo frame to Wi-Fi".to_string());
@@ -166,6 +197,7 @@ impl OverlayContent {
             password,
             ui_url: cli.ui_url,
             footer,
+            qr_asset,
         }
     }
 }
@@ -397,6 +429,15 @@ impl Renderer {
             layout.content_width,
             layout.typography_scale,
         );
+        cursor_y = self.draw_qr_section(
+            &mut buffer,
+            width,
+            height,
+            cursor_y,
+            layout.content_left,
+            layout.content_width,
+            layout.typography_scale,
+        );
         cursor_y = self.draw_step_three(
             &mut buffer,
             width,
@@ -517,7 +558,7 @@ impl Renderer {
         max_width: f32,
         scale: f32,
     ) -> f32 {
-        let label = "3. Visit this address and follow the prompts:";
+        let label = "4. If needed, open this address manually:";
         let text = &self.content.ui_url;
         let step_top = draw_paragraph(
             buffer,
@@ -545,6 +586,80 @@ impl Renderer {
             HighlightStyle::accent(scale),
             (20.0 * scale).clamp(12.0, 30.0),
         ) + (18.0 * scale).clamp(8.0, 30.0)
+    }
+
+    fn draw_qr_section(
+        &self,
+        buffer: &mut [u32],
+        width: u32,
+        height: u32,
+        top: f32,
+        margin: f32,
+        max_width: f32,
+        scale: f32,
+    ) -> f32 {
+        let label_top = draw_paragraph(
+            buffer,
+            width,
+            height,
+            &self.font,
+            "3. Scan this QR code to open setup on your phone:",
+            (23.0 * scale).clamp(16.0, 40.0),
+            Color::from_rgb(0xe8eef7),
+            margin,
+            top,
+            max_width,
+            (10.0 * scale).clamp(6.0, 18.0),
+        );
+
+        let qr_side = (250.0 * scale).clamp(170.0, 420.0).min(max_width);
+        let card_pad = (14.0 * scale).clamp(8.0, 24.0);
+        let card_side = qr_side + 2.0 * card_pad;
+        let card_left = margin;
+        let card_top = label_top;
+
+        draw_rounded_rect(
+            buffer,
+            width,
+            height,
+            card_left,
+            card_top,
+            card_left + card_side,
+            card_top + card_side,
+            (16.0 * scale).clamp(10.0, 24.0),
+            Color::from_rgb(0xffffff),
+        );
+
+        if let Some(qr_asset) = &self.content.qr_asset {
+            draw_qr_asset(
+                buffer,
+                width,
+                height,
+                qr_asset,
+                card_left + card_pad,
+                card_top + card_pad,
+                qr_side,
+            );
+        } else {
+            let fallback = "QR unavailable";
+            let text_scale = PxScale::from((18.0 * scale).clamp(12.0, 30.0));
+            let text_width = measure_text(fallback, &self.font, text_scale);
+            let text_left = card_left + ((card_side - text_width) * 0.5).max(card_pad);
+            let baseline = card_top + card_side * 0.55;
+            draw_text(
+                buffer,
+                width,
+                height,
+                &self.font,
+                fallback,
+                Color::from_rgb(0x334155),
+                text_left,
+                baseline,
+                text_scale,
+            );
+        }
+
+        card_top + card_side + (18.0 * scale).clamp(8.0, 30.0)
     }
 
     fn draw_footer(
@@ -750,6 +865,48 @@ fn draw_highlight(
     cursor_y
 }
 
+fn draw_qr_asset(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    qr: &QrAsset,
+    left: f32,
+    top: f32,
+    side: f32,
+) {
+    if qr.width == 0 || qr.height == 0 || side <= 1.0 {
+        return;
+    }
+    let x0 = left.max(0.0).floor() as i32;
+    let y0 = top.max(0.0).floor() as i32;
+    let x1 = (left + side).min(width as f32).ceil() as i32;
+    let y1 = (top + side).min(height as f32).ceil() as i32;
+    let draw_w = (x1 - x0).max(1) as u32;
+    let draw_h = (y1 - y0).max(1) as u32;
+
+    for dy in 0..draw_h {
+        for dx in 0..draw_w {
+            let sx = ((dx as f32 / draw_w as f32) * qr.width as f32).floor() as u32;
+            let sy = ((dy as f32 / draw_h as f32) * qr.height as f32).floor() as u32;
+            let luma = qr.sample_luma(sx, sy);
+            let color = if luma < 128 {
+                Color::from_rgb(0x111111)
+            } else {
+                Color::from_rgb(0xffffff)
+            };
+            blend_pixel(
+                buffer,
+                width,
+                height,
+                (x0 as u32 + dx) as f32,
+                (y0 as u32 + dy) as f32,
+                color,
+                1.0,
+            );
+        }
+    }
+}
+
 fn wrap_text(text: &str, font: &FontArc, scale: PxScale, max_width: f32) -> Vec<String> {
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut lines = Vec::new();
@@ -811,16 +968,17 @@ fn draw_text(
             cursor_x += scaled.kern(prev, glyph);
         }
         let advance = scaled.h_advance(glyph);
-        if let Some(outline) = font.outline_glyph(scaled.scaled_glyph(ch)) {
+        let mut positioned = scaled.scaled_glyph(ch);
+        positioned.position = point(cursor_x, baseline);
+        if let Some(outline) = font.outline_glyph(positioned) {
+            let bounds = outline.px_bounds();
             outline.draw(|x, y, coverage| {
-                let fx = x as f32;
-                let fy = y as f32;
                 blend_pixel(
                     buffer,
                     width,
                     height,
-                    cursor_x + fx,
-                    baseline - scaled.ascent() + fy,
+                    bounds.min.x + x as f32,
+                    bounds.min.y + y as f32,
                     color,
                     coverage,
                 );

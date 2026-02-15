@@ -2,6 +2,7 @@
 #
 # Overlay takeover smoke-test for Sway
 # - Launches the Wi‑Fi overlay in the active kiosk Sway session
+# - Prepares realistic overlay assets (password + QR) from wifi-manager config
 # - Verifies it appears (focused + fullscreen) via Sway IPC
 # - Optional: hide/kill the overlay
 #
@@ -13,13 +14,77 @@
 set -euo pipefail
 
 SSID_DEFAULT=${SSID_DEFAULT:-Test-Overlay}
-UI_URL_DEFAULT=${UI_URL_DEFAULT:-http://127.0.0.1:8080/}
-PASS_FILE_DEFAULT=${PASS_FILE_DEFAULT:-/var/tmp/overlay-test-password.txt}
+CONFIG_PATH_DEFAULT=${CONFIG_PATH_DEFAULT:-/opt/photoframe/etc/wifi-manager.yaml}
+PASSWORD_WORD_COUNT=${PASSWORD_WORD_COUNT:-3}
+GENERATE_PASSWORD=${GENERATE_PASSWORD:-1}
+GENERATE_QR=${GENERATE_QR:-1}
 
 log() { printf '[overlay-test] %s\n' "$*"; }
 err() { printf '[overlay-test] ERROR: %s\n' "$*" >&2; exit 1; }
 
 need() { command -v "$1" >/dev/null 2>&1 || err "missing command: $1"; }
+
+strip_yaml_value() {
+  sed -e 's/[[:space:]]+#.*$//' \
+      -e 's/^[[:space:]]*//' \
+      -e 's/[[:space:]]*$//' \
+      -e 's/^"//' \
+      -e 's/"$//'
+}
+
+read_yaml_scalar() {
+  local key="$1"
+  local file="$2"
+  awk -v key="${key}" '
+    /^[[:space:]]*#/ { next }
+    $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
+      value = $0
+      sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "", value)
+      print value
+      exit
+    }
+  ' "${file}" | strip_yaml_value
+}
+
+read_yaml_nested() {
+  local section="$1"
+  local key="$2"
+  local file="$3"
+  awk -v section="${section}" -v key="${key}" '
+    /^[[:space:]]*#/ { next }
+    $0 ~ "^[[:space:]]*" section ":[[:space:]]*$" { in_section = 1; next }
+    in_section == 1 {
+      if ($0 ~ "^[^[:space:]]") { in_section = 0; next }
+      if ($0 ~ "^[[:space:]]+" key ":[[:space:]]*") {
+        value = $0
+        sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "", value)
+        print value
+        exit
+      }
+    }
+  ' "${file}" | strip_yaml_value
+}
+
+generate_password_from_wordlist() {
+  local wordlist_path="$1"
+  local count="$2"
+  [[ -r "${wordlist_path}" ]] || err "wordlist not readable: ${wordlist_path}"
+  local words
+  words="$(grep -Ev '^[[:space:]]*(#|$)' "${wordlist_path}" || true)"
+  [[ -n "${words}" ]] || err "wordlist has no usable entries: ${wordlist_path}"
+  local password=""
+  local i word
+  for ((i = 0; i < count; i++)); do
+    word="$(printf '%s\n' "${words}" | shuf -n1)"
+    [[ -n "${word}" ]] || err "failed to choose random word from ${wordlist_path}"
+    if [[ -z "${password}" ]]; then
+      password="${word}"
+    else
+      password="${password}-${word}"
+    fi
+  done
+  printf '%s\n' "${password}"
+}
 
 main() {
   local action="${1:-show}"
@@ -28,6 +93,7 @@ main() {
   need grep
   need awk
   need ps
+  need shuf
   need timeout || true
 
   # Resolve kiosk user + Sway IPC
@@ -90,27 +156,65 @@ main() {
   esac
 
   # Inputs (safe defaults; override via env)
-  local ssid ui_url pass_file
-  ssid="${SSID:-$SSID_DEFAULT}"
-  ui_url="${UI_URL:-$UI_URL_DEFAULT}"
-  pass_file="${PASS_FILE:-$PASS_FILE_DEFAULT}"
+  local config_path ssid ui_url pass_file
+  local hotspot_ip ui_port var_dir wordlist_path configured_ssid
+  config_path="${WIFI_MANAGER_CONFIG:-$CONFIG_PATH_DEFAULT}"
+  hotspot_ip="192.168.4.1"
+  ui_port="8080"
+  var_dir="/var/lib/photoframe"
+  wordlist_path="/opt/photoframe/share/wordlist.txt"
+  configured_ssid="${SSID_DEFAULT}"
 
-  # Ensure a password file exists and is readable by kiosk
-  if [[ ! -f "$pass_file" ]]; then
-    log "Creating test password file as kiosk at ${pass_file}"
-    run_as_kiosk sh -lc "umask 077; printf '%s\n' 'Test-Overlay-1234' > \"${pass_file}\""
-  else
-    # If the file exists but isn't readable by kiosk, repair ownership/permissions
-    if ! run_as_kiosk test -r "$pass_file"; then
-      log "Adjusting ownership/permissions on ${pass_file} for kiosk"
-      chown kiosk:kiosk "$pass_file" || true
-      chmod 600 "$pass_file" || true
-    fi
+  if [[ -f "${config_path}" ]]; then
+    hotspot_ip="$(read_yaml_nested "hotspot" "ipv4-addr" "${config_path}" || true)"
+    hotspot_ip="${hotspot_ip:-192.168.4.1}"
+    ui_port="$(read_yaml_nested "ui" "port" "${config_path}" || true)"
+    ui_port="${ui_port:-8080}"
+    var_dir="$(read_yaml_scalar "var-dir" "${config_path}" || true)"
+    var_dir="${var_dir:-/var/lib/photoframe}"
+    wordlist_path="$(read_yaml_scalar "wordlist-path" "${config_path}" || true)"
+    wordlist_path="${wordlist_path:-/opt/photoframe/share/wordlist.txt}"
+    configured_ssid="$(read_yaml_nested "hotspot" "ssid" "${config_path}" || true)"
+    configured_ssid="${configured_ssid:-$SSID_DEFAULT}"
   fi
+
+  ssid="${SSID:-${configured_ssid}}"
+  ui_url="${UI_URL:-http://${hotspot_ip}:${ui_port}/}"
+  pass_file="${PASS_FILE:-${var_dir}/hotspot-password.txt}"
 
   # Ensure the overlay binary exists
   local bin=/opt/photoframe/bin/wifi-manager
   [[ -x "$bin" ]] || err "wifi-manager not found at ${bin} (deploy application stage first)"
+
+  # Prepare a realistic hotspot password from the configured wordlist.
+  if [[ "${GENERATE_PASSWORD}" == "1" ]]; then
+    local generated_password
+    generated_password="$(generate_password_from_wordlist "${wordlist_path}" "${PASSWORD_WORD_COUNT}")"
+    log "Generated ${PASSWORD_WORD_COUNT}-word test hotspot password from ${wordlist_path}"
+    run_as_kiosk PASS_PATH="${pass_file}" PASS_VALUE="${generated_password}" sh -lc '
+      umask 077
+      install -d -m 750 "$(dirname -- "$PASS_PATH")"
+      printf "%s\n" "$PASS_VALUE" > "$PASS_PATH"
+    '
+  else
+    [[ -f "${pass_file}" ]] || err "password file missing and GENERATE_PASSWORD=0: ${pass_file}"
+  fi
+  if ! run_as_kiosk test -r "${pass_file}"; then
+    err "password file is not readable by kiosk: ${pass_file}"
+  fi
+
+  # Generate QR asset used by the recovery portal page.
+  if [[ "${GENERATE_QR}" == "1" ]]; then
+    if [[ -f "${config_path}" ]]; then
+      log "Generating QR asset using ${config_path}"
+      run_as_kiosk "${bin}" qr --config "${config_path}" >/dev/null
+      log "QR asset refreshed at ${var_dir}/wifi-qr.png"
+    else
+      log "Skipping QR generation: config not found at ${config_path}"
+    fi
+  fi
+
+  log "Note: overlay-test does not activate hotspot or change NetworkManager state"
 
   # Determine Wayland display socket under XDG_RUNTIME_DIR
   local wl_sock wl_display
