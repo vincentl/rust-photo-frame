@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use clap::Args;
 use fontdb::{Database, Family, Query, Source};
 use softbuffer::{Context as SoftContext, Surface};
@@ -325,77 +325,95 @@ impl Renderer {
 
     fn render(&self, width: u32, height: u32) -> Vec<u32> {
         let mut buffer = vec![0u32; (width as usize) * (height as usize)];
-        let bg = Color::from_rgb(0x0b1014);
-        fill_rect(
+        let layout = OverlayLayout::for_surface(width, height, self.scale_factor);
+
+        fill_vertical_gradient(
             &mut buffer,
             width,
             height,
-            0.0,
-            0.0,
-            width as f32,
-            height as f32,
-            bg,
+            Color::from_rgb(0x070b12),
+            Color::from_rgb(0x101924),
         );
 
-        let scale = self.scale_factor.max(1.0);
-        let margin = 80.0 * scale;
-        let max_width = (width as f32 - 2.0 * margin).max(320.0 * scale);
+        // Panel border glow + inner surface.
+        draw_rounded_rect(
+            &mut buffer,
+            width,
+            height,
+            layout.panel_left,
+            layout.panel_top,
+            layout.panel_right,
+            layout.panel_bottom,
+            layout.panel_radius,
+            Color::from_rgba(0x2e3f53, 0.86),
+        );
+        draw_rounded_rect(
+            &mut buffer,
+            width,
+            height,
+            layout.panel_left + layout.border_thickness,
+            layout.panel_top + layout.border_thickness,
+            layout.panel_right - layout.border_thickness,
+            layout.panel_bottom - layout.border_thickness,
+            (layout.panel_radius - layout.border_thickness).max(8.0),
+            Color::from_rgba(0x0f1723, 0.96),
+        );
 
-        let mut cursor_y = margin;
+        let mut cursor_y = layout.content_top;
 
         cursor_y = self.draw_title(
             &mut buffer,
             width,
             height,
             cursor_y,
-            margin,
-            max_width,
-            scale,
+            layout.content_left,
+            layout.content_width,
+            layout.typography_scale,
         );
         cursor_y = self.draw_subtitle(
             &mut buffer,
             width,
             height,
             cursor_y,
-            margin,
-            max_width,
-            scale,
+            layout.content_left,
+            layout.content_width,
+            layout.typography_scale,
         );
         cursor_y = self.draw_step_one(
             &mut buffer,
             width,
             height,
             cursor_y,
-            margin,
-            max_width,
-            scale,
+            layout.content_left,
+            layout.content_width,
+            layout.typography_scale,
         );
         cursor_y = self.draw_step_two(
             &mut buffer,
             width,
             height,
             cursor_y,
-            margin,
-            max_width,
-            scale,
+            layout.content_left,
+            layout.content_width,
+            layout.typography_scale,
         );
         cursor_y = self.draw_step_three(
             &mut buffer,
             width,
             height,
             cursor_y,
-            margin,
-            max_width,
-            scale,
+            layout.content_left,
+            layout.content_width,
+            layout.typography_scale,
         );
         let _ = self.draw_footer(
             &mut buffer,
             width,
             height,
             cursor_y,
-            margin,
-            max_width,
-            scale,
+            layout.content_left,
+            layout.content_width,
+            layout.typography_scale,
         );
 
         buffer
@@ -411,7 +429,7 @@ impl Renderer {
         max_width: f32,
         scale: f32,
     ) -> f32 {
-        let size = 56.0 * scale;
+        let size = (52.0 * scale).clamp(30.0, 92.0);
         let color = Color::from_rgb(0xf3f6fb);
         draw_paragraph(
             buffer,
@@ -424,8 +442,8 @@ impl Renderer {
             margin,
             top,
             max_width,
-            28.0 * scale,
-        )
+            (16.0 * scale).clamp(10.0, 32.0),
+        ) + (20.0 * scale).clamp(10.0, 32.0)
     }
 
     fn draw_subtitle(
@@ -438,8 +456,8 @@ impl Renderer {
         max_width: f32,
         scale: f32,
     ) -> f32 {
-        let size = 30.0 * scale;
-        let color = Color::from_rgb(0xc7ccd7);
+        let size = (25.0 * scale).clamp(17.0, 46.0);
+        let color = Color::from_rgb(0xc8d2df);
         draw_paragraph(
             buffer,
             width,
@@ -451,8 +469,8 @@ impl Renderer {
             margin,
             top,
             max_width,
-            38.0 * scale,
-        )
+            (14.0 * scale).clamp(8.0, 26.0),
+        ) + (26.0 * scale).clamp(12.0, 40.0)
     }
 
     fn draw_step_one(
@@ -507,12 +525,12 @@ impl Renderer {
             height,
             &self.font,
             label,
-            30.0 * scale,
-            Color::from_rgb(0xf3f6fb),
+            (23.0 * scale).clamp(16.0, 40.0),
+            Color::from_rgb(0xe8eef7),
             margin,
             top,
             max_width,
-            20.0 * scale,
+            (10.0 * scale).clamp(6.0, 18.0),
         );
         draw_highlight(
             buffer,
@@ -520,13 +538,13 @@ impl Renderer {
             height,
             &self.font,
             text,
-            32.0 * scale,
+            (27.0 * scale).clamp(18.0, 50.0),
             margin,
             step_top,
             max_width,
             HighlightStyle::accent(scale),
-            48.0 * scale,
-        )
+            (20.0 * scale).clamp(12.0, 30.0),
+        ) + (18.0 * scale).clamp(8.0, 30.0)
     }
 
     fn draw_footer(
@@ -545,13 +563,62 @@ impl Renderer {
             height,
             &self.font,
             &self.content.footer,
-            26.0 * scale,
-            Color::from_rgb(0x98a1ae),
+            (21.0 * scale).clamp(14.0, 38.0),
+            Color::from_rgb(0xa6b2c1),
             margin,
             top,
             max_width,
-            28.0 * scale,
+            (12.0 * scale).clamp(7.0, 22.0),
         )
+    }
+}
+
+struct OverlayLayout {
+    panel_left: f32,
+    panel_top: f32,
+    panel_right: f32,
+    panel_bottom: f32,
+    panel_radius: f32,
+    border_thickness: f32,
+    content_left: f32,
+    content_top: f32,
+    content_width: f32,
+    typography_scale: f32,
+}
+
+impl OverlayLayout {
+    fn for_surface(width: u32, height: u32, scale_factor: f32) -> Self {
+        let width_f = width.max(1) as f32;
+        let height_f = height.max(1) as f32;
+        let viewport_scale = (width_f / 1920.0).min(height_f / 1080.0).clamp(0.85, 2.2);
+        let scale = (viewport_scale * scale_factor.clamp(1.0, 1.2)).clamp(0.85, 2.4);
+
+        let outer_margin = (28.0 * scale).clamp(18.0, 76.0);
+        let available_width = (width_f - 2.0 * outer_margin).max(320.0);
+        let panel_target_width = (1480.0 * viewport_scale).clamp(740.0, available_width);
+        let panel_width = panel_target_width.min(available_width);
+        let panel_left = ((width_f - panel_width) * 0.5).max(outer_margin);
+        let panel_right = panel_left + panel_width;
+        let panel_top = outer_margin;
+        let panel_bottom = (height_f - outer_margin).max(panel_top + 200.0);
+
+        let panel_padding = (50.0 * scale).clamp(24.0, 94.0);
+        let content_left = panel_left + panel_padding;
+        let content_top = panel_top + panel_padding;
+        let content_width = (panel_width - panel_padding * 2.0).max(260.0);
+
+        Self {
+            panel_left,
+            panel_top,
+            panel_right,
+            panel_bottom,
+            panel_radius: (34.0 * scale).clamp(16.0, 52.0),
+            border_thickness: (3.0 * scale).clamp(2.0, 6.0),
+            content_left,
+            content_top,
+            content_width,
+            typography_scale: scale,
+        }
     }
 }
 
@@ -573,12 +640,12 @@ fn draw_step_with_highlight(
         height,
         font,
         label,
-        30.0 * scale,
-        Color::from_rgb(0xf3f6fb),
+        (23.0 * scale).clamp(16.0, 40.0),
+        Color::from_rgb(0xe8eef7),
         margin,
         top,
         max_width,
-        20.0 * scale,
+        (10.0 * scale).clamp(6.0, 18.0),
     );
     draw_highlight(
         buffer,
@@ -586,13 +653,13 @@ fn draw_step_with_highlight(
         height,
         font,
         value,
-        34.0 * scale,
+        (29.0 * scale).clamp(20.0, 54.0),
         margin,
         step_top,
         max_width,
         HighlightStyle::primary(scale),
-        48.0 * scale,
-    )
+        (20.0 * scale).clamp(12.0, 30.0),
+    ) + (16.0 * scale).clamp(8.0, 30.0)
 }
 
 #[derive(Clone, Copy)]
@@ -643,12 +710,15 @@ fn draw_highlight(
 ) -> f32 {
     let scale = PxScale::from(size);
     let metrics = line_metrics(font, scale);
-    let lines = wrap_text(text, font, scale, max_width - 2.0 * style.pad_x);
+    let text_max_width = (max_width - 2.0 * style.pad_x).max(80.0);
+    let lines = wrap_text(text, font, scale, text_max_width);
 
     let mut cursor_y = top;
     for line in lines.iter() {
         let text_width = measure_text(line, font, scale);
-        let background_width = text_width + 2.0 * style.pad_x;
+        let ideal_width = text_width + 2.0 * style.pad_x;
+        let min_width = (max_width * style.min_width_ratio).max(ideal_width);
+        let background_width = min_width.min(max_width);
         let background_height = metrics.ascent + metrics.descent + 2.0 * style.pad_y;
         let background_left = left;
         let background_top = cursor_y;
@@ -731,11 +801,15 @@ fn draw_text(
 ) {
     let scaled = font.as_scaled(scale);
     let mut cursor_x = left;
+    let mut previous = None;
     for ch in text.chars() {
         if ch.is_control() {
             continue;
         }
         let glyph = scaled.glyph_id(ch);
+        if let Some(prev) = previous {
+            cursor_x += scaled.kern(prev, glyph);
+        }
         let advance = scaled.h_advance(glyph);
         if let Some(outline) = font.outline_glyph(scaled.scaled_glyph(ch)) {
             outline.draw(|x, y, coverage| {
@@ -753,6 +827,7 @@ fn draw_text(
             });
         }
         cursor_x += advance;
+        previous = Some(glyph);
     }
 }
 
@@ -894,12 +969,17 @@ fn point_in_corner(dx: f32, dy: f32, radius: f32, corner: Corner) -> bool {
 fn measure_text(text: &str, font: &FontArc, scale: PxScale) -> f32 {
     let scaled_font = font.as_scaled(scale);
     let mut width = 0.0f32;
+    let mut previous = None;
     for ch in text.chars() {
         if ch == '\n' {
             continue;
         }
         let glyph_id = scaled_font.glyph_id(ch);
+        if let Some(prev) = previous {
+            width += scaled_font.kern(prev, glyph_id);
+        }
         width += scaled_font.h_advance(glyph_id);
+        previous = Some(glyph_id);
     }
     width.max(0.0)
 }
@@ -921,6 +1001,31 @@ fn fill_rect(
     for y in y0.max(0)..y1.min(height as i32) {
         for x in x0.max(0)..x1.min(width as i32) {
             blend_pixel(buffer, width, height, x as f32, y as f32, color, color.a);
+        }
+    }
+}
+
+fn fill_vertical_gradient(buffer: &mut [u32], width: u32, height: u32, top: Color, bottom: Color) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    for y in 0..height {
+        let t = if height <= 1 {
+            0.0
+        } else {
+            y as f32 / (height - 1) as f32
+        };
+        let row = Color {
+            r: top.r + (bottom.r - top.r) * t,
+            g: top.g + (bottom.g - top.g) * t,
+            b: top.b + (bottom.b - top.b) * t,
+            a: top.a + (bottom.a - top.a) * t,
+        };
+        let packed = pack_color(row.rgb());
+        let start = (y * width) as usize;
+        let end = start + width as usize;
+        for pixel in &mut buffer[start..end] {
+            *pixel = packed;
         }
     }
 }
@@ -988,6 +1093,12 @@ impl Color {
         Self { r, g, b, a: 1.0 }
     }
 
+    fn from_rgba(hex: u32, alpha: f32) -> Self {
+        let mut value = Self::from_rgb(hex);
+        value.a = alpha.clamp(0.0, 1.0);
+        value
+    }
+
     fn rgb(self) -> (f32, f32, f32) {
         (self.r, self.g, self.b)
     }
@@ -998,24 +1109,27 @@ struct HighlightStyle {
     foreground: Color,
     pad_x: f32,
     pad_y: f32,
+    min_width_ratio: f32,
 }
 
 impl HighlightStyle {
     fn primary(scale: f32) -> Self {
         Self {
-            background: Color::from_rgb(0x1c61d6),
+            background: Color::from_rgb(0x2458bc),
             foreground: Color::from_rgb(0xffffff),
-            pad_x: 28.0 * scale,
-            pad_y: 22.0 * scale,
+            pad_x: (22.0 * scale).clamp(12.0, 38.0),
+            pad_y: (15.0 * scale).clamp(8.0, 26.0),
+            min_width_ratio: 0.58,
         }
     }
 
     fn accent(scale: f32) -> Self {
         Self {
-            background: Color::from_rgb(0x1a8f67),
+            background: Color::from_rgb(0x1f8f66),
             foreground: Color::from_rgb(0xffffff),
-            pad_x: 28.0 * scale,
-            pad_y: 22.0 * scale,
+            pad_x: (22.0 * scale).clamp(12.0, 38.0),
+            pad_y: (15.0 * scale).clamp(8.0, 26.0),
+            min_width_ratio: 0.72,
         }
     }
 }
