@@ -6,10 +6,15 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{info, warn};
 
 pub async fn activate(config: &Config) -> Result<Vec<String>> {
     let (password, words) = password::generate_from_wordlist(&config.wordlist_path, 3)?;
+    // Force a profile restart before applying credentials so NetworkManager
+    // doesn't keep serving an older active AP key across repeated recovery runs.
+    if let Err(err) = nm::bring_hotspot_down(&config.hotspot).await {
+        warn!(error = ?err, "failed to bring hotspot down before password refresh");
+    }
     nm::ensure_hotspot_profile(&config.hotspot, &config.interface, Some(&password)).await?;
     nm::bring_hotspot_up(&config.hotspot).await?;
     persist_password(config, &password)?;
