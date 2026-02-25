@@ -156,18 +156,30 @@ read_hotspot_profile_psk() {
   printf '%s' "${raw}"
 }
 
+hotspot_interface_ipv4() {
+  local wifi_interface="$1"
+  local raw=""
+
+  raw="$(nmcli -g IP4.ADDRESS device show "${wifi_interface}" 2>/dev/null | head -n1 | tr -d '\r')"
+  raw="${raw#*:}"
+  raw="${raw%%/*}"
+  printf '%s' "${raw}"
+}
+
 main() {
   local wifi_service="${WIFI_SERVICE:-photoframe-wifi-manager.service}"
   local photo_service="${PHOTO_SERVICE:-greetd.service}"
   local wifi_interface="${WIFI_INTERFACE:-}"
   local hotspot_id="${HOTSPOT_ID:-pf-hotspot}"
   local hotspot_ssid="${HOTSPOT_SSID:-PhotoFrame-Setup}"
+  local ui_port="${WIFI_UI_PORT:-8080}"
   local wait_hotspot_sec="${WAIT_HOTSPOT_SEC:-150}"
   local wait_online_sec="${WAIT_ONLINE_SEC:-240}"
   local config_interface=""
   local active_connection=""
   local device_state=""
   local ssh_iface=""
+  local hotspot_ipv4=""
   local hotspot_password_file="/var/lib/photoframe/hotspot-password.txt"
   local displayed_password=""
   local hotspot_profile_psk=""
@@ -286,6 +298,20 @@ main() {
     fail "Hotspot password file and NetworkManager hotspot PSK do not match"
   fi
   pass "Hotspot password file matches NetworkManager profile"
+
+  hotspot_ipv4="$(hotspot_interface_ipv4 "${wifi_interface}")"
+  if [[ -n "${hotspot_ipv4}" ]]; then
+    info "Hotspot interface address on ${wifi_interface}: ${hotspot_ipv4}"
+    if command -v curl >/dev/null 2>&1; then
+      run_cmd \
+        "Recovery UI reachable on hotspot address" \
+        bash -lc "curl -fsS --max-time 5 'http://${hotspot_ipv4}:${ui_port}/status' >/dev/null"
+    else
+      warn "curl not installed; skipping direct Recovery UI reachability check"
+    fi
+  else
+    warn "Unable to determine hotspot IPv4 address on ${wifi_interface}; skipping direct Recovery UI reachability check"
+  fi
 
   section "Operator action"
   info "Join hotspot SSID '${hotspot_ssid}' from a phone/laptop, open the QR/setup URL, and submit valid home Wi-Fi credentials."
