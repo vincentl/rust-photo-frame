@@ -141,6 +141,7 @@ pub async fn ensure_hotspot_profile(
     interface: &str,
     password: Option<&str>,
 ) -> Result<()> {
+    let hotspot_ipv4_cidr = format!("{}/24", hotspot.ipv4_addr);
     let existing = list_connection_names().await?;
     if existing.contains(&hotspot.connection_id) {
         debug!(id = %hotspot.connection_id, "hotspot profile already exists; ensuring settings");
@@ -182,6 +183,14 @@ pub async fn ensure_hotspot_profile(
             &hotspot.connection_id,
             "ipv4.method",
             "shared",
+        ])
+        .await?;
+        nmcli(&[
+            "connection",
+            "modify",
+            &hotspot.connection_id,
+            "ipv4.addresses",
+            &hotspot_ipv4_cidr,
         ])
         .await?;
         nmcli(&[
@@ -235,6 +244,14 @@ pub async fn ensure_hotspot_profile(
             &hotspot.connection_id,
             "ipv4.method",
             "shared",
+        ])
+        .await?;
+        nmcli(&[
+            "connection",
+            "modify",
+            &hotspot.connection_id,
+            "ipv4.addresses",
+            &hotspot_ipv4_cidr,
         ])
         .await?;
         nmcli(&[
