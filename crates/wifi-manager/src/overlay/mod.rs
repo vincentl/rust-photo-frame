@@ -53,8 +53,9 @@ impl OverlayController {
     pub async fn show(&mut self, request: &OverlayRequest) -> Result<()> {
         self.prune_exited()?;
         if self.child.is_some() {
-            self.focus_overlay().await?;
-            return Ok(());
+            // Always refresh overlay content so any regenerated hotspot password
+            // is re-read from disk and rendered immediately.
+            self.stop_overlay_only().await?;
         }
 
         let command_parts = self.config.command.clone();
@@ -128,6 +129,26 @@ impl OverlayController {
         sleep(Duration::from_millis(250)).await;
         if let Err(err) = self.focus_overlay().await {
             warn!(error = ?err, "failed to focus overlay window");
+        }
+        Ok(())
+    }
+
+    async fn stop_overlay_only(&mut self) -> Result<()> {
+        if let Some(mut child) = self.child.take() {
+            if let Some(pid) = child.id() {
+                debug!(pid, "restarting wifi overlay process");
+            }
+            child.start_kill().ok();
+            let _ = child.wait().await;
+        }
+        if let Err(err) = self
+            .run_commands(vec![format!(
+                "[app_id=\"{}\"] kill",
+                self.config.overlay_app_id
+            )])
+            .await
+        {
+            debug!(error = ?err, "failed to kill existing overlay window");
         }
         Ok(())
     }

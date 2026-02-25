@@ -541,7 +541,7 @@ impl Renderer {
         max_width: f32,
         scale: f32,
     ) -> f32 {
-        let label = "2. Enter the password:";
+        let label = "2. Enter the password exactly (include hyphens):";
         let text = &self.content.password;
         draw_step_with_highlight(
             buffer, width, height, &self.font, label, text, top, margin, max_width, scale,
