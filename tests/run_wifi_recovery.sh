@@ -268,7 +268,7 @@ main() {
   if [[ ! -s "${hotspot_password_file}" ]]; then
     fail "Expected hotspot password file at ${hotspot_password_file}"
   fi
-  displayed_password="$(sudo tr -d '\r\n' <"${hotspot_password_file}" 2>/dev/null || true)"
+  displayed_password="$(sudo cat "${hotspot_password_file}" 2>/dev/null | tr -d '\r\n' || true)"
   if [[ -z "${displayed_password}" ]]; then
     fail "Hotspot password file is empty: ${hotspot_password_file}"
   fi
