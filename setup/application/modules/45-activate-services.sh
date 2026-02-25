@@ -114,8 +114,8 @@ for unit in photoframe-wifi-manager.service buttond.service; do
     if run_sudo systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
         log INFO "Enabling ${unit}"
         run_sudo systemctl enable "${unit}" >/dev/null 2>&1 || true
-        log INFO "Starting ${unit}"
-        run_sudo systemctl start "${unit}" >/dev/null 2>&1 || true
+        log INFO "Restarting ${unit}"
+        run_sudo systemctl restart "${unit}" >/dev/null 2>&1 || true
     fi
 done
 

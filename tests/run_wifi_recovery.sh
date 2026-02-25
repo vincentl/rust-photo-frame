@@ -125,6 +125,37 @@ wait_for_hotspot_transition() {
   return 1
 }
 
+is_three_word_password() {
+  local password="$1"
+  local segments=()
+  local segment
+
+  if [[ -z "${password}" || "${password}" =~ [[:space:]] ]]; then
+    return 1
+  fi
+
+  IFS='-' read -r -a segments <<< "${password}"
+  if [[ "${#segments[@]}" -ne 3 ]]; then
+    return 1
+  fi
+  for segment in "${segments[@]}"; do
+    if [[ -z "${segment}" ]]; then
+      return 1
+    fi
+  done
+
+  return 0
+}
+
+read_hotspot_profile_psk() {
+  local hotspot_id="$1"
+  local raw=""
+
+  raw="$(sudo nmcli --show-secrets -g 802-11-wireless-security.psk connection show "${hotspot_id}" 2>/dev/null | head -n1 | tr -d '\r')"
+  raw="${raw#*:}"
+  printf '%s' "${raw}"
+}
+
 main() {
   local wifi_service="${WIFI_SERVICE:-photoframe-wifi-manager.service}"
   local photo_service="${PHOTO_SERVICE:-greetd.service}"
@@ -137,6 +168,9 @@ main() {
   local active_connection=""
   local device_state=""
   local ssh_iface=""
+  local hotspot_password_file="/var/lib/photoframe/hotspot-password.txt"
+  local displayed_password=""
+  local hotspot_profile_psk=""
   local start_iso
   local helper_log="/tmp/wifi-recovery-test.log"
 
@@ -229,6 +263,29 @@ main() {
   fi
 
   run_cmd "Hotspot is active (${hotspot_id})" bash -lc "nmcli -t -f NAME connection show --active | grep -Fx '${hotspot_id}'"
+
+  section "Validate hotspot password state"
+  if [[ ! -s "${hotspot_password_file}" ]]; then
+    fail "Expected hotspot password file at ${hotspot_password_file}"
+  fi
+  displayed_password="$(sudo tr -d '\r\n' <"${hotspot_password_file}" 2>/dev/null || true)"
+  if [[ -z "${displayed_password}" ]]; then
+    fail "Hotspot password file is empty: ${hotspot_password_file}"
+  fi
+  if is_three_word_password "${displayed_password}"; then
+    pass "Hotspot password uses three-word format"
+  else
+    fail "Hotspot password is not in expected three-word format"
+  fi
+
+  hotspot_profile_psk="$(read_hotspot_profile_psk "${hotspot_id}")"
+  if [[ -z "${hotspot_profile_psk}" ]]; then
+    fail "Unable to read hotspot PSK from NetworkManager for ${hotspot_id}"
+  fi
+  if [[ "${hotspot_profile_psk}" != "${displayed_password}" ]]; then
+    fail "Hotspot password file and NetworkManager hotspot PSK do not match"
+  fi
+  pass "Hotspot password file matches NetworkManager profile"
 
   section "Operator action"
   info "Join hotspot SSID '${hotspot_ssid}' from a phone/laptop, open the QR/setup URL, and submit valid home Wi-Fi credentials."

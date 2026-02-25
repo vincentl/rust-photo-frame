@@ -16,8 +16,10 @@ pub async fn activate(config: &Config) -> Result<Vec<String>> {
         warn!(error = ?err, "failed to bring hotspot down before password refresh");
     }
     nm::ensure_hotspot_profile(&config.hotspot, &config.interface, Some(&password)).await?;
-    nm::bring_hotspot_up(&config.hotspot).await?;
+    // Persist before launching the AP so overlay rendering and portal guidance
+    // always source the same password we just wrote into NetworkManager.
     persist_password(config, &password)?;
+    nm::bring_hotspot_up(&config.hotspot).await?;
     info!(ssid = %config.hotspot.ssid, "hotspot activated");
     Ok(words)
 }
