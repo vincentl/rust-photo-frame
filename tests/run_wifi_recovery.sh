@@ -314,8 +314,16 @@ main() {
   fi
 
   section "Operator action"
-  info "Join hotspot SSID '${hotspot_ssid}' from a phone/laptop, open the QR/setup URL, and submit valid home Wi-Fi credentials."
+  info "Join hotspot SSID '${hotspot_ssid}' from a phone/laptop, open the setup URL, and submit valid home Wi-Fi credentials."
   confirm "Did the portal accept credentials submission?"
+
+  section "Wait for submission acknowledgement"
+  if wait_for_submission_ack "$wifi_service" "$start_iso" 75; then
+    pass "Provisioning request observed by watcher"
+  else
+    dump_recovery_debug "$wifi_service" "$start_iso"
+    fail "No provisioning request observed within 75s after submission"
+  fi
 
   section "Wait for online transition"
   if wait_for_journal_pattern "$wifi_service" "$start_iso" 'reason=(provision-success|probe-success|link-restored)' "$wait_online_sec"; then
@@ -343,6 +351,26 @@ main() {
   sudo journalctl -u "$wifi_service" --since "$start_iso" --no-pager || true
 
   pass "Wi-Fi recovery acceptance completed"
+}
+
+wait_for_submission_ack() {
+  local service="$1"
+  local since="$2"
+  local timeout="${3:-75}"
+  local deadline
+
+  deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if sudo journalctl -u "$service" --since "$since" --no-pager 2>/dev/null \
+      | grep -E 'to=ProvisioningAttempt.*reason=provision-request|reason=provision-request.*to=ProvisioningAttempt' >/dev/null; then
+      return 0
+    fi
+    if [[ -s /var/lib/photoframe/wifi-request.json ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
 }
 
 wait_for_journal_pattern() {

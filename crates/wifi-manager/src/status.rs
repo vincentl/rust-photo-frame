@@ -5,7 +5,9 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use time::OffsetDateTime;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,20 +110,46 @@ pub fn redact_ssid(ssid: &str) -> String {
 }
 
 fn write_json_with_mode<T: Serialize>(path: &Path, value: &T, mode: u32) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent dir at {}", parent.display()))?;
-    }
+    let parent = path
+        .parent()
+        .context("target JSON path has no parent directory")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create parent dir at {}", parent.display()))?;
+
     let json = serde_json::to_vec_pretty(value)?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    let stem = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("record");
+    let tmp_path = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        stem,
+        std::process::id(),
+        nonce
+    ));
+
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
+        .create_new(true)
         .truncate(true)
         .mode(mode)
-        .open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
+        .open(&tmp_path)
+        .with_context(|| format!("failed to open {}", tmp_path.display()))?;
     file.write_all(&json)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", tmp_path.display()))?;
+    drop(file);
+
+    fs::set_permissions(&tmp_path, fs::Permissions::from_mode(mode))
+        .with_context(|| format!("failed to set permissions on {}", tmp_path.display()))?;
+    fs::rename(&tmp_path, path)
+        .with_context(|| format!("failed to atomically replace {}", path.display()))?;
     Ok(())
 }
 

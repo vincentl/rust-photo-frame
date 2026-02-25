@@ -71,24 +71,18 @@ async fn shutdown_signal() {
 }
 
 async fn render_form(State(state): State<UiState>) -> Html<String> {
-    let qr_available = qr::qr_path(&state.config).exists();
-    let qr_tag = if qr_available {
-        "<img src=\"/qr.png\" alt=\"QR code\" class=\"qr\">"
-    } else {
-        "<p class=\"qr-missing\">QR code is generating…</p>"
-    };
     let body = format!(
         "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>\
-<title>Photo Frame Wi-Fi Setup</title><style>{}</style></head><body><main><section class='hero'><h1>Photo Frame Wi-Fi Recovery</h1><p>Connect to the hotspot <strong>{}</strong> using the password shown on the frame. Scan the QR code first, then fill in your network details.</p>{}</section><section class='form'><form method='post' action='/submit'><label>Wi-Fi Name (SSID)<input name='ssid' required maxlength='32'></label><label>Password<input name='password' type='password' minlength='8' maxlength='63' required></label><button type='submit'>Connect</button></form><p class='status-link'><a href='/status'>View connection status</a></p></section></main></body></html>",
+<title>Photo Frame Wi-Fi Setup</title><style>{}</style></head><body><main><section class='hero'><h1>Photo Frame Wi-Fi Recovery</h1><p>Connect to the hotspot <strong>{}</strong> using the password shown on the frame, then submit your home Wi-Fi details below.</p></section><section class='form'><form method='post' action='/submit'><label>Wi-Fi Name (SSID)<input name='ssid' required maxlength='32'></label><label>Password<input name='password' type='password' minlength='8' maxlength='63' required></label><button type='submit'>Connect</button></form><p class='status-link'><a href='/status'>View connection status</a></p></section></main></body></html>",
         styles(),
-        state.config.hotspot.ssid,
-        qr_tag
+        state.config.hotspot.ssid
     );
     Html(body)
 }
 
 async fn handle_submit(State(state): State<UiState>, Form(form): Form<WifiForm>) -> Response {
     let ssid = form.ssid.clone();
+    info!(ssid = %redact_ssid(&ssid), "received provisioning form submission");
     match queue_submission(&state.config, &form).await {
         Ok(message) => Html(success_page(&message)).into_response(),
         Err(err) => {
@@ -137,10 +131,15 @@ async fn queue_submission(config: &Config, form: &WifiForm) -> Result<String> {
             status: "queued".to_string(),
             message: message.clone(),
             ssid: redact_ssid(&form.ssid),
-            attempt_id: Some(attempt_id),
+            attempt_id: Some(attempt_id.clone()),
             error: None,
         },
     )?;
+    info!(
+        attempt_id = %attempt_id,
+        ssid = %redact_ssid(&form.ssid),
+        "queued provisioning request"
+    );
 
     Ok(message)
 }
