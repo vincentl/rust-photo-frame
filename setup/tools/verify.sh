@@ -138,35 +138,6 @@ if [[ -x "${BIN_POWERCTL}" ]]; then
   }
 fi
 
-read_env_value() {
-  local key="$1"
-  local file="$2"
-  awk -v key="${key}" '
-    /^[[:space:]]*#/ { next }
-    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
-      value = $0
-      sub(/^[[:space:]]*[^=]+=[[:space:]]*/, "", value)
-      sub(/[[:space:]]+#.*/, "", value)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-      sub(/^"/, "", value)
-      sub(/"$/, "", value)
-      print value
-      exit
-    }
-  ' "${file}"
-}
-
-sync_is_configured() {
-  local rclone_remote=""
-  local rsync_source=""
-  if [[ ! -f "${SYNC_ENV_PATH}" ]]; then
-    return 1
-  fi
-  rclone_remote="$(read_env_value "RCLONE_REMOTE" "${SYNC_ENV_PATH}")"
-  rsync_source="$(read_env_value "RSYNC_SOURCE" "${SYNC_ENV_PATH}")"
-  [[ -n "${rclone_remote}" || -n "${rsync_source}" ]]
-}
-
 # systemd service health
 if systemd_available; then
   check_unit() {
@@ -238,7 +209,7 @@ if systemd_available; then
   check_seatd
   check_unit photoframe-wifi-manager.service ERROR "installed by app deploy"
   check_unit buttond.service WARN "optional, installed by app deploy"
-  if sync_is_configured; then
+  if sync_is_configured "${SYNC_ENV_PATH}"; then
     check_unit photoframe-sync.timer WARN "run 'sudo systemctl enable --now photoframe-sync.timer' after configuring ${SYNC_ENV_PATH}"
   else
     if systemd_unit_exists photoframe-sync.timer; then

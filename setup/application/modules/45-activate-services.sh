@@ -19,36 +19,6 @@ run_sudo() {
     sudo "$@"
 }
 
-read_env_value() {
-    local key="$1"
-    local file="$2"
-    awk -v key="${key}" '
-        /^[[:space:]]*#/ { next }
-        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
-            value = $0
-            sub(/^[[:space:]]*[^=]+=[[:space:]]*/, "", value)
-            sub(/[[:space:]]+#.*/, "", value)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-            sub(/^"/, "", value)
-            sub(/"$/, "", value)
-            print value
-            exit
-        }
-    ' "${file}"
-}
-
-sync_is_configured() {
-    local sync_env="$1"
-    local rclone_remote=""
-    local rsync_source=""
-    if [[ ! -f "${sync_env}" ]]; then
-        return 1
-    fi
-    rclone_remote="$(read_env_value "RCLONE_REMOTE" "${sync_env}")"
-    rsync_source="$(read_env_value "RSYNC_SOURCE" "${sync_env}")"
-    [[ -n "${rclone_remote}" || -n "${rsync_source}" ]]
-}
-
 configure_sync_timer() {
     if ! run_sudo systemctl list-unit-files "${SYNC_TIMER}" >/dev/null 2>&1; then
         log INFO "${SYNC_TIMER} not installed; skipping sync timer activation"

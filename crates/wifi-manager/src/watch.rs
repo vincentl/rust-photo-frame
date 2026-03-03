@@ -18,6 +18,17 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
+/// Seconds to wait after queuing credentials before tearing down the hotspot.
+/// This gives the recovery portal time to deliver its final HTTP response to
+/// the browser before the AP interface disappears.
+const POST_SUBMIT_SETTLE_SECS: u64 = 3;
+
+/// Seconds to wait after the hotspot is deactivated before asking
+/// NetworkManager to activate the infrastructure connection.  This lets NM
+/// finish releasing the radio from AP mode so the subsequent `connection up`
+/// does not race with the interface state transition.
+const NM_SETTLE_SECS: u64 = 2;
+
 pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     fs::create_dir_all(&config.var_dir)
         .with_context(|| format!("failed to create var dir at {}", config.var_dir.display()))?;
@@ -566,31 +577,36 @@ async fn apply_provision_request(
         warn!(error = ?err, "failed to persist connecting status");
     }
 
-    let connection_id = match nm::add_or_update_wifi(
-        &config.interface,
-        &request.ssid,
-        &request.password,
-    )
-    .await
-    {
-        Ok(value) => value,
-        Err(err) => {
-            record_attempt_error(
-                config,
-                request,
-                "Failed to save Wi-Fi credentials.",
-                err.to_string(),
-            );
-            if let Err(recover_err) = ensure_hotspot_active(config, recovery, overlay).await {
-                warn!(error = ?recover_err, "failed to recover hotspot after provisioning save failure");
+    let connection_id =
+        match nm::add_or_update_wifi(&config.interface, &request.ssid, &request.password).await {
+            Ok(value) => value,
+            Err(err) => {
+                record_attempt_error(
+                    config,
+                    request,
+                    "Failed to save Wi-Fi credentials.",
+                    err.to_string(),
+                );
+                restore_hotspot_or_reset(config, recovery, overlay, "provisioning save failure")
+                    .await;
+                return ProvisionOutcome::Failed;
             }
-            return ProvisionOutcome::Failed;
-        }
-    };
+        };
+
+    // Wait for the recovery portal to finish delivering its success response
+    // before the AP interface disappears.  Without this pause the browser's
+    // TCP connection is cut mid-transfer and the user sees a network error
+    // instead of the "credentials saved" page.
+    sleep(Duration::from_secs(POST_SUBMIT_SETTLE_SECS)).await;
 
     if let Err(err) = hotspot::deactivate(config).await {
         warn!(error = ?err, "failed to disable hotspot before applying credentials");
     }
+
+    // Give NetworkManager time to fully release the radio from AP mode before
+    // requesting infrastructure association; an immediate `connection up` races
+    // with the interface state transition and can fail silently.
+    sleep(Duration::from_secs(NM_SETTLE_SECS)).await;
 
     if let Err(err) = nm::activate_connection(&connection_id).await {
         record_attempt_error(
@@ -599,13 +615,16 @@ async fn apply_provision_request(
             "Failed to activate Wi-Fi connection.",
             err.to_string(),
         );
-        if let Err(recover_err) = ensure_hotspot_active(config, recovery, overlay).await {
-            warn!(error = ?recover_err, "failed to recover hotspot after activation error");
-        }
+        restore_hotspot_or_reset(config, recovery, overlay, "activation error").await;
         return ProvisionOutcome::Failed;
     }
 
     if wait_for_infrastructure_online(config, config.recovery_connect_timeout_sec).await {
+        // Enable autoconnect now that we have confirmed the credentials work so
+        // NM reconnects to this network automatically on subsequent boots.
+        if let Err(err) = nm::enable_connection_autoconnect(&connection_id).await {
+            warn!(error = ?err, "failed to enable autoconnect on new profile");
+        }
         let msg = "Frame is back online.".to_string();
         if let Err(err) = write_last_attempt(
             config,
@@ -628,9 +647,7 @@ async fn apply_provision_request(
             "Unable to confirm connection. Double-check the password and try again.",
             "connection timeout".to_string(),
         );
-        if let Err(err) = ensure_hotspot_active(config, recovery, overlay).await {
-            warn!(error = ?err, "failed to restore hotspot after connection timeout");
-        }
+        restore_hotspot_or_reset(config, recovery, overlay, "connection timeout").await;
         ProvisionOutcome::Failed
     }
 }
@@ -666,6 +683,36 @@ async fn ensure_hotspot_active(
     Ok(())
 }
 
+/// Try to restore the recovery hotspot after a provisioning failure.
+///
+/// If the hotspot cannot be brought back up we invalidate the current recovery
+/// session by taking `recovery` to `None` (stopping the UI process).  The
+/// watcher's backoff path will then call `enter_recovery` to start fresh
+/// instead of staying stuck in `RecoveryHotspotActive` with the AP down.
+async fn restore_hotspot_or_reset(
+    config: &Config,
+    recovery: &mut Option<ActiveRecovery>,
+    overlay: &mut OverlayController,
+    context: &str,
+) {
+    match ensure_hotspot_active(config, recovery, overlay).await {
+        Ok(()) => {}
+        Err(err) => {
+            warn!(
+                error = ?err,
+                context,
+                "failed to restore hotspot after provisioning failure; resetting recovery session"
+            );
+            // Tear down the UI subprocess so the backoff path can call
+            // enter_recovery and restart the entire recovery session cleanly.
+            if let Some(mut active) = recovery.take() {
+                active.ui_process.start_kill().ok();
+                let _ = active.ui_process.wait().await;
+            }
+        }
+    }
+}
+
 async fn run_reconnect_probe(
     config: &Config,
     recovery: &mut Option<ActiveRecovery>,
@@ -686,9 +733,7 @@ async fn run_reconnect_probe(
         return true;
     }
 
-    if let Err(err) = ensure_hotspot_active(config, recovery, overlay).await {
-        warn!(error = ?err, "failed to restore hotspot after reconnect probe");
-    }
+    restore_hotspot_or_reset(config, recovery, overlay, "reconnect probe").await;
     false
 }
 

@@ -94,35 +94,6 @@ wait_for_control_socket() {
     return 1
 }
 
-read_env_value() {
-    local key="$1"
-    local file="$2"
-    awk -v key="${key}" '
-        /^[[:space:]]*#/ { next }
-        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
-            value = $0
-            sub(/^[[:space:]]*[^=]+=[[:space:]]*/, "", value)
-            sub(/[[:space:]]+#.*/, "", value)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-            sub(/^"/, "", value)
-            sub(/"$/, "", value)
-            print value
-            exit
-        }
-    ' "${file}"
-}
-
-sync_is_configured() {
-    local rclone_remote=""
-    local rsync_source=""
-    if [[ ! -f "${SYNC_ENV_PATH}" ]]; then
-        return 1
-    fi
-    rclone_remote="$(read_env_value "RCLONE_REMOTE" "${SYNC_ENV_PATH}")"
-    rsync_source="$(read_env_value "RSYNC_SOURCE" "${SYNC_ENV_PATH}")"
-    [[ -n "${rclone_remote}" || -n "${rsync_source}" ]]
-}
-
 if [[ ! -x "${BIN_PATH}" ]]; then
     log ERROR "Binary ${BIN_PATH} missing or not executable"
     exit 1
@@ -225,7 +196,7 @@ if systemd_available; then
     check_enabled "${WIFI_SERVICE}" "${kiosk_hint}"
 
     check_service "${BUTTON_SERVICE}" "WARN" "${kiosk_hint}"
-    if sync_is_configured; then
+    if sync_is_configured "${SYNC_ENV_PATH}"; then
         check_service "${SYNC_TIMER}" "WARN" "run 'sudo systemctl enable --now ${SYNC_TIMER}' after configuring ${SYNC_ENV_PATH}"
     else
         if systemd_unit_exists "${SYNC_TIMER}"; then
@@ -279,7 +250,7 @@ else
     seatd_status="not checked (systemctl unavailable)"
 fi
 
-if sync_is_configured; then
+if sync_is_configured "${SYNC_ENV_PATH}"; then
     sync_config_status="configured (${SYNC_ENV_PATH})"
 else
     sync_config_status="not configured (${SYNC_ENV_PATH}; set RCLONE_REMOTE or RSYNC_SOURCE)"

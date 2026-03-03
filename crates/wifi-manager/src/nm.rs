@@ -396,12 +396,16 @@ pub async fn add_or_update_wifi(interface: &str, ssid: &str, psk: &str) -> Resul
         ])
         .await?;
         nmcli(&["connection", "modify", &connection_id, "wifi-sec.psk", psk]).await?;
+        // Keep autoconnect disabled during the provisioning attempt so
+        // NetworkManager does not race to activate this profile while the
+        // recovery hotspot is still tearing down.  The caller enables it
+        // after confirming a successful connection.
         nmcli(&[
             "connection",
             "modify",
             &connection_id,
             "connection.autoconnect",
-            "yes",
+            "no",
         ])
         .await?;
     } else {
@@ -421,12 +425,29 @@ pub async fn add_or_update_wifi(interface: &str, ssid: &str, psk: &str) -> Resul
             "wpa-psk",
             "wifi-sec.psk",
             psk,
+            // Autoconnect is intentionally off until the caller confirms the
+            // connection is live; this prevents NM from competing with the
+            // explicit activation request while the hotspot is still active.
             "connection.autoconnect",
-            "yes",
+            "no",
         ])
         .await?;
     }
     Ok(connection_id)
+}
+
+/// Enable autoconnect on a saved connection profile so NetworkManager
+/// activates it automatically on future boots.
+pub async fn enable_connection_autoconnect(connection_id: &str) -> Result<()> {
+    nmcli(&[
+        "connection",
+        "modify",
+        connection_id,
+        "connection.autoconnect",
+        "yes",
+    ])
+    .await?;
+    Ok(())
 }
 
 pub async fn activate_connection(connection_id: &str) -> Result<()> {

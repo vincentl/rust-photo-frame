@@ -125,12 +125,7 @@ fn write_json_with_mode<T: Serialize>(path: &Path, value: &T, mode: u32) -> Resu
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("record");
-    let tmp_path = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        stem,
-        std::process::id(),
-        nonce
-    ));
+    let tmp_path = parent.join(format!(".{}.{}.{}.tmp", stem, std::process::id(), nonce));
 
     let mut file = OpenOptions::new()
         .write(true)

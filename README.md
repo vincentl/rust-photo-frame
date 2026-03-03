@@ -1,14 +1,16 @@
 # Photo Frame
 
-A digital photo frame driver implemented in Rust with a pipeline tuned for Raspberry Pi hardware. Watches a photo library, weights the playlist so new images appear more frequently, and renders each slide with configurable matting, transitions, and photo effects.
+A Rust-powered digital photo frame for Raspberry Pi. It watches a photo library on disk (or synced from the cloud), weights the playlist so newer images appear more often, and renders each slide with configurable matting, transitions, and photo effects — all on-device, no internet required after setup.
 
-**Built for:** Raspberry Pi hobbyists, makers or photographers who want a bespoke display, and Rust developers interested in embedded graphics pipelines.
+**Built for:** Raspberry Pi hobbyists, makers, and photographers who want a bespoke display they fully control.
 
-**Highlights:**
+**What it does:**
 
-- Runs entirely on-device with a configurable playlist weighting system.
-- Supports rich visual treatments (mats, transitions, print simulation) without requiring graphics expertise.
-- External buttond integration handles wake/sleep scheduling and Wayland-friendly DPMS commands for HDMI displays.
+- **Slideshow engine** — GPU-accelerated rendering with matting, transitions (fade, wipe, push, e-ink simulation), and print simulation effects.
+- **Smart playlist** — recursively scans a configurable library directory; new photos appear more frequently until they've been shown enough times.
+- **Wi-Fi self-recovery** — when Wi-Fi drops, the frame launches a secured hotspot with a QR code and guided web UI so you can enter new credentials without a keyboard.
+- **Hardware button** — `buttond` handles wake/sleep via a physical GPIO button and enforces a configurable daily sleep schedule.
+- **Cloud sync (optional)** — a systemd timer runs `rclone` or `rsync` to keep the local library in sync with a remote source.
 
 ## Table of Contents
 
@@ -17,12 +19,11 @@ A digital photo frame driver implemented in Rust with a pipeline tuned for Raspb
 3. [Software Setup](#software-setup)
 4. [Wi-Fi Recovery & Provisioning](#wi-fi-recovery-provisioning)
 5. [Documentation Guide](#documentation-guide)
-6. [Features](#features)
-7. [Architecture Overview](#architecture-overview)
-8. [Configuration](#configuration)
-9. [Fabrication](#fabrication)
-10. [References](#references)
-11. [License](#license)
+6. [Architecture Overview](#architecture-overview)
+7. [Configuration](#configuration)
+8. [Fabrication](#fabrication)
+9. [References](#references)
+10. [License](#license)
 
 ## New to Photo Frame?
 
@@ -37,7 +38,7 @@ If you follow `docs/software.md` from top to bottom, you will finish with an ins
 
 ## Hardware
 
-Plan your build around a Raspberry Pi 5, a portrait-capable 4K monitor, and mounting hardware that hides cables while keeping airflow open. The dedicated hardware guide covers the recommended bill of materials plus optional accessories and planning tips. [Full details →](docs/hardware.md)
+The project is tested on a Raspberry Pi 5 with a portrait-capable 4K monitor. A Pi 4 may also work but has not been formally tested; GPU-intensive effects may perform differently. The dedicated hardware guide covers the recommended bill of materials plus optional accessories and planning tips. [Full details →](docs/hardware.md)
 
 ## Software Setup
 
@@ -77,19 +78,6 @@ Use [docs/README.md](docs/README.md) for a role-based map (fresh install, day-2 
 - `docs/`: operational and architecture guides.
 - `tests/`: manual smoke and diagnostics scripts.
 
-## Features
-
-- Recursively scans a configurable photo library directory
-  - Detects changes from external synchronization processes
-    - Automatically adds new photos to the playlist
-    - Removes deleted photos from the playlist
-  - Prioritizes newer photos with user-configurable display rates
-- Configurable matting, transitions, and photo effects
-- Supports multiple image formats: JPG, PNG, GIF, WebP, BMP, TIFF
-- Robust error handling with structured logging
-- buttond automatically derives the active Wayland display socket at startup, waiting briefly for the compositor when needed so DPMS commands stay reliable
-- Boots to the greeting screen and waits for external `set-state` commands before advancing, keeping scheduling logic in buttond.
-
 ## Architecture Overview
 
 Curious how the frame stays responsive? This optional deep dive outlines the async tasks and their communication patterns. Skip ahead to [Configuration](#configuration) if you just want to tune the experience.
@@ -101,7 +89,7 @@ flowchart LR
   MAIN[Main] --> FILES[PhotoFiles]
   MAIN --> MAN[PhotoManager]
   MAIN --> LOAD[PhotoLoader]
-  MAIN --> AFFECT[PhotoAffect]
+  MAIN --> AFFECT[PhotoEffect]
   MAIN --> VIEW[PhotoViewer]
 
   FILES -->|inventory updates| MAN
@@ -133,12 +121,12 @@ See [docs/credits.md](docs/credits.md) for image attributions.
 
 - **Procedural studio mat weave texture.** Our weave shading is adapted from Mike Cauchi’s breakdown of tillable cloth shading, which layers sine-profiled warp/weft threads with randomized grain to keep the pattern from banding. See ["Research – Tillable Images and Cloth Shading"](https://www.mikecauchiart.com/single-post/2017/01/23/research-tillable-images-and-cloth-shading).
 - **Print simulation shading.** The gallery-lighting and relief model follows guidance from Rohit A. Patil, Mark D. Fairchild, and Garrett M. Johnson’s paper ["3D Simulation of Prints for Improved Soft Proofing"](https://doi.org/10.1117/12.813471).
+
 ## AI Statement
 
-This project was developed with significant assistance from OpenAI’s AI tools:
+This project was developed with significant assistance from Anthropic’s AI tools:
 
-- **ChatGPT** was used for design discussions, debugging strategies, and drafting technical documentation.
-- **Codex** (OpenAI’s software engineering agent framework) was used extensively for code generation and documentation.
+- **Claude** was used extensively for design discussions, code generation, debugging, and drafting technical documentation.
 
 ## License
 

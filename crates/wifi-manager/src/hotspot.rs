@@ -59,13 +59,12 @@ fn persist_password(config: &Config, password: &str) -> Result<()> {
         .open(&temp_path)
         .with_context(|| format!("failed to open {}", temp_path.display()))?;
     use std::io::Write;
-    file.write_all(password.as_bytes())
-        .with_context(|| {
-            format!(
-                "failed to write hotspot password to {}",
-                temp_path.display()
-            )
-        })?;
+    file.write_all(password.as_bytes()).with_context(|| {
+        format!(
+            "failed to write hotspot password to {}",
+            temp_path.display()
+        )
+    })?;
     file.sync_all()
         .with_context(|| format!("failed to sync {}", temp_path.display()))?;
     drop(file);

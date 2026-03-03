@@ -307,10 +307,7 @@ impl OverlayController {
             if is_live_sway_socket(path) {
                 return Ok(path.clone());
             }
-            bail!(
-                "configured sway socket is unavailable: {}",
-                path.display()
-            );
+            bail!("configured sway socket is unavailable: {}", path.display());
         }
 
         if let Some(path) = std::env::var_os("SWAYSOCK") {
@@ -406,8 +403,7 @@ fn find_socket_in_dir(dir: &Path) -> Result<Option<PathBuf>> {
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
-        if name.starts_with("sway-ipc.") && name.ends_with(".sock") && is_live_sway_socket(&path)
-        {
+        if name.starts_with("sway-ipc.") && name.ends_with(".sock") && is_live_sway_socket(&path) {
             return Ok(Some(path));
         }
     }

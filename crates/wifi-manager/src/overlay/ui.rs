@@ -7,8 +7,8 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ab_glyph::{point, Font, FontArc, PxScale, ScaleFont};
-use anyhow::{anyhow, Context, Result};
+use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
+use anyhow::{Context, Result, anyhow};
 use clap::Args;
 use fontdb::{Database, Family, Query, Source};
 use image::ImageReader;

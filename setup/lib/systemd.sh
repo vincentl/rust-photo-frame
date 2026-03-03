@@ -154,3 +154,35 @@ systemd_remove_dropins() {
     local unit="$1"
     rm -rf "${SYSTEMD_DIR}/${unit}.d"
 }
+
+# Read a KEY=value pair from an env file, stripping comments and quotes.
+read_env_value() {
+    local key="$1"
+    local file="$2"
+    awk -v key="${key}" '
+        /^[[:space:]]*#/ { next }
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            value = $0
+            sub(/^[[:space:]]*[^=]+=[[:space:]]*/, "", value)
+            sub(/[[:space:]]+#.*/, "", value)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            sub(/^"/, "", value)
+            sub(/"$/, "", value)
+            print value
+            exit
+        }
+    ' "${file}"
+}
+
+# Return 0 if RCLONE_REMOTE or RSYNC_SOURCE is set in the given env file.
+sync_is_configured() {
+    local sync_env="$1"
+    local rclone_remote=""
+    local rsync_source=""
+    if [[ ! -f "${sync_env}" ]]; then
+        return 1
+    fi
+    rclone_remote="$(read_env_value "RCLONE_REMOTE" "${sync_env}")"
+    rsync_source="$(read_env_value "RSYNC_SOURCE" "${sync_env}")"
+    [[ -n "${rclone_remote}" || -n "${rsync_source}" ]]
+}

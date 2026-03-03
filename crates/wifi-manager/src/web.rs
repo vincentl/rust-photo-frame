@@ -191,7 +191,7 @@ fn render_status_html(config: &Config) -> String {
 
 fn success_page(message: &str) -> String {
     format!(
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta http-equiv='refresh' content='3;url=/status'><title>Connecting…</title><style>{}</style></head><body><main><section class='status'><h1>Connecting…</h1><p>{}</p><p>The frame is applying your credentials. This page will refresh with live status.</p></section></main></body></html>",
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Credentials saved</title><style>{}</style></head><body><main><section class='status'><h1>Credentials saved</h1><p>{}</p><p>This hotspot will shut down while the frame joins your network. Rejoin your home Wi-Fi \u{2014} if the frame connects successfully the recovery screen will close. If it fails, the <strong>PhotoFrame-Setup</strong> hotspot will reappear and you can try again.</p></section></main></body></html>",
         styles(),
         message
     )
