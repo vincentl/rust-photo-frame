@@ -524,7 +524,7 @@ impl Renderer {
         max_width: f32,
         scale: f32,
     ) -> f32 {
-        let label = "1. Join the hotspot network:";
+        let label = "1. Scan the QR code OR join the hotspot manually:";
         let text = &self.content.ssid;
         draw_step_with_highlight(
             buffer, width, height, &self.font, label, text, top, margin, max_width, scale,
@@ -541,7 +541,7 @@ impl Renderer {
         max_width: f32,
         scale: f32,
     ) -> f32 {
-        let label = "2. Enter the password exactly (include hyphens):";
+        let label = "2. If joining manually, enter this password (include hyphens):";
         let text = &self.content.password;
         draw_step_with_highlight(
             buffer, width, height, &self.font, label, text, top, margin, max_width, scale,
@@ -558,7 +558,7 @@ impl Renderer {
         max_width: f32,
         scale: f32,
     ) -> f32 {
-        let label = "4. If needed, open this address manually:";
+        let label = "4. Once joined, open this address in your browser:";
         let text = &self.content.ui_url;
         let step_top = draw_paragraph(
             buffer,
@@ -603,7 +603,7 @@ impl Renderer {
             width,
             height,
             &self.font,
-            "3. Scan this QR code to open setup on your phone:",
+            "3. Scan QR to join the hotspot (iOS/Android camera app):",
             (23.0 * scale).clamp(16.0, 40.0),
             Color::from_rgb(0xe8eef7),
             margin,
