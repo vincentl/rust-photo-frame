@@ -28,7 +28,7 @@ pub fn apply_print_simulation(image: &mut RgbaImage, options: &PrintSimulationOp
     let light_angle = options.light_angle_degrees.to_radians();
     let light_dir = (light_angle.cos(), light_angle.sin());
     let relief_strength = options.relief_strength.max(0.0);
-    let sheen_strength = options.sheen_strength.max(0.0).min(1.0);
+    let sheen_strength = options.sheen_strength.clamp(0.0, 1.0);
     let ink_spread = options.ink_spread.max(0.0);
     let paper = [
         f32::from(options.paper_color[0]) / 255.0,

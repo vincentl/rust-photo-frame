@@ -193,10 +193,10 @@ impl MattingPipeline {
             let result_tx = Arc::clone(&result_tx);
             std::thread::spawn(move || {
                 while let Ok(task) = task_rx.recv() {
-                    if let Some(result) = process_mat_task(task) {
-                        if result_tx.send(result).is_err() {
-                            break;
-                        }
+                    if let Some(result) = process_mat_task(task)
+                        && result_tx.send(result).is_err()
+                    {
+                        break;
                     }
                 }
             });
@@ -204,6 +204,9 @@ impl MattingPipeline {
         Self { task_tx, result_rx }
     }
 
+    // MatTask is large by design (contains image buffers); returning it on error
+    // lets the caller reclaim the task without re-allocation.
+    #[allow(clippy::result_large_err)]
     fn try_submit(&self, task: MatTask) -> Result<(), MatTask> {
         match self.task_tx.try_send(task) {
             Ok(()) => Ok(()),
@@ -589,11 +592,12 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             if *sigma > 0.0 {
                 let mut sample = bg;
                 let mut sigma_px = *sigma;
-                let scale = sample_scale
-                    .is_finite()
-                    .then_some(*sample_scale)
-                    .unwrap_or_else(MattingMode::default_blur_sample_scale)
-                    .clamp(0.01, 1.0);
+                let scale = if sample_scale.is_finite() {
+                    *sample_scale
+                } else {
+                    MattingMode::default_blur_sample_scale()
+                }
+                .clamp(0.01, 1.0);
                 if scale < 1.0 {
                     let sample_w = ((canvas_w as f32) * scale)
                         .round()
@@ -938,6 +942,7 @@ pub fn run_windowed(
             self.sleep.as_mut()
         }
 
+        #[allow(clippy::too_many_arguments)]
         fn with_scene_mut<'a, R>(
             &'a mut self,
             window: Option<&'a Window>,
@@ -1088,9 +1093,7 @@ pub fn run_windowed(
                 }
             };
 
-            let Some(mut mode) = self.mode.take() else {
-                return None;
-            };
+            let mut mode = self.mode.take()?;
             let surface = self.active_surface();
             let mut bridge = MattingBridge {
                 preload_count: self.preload_count,
@@ -1659,15 +1662,15 @@ pub fn run_windowed(
             self.drain_mat_results();
 
             let mode_kind = self.mode_kind();
-            if !matches!(mode_kind, ViewerModeKind::Sleep) {
-                if let Some(mut mode) = self.mode.take() {
-                    {
-                        let wake = mode.wake_mut();
-                        self.upload_ready_results_for_wake(wake);
-                        self.queue_mat_tasks_for_wake(wake);
-                    }
-                    self.mode = Some(mode);
+            if !matches!(mode_kind, ViewerModeKind::Sleep)
+                && let Some(mut mode) = self.mode.take()
+            {
+                {
+                    let wake = mode.wake_mut();
+                    self.upload_ready_results_for_wake(wake);
+                    self.queue_mat_tasks_for_wake(wake);
                 }
+                self.mode = Some(mode);
             }
 
             let _ = self.with_active_scene(|scene, ctx| {
@@ -1739,10 +1742,8 @@ pub fn run_windowed(
                     if priority {
                         let replace_next = wake.next().is_some_and(|stage| stage.path == path);
                         wake.pending_mut().retain(|queued| queued.path != path);
-                        if replace_next {
-                            if let Some(stage) = wake.take_next() {
-                                wake.pending_mut().push_front(stage);
-                            }
+                        if replace_next && let Some(stage) = wake.take_next() {
+                            wake.pending_mut().push_front(stage);
                         }
                         wake.pending_mut().push_front(new_tex);
                     } else {
@@ -2202,7 +2203,6 @@ pub fn run_windowed(
                             frame.present();
                             screen.after_submit();
                             self.record_frame_presented();
-                            return;
                         }
                         ViewerModeKind::Greeting => {
                             let Some(screen) = mode.greeting_mut() else {
@@ -2221,7 +2221,6 @@ pub fn run_windowed(
                             frame.present();
                             screen.after_submit();
                             self.record_frame_presented();
-                            return;
                         }
                         ViewerModeKind::Wake => {
                             let wake = mode.wake_mut();
@@ -2367,7 +2366,6 @@ pub fn run_windowed(
                             frame.present();
                             wake.after_present();
                             self.record_frame_presented();
-                            return;
                         }
                     }
                 }

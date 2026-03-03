@@ -139,7 +139,7 @@ mod neon {
             dst.len()
         );
         assert!(
-            weights.len() >= 2 * radius + 1,
+            weights.len() > 2 * radius,
             "blur_pass: weights too short ({} < {})",
             weights.len(),
             2 * radius + 1

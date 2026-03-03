@@ -164,9 +164,12 @@ mod greeting {
 
     impl Default for SleepScreenConfig {
         fn default() -> Self {
-            let mut screen = ScreenMessageConfig::default();
-            screen.message = Some("Going to Sleep".to_string());
-            Self { screen }
+            Self {
+                screen: ScreenMessageConfig {
+                    message: Some("Going to Sleep".to_string()),
+                    ..ScreenMessageConfig::default()
+                },
+            }
         }
     }
 }
@@ -200,7 +203,7 @@ mod awake {
         pub fn next_transition_after(&self, from: DateTime<Tz>) -> Option<(DateTime<Tz>, bool)> {
             let start_date = from.date_naive();
             for offset in 0..=7 {
-                let offset_days = i64::try_from(offset).ok()?;
+                let offset_days = i64::from(offset);
                 let date = start_date + ChronoDuration::days(offset_days);
                 for interval in self.intervals_for_date(date) {
                     if interval.start > from {
@@ -272,7 +275,7 @@ mod awake {
             Ok(())
         }
 
-        fn validate_ranges(ranges: &mut Vec<AwakeTimeRange>, label: &str) -> Result<()> {
+        fn validate_ranges(ranges: &mut [AwakeTimeRange], label: &str) -> Result<()> {
             ranges.sort_unstable_by_key(|range| range.start());
             let mut previous_end: Option<NaiveTime> = None;
             for range in ranges.iter() {

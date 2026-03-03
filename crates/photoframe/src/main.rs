@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
     );
 
     if let Some(iterations) = playlist_dry_run {
-        run_playlist_dry_run(&*cfg, iterations, now_override, playlist_seed)?;
+        run_playlist_dry_run(&cfg, iterations, now_override, playlist_seed)?;
         return Ok(());
     }
 
@@ -342,10 +342,10 @@ struct SocketCleanup {
 #[cfg(unix)]
 impl Drop for SocketCleanup {
     fn drop(&mut self) {
-        if let Err(err) = std::fs::remove_file(&self.path) {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                tracing::debug!(path = %self.path.display(), ?err, "failed to remove control socket");
-            }
+        if let Err(err) = std::fs::remove_file(&self.path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::debug!(path = %self.path.display(), ?err, "failed to remove control socket");
         }
     }
 }
@@ -358,18 +358,18 @@ async fn run_control_socket(
     greeting_delay: Duration,
     schedule: Option<config::AwakeScheduleConfig>,
 ) -> Result<()> {
-    if let Some(parent) = socket_path.parent() {
-        if let Err(err) = std::fs::create_dir_all(parent) {
-            if err.kind() == std::io::ErrorKind::PermissionDenied {
-                return Err(err).with_context(|| {
-                    format!(
-                        "failed to create control socket directory {parent:?}; ensure the directory is writable or set control-socket-path"
-                    )
-                });
-            }
-            return Err(err)
-                .with_context(|| format!("failed to create control socket directory {parent:?}"));
+    if let Some(parent) = socket_path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        if err.kind() == std::io::ErrorKind::PermissionDenied {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to create control socket directory {parent:?}; ensure the directory is writable or set control-socket-path"
+                )
+            });
         }
+        return Err(err)
+            .with_context(|| format!("failed to create control socket directory {parent:?}"));
     }
 
     if socket_path.exists() {

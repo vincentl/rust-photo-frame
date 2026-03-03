@@ -106,8 +106,8 @@ fn main() -> Result<()> {
                 let mut handled = false;
                 for event in events {
                     handled = true;
-                    match event.destructure() {
-                        EventSummary::Key(_, KeyCode::KEY_POWER, value) => match value {
+                    if let EventSummary::Key(_, KeyCode::KEY_POWER, value) = event.destructure() {
+                        match value {
                             1 => {
                                 tracker.on_press(Instant::now());
                             }
@@ -117,8 +117,7 @@ fn main() -> Result<()> {
                                 }
                             }
                             _ => {}
-                        },
-                        _ => {}
+                        }
                     }
                 }
                 !handled
@@ -227,7 +226,11 @@ impl ButtondSettings {
         let durations = Durations::from_millis(debounce_ms, single_window_ms, double_window_ms);
         let device = device_override.or(device);
         let mut shutdown_command = shutdown_command.into_spec("shutdown");
-        configure_shutdown_args(&shutdown_command.program, &mut shutdown_command.args, force_shutdown);
+        configure_shutdown_args(
+            &shutdown_command.program,
+            &mut shutdown_command.args,
+            force_shutdown,
+        );
         let ScreenConfig {
             off_delay_ms,
             on_command,
@@ -539,7 +542,11 @@ impl CommandExecutor for SwayCommandExecutor {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let extra = stderr.trim();
             if extra.is_empty() {
-                bail!("{} command exited with status {}", command.label, output.status);
+                bail!(
+                    "{} command exited with status {}",
+                    command.label,
+                    output.status
+                );
             } else {
                 bail!(
                     "{} command exited with status {}: {}",
@@ -1362,10 +1369,10 @@ fn scheduler_loop(
             )
         };
 
-        if let Some((command, _)) = pending_command.as_ref() {
-            if current_mode == command.target_mode() {
-                pending_command = None;
-            }
+        if let Some((command, _)) = pending_command.as_ref()
+            && current_mode == command.target_mode()
+        {
+            pending_command = None;
         }
 
         if should_be_awake && current_mode != ViewerMode::Awake {
@@ -1377,13 +1384,12 @@ fn scheduler_loop(
                 continue;
             }
 
-            if let Some((command, last_sent)) = pending_command.as_ref() {
-                if *command == SchedulerCommand::WakeUp
-                    && now_instant.duration_since(*last_sent) < COMMAND_RETRY
-                {
-                    sleep_for(COMMAND_SETTLE, MAX_SLEEP);
-                    continue;
-                }
+            if let Some((command, last_sent)) = pending_command.as_ref()
+                && *command == SchedulerCommand::WakeUp
+                && now_instant.duration_since(*last_sent) < COMMAND_RETRY
+            {
+                sleep_for(COMMAND_SETTLE, MAX_SLEEP);
+                continue;
             }
 
             match tx.send(SchedulerCommand::WakeUp) {
@@ -1406,13 +1412,12 @@ fn scheduler_loop(
                 }
             }
 
-            if let Some((command, last_sent)) = pending_command.as_ref() {
-                if *command == SchedulerCommand::GoToSleep
-                    && now_instant.duration_since(*last_sent) < COMMAND_RETRY
-                {
-                    sleep_for(COMMAND_SETTLE, MAX_SLEEP);
-                    continue;
-                }
+            if let Some((command, last_sent)) = pending_command.as_ref()
+                && *command == SchedulerCommand::GoToSleep
+                && now_instant.duration_since(*last_sent) < COMMAND_RETRY
+            {
+                sleep_for(COMMAND_SETTLE, MAX_SLEEP);
+                continue;
             }
 
             match tx.send(SchedulerCommand::GoToSleep) {
@@ -1430,12 +1435,12 @@ fn scheduler_loop(
 
         let mut next_check = now_instant + MAX_SLEEP;
 
-        if let Some((transition, _)) = config.schedule.next_transition_after(now) {
-            if let Some(duration) = chrono_duration_to_std(transition.signed_duration_since(now)) {
-                let candidate = now_instant + duration;
-                if candidate < next_check {
-                    next_check = candidate;
-                }
+        if let Some((transition, _)) = config.schedule.next_transition_after(now)
+            && let Some(duration) = chrono_duration_to_std(transition.signed_duration_since(now))
+        {
+            let candidate = now_instant + duration;
+            if candidate < next_check {
+                next_check = candidate;
             }
         }
 
@@ -1533,12 +1538,11 @@ fn scan_dir<P: AsRef<Path>>(dir: P, filter_power_name: bool) -> Result<Option<(D
             }
         }
 
-        if !filter_power_name {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if !name.starts_with("event") {
-                    continue;
-                }
-            }
+        if !filter_power_name
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && !name.starts_with("event")
+        {
+            continue;
         }
 
         match open_power_device(&path)? {
@@ -1718,11 +1722,11 @@ impl ButtonTracker {
     }
 
     fn accept(&mut self, now: Instant) -> bool {
-        if let Some(last) = self.last_transition {
-            if now.saturating_duration_since(last) < self.durations.debounce {
-                debug!("debounced transition");
-                return false;
-            }
+        if let Some(last) = self.last_transition
+            && now.saturating_duration_since(last) < self.durations.debounce
+        {
+            debug!("debounced transition");
+            return false;
         }
         self.last_transition = Some(now);
         true
@@ -1876,7 +1880,10 @@ awake-scheduled: {}
         let mut args = vec![String::from("poweroff")];
         let program = Path::new("/usr/bin/loginctl");
         configure_shutdown_args(program, &mut args, true);
-        assert!(args.iter().all(|a| a != FORCE_SHUTDOWN_FLAG && a != NO_ASK_PASSWORD_FLAG));
+        assert!(
+            args.iter()
+                .all(|a| a != FORCE_SHUTDOWN_FLAG && a != NO_ASK_PASSWORD_FLAG)
+        );
     }
 
     #[derive(Default, Clone)]

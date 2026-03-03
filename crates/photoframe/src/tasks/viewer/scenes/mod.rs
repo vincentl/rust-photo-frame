@@ -442,15 +442,15 @@ impl WakeScene {
         if shown_at.elapsed() < std::time::Duration::from_millis(self.dwell_ms) {
             return;
         }
-        if self.next.is_none() {
-            if let Some(stage) = self.pending.pop_front() {
-                tracing::debug!(
-                    "transition_stage path={} queue_depth={}",
-                    stage.path.display(),
-                    self.pending.len()
-                );
-                self.next = Some(stage);
-            }
+        if self.next.is_none()
+            && let Some(stage) = self.pending.pop_front()
+        {
+            tracing::debug!(
+                "transition_stage path={} queue_depth={}",
+                stage.path.display(),
+                self.pending.len()
+            );
+            self.next = Some(stage);
         }
         if self.next.is_some() && self.current.is_some() {
             let selected = self.transition_cfg.select_active(rng);

@@ -41,8 +41,13 @@ pub struct OverlayCli {
 
 pub fn run(args: OverlayCli) -> Result<()> {
     let password = read_password(&args.password_file)?;
-    let qr_asset = read_qr_asset_for_overlay(&args.password_file);
-    let content = OverlayContent::new(args, password, qr_asset);
+    let var_dir = args
+        .password_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let wifi_qr_asset = load_qr_asset(&var_dir.join("wifi-qr.png"));
+    let portal_qr_asset = load_qr_asset(&var_dir.join("portal-qr.png"));
+    let content = OverlayContent::new(args, password, wifi_qr_asset, portal_qr_asset);
     let font = load_font()?;
     let event_loop = EventLoop::new()?;
     let mut app = OverlayApp::new(font, content);
@@ -102,9 +107,8 @@ impl QrAsset {
     }
 }
 
-fn read_qr_asset_for_overlay(password_file: &Path) -> Option<QrAsset> {
-    let qr_path = password_file.parent()?.join("wifi-qr.png");
-    let reader = ImageReader::open(&qr_path).ok()?;
+fn load_qr_asset(path: &Path) -> Option<QrAsset> {
+    let reader = ImageReader::open(path).ok()?;
     let image = reader.decode().ok()?;
     let luma = image.to_luma8();
     Some(QrAsset {
@@ -180,11 +184,19 @@ struct OverlayContent {
     password: String,
     ui_url: String,
     footer: String,
-    qr_asset: Option<QrAsset>,
+    /// QR code encoding `WIFI:T:WPA;S:<ssid>;P:<password>;;` — tap to join hotspot.
+    wifi_qr_asset: Option<QrAsset>,
+    /// QR code encoding the portal URL — tap to open setup page after joining.
+    portal_qr_asset: Option<QrAsset>,
 }
 
 impl OverlayContent {
-    fn new(cli: OverlayCli, password: String, qr_asset: Option<QrAsset>) -> Self {
+    fn new(
+        cli: OverlayCli,
+        password: String,
+        wifi_qr_asset: Option<QrAsset>,
+        portal_qr_asset: Option<QrAsset>,
+    ) -> Self {
         let title = cli
             .title
             .unwrap_or_else(|| "Reconnect the photo frame to Wi-Fi".to_string());
@@ -197,7 +209,8 @@ impl OverlayContent {
             password,
             ui_url: cli.ui_url,
             footer,
-            qr_asset,
+            wifi_qr_asset,
+            portal_qr_asset,
         }
     }
 }
@@ -429,16 +442,7 @@ impl Renderer {
             layout.content_width,
             layout.typography_scale,
         );
-        cursor_y = self.draw_qr_section(
-            &mut buffer,
-            width,
-            height,
-            cursor_y,
-            layout.content_left,
-            layout.content_width,
-            layout.typography_scale,
-        );
-        cursor_y = self.draw_step_three(
+        cursor_y = self.draw_qr_pair_section(
             &mut buffer,
             width,
             height,
@@ -548,7 +552,10 @@ impl Renderer {
         )
     }
 
-    fn draw_step_three(
+    /// Draw both QR codes side by side: left = Wi-Fi join (`WIFI:` URI),
+    /// right = portal URL.  Below the portal QR the URL is shown as plain text
+    /// so users who cannot scan QR codes can still type it manually.
+    fn draw_qr_pair_section(
         &self,
         buffer: &mut [u32],
         width: u32,
@@ -558,108 +565,129 @@ impl Renderer {
         max_width: f32,
         scale: f32,
     ) -> f32 {
-        let label = "4. Once joined, open this address in your browser:";
-        let text = &self.content.ui_url;
-        let step_top = draw_paragraph(
-            buffer,
-            width,
-            height,
-            &self.font,
-            label,
-            (23.0 * scale).clamp(16.0, 40.0),
-            Color::from_rgb(0xe8eef7),
-            margin,
-            top,
-            max_width,
-            (10.0 * scale).clamp(6.0, 18.0),
-        );
-        draw_highlight(
-            buffer,
-            width,
-            height,
-            &self.font,
-            text,
-            (27.0 * scale).clamp(18.0, 50.0),
-            margin,
-            step_top,
-            max_width,
-            HighlightStyle::accent(scale),
-            (20.0 * scale).clamp(12.0, 30.0),
-        ) + (18.0 * scale).clamp(8.0, 30.0)
-    }
+        let col_gap = (28.0 * scale).clamp(16.0, 48.0);
+        let col_width = ((max_width - col_gap) * 0.5).max(120.0);
 
-    fn draw_qr_section(
-        &self,
-        buffer: &mut [u32],
-        width: u32,
-        height: u32,
-        top: f32,
-        margin: f32,
-        max_width: f32,
-        scale: f32,
-    ) -> f32 {
-        let label_top = draw_paragraph(
-            buffer,
-            width,
-            height,
-            &self.font,
-            "3. Scan QR to join the hotspot (iOS/Android camera app):",
-            (23.0 * scale).clamp(16.0, 40.0),
-            Color::from_rgb(0xe8eef7),
-            margin,
-            top,
-            max_width,
-            (10.0 * scale).clamp(6.0, 18.0),
-        );
-
-        let qr_side = (250.0 * scale).clamp(170.0, 420.0).min(max_width);
-        let card_pad = (14.0 * scale).clamp(8.0, 24.0);
+        let qr_side = (200.0 * scale)
+            .clamp(130.0, 340.0)
+            .min(col_width - 2.0 * (12.0 * scale).clamp(8.0, 20.0));
+        let card_pad = (12.0 * scale).clamp(8.0, 20.0);
         let card_side = qr_side + 2.0 * card_pad;
-        let card_left = margin;
-        let card_top = label_top;
+        let card_radius = (14.0 * scale).clamp(8.0, 22.0);
 
+        let left_x = margin;
+        let right_x = margin + col_width + col_gap;
+
+        let label_size = (22.0 * scale).clamp(15.0, 38.0);
+        let label_gap = (8.0 * scale).clamp(5.0, 14.0);
+
+        // Draw step 3 label above the left (Wi-Fi join) QR.
+        let left_label_bottom = draw_paragraph(
+            buffer,
+            width,
+            height,
+            &self.font,
+            "3. Scan to join the hotspot:",
+            label_size,
+            Color::from_rgb(0xe8eef7),
+            left_x,
+            top,
+            col_width,
+            label_gap,
+        );
+
+        // Draw step 4 label above the right (portal URL) QR.
+        let right_label_bottom = draw_paragraph(
+            buffer,
+            width,
+            height,
+            &self.font,
+            "4. Then scan to open setup:",
+            label_size,
+            Color::from_rgb(0xe8eef7),
+            right_x,
+            top,
+            col_width,
+            label_gap,
+        );
+
+        // Both QR cards start at the same y so they are vertically aligned.
+        let qr_top = left_label_bottom.max(right_label_bottom);
+
+        // ── Left card: Wi-Fi join QR ──────────────────────────────────────────
         draw_rounded_rect(
             buffer,
             width,
             height,
-            card_left,
-            card_top,
-            card_left + card_side,
-            card_top + card_side,
-            (16.0 * scale).clamp(10.0, 24.0),
+            left_x,
+            qr_top,
+            left_x + card_side,
+            qr_top + card_side,
+            card_radius,
             Color::from_rgb(0xffffff),
         );
-
-        if let Some(qr_asset) = &self.content.qr_asset {
+        if let Some(qr) = &self.content.wifi_qr_asset {
             draw_qr_asset(
                 buffer,
                 width,
                 height,
-                qr_asset,
-                card_left + card_pad,
-                card_top + card_pad,
+                qr,
+                left_x + card_pad,
+                qr_top + card_pad,
                 qr_side,
             );
         } else {
-            let fallback = "QR unavailable";
-            let text_scale = PxScale::from((18.0 * scale).clamp(12.0, 30.0));
-            let text_width = measure_text(fallback, &self.font, text_scale);
-            let text_left = card_left + ((card_side - text_width) * 0.5).max(card_pad);
-            let baseline = card_top + card_side * 0.55;
-            draw_text(
-                buffer,
-                width,
-                height,
-                &self.font,
-                fallback,
-                Color::from_rgb(0x334155),
-                text_left,
-                baseline,
-                text_scale,
+            draw_qr_fallback(
+                buffer, width, height, &self.font, left_x, qr_top, card_side, card_pad, scale,
             );
         }
 
-        card_top + card_side + (18.0 * scale).clamp(8.0, 30.0)
+        // ── Right card: portal URL QR ─────────────────────────────────────────
+        draw_rounded_rect(
+            buffer,
+            width,
+            height,
+            right_x,
+            qr_top,
+            right_x + card_side,
+            qr_top + card_side,
+            card_radius,
+            Color::from_rgb(0xffffff),
+        );
+        if let Some(qr) = &self.content.portal_qr_asset {
+            draw_qr_asset(
+                buffer,
+                width,
+                height,
+                qr,
+                right_x + card_pad,
+                qr_top + card_pad,
+                qr_side,
+            );
+        } else {
+            draw_qr_fallback(
+                buffer, width, height, &self.font, right_x, qr_top, card_side, card_pad, scale,
+            );
+        }
+
+        let after_cards = qr_top + card_side + (14.0 * scale).clamp(8.0, 24.0);
+
+        // URL text below the right QR as a fallback for non-camera users.
+        let url_bottom = draw_paragraph(
+            buffer,
+            width,
+            height,
+            &self.font,
+            &format!("Or type: {}", self.content.ui_url),
+            (18.0 * scale).clamp(12.0, 30.0),
+            Color::from_rgb(0x7a8fa5),
+            right_x,
+            after_cards,
+            col_width,
+            (6.0 * scale).clamp(4.0, 12.0),
+        );
+
+        url_bottom + (16.0 * scale).clamp(8.0, 28.0)
     }
 
     fn draw_footer(
@@ -863,6 +891,37 @@ fn draw_highlight(
     }
 
     cursor_y
+}
+
+/// Draw a "QR unavailable" placeholder inside a white card when the QR image
+/// could not be loaded from disk.
+fn draw_qr_fallback(
+    buffer: &mut [u32],
+    width: u32,
+    height: u32,
+    font: &FontArc,
+    card_left: f32,
+    card_top: f32,
+    card_side: f32,
+    card_pad: f32,
+    scale: f32,
+) {
+    let fallback = "QR unavailable";
+    let text_scale = PxScale::from((16.0 * scale).clamp(11.0, 26.0));
+    let text_width = measure_text(fallback, font, text_scale);
+    let text_left = card_left + ((card_side - text_width) * 0.5).max(card_pad);
+    let baseline = card_top + card_side * 0.55;
+    draw_text(
+        buffer,
+        width,
+        height,
+        font,
+        fallback,
+        Color::from_rgb(0x334155),
+        text_left,
+        baseline,
+        text_scale,
+    );
 }
 
 fn draw_qr_asset(
@@ -1278,16 +1337,6 @@ impl HighlightStyle {
             pad_x: (22.0 * scale).clamp(12.0, 38.0),
             pad_y: (15.0 * scale).clamp(8.0, 26.0),
             min_width_ratio: 0.58,
-        }
-    }
-
-    fn accent(scale: f32) -> Self {
-        Self {
-            background: Color::from_rgb(0x1f8f66),
-            foreground: Color::from_rgb(0xffffff),
-            pad_x: (22.0 * scale).clamp(12.0, 38.0),
-            pad_y: (15.0 * scale).clamp(8.0, 26.0),
-            min_width_ratio: 0.72,
         }
     }
 }

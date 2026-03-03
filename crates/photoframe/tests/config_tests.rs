@@ -1,8 +1,8 @@
-use rand::{SeedableRng, rngs::StdRng};
 use photoframe::config::{
     Configuration, GlobalPhotoSettings, MattingKind, MattingMode, MattingSelection,
     PhotoEffectOptions, StudioMatColor, TransitionKind, TransitionSelection,
 };
+use rand::{SeedableRng, rngs::StdRng};
 use std::path::PathBuf;
 
 #[test]
@@ -171,17 +171,13 @@ matting:
     let selected: Vec<_> = cfg.matting.iter_selected().collect();
     assert_eq!(selected.len(), 3);
     let fixed_first = &selected[0];
-    if let photoframe::config::MattingMode::FixedColor { colors, .. } =
-        &fixed_first.option.style
-    {
+    if let photoframe::config::MattingMode::FixedColor { colors, .. } = &fixed_first.option.style {
         assert_eq!(colors.as_slice(), &[[10, 20, 30]]);
     } else {
         panic!("expected fixed-color matting");
     }
     let fixed_second = &selected[1];
-    if let photoframe::config::MattingMode::FixedColor { colors, .. } =
-        &fixed_second.option.style
-    {
+    if let photoframe::config::MattingMode::FixedColor { colors, .. } = &fixed_second.option.style {
         assert_eq!(colors.as_slice(), &[[5, 15, 25]]);
     } else {
         panic!("expected second fixed-color matting");
@@ -301,8 +297,7 @@ matting:
         .primary_selected()
         .expect("expected fixed-color mat option");
     assert_eq!(selected.entry.kind, MattingKind::FixedColor);
-    if let photoframe::config::MattingMode::FixedColor { colors, .. } = &selected.option.style
-    {
+    if let photoframe::config::MattingMode::FixedColor { colors, .. } = &selected.option.style {
         assert_eq!(colors.as_slice(), &[[17, 34, 51]]);
     } else {
         panic!("expected fixed-color matting");
@@ -483,10 +478,7 @@ matting:
         match &entry.option.style {
             MattingMode::FixedImage { paths, fit } => {
                 assert_eq!(paths, &vec![path.clone()]);
-                assert!(matches!(
-                    fit,
-                    photoframe::config::FixedImageFit::Contain
-                ));
+                assert!(matches!(fit, photoframe::config::FixedImageFit::Contain));
             }
             other => panic!("expected fixed-image matting, got {other:?}"),
         }

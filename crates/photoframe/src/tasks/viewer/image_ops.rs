@@ -151,6 +151,7 @@ pub(super) fn resize_to_fit_with_margin(
 
 // ── Studio mat rendering ─────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_studio_mat(
     canvas_w: u32,
     canvas_h: u32,

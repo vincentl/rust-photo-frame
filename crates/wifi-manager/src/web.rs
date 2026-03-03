@@ -84,7 +84,20 @@ async fn handle_submit(State(state): State<UiState>, Form(form): Form<WifiForm>)
     let ssid = form.ssid.clone();
     info!(ssid = %redact_ssid(&ssid), "received provisioning form submission");
     match queue_submission(&state.config, &form).await {
-        Ok(message) => Html(success_page(&message)).into_response(),
+        Ok(message) => {
+            // Send Connection: close so the browser finalises the response and
+            // closes the TCP connection cleanly.  Without this the browser holds
+            // the connection open with HTTP/1.1 keep-alive; when the hotspot AP
+            // interface disappears a few seconds later the idle connection is
+            // reset and iOS shows a network-error spinner even though the
+            // success page was already rendered.
+            let mut resp = Html(success_page(&message)).into_response();
+            resp.headers_mut().insert(
+                header::CONNECTION,
+                header::HeaderValue::from_static("close"),
+            );
+            resp
+        }
         Err(err) => {
             warn!(error = ?err, "wifi submission failed");
             let display =
@@ -191,7 +204,7 @@ fn render_status_html(config: &Config) -> String {
 
 fn success_page(message: &str) -> String {
     format!(
-        "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Credentials saved</title><style>{}</style></head><body><main><section class='status'><h1>Credentials saved</h1><p>{}</p><p>This hotspot will shut down while the frame joins your network. Rejoin your home Wi-Fi \u{2014} if the frame connects successfully the recovery screen will close. If it fails, the <strong>PhotoFrame-Setup</strong> hotspot will reappear and you can try again.</p></section></main></body></html>",
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Connecting\u{2026}</title><style>{}</style></head><body><main><section class='status'><h1>Connecting to your network\u{2026}</h1><p>{}</p><p>The hotspot will shut down in a moment while the frame joins your Wi-Fi. You can safely rejoin your home network now.</p><p>If the frame connects successfully the recovery screen closes and the slideshow resumes. If it fails, the <strong>PhotoFrame-Setup</strong> hotspot reappears and you can try again.</p></section></main></body></html>",
         styles(),
         message
     )

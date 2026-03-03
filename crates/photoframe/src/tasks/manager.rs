@@ -264,11 +264,11 @@ impl PlaylistState {
     }
 
     fn mark_sent(&mut self, sent: &ScheduledPhoto) {
-        if let Some(front) = self.queue.front() {
-            if front.path == sent.path {
-                self.queue.pop_front();
-                return;
-            }
+        if let Some(front) = self.queue.front()
+            && front.path == sent.path
+        {
+            self.queue.pop_front();
+            return;
         }
         if let Some(pos) = self.queue.iter().position(|p| p.path == sent.path) {
             self.queue.remove(pos);

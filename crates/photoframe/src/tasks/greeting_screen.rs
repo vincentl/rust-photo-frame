@@ -48,8 +48,7 @@ impl GreetingScreen {
     ) -> Self {
         let mut font_system = FontSystem::new();
         initialize_font_database(font_system.db_mut());
-        let font_family =
-            resolve_font_family(&font_system, screen.font.as_ref().map(|s| s.as_str()));
+        let font_family = resolve_font_family(&font_system, screen.font.as_deref());
         let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(32.0, 38.4));
         text_buffer.set_wrap(&mut font_system, Wrap::WordOrGlyph);
 
@@ -445,12 +444,7 @@ fn compute_font_size(message: &str, size: PhysicalSize<u32>) -> f32 {
     }
     let min_dim = size.width.min(size.height) as f32;
     let mut scale = min_dim * 0.12; // start with 12% of the smaller side
-    if scale < 24.0 {
-        scale = 24.0;
-    }
-    if scale > 360.0 {
-        scale = 360.0;
-    }
+    scale = scale.clamp(24.0, 360.0);
 
     // If the message is very long, reduce the scale heuristically.
     let chars = message.chars().count().max(1);

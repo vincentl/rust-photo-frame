@@ -29,7 +29,7 @@ pub async fn run(
     cancel: CancellationToken,
 ) -> Result<()> {
     // 1) Startup scan (recursive) -> collect, shuffle, emit
-    let initial = discover_startup_photos(&*cfg)?;
+    let initial = discover_startup_photos(&cfg)?;
     for info in &initial {
         debug!(action = "startup_add", path = %info.path.display());
         let _ = to_manager

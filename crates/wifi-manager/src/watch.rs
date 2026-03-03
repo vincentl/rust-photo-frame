@@ -471,7 +471,10 @@ async fn enter_recovery(
     );
 
     if let Err(err) = qr::generate(config) {
-        warn!(error = ?err, "failed to write QR code asset");
+        warn!(error = ?err, "failed to write Wi-Fi join QR code asset");
+    }
+    if let Err(err) = qr::generate_portal_qr(config) {
+        warn!(error = ?err, "failed to write portal URL QR code asset");
     }
 
     let child = spawn_ui(config_path).await?;

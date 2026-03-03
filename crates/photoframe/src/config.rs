@@ -44,7 +44,7 @@ impl Default for GlobalPhotoSettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct MattingOptions {
-    #[serde(default = "MattingOptions::default_minimum_percentage")] 
+    #[serde(default = "MattingOptions::default_minimum_percentage")]
     pub minimum_mat_percentage: f32,
     #[serde(default, flatten)]
     pub style: MattingMode,
@@ -268,7 +268,7 @@ where
     type Item = SelectedOption<'a, K, O>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(entry) = self.entries.next() {
+        for entry in self.entries.by_ref() {
             if let Some(option) = self.options.lookup(entry) {
                 return Some(SelectedOption { entry, option });
             }
@@ -778,11 +778,7 @@ where
                 _ => {
                     return Err(de::Error::unknown_field(
                         other,
-                        &[
-                            "colors",
-                            "color",
-                            "minimum-mat-percentage",
-                        ],
+                        &["colors", "color", "minimum-mat-percentage"],
                     ));
                 }
             },
@@ -808,12 +804,7 @@ where
                 _ => {
                     return Err(de::Error::unknown_field(
                         other,
-                        &[
-                            "sigma",
-                            "sample-scale",
-                            "backend",
-                            "minimum-mat-percentage",
-                        ],
+                        &["sigma", "sample-scale", "backend", "minimum-mat-percentage"],
                     ));
                 }
             },
@@ -886,11 +877,7 @@ where
                 _ => {
                     return Err(de::Error::unknown_field(
                         other,
-                        &[
-                            "path",
-                            "fit",
-                            "minimum-mat-percentage",
-                        ],
+                        &["path", "fit", "minimum-mat-percentage"],
                     ));
                 }
             },
@@ -903,42 +890,42 @@ impl MattingOptionBuilder {
     fn into_canonical_options(self, kind: MattingKind) -> Vec<MattingOptions> {
         match kind {
             MattingKind::FixedColor => {
-                if let Some(colors) = &self.fixed_colors {
-                    if colors.len() > 1 {
-                        let mut options = Vec::with_capacity(colors.len());
-                        for color in colors.iter().copied() {
-                            let mut builder = self.clone();
-                            builder.fixed_colors = Some(vec![color]);
-                            options.push(MattingOptions::with_kind(kind, builder));
-                        }
-                        return options;
+                if let Some(colors) = &self.fixed_colors
+                    && colors.len() > 1
+                {
+                    let mut options = Vec::with_capacity(colors.len());
+                    for color in colors.iter().copied() {
+                        let mut builder = self.clone();
+                        builder.fixed_colors = Some(vec![color]);
+                        options.push(MattingOptions::with_kind(kind, builder));
                     }
+                    return options;
                 }
             }
             MattingKind::Studio => {
-                if let Some(colors) = &self.studio_colors {
-                    if colors.len() > 1 {
-                        let mut options = Vec::with_capacity(colors.len());
-                        for color in colors.iter().copied() {
-                            let mut builder = self.clone();
-                            builder.studio_colors = Some(vec![color]);
-                            options.push(MattingOptions::with_kind(kind, builder));
-                        }
-                        return options;
+                if let Some(colors) = &self.studio_colors
+                    && colors.len() > 1
+                {
+                    let mut options = Vec::with_capacity(colors.len());
+                    for color in colors.iter().copied() {
+                        let mut builder = self.clone();
+                        builder.studio_colors = Some(vec![color]);
+                        options.push(MattingOptions::with_kind(kind, builder));
                     }
+                    return options;
                 }
             }
             MattingKind::FixedImage => {
-                if let Some(paths) = &self.fixed_image_paths {
-                    if paths.len() > 1 {
-                        let mut options = Vec::with_capacity(paths.len());
-                        for path in paths.iter().cloned() {
-                            let mut builder = self.clone();
-                            builder.fixed_image_paths = Some(vec![path]);
-                            options.push(MattingOptions::with_kind(kind, builder));
-                        }
-                        return options;
+                if let Some(paths) = &self.fixed_image_paths
+                    && paths.len() > 1
+                {
+                    let mut options = Vec::with_capacity(paths.len());
+                    for path in paths.iter().cloned() {
+                        let mut builder = self.clone();
+                        builder.fixed_image_paths = Some(vec![path]);
+                        options.push(MattingOptions::with_kind(kind, builder));
                     }
+                    return options;
                 }
             }
             MattingKind::Blur => {}
@@ -950,8 +937,7 @@ impl MattingOptionBuilder {
 
 impl Default for MattingConfig {
     fn default() -> Self {
-        let mut options = Vec::new();
-        options.push(MattingOptions::default());
+        let options = vec![MattingOptions::default()];
         Self {
             selection: MattingSelection::Fixed(SelectionEntry {
                 index: 0,
@@ -1640,8 +1626,7 @@ pub struct TransitionConfig {
 
 impl Default for TransitionConfig {
     fn default() -> Self {
-        let mut options = Vec::new();
-        options.push(TransitionOptions::default_for(TransitionKind::Fade));
+        let options = vec![TransitionOptions::default_for(TransitionKind::Fade)];
         Self {
             selection: TransitionSelection::Fixed(SelectionEntry {
                 index: 0,
@@ -1998,17 +1983,9 @@ impl Default for WipeTransition {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PushTransition {
     pub angles: AnglePicker,
-}
-
-impl Default for PushTransition {
-    fn default() -> Self {
-        Self {
-            angles: AnglePicker::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]

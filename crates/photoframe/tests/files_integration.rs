@@ -1,7 +1,7 @@
-use rand::{SeedableRng, seq::SliceRandom};
 use photoframe::config::{Configuration, GlobalPhotoSettings};
 use photoframe::events::{InvalidPhoto, InventoryEvent};
 use photoframe::tasks::files;
+use rand::{SeedableRng, seq::SliceRandom};
 use std::fs;
 use std::path::PathBuf;
 use tempfile::tempdir;
