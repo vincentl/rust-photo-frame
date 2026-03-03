@@ -7,11 +7,15 @@ use rand::{SeedableRng, seq::SliceRandom};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use tracing::{debug, error, info};
+
+/// Image file extensions recognised by the scanner (lowercase, without leading dot).
+const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 use walkdir::WalkDir;
 
 #[instrument(
@@ -19,13 +23,13 @@ use walkdir::WalkDir;
     fields(root = %cfg.photo_library_path.display())
 )]
 pub async fn run(
-    cfg: Configuration,
+    cfg: Arc<Configuration>,
     to_manager: Sender<InventoryEvent>,
     mut invalid_rx: Receiver<InvalidPhoto>,
     cancel: CancellationToken,
 ) -> Result<()> {
     // 1) Startup scan (recursive) -> collect, shuffle, emit
-    let initial = discover_startup_photos(&cfg)?;
+    let initial = discover_startup_photos(&*cfg)?;
     for info in &initial {
         debug!(action = "startup_add", path = %info.path.display());
         let _ = to_manager
@@ -114,15 +118,15 @@ pub async fn run(
 
 #[inline]
 fn is_image(p: &Path) -> bool {
-    matches!(
-        p.extension()
-            .and_then(OsStr::to_str)
-            .map(|s| s.to_ascii_lowercase()),
-        Some(ref e) if ["jpg","jpeg","png","webp"].contains(&e.as_str())
-    )
+    p.extension()
+        .and_then(OsStr::to_str)
+        .map(|s| s.to_ascii_lowercase())
+        .is_some_and(|ext| SUPPORTED_EXTENSIONS.contains(&ext.as_str()))
 }
 
 fn delete_if_exists(p: &Path) -> Result<()> {
+    // The exists() check is a TOCTOU optimisation only; if the file is removed between
+    // this check and remove_file(), the NotFound arm below handles it gracefully.
     if !p.exists() {
         debug!(path = %p.display(), "delete: source missing; skipping");
         return Ok(());
@@ -153,6 +157,8 @@ fn photo_created_at(path: &Path) -> SystemTime {
 
 pub fn discover_startup_photos(cfg: &Configuration) -> Result<Vec<PhotoInfo>> {
     let mut initial = Vec::<PathBuf>::new();
+    // follow_links(true) is intentional so symlinked sub-directories work. WalkDir's internal
+    // inode tracker prevents infinite loops from circular symlinks.
     for entry in WalkDir::new(&cfg.photo_library_path)
         .follow_links(true)
         .into_iter()

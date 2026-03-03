@@ -99,7 +99,7 @@ impl FixedImageBackground {
         if let Some(hit) = self
             .cache
             .lock()
-            .expect("fixed-image cache poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .filter(|cached| cached.matches(canvas_w, canvas_h, max_dim, fit))
         {
@@ -160,7 +160,7 @@ impl FixedImageBackground {
         };
 
         let prepared = Arc::new(prepared);
-        let mut cache = self.cache.lock().expect("fixed-image cache poisoned");
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         *cache = Some(CachedImage {
             width: canvas_w,
             height: canvas_h,

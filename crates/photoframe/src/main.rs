@@ -17,6 +17,7 @@ use clap::Parser;
 use humantime::{format_rfc3339, parse_rfc3339};
 use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -37,11 +38,7 @@ use events::{
 };
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "photoframe",
-    version,
-    about = "photo frame minimal scaffold"
-)]
+#[command(name = "photoframe", version, about = "photo frame minimal scaffold")]
 struct Args {
     /// Path to YAML config
     #[arg(value_name = "CONFIG")]
@@ -80,10 +77,12 @@ async fn main() -> Result<()> {
         None => None,
     };
 
-    let cfg = config::Configuration::from_yaml_file(&config)
-        .with_context(|| format!("failed to load configuration from {}", config.display()))?
-        .validated()
-        .context("invalid configuration values")?;
+    let cfg = Arc::new(
+        config::Configuration::from_yaml_file(&config)
+            .with_context(|| format!("failed to load configuration from {}", config.display()))?
+            .validated()
+            .context("invalid configuration values")?,
+    );
     tracing::info!(
         "Loaded configuration from {}:\n{:#?}",
         config.display(),
@@ -91,22 +90,30 @@ async fn main() -> Result<()> {
     );
 
     if let Some(iterations) = playlist_dry_run {
-        run_playlist_dry_run(&cfg, iterations, now_override, playlist_seed)?;
+        run_playlist_dry_run(&*cfg, iterations, now_override, playlist_seed)?;
         return Ok(());
     }
 
-    // Channels (small/bounded)
-    let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(128); // Files -> Manager
-    let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(64); // Manager/Loader -> Files
-    let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(4); // Manager -> Loader (allow a few in-flight requests)
-    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count); // Loader -> PhotoEffect
-    let (processed_tx, processed_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count); // PhotoEffect -> Viewer
-    let (displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(64); // Viewer  -> Manager
-    let (viewer_control_tx, viewer_control_rx) = mpsc::channel::<ViewerCommand>(16); // External -> Viewer
+    // Channels (bounded).  Capacities are chosen to bound memory while keeping the pipeline fluid:
+    // - inv_tx: burst during startup scan can be large; 128 gives headroom without unbounded growth.
+    // - invalid_tx / displayed_tx: low-frequency bookkeeping; 64 is generous.
+    // - to_load_tx: intentionally small (4) so the manager stays in sync with what the loader needs.
+    // - loaded_tx / processed_tx: sized to viewer_preload_count so the decode pipeline stays filled
+    //   without buffering more decoded frames than the viewer will consume.
+    // - viewer_control_tx: external control commands are rare; 16 is ample.
+    let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(128);
+    let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(64);
+    let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(4);
+    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count);
+    let (processed_tx, processed_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count);
+    let (displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(64);
+    let (viewer_control_tx, viewer_control_rx) = mpsc::channel::<ViewerCommand>(16);
 
     let cancel = CancellationToken::new();
 
-    // Ctrl-D/Ctrl-C cancel the pipeline
+    // Both the stdin watcher and the Ctrl-C handler call cancel.cancel().
+    // CancellationToken::cancel() is idempotent, so whichever fires first wins and
+    // the second call is a no-op.
     if io::stdin().is_terminal() {
         let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || {
@@ -157,7 +164,7 @@ async fn main() -> Result<()> {
 
     // PhotoFiles
     tasks.spawn({
-        let cfg = cfg.clone();
+        let cfg = Arc::clone(&cfg);
         let inv_tx = inv_tx.clone();
         let invalid_rx = invalid_rx;
         let cancel = cancel.clone();
@@ -225,7 +232,7 @@ async fn main() -> Result<()> {
         processed_rx,
         displayed_tx.clone(),
         cancel.clone(),
-        cfg.clone(),
+        Arc::clone(&cfg),
         viewer_control_rx,
     )
     .context("viewer failed");
@@ -545,37 +552,7 @@ async fn handle_control_connection(
     let request: ControlCommand = match serde_json::from_slice(&buf) {
         Ok(command) => command,
         Err(err) => {
-            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&buf) {
-                match value.get("command").and_then(|c| c.as_str()) {
-                    None => {
-                        tracing::warn!(payload = %payload_text, "control payload missing `command`: {err}")
-                    }
-                    Some("set-state") => match value.get("state") {
-                        None => {
-                            tracing::warn!(payload = %payload_text, "set-state command missing `state`: {err}");
-                        }
-                        Some(serde_json::Value::String(state)) => match state.as_str() {
-                            "awake" | "asleep" => {
-                                tracing::warn!(payload = %payload_text, state = %state, "invalid set-state payload: {err}");
-                            }
-                            _ => {
-                                tracing::warn!(payload = %payload_text, state = %state, "unrecognized viewer state (expected `awake` or `asleep`): {err}");
-                            }
-                        },
-                        Some(_) => {
-                            tracing::warn!(payload = %payload_text, "set-state command expects string `state`: {err}");
-                        }
-                    },
-                    Some("toggle-state") => {
-                        tracing::warn!(payload = %payload_text, command = "toggle-state", "malformed toggle command payload: {err}");
-                    }
-                    Some(command) => {
-                        tracing::warn!(payload = %payload_text, command, "unsupported control command");
-                    }
-                }
-            } else {
-                tracing::warn!(payload = %payload_text, "invalid control payload: {err}");
-            }
+            tracing::warn!(payload = %payload_text, "invalid control payload: {err}");
             return Ok(());
         }
     };

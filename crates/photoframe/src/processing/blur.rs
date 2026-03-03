@@ -127,6 +127,24 @@ mod neon {
         weights: &[f32],
         horizontal: bool,
     ) {
+        let expected = width * height * 4;
+        assert!(
+            src.len() >= expected,
+            "blur_pass: src too short ({} < {expected})",
+            src.len()
+        );
+        assert!(
+            dst.len() >= expected,
+            "blur_pass: dst too short ({} < {expected})",
+            dst.len()
+        );
+        assert!(
+            weights.len() >= 2 * radius + 1,
+            "blur_pass: weights too short ({} < {})",
+            weights.len(),
+            2 * radius + 1
+        );
+
         let src_ptr = src.as_ptr();
         let dst_ptr = dst.as_mut_ptr();
         let kernel = &weights[..(2 * radius + 1)];
@@ -157,5 +175,36 @@ mod neon {
     #[inline(always)]
     fn clamp_i(value: isize, max: isize) -> usize {
         value.clamp(0, max.saturating_sub(1)) as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgba;
+
+    fn single_pixel_image(r: u8, g: u8, b: u8, a: u8) -> RgbaImage {
+        let mut img = RgbaImage::new(1, 1);
+        img.put_pixel(0, 0, Rgba([r, g, b, a]));
+        img
+    }
+
+    #[test]
+    fn zero_sigma_returns_clone() {
+        let img = single_pixel_image(128, 64, 32, 255);
+        for backend in [BlurBackend::Cpu, BlurBackend::Neon] {
+            let out = apply_blur(&img, 0.0, backend);
+            assert_eq!(out.dimensions(), img.dimensions());
+            assert_eq!(out.get_pixel(0, 0), img.get_pixel(0, 0));
+        }
+    }
+
+    #[test]
+    fn one_by_one_image_does_not_crash() {
+        let img = single_pixel_image(200, 100, 50, 255);
+        for backend in [BlurBackend::Cpu, BlurBackend::Neon] {
+            let out = apply_blur(&img, 1.0, backend);
+            assert_eq!(out.dimensions(), (1, 1));
+        }
     }
 }

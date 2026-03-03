@@ -205,16 +205,19 @@ impl PlaylistState {
 
         rest.shuffle(&mut self.rng);
 
+        // Build a lookup map so prioritized entries can be placed in order without O(n²) scans.
+        let mut front_by_path: HashMap<PathBuf, ScheduledPhoto> = front
+            .into_iter()
+            .map(|sp| ((*sp.path).clone(), sp))
+            .collect();
+
         let mut queue = VecDeque::new();
-        for path in prioritized {
-            if let Some(idx) = front
-                .iter()
-                .position(|p| p.path.as_path() == path.as_path())
-            {
-                queue.push_back(front.remove(idx));
+        for path in &prioritized {
+            if let Some(entry) = front_by_path.remove(path) {
+                queue.push_back(entry);
             }
         }
-        for entry in front {
+        for entry in front_by_path.into_values() {
             queue.push_back(entry);
         }
         for entry in rest {
