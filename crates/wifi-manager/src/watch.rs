@@ -234,35 +234,47 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
                                     }
                                 }
                             } else if should_run_reconnect_probe(&config, &recovery) {
-                                let probe_success =
-                                    run_reconnect_probe(&config, &mut recovery, &mut overlay).await;
-                                if probe_success {
-                                    finalize_recovery(
+                                if nm::has_ap_clients(&config.interface).await {
+                                    // A phone or laptop is currently associated with the AP.
+                                    // Tearing down the hotspot to probe would disconnect them
+                                    // mid-session, so skip this probe tick.
+                                    debug!("skipping reconnect probe: AP has active client(s)");
+                                } else {
+                                    let probe_success = run_reconnect_probe(
                                         &config,
                                         &mut recovery,
                                         &mut overlay,
-                                        "probe-success",
-                                        None,
                                     )
                                     .await;
-                                    offline_since = None;
-                                    backoff_until = None;
-                                    transition_state(
-                                        &config,
-                                        &mut state,
-                                        WatchState::Online,
-                                        "probe-success",
-                                        None,
-                                    );
-                                } else {
-                                    backoff_until = Some(Instant::now() + Duration::from_secs(3));
-                                    transition_state(
-                                        &config,
-                                        &mut state,
-                                        WatchState::RecoveryBackoff,
-                                        "probe-failed",
-                                        None,
-                                    );
+                                    if probe_success {
+                                        finalize_recovery(
+                                            &config,
+                                            &mut recovery,
+                                            &mut overlay,
+                                            "probe-success",
+                                            None,
+                                        )
+                                        .await;
+                                        offline_since = None;
+                                        backoff_until = None;
+                                        transition_state(
+                                            &config,
+                                            &mut state,
+                                            WatchState::Online,
+                                            "probe-success",
+                                            None,
+                                        );
+                                    } else {
+                                        backoff_until =
+                                            Some(Instant::now() + Duration::from_secs(3));
+                                        transition_state(
+                                            &config,
+                                            &mut state,
+                                            WatchState::RecoveryBackoff,
+                                            "probe-failed",
+                                            None,
+                                        );
+                                    }
                                 }
                             }
                         }

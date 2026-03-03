@@ -148,7 +148,10 @@ fn default_recovery_mode() -> RecoveryMode {
 }
 
 fn default_recovery_reconnect_probe() -> u64 {
-    60
+    // 5 minutes between probes.  The probe tears down the AP (kicking any
+    // connected phone off), so we want it infrequent.  The AP-client guard in
+    // watch.rs provides the primary protection; this interval is the fallback.
+    300
 }
 
 fn default_recovery_connect_timeout() -> u64 {
@@ -212,7 +215,7 @@ mod tests {
     fn defaults_include_recovery_settings() {
         let cfg: Config = serde_yaml::from_str("{}").expect("parse config");
         assert_eq!(cfg.recovery_mode, RecoveryMode::AppHandoff);
-        assert_eq!(cfg.recovery_reconnect_probe_sec, 60);
+        assert_eq!(cfg.recovery_reconnect_probe_sec, 300);
         assert_eq!(cfg.recovery_connect_timeout_sec, 20);
         assert_eq!(cfg.photo_app.app_id, "photoframe");
         assert_eq!(

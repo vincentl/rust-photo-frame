@@ -506,6 +506,27 @@ async fn nmcli(args: &[&str]) -> Result<String> {
     }
 }
 
+/// Returns `true` if at least one wireless client is currently associated with
+/// the AP on `interface`.
+///
+/// Runs `iw dev <interface> station dump`.  Non-empty stdout means at least one
+/// station entry is present.  On any error we return `false` so that probe
+/// decisions fail-safe: we would rather probe unnecessarily than permanently
+/// suppress probing because `iw` is unavailable.
+pub async fn has_ap_clients(interface: &str) -> bool {
+    match Command::new("iw")
+        .args(["dev", interface, "station", "dump"])
+        .output()
+        .await
+    {
+        Ok(output) => !output.stdout.is_empty(),
+        Err(err) => {
+            debug!(error = ?err, "iw station dump failed; assuming no AP clients");
+            false
+        }
+    }
+}
+
 fn display_args(args: &[&str]) -> String {
     let mut masked = Vec::with_capacity(args.len());
     let mut skip_next = false;
