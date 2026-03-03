@@ -3,7 +3,7 @@ interface: wlan0
 check-interval-sec: 5
 offline-grace-sec: 30
 recovery-mode: app-handoff
-recovery-reconnect-probe-sec: 60
+recovery-reconnect-probe-sec: 300
 recovery-connect-timeout-sec: 20
 wordlist-path: /opt/photoframe/share/wordlist.txt
 var-dir: /var/lib/photoframe
