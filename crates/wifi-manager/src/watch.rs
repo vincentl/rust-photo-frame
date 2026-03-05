@@ -5,7 +5,7 @@ use crate::overlay::{OverlayController, overlay_request};
 use crate::qr;
 use crate::status::{
     AttemptRecord, ProvisionRequest, RuntimeStateRecord, now_rfc3339, read_request, redact_ssid,
-    remove_request, write_last_attempt, write_runtime_state,
+    remove_request, write_last_attempt, write_last_ssid, write_runtime_state,
 };
 use anyhow::{Context, Result};
 use rand::Rng;
@@ -639,6 +639,11 @@ async fn apply_provision_request(
         // NM reconnects to this network automatically on subsequent boots.
         if let Err(err) = nm::enable_connection_autoconnect(&connection_id).await {
             warn!(error = ?err, "failed to enable autoconnect on new profile");
+        }
+        // Persist the SSID so the web UI can pre-populate the form on the
+        // next recovery cycle.
+        if let Err(err) = write_last_ssid(config, &request.ssid) {
+            warn!(error = ?err, "failed to write last known SSID");
         }
         let msg = "Frame is back online.".to_string();
         if let Err(err) = write_last_attempt(

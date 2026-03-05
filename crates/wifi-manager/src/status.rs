@@ -86,6 +86,45 @@ pub fn write_runtime_state(config: &Config, record: &RuntimeStateRecord) -> Resu
     write_json_with_mode(&runtime_state_path(config), record, 0o644)
 }
 
+pub fn last_ssid_path(config: &Config) -> PathBuf {
+    config.var_dir.join("last-ssid.txt")
+}
+
+/// Atomically write the plain-text SSID that was last used for a successful
+/// provisioning attempt.  Read back by the web UI to pre-populate the form.
+pub fn write_last_ssid(config: &Config, ssid: &str) -> Result<()> {
+    let path = last_ssid_path(config);
+    let parent = path.parent().context("last-ssid path has no parent")?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = parent.join(format!(".last-ssid.{}.{}.tmp", std::process::id(), nonce));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .create_new(true)
+        .truncate(true)
+        .mode(0o644)
+        .open(&tmp)
+        .with_context(|| format!("failed to open {}", tmp.display()))?;
+    file.write_all(ssid.as_bytes())
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", tmp.display()))?;
+    drop(file);
+    fs::rename(&tmp, &path).with_context(|| format!("failed to rename {}", path.display()))?;
+    Ok(())
+}
+
+pub fn read_last_ssid(config: &Config) -> Option<String> {
+    fs::read_to_string(last_ssid_path(config))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 pub fn read_runtime_state(config: &Config) -> Result<Option<RuntimeStateRecord>> {
     read_json_optional(&runtime_state_path(config))

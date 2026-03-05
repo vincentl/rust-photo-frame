@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::qr;
 use crate::status::{
-    AttemptRecord, ProvisionRequest, now_rfc3339, read_last_attempt, redact_ssid,
+    AttemptRecord, ProvisionRequest, now_rfc3339, read_last_attempt, read_last_ssid, redact_ssid,
     write_last_attempt, write_request,
 };
 use anyhow::{Context, Result};
@@ -16,9 +16,17 @@ use serde::Deserialize;
 use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
+use tokio::time::sleep;
 use tracing::{info, warn};
+
+/// How long to wait after sending the success page before writing the
+/// provisioning request file.  This gives the browser time to receive the
+/// response before the watcher starts the NM operations that eventually tear
+/// down the hotspot AP interface.
+const PROVISIONING_DELAY_SECS: u64 = 5;
 
 #[derive(Clone)]
 struct UiState {
@@ -71,11 +79,18 @@ async fn shutdown_signal() {
 }
 
 async fn render_form(State(state): State<UiState>) -> Html<String> {
+    let last_ssid = read_last_ssid(&state.config).unwrap_or_default();
+    let ssid_value = if last_ssid.is_empty() {
+        String::new()
+    } else {
+        format!(" value='{}'", html_attr_escape(&last_ssid))
+    };
     let body = format!(
         "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>\
-<title>Photo Frame Wi-Fi Setup</title><style>{}</style></head><body><main><section class='hero'><h1>Photo Frame Wi-Fi Recovery</h1><p>Connect to the hotspot <strong>{}</strong> using the password shown on the frame, then submit your home Wi-Fi details below.</p></section><section class='form'><form method='post' action='/submit'><label>Wi-Fi Name (SSID)<input name='ssid' required maxlength='32'></label><label>Password<input name='password' type='password' minlength='8' maxlength='63' required></label><button type='submit'>Connect</button></form><p class='status-link'><a href='/status'>View connection status</a></p></section></main></body></html>",
+<title>Photo Frame Wi-Fi Setup</title><style>{}</style></head><body><main><section class='hero'><h1>Photo Frame Wi-Fi Recovery</h1><p>Connect to the hotspot <strong>{}</strong> using the password shown on the frame, then submit your home Wi-Fi details below.</p></section><section class='form'><form method='post' action='/submit'><label>Wi-Fi Name (SSID)<input name='ssid' required maxlength='32'{}></label><label>Password<input name='password' type='password' minlength='8' maxlength='63' required></label><button type='submit'>Connect</button></form></section></main></body></html>",
         styles(),
-        state.config.hotspot.ssid
+        state.config.hotspot.ssid,
+        ssid_value
     );
     Html(body)
 }
@@ -83,14 +98,22 @@ async fn render_form(State(state): State<UiState>) -> Html<String> {
 async fn handle_submit(State(state): State<UiState>, Form(form): Form<WifiForm>) -> Response {
     let ssid = form.ssid.clone();
     info!(ssid = %redact_ssid(&ssid), "received provisioning form submission");
-    match queue_submission(&state.config, &form).await {
-        Ok(message) => {
-            // Send Connection: close so the browser finalises the response and
-            // closes the TCP connection cleanly.  Without this the browser holds
-            // the connection open with HTTP/1.1 keep-alive; when the hotspot AP
-            // interface disappears a few seconds later the idle connection is
-            // reset and iOS shows a network-error spinner even though the
-            // success page was already rendered.
+    match prepare_submission(&state.config, &form).await {
+        Ok((request, message)) => {
+            // Write the request file after a delay so the success page is
+            // fully delivered to the browser before the watcher begins
+            // provisioning and eventually tears down the hotspot AP interface.
+            let config = state.config.clone();
+            tokio::spawn(async move {
+                sleep(Duration::from_secs(PROVISIONING_DELAY_SECS)).await;
+                if let Err(err) = write_request(&config, &request) {
+                    warn!(error = ?err, "failed to write provisioning request after response delay");
+                }
+            });
+            // Connection: close tells the browser to finalize and close the
+            // TCP connection rather than keeping it alive.  This prevents iOS
+            // from showing a spinner when the AP interface disappears while an
+            // idle keep-alive connection is still open.
             let mut resp = Html(success_page(&message)).into_response();
             resp.headers_mut().insert(
                 header::CONNECTION,
@@ -118,7 +141,13 @@ async fn handle_submit(State(state): State<UiState>, Form(form): Form<WifiForm>)
     }
 }
 
-async fn queue_submission(config: &Config, form: &WifiForm) -> Result<String> {
+/// Validate form inputs and record a "queued" attempt status.
+/// Returns the `ProvisionRequest` to be written after the success page is
+/// delivered, and the human-readable message for the success page.
+async fn prepare_submission(
+    config: &Config,
+    form: &WifiForm,
+) -> Result<(ProvisionRequest, String)> {
     validate_ssid(&form.ssid)?;
     validate_password(&form.password)?;
 
@@ -130,8 +159,6 @@ async fn queue_submission(config: &Config, form: &WifiForm) -> Result<String> {
         ssid: form.ssid.trim().to_string(),
         password: form.password.clone(),
     };
-
-    write_request(config, &request)?;
 
     let message = format!(
         "Queued credentials for {}. The frame is applying them now…",
@@ -154,7 +181,7 @@ async fn queue_submission(config: &Config, form: &WifiForm) -> Result<String> {
         "queued provisioning request"
     );
 
-    Ok(message)
+    Ok((request, message))
 }
 
 async fn status_page(State(state): State<UiState>) -> Html<String> {
@@ -249,6 +276,21 @@ fn generate_attempt_id() -> String {
 struct WifiForm {
     ssid: String,
     password: String,
+}
+
+fn html_attr_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn styles() -> &'static str {
