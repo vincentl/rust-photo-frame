@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Photo Frame cloud sync with atomic staging.
+#
+# Reads environment from the service unit (same variables as the old inline
+# ExecStart script):
+#   PHOTO_LIBRARY_PATH  – root of the photo library
+#   SYNC_TOOL           – "rclone" (default) or "rsync"
+#   RCLONE_REMOTE       – rclone remote:path  (required when SYNC_TOOL=rclone)
+#   RCLONE_FLAGS        – extra rclone flags
+#   RSYNC_SOURCE        – rsync source        (required when SYNC_TOOL=rsync)
+#   RSYNC_FLAGS         – extra rsync flags
+#
+# The sync runs in two phases:
+#   1. Download  – rclone/rsync → .cloud-staging/   (network I/O here)
+#   2. Promote   – rsync --link-dest → cloud/         (local, near-instant)
+#
+# If phase 1 fails, cloud/ is untouched.  Files shared between staging and
+# cloud/ are hard-linked (same inode), so no extra disk space is used.
+set -euo pipefail
+
+LIBRARY_ROOT="${PHOTO_LIBRARY_PATH:-}"
+if [[ -z "${LIBRARY_ROOT}" ]]; then
+    echo "photoframe-cloud-sync: PHOTO_LIBRARY_PATH must be set" >&2
+    exit 2
+fi
+
+DEST="${LIBRARY_ROOT%/}/cloud"
+STAGING="${LIBRARY_ROOT%/}/.cloud-staging"
+mkdir -p "${STAGING}" "${DEST}"
+
+case "${SYNC_TOOL:-rclone}" in
+    rsync)
+        if [[ -z "${RSYNC_SOURCE:-}" ]]; then
+            echo "photoframe-cloud-sync: RSYNC_SOURCE must be set when SYNC_TOOL=rsync" >&2
+            exit 2
+        fi
+        # shellcheck disable=SC2086
+        rsync ${RSYNC_FLAGS} "${RSYNC_SOURCE}" "${STAGING}/"
+        ;;
+    *)
+        if [[ -z "${RCLONE_REMOTE:-}" ]]; then
+            echo "photoframe-cloud-sync: RCLONE_REMOTE must be set when SYNC_TOOL=rclone" >&2
+            exit 2
+        fi
+        # shellcheck disable=SC2086
+        rclone sync "${RCLONE_REMOTE}" "${STAGING}" ${RCLONE_FLAGS}
+        ;;
+esac
+
+# Promote staging → live cloud directory.
+# --link-dest creates hard links to staging inodes instead of copying data,
+# so this step uses no extra disk space and completes in milliseconds.
+rsync -a --delete --link-dest="${STAGING}" "${STAGING}/" "${DEST}/"

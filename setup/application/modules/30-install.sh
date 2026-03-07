@@ -128,6 +128,17 @@ prepare_runtime() {
             log INFO "Seeded default config at ${CONFIG_DEST}"
         fi
     fi
+
+    local sync_env_dest="/etc/photoframe/sync.env"
+    if [[ -f "${STAGE_DIR}/etc/photoframe/sync.env" ]]; then
+        if run_sudo test -f "${sync_env_dest}"; then
+            log INFO "Preserving existing sync config at ${sync_env_dest}"
+        else
+            run_sudo install -m 660 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" \
+                "${STAGE_DIR}/etc/photoframe/sync.env" "${sync_env_dest}"
+            log INFO "Seeded default sync config at ${sync_env_dest}"
+        fi
+    fi
 }
 
 set_permissions() {

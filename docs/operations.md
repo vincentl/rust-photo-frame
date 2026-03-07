@@ -135,6 +135,8 @@ Common things to configure: [docs/configuration.md](configuration.md)
 
 ## Running a manual sync
 
+To set up cloud sync for the first time, see [docs/cloud-sync.md](cloud-sync.md).
+
 If the sync timer is enabled, it runs automatically on its schedule. To trigger it immediately:
 
 ```bash

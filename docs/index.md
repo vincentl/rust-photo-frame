@@ -40,6 +40,7 @@ For display / sleep issues: [power-and-sleep.md](power-and-sleep.md)
 
 - **[quick-reference.md](quick-reference.md)** — command cheat sheet
 - **[operations.md](operations.md)** — adding photos, editing config, restarting, updating, sync
+- **[cloud-sync.md](cloud-sync.md)** — automatic cloud sync setup (Google Drive, Dropbox, S3, and more)
 
 ---
 
@@ -78,6 +79,7 @@ Two accounts matter on a running frame:
 | [troubleshooting.md](troubleshooting.md) | Symptom → cause → fix |
 | [quick-reference.md](quick-reference.md) | Daily command cheat sheet |
 | [operations.md](operations.md) | Adding photos, config, updates, sync |
+| [cloud-sync.md](cloud-sync.md) | Cloud sync setup and management |
 | [configuration.md](configuration.md) | YAML reference: all settings |
 | [power-and-sleep.md](power-and-sleep.md) | Schedule, DPMS, powerctl |
 | [wifi-manager.md](wifi-manager.md) | Wi-Fi recovery architecture and ops |
