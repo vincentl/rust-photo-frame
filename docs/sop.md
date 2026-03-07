@@ -1,5 +1,9 @@
 # Operations SOP
 
+> **This page has moved.** The current operations guide is [docs/operations.md](operations.md). The content below is retained for reference.
+
+---
+
 This runbook covers day-2 operations for deployed frames.
 
 Command context: run commands as your operator account over SSH and use `sudo` where shown.

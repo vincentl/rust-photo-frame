@@ -86,22 +86,30 @@ sleep-screen:
     font: "#f0e8d5"         # warm ivory
     accent: "#375978"       # muted indigo-teal
 
-# Wake/sleep scheduling now lives in buttond. Configure buttond's awake schedule
-# to drive the frame via `set-state` commands when you want timed behavior.
-awake-schedule:
-  timezone: "America/New_York"
-  awake-scheduled:
-    daily:
-      - ["07:15", "22:00"]
-    weekdays:
-      - ["06:45", "23:00"]
-    weekend:
-      - ["07:15", "12:00"]
-      - ["15:00", "23:30"]
-    friday: []
-    saturday:
-      - ["08:00", "12:00"]
-      - ["16:00", "23:00"]
+# Wake/sleep scheduling. buttond drives the frame via `set-state` commands on
+# schedule boundaries. Without an awake-schedule block, buttond keeps the frame
+# awake at all times (always-on behavior).
+#
+# To enable scheduled operation, uncomment the block below and adjust times and
+# timezone to match your location. An empty list for a day-of-week key (e.g.
+# friday: []) means "sleep all day" — remove the key to fall back to the daily
+# windows instead.
+#
+# awake-schedule:
+#   timezone: "America/New_York"    # IANA timezone name
+#   awake-scheduled:
+#     daily:                        # default window applied to all days
+#       - ["07:15", "22:00"]
+#     weekdays:                     # Mon–Thu; overrides daily
+#       - ["06:45", "23:00"]
+#     weekend:                      # Sat–Sun; overrides daily
+#       - ["07:15", "12:00"]
+#       - ["15:00", "23:30"]
+#     friday: []                    # empty list = sleep all day Friday; remove this
+#                                   # line to use the daily window on Fridays instead
+#     saturday:
+#       - ["08:00", "12:00"]
+#       - ["16:00", "23:00"]
 
 # Number of images to preload in the viewer (aligns with channel capacity)
 viewer-preload-count: 3

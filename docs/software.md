@@ -1,5 +1,9 @@
 # Raspberry Pi Provisioning and Installation
 
+> **This page has moved.** The current installation guide is [docs/installation.md](installation.md). The content below is retained for reference.
+
+---
+
 These instructions cover the full workflow for preparing a Raspberry Pi to run the Photo Frame project, from creating the SD card image to verifying the kiosk session and showing your first slideshow.
 
 Audience: operator/installer. For setup module internals see `setup/README.md`.

@@ -1,88 +1,98 @@
 # Photo Frame
 
-A Rust-powered digital photo frame for Raspberry Pi. It watches a photo library on disk (or synced from the cloud), weights the playlist so newer images appear more often, and renders each slide with configurable matting, transitions, and photo effects — all on-device, no internet required after setup.
+Build a wall-mounted digital photo frame using a Raspberry Pi 5 and a 4K monitor. It displays a self-managing slideshow from a local photo library: GPU-accelerated transitions, customizable matting styles, a smart playlist that surfaces newer photos first, and a built-in Wi-Fi recovery portal — all running on-device with no cloud dependency after setup.
 
-**Built for:** Raspberry Pi hobbyists, makers, and photographers who want a bespoke display they fully control.
+**Built for makers and hobbyists** who want a bespoke display they fully control, not a subscription-based appliance.
 
-**What it does:**
+---
 
-- **Slideshow engine** — GPU-accelerated rendering with matting, transitions (fade, wipe, push, e-ink simulation), and print simulation effects.
-- **Smart playlist** — recursively scans a configurable library directory; new photos appear more frequently until they've been shown enough times.
-- **Wi-Fi self-recovery** — when Wi-Fi drops, the frame launches a secured hotspot with a QR code and guided web UI so you can enter new credentials without a keyboard.
-- **Hardware button** — `buttond` handles wake/sleep via a physical GPIO button and enforces a configurable daily sleep schedule.
-- **Cloud sync (optional)** — a systemd timer runs `rclone` or `rsync` to keep the local library in sync with a remote source.
+## What you'll build
 
-## Table of Contents
+A kiosk-mode Raspberry Pi 5 that:
+- Cycles through photos in `/var/lib/photoframe/photos` with smooth GPU transitions and matting
+- Wakes and sleeps on a configurable schedule (or stays on all the time — your choice)
+- Recovers from Wi-Fi drops by launching a hotspot with a QR-code guided web UI for re-provisioning credentials
+- Accepts control commands over a Unix socket for scripting and hardware button integration
 
-1. [New to Photo Frame?](#new-to-photo-frame)
-2. [Hardware](#hardware)
-3. [Software Setup](#software-setup)
-4. [Wi-Fi Recovery & Provisioning](#wi-fi-recovery-provisioning)
-5. [Documentation Guide](#documentation-guide)
-6. [Architecture Overview](#architecture-overview)
-7. [Configuration](#configuration)
-8. [Fabrication](#fabrication)
-9. [References](#references)
-10. [License](#license)
+---
 
-## New to Photo Frame?
+## What you'll need
 
-Use this reading order for a first install:
+| Component | Notes |
+| --- | --- |
+| Raspberry Pi 5 (4 GiB+) | The GPU headroom matters; 8 GiB recommended for 4K with effects |
+| 4K monitor | Tested with Dell S2725QC 27" 4K. HDMI-CEC is not used. |
+| USB-C power supply | Pi 5 needs a 27W USB-C PD supply (official Pi 5 adapter or equivalent) |
+| HDMI cable | Short, high-quality run; the display won't tolerate a marginal cable |
+| High-endurance microSD | 32 GiB+ recommended for always-on use |
+| Momentary pushbutton | Optional — wires to Pi 5 power pads for hardware wake/sleep; see [hardware guide](docs/hardware.md) |
+| Mounting + enclosure | See [fabrication guide](maker/fabrication.md) for a tested French-cleat + shadow-box build |
 
-1. Plan hardware: [docs/hardware.md](docs/hardware.md)
-2. Provision and install software: [docs/software.md](docs/software.md)
-3. Tune runtime behavior: [docs/configuration.md](docs/configuration.md)
-4. Operate and troubleshoot: [docs/sop.md](docs/sop.md)
+[Full hardware guide →](docs/hardware.md)
 
-If you follow `docs/software.md` from top to bottom, you will finish with an installed kiosk session and a running slideshow.
+---
 
-## Hardware
+## Get started
 
-The project is tested on a Raspberry Pi 5 with a portrait-capable 4K monitor. A Pi 4 may also work but has not been formally tested; GPU-intensive effects may perform differently. The dedicated hardware guide covers the recommended bill of materials plus optional accessories and planning tips. [Full details →](docs/hardware.md)
+1. **Plan your hardware** — [docs/hardware.md](docs/hardware.md)
+2. **Install the software** — [docs/installation.md](docs/installation.md)
+3. **Understand your first boot** — [docs/first-boot.md](docs/first-boot.md)
+4. **Tune the experience** — [docs/configuration.md](docs/configuration.md)
 
-## Software Setup
+If you follow `docs/installation.md` from top to bottom you'll finish with a running slideshow.
 
-From flashing Raspberry Pi OS to deploying the watcher, hotspot, and sync services, the setup guide walks through every command you need to bring the slideshow online. It also documents CLI flags for local debugging and a quickstart checklist for provisioning. [Full details →](docs/software.md)
-Setup pipeline internals and helper-library notes are in [setup/README.md](setup/README.md).
+---
 
-> **Install layout at a glance**
->
-> - `/opt/photoframe` holds the read-only runtime artifacts that ship with the project: compiled binaries, unit files, and the pristine configuration templates staged by the setup scripts.
-> - `/var/lib/photoframe` carries the live state: logs, caches, hotspot artifacts, and any synchronized media. Treat this tree as the working area that systemd services mutate at runtime.
-> - `/etc/photoframe/config.yaml` holds the active configuration the services consume. Edit this copy (with `sudo`) to adjust library paths or button behavior.
->
-> This split keeps upgrades simple—rerunning the installer refreshes `/opt` without clobbering the operator-managed data living under `/var`.
+## Something not working?
 
-Looking for the Pi 5 kiosk recipe? The Trixie-specific instructions live in [docs/kiosk.md](docs/kiosk.md).
+Start here: **[docs/troubleshooting.md](docs/troubleshooting.md)**
 
-## Wi-Fi Recovery & Provisioning
+Common situations covered:
+- Screen shows the greeting ("Warming up…") then goes black
+- `powerctl wake` returns "no sway process found"
+- Photos don't appear after waking the frame
+- Frame sleeps at unexpected times (including the `friday: []` gotcha)
+- Build fails with out-of-memory errors
 
-When Wi-Fi drops, the frame pivots into a self-service recovery flow handled by the `wifi-manager` binary. It watches connectivity, launches a captive hotspot with a QR-code guided web UI, and writes fresh credentials back into NetworkManager—without ever running `cargo` as root.
+Quick command reference for daily use: **[docs/quick-reference.md](docs/quick-reference.md)**
 
-- **Automatic hotspot:** offline detection after a configurable grace period launches the **PhotoFrame-Setup** access point secured with a random three-word passphrase.
-- **Guided UI:** the on-device web server (default `http://192.168.4.1:8080/`) collects the replacement SSID/password and reports provisioning progress live.
-- **Systemd integration:** `photoframe-wifi-manager.service` runs as the `kiosk` user, restarts on failure, and keeps operational breadcrumbs in `/var/lib/photoframe` (hotspot password, QR image, last provisioning attempt).
+---
 
-Full operating procedures, configuration options, and troubleshooting steps are documented in [docs/wifi-manager.md](docs/wifi-manager.md).
+## Documentation
 
-## Documentation Guide
+Use [docs/index.md](docs/index.md) for the full documentation map. Quick paths:
 
-Use [docs/README.md](docs/README.md) for a role-based map (fresh install, day-2 ops, Wi-Fi internals, and developer validation).
+| I want to… | Start here |
+| --- | --- |
+| Set up from scratch | [docs/installation.md](docs/installation.md) |
+| Understand first boot | [docs/first-boot.md](docs/first-boot.md) |
+| Fix a problem | [docs/troubleshooting.md](docs/troubleshooting.md) |
+| Run daily commands | [docs/quick-reference.md](docs/quick-reference.md) |
+| Tune transitions, mats, schedule | [docs/configuration.md](docs/configuration.md) |
+| Operate and maintain | [docs/operations.md](docs/operations.md) |
+| Build the physical frame | [maker/fabrication.md](maker/fabrication.md) |
 
-## Repository Layout
+---
 
-- `crates/photoframe`: primary slideshow application crate.
-- `crates/buttond`: systemd-friendly hardware button daemon.
-- `crates/wifi-manager`: captive portal and Wi-Fi recovery agent.
-- `setup/`: provisioning scripts used during Pi imaging.
-- `docs/`: operational and architecture guides.
-- `tests/`: manual smoke and diagnostics scripts.
+## Repository layout
 
-## Architecture Overview
+```
+crates/photoframe/     Main slideshow application (GPU rendering, viewer pipeline)
+crates/buttond/        Hardware button daemon + wake/sleep scheduling
+crates/wifi-manager/   Captive portal and Wi-Fi recovery agent
+crates/config-model/   Shared configuration types
+setup/                 Provisioning scripts for Raspberry Pi OS
+docs/                  Operational and architecture guides
+maker/                 Physical build files (STL, SVG, fabrication guide)
+tests/                 Manual smoke tests and diagnostics scripts
+config.yaml            Annotated example configuration
+```
 
-Curious how the frame stays responsive? This optional deep dive outlines the async tasks and their communication patterns. Skip ahead to [Configuration](#configuration) if you just want to tune the experience.
+---
 
-The runtime is composed of five asynchronous tasks orchestrated by `main.rs`. They communicate over bounded channels to keep memory predictable and to respect GPU/CPU parallelism limits.
+## How it works (optional deep dive)
+
+The runtime is five async tasks that communicate over bounded channels. This keeps memory predictable and decouples CPU decode from GPU rendering.
 
 ```mermaid
 flowchart LR
@@ -101,35 +111,35 @@ flowchart LR
   VIEW -->|displayed event| MAN
 ```
 
-## Configuration
+- **PhotoFiles** — watches the library directory and maintains an inventory of available images
+- **PhotoManager** — builds a weighted playlist; new photos appear more often and decay toward equal weight over a configurable half-life
+- **PhotoLoader** — decodes JPEG/PNG in parallel (configurable concurrency) to RGBA pixel buffers
+- **PhotoEffect** — optionally applies print-simulation effects (paper texture, gallery lighting)
+- **PhotoViewer** — GPU-accelerated rendering with configurable matting and transitions via WGPU/Wayland
 
-All configuration options—from playlist weighting and greeting screens to transition tuning—are documented in depth, including starter YAML, per-key reference tables, and copy/paste recipes. [Reference →](docs/configuration.md)
-
-> **Matting at a glance:** The viewer walks `matting.active` from top to bottom, expanding inline palettes (such as `colors` arrays) into a canonical list of presets. Random and sequential selection both operate on that expanded list, so weighting or rotation happens after the inline swatches unfold. See the [full matting documentation](docs/configuration.md#matting-configuration) for details and examples.
-
-Need help wiring buttond's wake/sleep schedule to Raspberry Pi + Dell HDMI hardware? The dedicated power guide covers DPMS commands, troubleshooting, and verification steps. [Power & sleep details →](docs/power-and-sleep.md)
+---
 
 ## Fabrication
 
-Plan the physical build of the frame with dedicated fabrication guidance that covers laser cutting, 3D-printed brackets, cabinetry, and a final assembly checklist. [Full details →](maker/fabrication.md)
+Files for a custom wall mount are in the `maker/` directory: French-cleat spacers (3MF/STL/SCAD), a Pi 5 bracket (SVG), and a drill template. See [maker/fabrication.md](maker/fabrication.md) for the build guide.
 
-## Credits
-
-See [docs/credits.md](docs/credits.md) for image attributions.
+---
 
 ## References
 
-- **Procedural studio mat weave texture.** Our weave shading is adapted from Mike Cauchi’s breakdown of tillable cloth shading, which layers sine-profiled warp/weft threads with randomized grain to keep the pattern from banding. See ["Research – Tillable Images and Cloth Shading"](https://www.mikecauchiart.com/single-post/2017/01/23/research-tillable-images-and-cloth-shading).
-- **Print simulation shading.** The gallery-lighting and relief model follows guidance from Rohit A. Patil, Mark D. Fairchild, and Garrett M. Johnson’s paper ["3D Simulation of Prints for Improved Soft Proofing"](https://doi.org/10.1117/12.813471).
+- **Studio mat weave texture.** Adapted from Mike Cauchi's breakdown of tillable cloth shading. ["Research – Tillable Images and Cloth Shading"](https://www.mikecauchiart.com/single-post/2017/01/23/research-tillable-images-and-cloth-shading).
+- **Print simulation shading.** Based on Rohit A. Patil, Mark D. Fairchild, and Garrett M. Johnson, ["3D Simulation of Prints for Improved Soft Proofing"](https://doi.org/10.1117/12.813471).
+
+---
 
 ## AI Statement
 
-This project was developed with significant assistance from Anthropic’s AI tools:
+This project was developed with significant assistance from Anthropic's AI tools. Claude was used for design discussions, code generation, debugging, and drafting documentation.
 
-- **Claude** was used extensively for design discussions, code generation, debugging, and drafting technical documentation.
+---
 
 ## License
 
-This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for full text.
+MIT License — see [LICENSE](LICENSE) for full text.
 
 © 2025 Vincent Lucarelli

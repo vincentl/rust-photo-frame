@@ -1,5 +1,9 @@
 # Documentation Guide
 
+> **This page has moved.** The current documentation index is [docs/index.md](index.md). The content below is retained for reference.
+
+---
+
 Use this page as the map for Photo Frame documentation.
 
 ## First-time path (in order)

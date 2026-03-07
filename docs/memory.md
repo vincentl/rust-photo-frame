@@ -1,59 +1,103 @@
-# Memory profile and tuning
+# Memory Profile and Tuning
 
-This document describes how photoframe uses RAM at runtime and what
-tunables help keep the footprint under control on constrained systems such as
-the Raspberry Pi. The goal is to explain why the recent matting work can push a
-4 GiB device over the limit and outline mitigation levers.
+How `photoframe` uses RAM at runtime, what to expect on different Pi models, and how to tune it down when needed.
 
-## Pipeline overview
+---
 
-The slideshow stages create multiple temporary copies of each image. When these
-copies stack up across the configured preload window, overall memory pressure
-can spike.
+## Budget by Pi model
 
-1. **Loader decode buffer.** The loader converts source photos into raw RGBA8
-   byte arrays (`PreparedImageCpu`). The `tokio` channel between the manager,
-   loader, and viewer is sized by `viewer-preload-count`, so the system keeps
-   that many decoded frames alive even before any matting work begins.【F:crates/photoframe/src/main.rs†L118-L131】【F:crates/photoframe/src/events.rs†L13-L32】【F:crates/photoframe/src/tasks/loader.rs†L51-L111】
-2. **Matting worker input.** Each queued frame is cloned into a `MatTask` so the
-   CPU matting pipeline can resize and decorate it before display. This retains
-   another RGBA copy while the worker thread is active.【F:crates/photoframe/src/tasks/viewer.rs†L231-L334】
-3. **Matting output canvas.** The worker renders a full-screen canvas (`ImagePlane`)
-   per frame. The canvas dimensions track the display resolution and the
-   `oversample` setting, so 4K panels or aggressive oversampling can easily
-   generate tens of megabytes per image.【F:crates/photoframe/src/tasks/viewer.rs†L296-L389】
-4. **GPU upload staging.** When the viewer uploads the matted canvas to the
-   GPU, it may allocate an additional padded staging buffer to satisfy WGPU row
-   alignment requirements. This allocation lives until the upload completes on
-   the GPU queue.【F:crates/photoframe/src/tasks/viewer.rs†L600-L677】
-5. **Fixed-image backgrounds.** When the `fixed-image` matting mode is enabled,
-   each configured background is decoded once and cached indefinitely at the
-   canvas resolution. Large background images or long background lists can
-   therefore multiply steady-state memory usage.【F:crates/photoframe/src/processing/fixed_image.rs†L13-L123】
+The frame keeps several decoded frames in memory simultaneously (configurable via `viewer-preload-count`). On a 3840×2160 display with `oversample: 1.0`, a single RGBA image consumes roughly 33 MiB. With the default preload count of 3, and accounting for intermediate copies during matting, steady-state memory can easily exceed 400 MiB before OS overhead.
 
-In the current configuration it is common to have three frames in flight. On a
-3840×2160 display with `global-photo-settings.oversample: 1.0`, a single RGBA image consumes roughly
-33 MiB. With the copies above, a steady-state queue can therefore exceed
-400 MiB—before accounting for GPU allocations, font caches, and the rest of the
-system. That pressure encourages the kernel OOM killer to target unrelated
-processes such as `wireplumber`, which carries a high `oom_score_adj`.
+| Pi RAM | OS + system | Available to frame | Default preload | Recommended oversample |
+| --- | --- | --- | --- | --- |
+| 2 GiB | ~500 MiB | ~1.5 GiB | Reduce to 1 | 0.75 |
+| 4 GiB | ~500 MiB | ~3.5 GiB | 3 (default) | 1.0 |
+| 8 GiB | ~500 MiB | ~7.5 GiB | 4–5 | 1.0–1.5 |
+
+These are rough estimates. Heavy matting styles (studio, blur, fixed-image) and large backgrounds increase usage. Monitor with:
+
+```bash
+ps -o pid,rss,vsz,comm -p $(pgrep photoframe)
+# or in htop: filter by 'photoframe'
+```
+
+---
+
+## What happens when memory runs out
+
+The Linux kernel OOM killer terminates processes to recover memory. `photoframe` is not always the first target — processes with a high `oom_score_adj` (such as `wireplumber`) may be killed first. Signs of OOM:
+
+- Photos stop updating / slideshow freezes
+- `photoframe` exits and greetd restarts the session (greeting screen reappears)
+- `dmesg` shows "Out of memory: Kill process" entries
+
+Check:
+
+```bash
+sudo dmesg | grep -i "oom\|killed" | tail -20
+sudo journalctl -t photoframe -n 100 | grep -i "killed\|error"
+```
+
+---
+
+## Pipeline: where memory goes
+
+Each photo passes through several stages, accumulating temporary copies:
+
+1. **Loader decode buffer** — source photo decoded to raw RGBA. The channel between loader and viewer holds `viewer-preload-count` of these simultaneously.
+2. **Matting worker input** — a clone of the decoded frame sent to the CPU matting pipeline.
+3. **Matting output canvas** — a full-screen RGBA canvas at display resolution × `oversample`. On a 4K display at oversample 1.0, this is ~33 MiB per frame.
+4. **GPU upload staging** — a padded staging buffer aligned for WGPU row requirements, held until the GPU upload completes.
+5. **Fixed-image backgrounds** — each configured background image is decoded once and cached at full canvas resolution indefinitely.
+
+With 3 frames in flight, copies 1–4 stack up across all three, yielding 400+ MiB steady-state on 4K.
+
+---
 
 ## Mitigation levers
 
-* **Reduce `viewer-preload-count`.** Lowering the value trims the number of
-  concurrent decoded frames across the loader, matting queue, and GPU upload.
-  Values between 1 and 2 still hide most I/O hiccups on fast storage.
-* **Dial back `oversample`.** Keeping it near 1.0 dramatically reduces the size
-  of every matting canvas and GPU texture. Higher values should only be used
-  when the GPU and RAM budget clearly allow it.
-* **Cull large backgrounds.** When using the `fixed-image` matting mode, prefer
-  a short list of modestly sized assets (ideally already scaled near the screen
-  resolution) so the cached canvases do not balloon.
-* **Limit matting styles.** Disabling the matting stage (`matting.types: []`) or
-  sticking to lighter-weight options such as `fixed-color` cuts the CPU
-  intermediate allocations completely.
-* **Constrain source resolution.** Keeping the photo library near the panel
-  resolution avoids oversized decode buffers in the loader.
+Apply these in order — each one has diminishing returns so start with the highest-impact options:
 
-Monitoring the resident set size of the `photoframe` process while toggling
-these settings helps confirm the impact before deploying broadly.
+**1. Reduce `viewer-preload-count`** (highest impact)
+
+```yaml
+viewer-preload-count: 1   # default: 3
+```
+
+Cutting from 3 to 1 roughly trims 200 MiB on a 4K display. Values of 1–2 still hide most decode latency on fast SD cards.
+
+**2. Dial back `oversample`**
+
+```yaml
+global-photo-settings:
+  oversample: 0.75   # default: 1.0
+```
+
+Reduces every matting canvas and GPU texture by 44% (0.75² = 0.56). Start here if you want to keep preload count at 2.
+
+**3. Cull large backgrounds** (if using `fixed-image` matting)
+
+Each background image is cached forever at the full canvas resolution. A list of five 4K backgrounds adds ~165 MiB permanently. Keep the list short or pre-scale backgrounds to near-screen resolution before deploying.
+
+**4. Switch to lighter matting styles**
+
+The `fixed-color` mat style requires no intermediate copies. `blur` and `studio` are heavier. Disabling matting entirely (`active: []`) is the most aggressive option.
+
+**5. Constrain source photo resolution**
+
+Very large source photos (e.g. 50 MP RAW exports) create oversized decode buffers. Pre-scale photos to the display resolution before adding them to the library.
+
+---
+
+## Profiling
+
+Watch RSS (resident set size) while changing settings:
+
+```bash
+# Snapshot every 2 seconds
+watch -n 2 'ps -o pid,rss,vsz,comm -p $(pgrep photoframe)'
+```
+
+Or in `htop`: press `F4` to filter, type `photoframe`.
+
+The footprint stabilizes after the first few photo transitions. Take a steady-state reading with the frame awake and cycling, then compare before and after each tuning change.

@@ -1,130 +1,193 @@
 # Display Power and Sleep Guide
 
-buttond now owns wake/sleep scheduling for the frame. It evaluates the shared `awake-schedule` block, drives the slideshow state via the control socket, and executes DPMS commands to blank or revive the panel. This guide walks through the required packages, configuration snippets, and verification steps.
+`buttond` owns wake/sleep scheduling for the frame. It evaluates the `awake-schedule` block, drives the slideshow state via the control socket, and executes DPMS commands to blank or revive the panel.
 
-Command context: run commands as your operator account over SSH and use `sudo` where shown. Commands that touch Wayland session state run as `kiosk`.
+**Command context:** run commands as your operator account over SSH and use `sudo` where shown. Commands that touch the Wayland session must run as `kiosk` — use `sudo -u kiosk` as shown in the examples below. Running `powerctl` or `wlr-randr` as any other user produces "no sway process found for uid N" because those tools look for a Wayland session owned by the running user.
+
+---
+
+## Always-on vs. scheduled operation
+
+**Default behavior (no awake-schedule):** `buttond` keeps the frame awake at all times. Manual sleep/wake commands still work, but no automatic transitions happen.
+
+**Scheduled behavior:** add an `awake-schedule` block to `config.yaml` and buttond drives the frame between awake and asleep states at each boundary. See [Configuration essentials](#configuration-essentials).
+
+---
 
 ## Quick setup
 
-Use this quick sequence for a working schedule + power setup:
+For a working schedule + display power setup:
 
-1. Install tool:
-   - `sudo apt update && sudo apt install wlr-randr`
-2. Configure `awake-schedule` and `buttond.screen` in `/etc/photoframe/config.yaml`.
-3. Restart daemon:
-   - `sudo systemctl restart buttond.service`
-4. Verify:
-   - `sudo journalctl -u buttond.service -f`
-   - `echo '{"command":"set-state","state":"awake"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock`
-
-Expected outcome: buttond logs show schedule evaluation and the frame wakes when the control command is sent.
-
-## Setup steps
-
-1. Install the wlroots command-line utilities:
+1. Install display tool:
    ```bash
-   sudo apt update
-   sudo apt install wlr-randr
+   sudo apt update && sudo apt install wlr-randr
    ```
-2. (Optional) Deploy the application bundle (`./setup/application/deploy.sh`) so `/opt/photoframe/bin/powerctl` and the systemd units land on the device. The helper mirrors the default inline commands and can be referenced once the staged tree has been installed under `/opt`.
-3. Edit `/etc/photoframe/config.yaml` so it includes an awake schedule and display power commands:
-   ```yaml
-   awake-schedule:
-     timezone: America/New_York
-     awake-scheduled:
-       daily:
-         - ["07:30", "22:00"]
-       weekend:
-         - ["09:00", "23:30"]
-
-   buttond:
-     sleep-grace-ms: 300000
-     screen:
-       off-delay-ms: 3500
-       display-name: HDMI-A-2
-       on-command:
-         program: /opt/photoframe/bin/powerctl
-         args: [wake]
-       off-command:
-         program: /opt/photoframe/bin/powerctl
-         args: [sleep]
+2. Find your connector name:
+   ```bash
+   sudo -u kiosk wlr-randr | grep connected
    ```
-4. Restart the daemon so it picks up the edits:
+3. Configure `awake-schedule` and `buttond.screen` in `/etc/photoframe/config.yaml`.
+4. Restart daemon:
    ```bash
    sudo systemctl restart buttond.service
    ```
-5. Confirm scheduling works by watching the logs and issuing a manual wake:
+5. Verify:
    ```bash
    sudo journalctl -u buttond.service -f
-   echo '{"command": "set-state", "state": "awake"}' \
+   echo '{"command":"set-state","state":"awake"}' \
      | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock
    ```
-   buttond applies the configured schedule after the greeting delay, then continues driving wake/sleep transitions automatically.
 
-   Update `display-name` in the snippet to match the connector reported by `wlr-randr | grep connected` (for example `HDMI-A-1`).
+Expected outcome: buttond logs show schedule evaluation and the frame wakes when the control command is sent.
+
+---
+
+## Setup steps
+
+### 1. Install wlr-randr
+
+```bash
+sudo apt update
+sudo apt install wlr-randr
+```
+
+### 2. Find your display connector name
+
+The connector name must be run inside the kiosk Wayland session:
+
+```bash
+sudo -u kiosk wlr-randr | grep connected
+```
+
+Common values: `HDMI-A-1`, `HDMI-A-2`. Use whatever your hardware reports.
+
+### 3. Edit the config
+
+```bash
+sudo nano /etc/photoframe/config.yaml
+```
+
+Add or update these blocks:
+
+```yaml
+awake-schedule:
+  timezone: America/New_York
+  awake-scheduled:
+    daily:
+      - ["07:30", "22:00"]
+    weekend:
+      - ["09:00", "23:30"]
+
+buttond:
+  sleep-grace-ms: 300000
+  screen:
+    off-delay-ms: 3500
+    display-name: HDMI-A-2   # replace with output from step 2
+    on-command:
+      program: /opt/photoframe/bin/powerctl
+      args: [wake]
+    off-command:
+      program: /opt/photoframe/bin/powerctl
+      args: [sleep]
+```
+
+### 4. Restart buttond
+
+```bash
+sudo systemctl restart buttond.service
+```
+
+### 5. Confirm it works
+
+```bash
+sudo journalctl -u buttond.service -f
+echo '{"command":"set-state","state":"awake"}' \
+  | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock
+```
+
+buttond applies the configured schedule after the greeting delay, then continues driving wake/sleep transitions automatically.
+
+---
 
 ## Configuration essentials
 
-`awake-schedule` describes when the frame should be awake. The block supports wrap-past-midnight windows, weekday/weekend overrides, and per-day exceptions. Times accept `HH:MM` or `HH:MM:SS` strings and may optionally include a trailing IANA timezone name (for example `"07:30 America/Los_Angeles"`). When a field omits a zone the top-level `timezone` is used.
+`awake-schedule` describes when the frame should be awake. Supports wrap-past-midnight windows, weekday/weekend overrides, and per-day exceptions. Times use `HH:MM` or `HH:MM:SS`. An empty list for a day key (e.g. `friday: []`) means "sleep all day on that day" — remove the key to fall back to the `daily` window.
 
-buttond honours a few additional knobs inside its namespaced section:
+`buttond` knobs:
 
-- `sleep-grace-ms` — how long to defer scheduled sleep after button activity or a manual wake. This prevents accidental naps immediately after someone interacts with the frame.
-- `screen.off-delay-ms` — delay between sending the sleep command and running the configured power-off command so the on-device sleep screen has time to render.
-- `screen.on-command` / `screen.off-command` — shell commands executed when buttond transitions the panel. The defaults call `powerctl`, which issues `wlr-randr` DPMS requests with a `vcgencmd` fallback.
-- `screen.display-name` — set this to the connector name reported by `wlr-randr` (for example `HDMI-A-2`). buttond appends the value to both power commands so wake/sleep do not rely on runtime auto-detection.
+| Key | What it does |
+| --- | --- |
+| `sleep-grace-ms` | Delay before scheduled sleep after manual interaction, preventing accidental naps |
+| `screen.off-delay-ms` | Delay between sleep command and screen power-off, giving the sleep card time to render |
+| `screen.on-command` / `screen.off-command` | Shell commands for wake/sleep — defaults call `powerctl` |
+| `screen.display-name` | Connector name passed to both power commands; set explicitly to avoid auto-detection |
 
-The helper `/opt/photoframe/bin/powerctl` bootstraps the Wayland environment, auto-detects the first connected output when no argument is supplied, and chains `vcgencmd` as a fallback. buttond now prefers `powerctl` for both wake/sleep transitions and state detection whenever it sees `powerctl` configured for the screen commands. When `display-name` is omitted, the state probe targets any connected output.
+### powerctl
 
-Set `buttond.screen.display-name` so buttond always calls it with an explicit connector:
+`/opt/photoframe/bin/powerctl` bootstraps the Wayland environment, issues `wlr-randr` DPMS requests, and falls back to `vcgencmd display_power`.
+
+> **powerctl must run as the `kiosk` user.** It searches for a Wayland session owned by the running UID. Any other user produces "no sway process found for uid N".
+
 ```bash
+sudo -u kiosk /opt/photoframe/bin/powerctl wake
 sudo -u kiosk /opt/photoframe/bin/powerctl sleep
-sudo -u kiosk /opt/photoframe/bin/powerctl wake HDMI-A-2
+sudo -u kiosk /opt/photoframe/bin/powerctl wake HDMI-A-2   # explicit connector
 ```
+
+When `display-name` is set in config, buttond always passes it to `powerctl` automatically. When omitted, `powerctl` auto-detects the first connected output.
+
+---
 
 ## Manual overrides
 
-The frame remains asleep after the greeting until it receives a control command. Pipe JSON to the Unix socket (default `/run/photoframe/control.sock`):
+Pipe JSON to the control socket to override the schedule temporarily:
 
-- `{"command":"set-state","state":"awake"}` — force wake mode.
-- `{"command":"set-state","state":"asleep"}` — force sleep mode.
-- `{"command":"ToggleState"}` — flip between awake ↔ asleep.
+- Wake: `echo '{"command":"set-state","state":"awake"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock`
+- Sleep: `echo '{"command":"set-state","state":"asleep"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock`
+- Toggle: `echo '{"command":"ToggleState"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock`
 
-Manual toggles persist until another command arrives. When a schedule is configured, buttond resets the state at the next boundary after respecting `sleep-grace-ms`.
+Manual overrides persist until the next schedule boundary (after `sleep-grace-ms` elapses).
+
+---
 
 ## Raspberry Pi 5 + Dell S2725QC notes
 
-- Skip `/sys/class/backlight`. External HDMI panels do not expose a kernel backlight interface; writing there is a no-op.
-- Primary method: `wlr-randr --output <NAME> --off|--on`. Ensure `buttond` runs inside the same user Wayland session so the command sees a valid display socket.
-- Fallback: `vcgencmd display_power 0|1` still works on Pi 5 KMS. Default commands chain both methods.
-- CEC support: Dell monitors (including S2725QC) do not implement HDMI-CEC. `cec-ctl` cannot power them down.
-- Connector names: usually `HDMI-A-1` or `HDMI-A-2`. List outputs with:
+- **Skip `/sys/class/backlight`** — external HDMI panels don't expose a kernel backlight interface; writing there is a no-op.
+- **Primary method:** `wlr-randr --output <NAME> --off|--on` via `powerctl`.
+- **Fallback:** `vcgencmd display_power 0|1` still works on Pi 5 KMS. Default `powerctl` chains both.
+- **CEC:** the Dell S2725QC does not implement HDMI-CEC. `cec-ctl` cannot power it down.
+- **Connector names:** list outputs with:
 
-```bash
-wlr-randr | grep -E '^(.* connected|.)'
-```
+  ```bash
+  sudo -u kiosk wlr-randr | grep -E '^[A-Z]'
+  ```
 
-- Wayland session scope: `wlr-randr` must run in the compositor session. If running as a system service, export `WAYLAND_DISPLAY` (for example `WAYLAND_DISPLAY=wayland-1`) and forward the compositor socket via service binding.
+---
 
-Verification checklist:
-
-1. Run sleep command; monitor LED should turn amber and panel should blank.
-2. Wait a few seconds, then run wake command; screen should resync to expected mode.
-3. Watch `sudo journalctl -u buttond.service` for scheduled transitions and power command execution.
-
-## Troubleshooting matrix
+## Troubleshooting
 
 | Symptom | Likely cause | Fix |
-| ------- | ------------ | --- |
-| `wlr-randr: cannot connect to display` | Command is running outside the compositor Wayland session | Ensure `buttond` runs in the login user session or export the correct `WAYLAND_DISPLAY`. |
-| Commands run but monitor stays on | Output name mismatch | Use `wlr-randr | grep connected` and set correct `display-name` in config. |
-| Mode changes after wake | External scripts force a mode | Remove explicit `--mode` overrides and let compositor restore output mode. |
+| --- | --- | --- |
+| `no sway process found for uid N` | Running as wrong user | `sudo -u kiosk /opt/photoframe/bin/powerctl ...` |
+| `wlr-randr: cannot connect to display` | Running outside compositor session | Use `sudo -u kiosk` |
+| Commands run but monitor stays on | Output name mismatch | Run `sudo -u kiosk wlr-randr | grep connected` and update `display-name` in config |
+| Mode changes after wake | External scripts forcing a mode | Remove explicit `--mode` overrides |
 | `wlr-randr` not installed | Package missing | `sudo apt install wlr-randr` |
-| “display power action failed” in logs | Panel does not support DPMS path used | Keep fallback enabled or remove command block to silence warnings on unsupported hardware. |
+| "display power action failed" in logs | Panel doesn't support this DPMS path | Keep `vcgencmd` fallback enabled or remove the command block |
+
+---
 
 ## Operational tips
 
-- Use `sudo journalctl -u buttond.service -f` to watch schedule boundaries, DPMS actions, and manual overrides.
-- For interactive tests, send `{"command":"set-state","state":"awake"}` over the control socket instead of restarting services.
-- Keep custom power scripts under `/opt/photoframe/bin` and reference absolute paths in `buttond.screen`.
-- Debounce physical button wiring before writing to the control socket to avoid accidental double toggles.
+- Watch schedule transitions live: `sudo journalctl -u buttond.service -f`
+- For testing, use control socket commands rather than restarting services — they take effect immediately.
+- Keep custom power scripts in `/opt/photoframe/bin/` and use absolute paths in `buttond.screen`.
+- Debounce physical button wiring before connecting — spurious events cause rapid wake/sleep toggling.
+
+---
+
+## Verification checklist
+
+1. Send sleep command → monitor LED goes amber, panel blanks.
+2. Wait a few seconds → send wake command → screen resyncs to normal mode.
+3. Watch `sudo journalctl -u buttond.service` for scheduled transitions and power command output.
