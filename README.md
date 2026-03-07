@@ -9,6 +9,7 @@ Build a wall-mounted digital photo frame using a Raspberry Pi 5 and a 4K monitor
 ## What you'll build
 
 A kiosk-mode Raspberry Pi 5 that:
+
 - Cycles through photos in `/var/lib/photoframe/photos` with smooth GPU transitions and matting
 - Wakes and sleeps on a configurable schedule (or stays on all the time — your choice)
 - Recovers from Wi-Fi drops by launching a hotspot with a QR-code guided web UI for re-provisioning credentials
@@ -18,15 +19,15 @@ A kiosk-mode Raspberry Pi 5 that:
 
 ## What you'll need
 
-| Component | Notes |
-| --- | --- |
-| Raspberry Pi 5 (4 GiB+) | The GPU headroom matters; 8 GiB recommended for 4K with effects |
-| 4K monitor | Tested with Dell S2725QC 27" 4K. HDMI-CEC is not used. |
-| USB-C power supply | Pi 5 needs a 27W USB-C PD supply (official Pi 5 adapter or equivalent) |
-| HDMI cable | Short, high-quality run; the display won't tolerate a marginal cable |
-| High-endurance microSD | 32 GiB+ recommended for always-on use |
-| Momentary pushbutton | Optional — wires to Pi 5 power pads for hardware wake/sleep; see [hardware guide](docs/hardware.md) |
-| Mounting + enclosure | See [fabrication guide](maker/fabrication.md) for a tested French-cleat + shadow-box build |
+| Component               | Notes                                                                                               |
+| ----------------------- | --------------------------------------------------------------------------------------------------- |
+| Raspberry Pi 5 (4 GiB+) | The GPU headroom matters; 8 GiB recommended for 4K with effects                                     |
+| 4K monitor              | Tested with Dell S2725QC 27" 4K. HDMI-CEC is not used.                                              |
+| USB-C power supply      | Pi 5 needs a 27W USB-C PD supply (official Pi 5 adapter or equivalent)                              |
+| HDMI cable              | Short, high-quality run; the display won't tolerate a marginal cable                                |
+| High-endurance microSD  | 32 GiB+ recommended for always-on use                                                               |
+| Momentary pushbutton    | Optional — wires to Pi 5 power pads for hardware wake/sleep; see [hardware guide](docs/hardware.md) |
+| Mounting + enclosure    | See [fabrication guide](maker/fabrication.md) for a tested French-cleat + shadow-box build          |
 
 [Full hardware guide →](docs/hardware.md)
 
@@ -48,6 +49,7 @@ If you follow `docs/installation.md` from top to bottom you'll finish with a run
 Start here: **[docs/troubleshooting.md](docs/troubleshooting.md)**
 
 Common situations covered:
+
 - Screen shows the greeting ("Warming up…") then goes black
 - `powerctl wake` returns "no sway process found"
 - Photos don't appear after waking the frame
@@ -62,15 +64,15 @@ Quick command reference for daily use: **[docs/quick-reference.md](docs/quick-re
 
 Use [docs/index.md](docs/index.md) for the full documentation map. Quick paths:
 
-| I want to… | Start here |
-| --- | --- |
-| Set up from scratch | [docs/installation.md](docs/installation.md) |
-| Understand first boot | [docs/first-boot.md](docs/first-boot.md) |
-| Fix a problem | [docs/troubleshooting.md](docs/troubleshooting.md) |
-| Run daily commands | [docs/quick-reference.md](docs/quick-reference.md) |
-| Tune transitions, mats, schedule | [docs/configuration.md](docs/configuration.md) |
-| Operate and maintain | [docs/operations.md](docs/operations.md) |
-| Build the physical frame | [maker/fabrication.md](maker/fabrication.md) |
+| I want to…                       | Start here                                         |
+| -------------------------------- | -------------------------------------------------- |
+| Set up from scratch              | [docs/installation.md](docs/installation.md)       |
+| Understand first boot            | [docs/first-boot.md](docs/first-boot.md)           |
+| Fix a problem                    | [docs/troubleshooting.md](docs/troubleshooting.md) |
+| Run daily commands               | [docs/quick-reference.md](docs/quick-reference.md) |
+| Tune transitions, mats, schedule | [docs/configuration.md](docs/configuration.md)     |
+| Operate and maintain             | [docs/operations.md](docs/operations.md)           |
+| Build the physical frame         | [maker/fabrication.md](maker/fabrication.md)       |
 
 ---
 
@@ -134,7 +136,10 @@ Files for a custom wall mount are in the `maker/` directory: French-cleat spacer
 
 ## AI Statement
 
-This project was developed with significant assistance from Anthropic's AI tools. Claude was used for design discussions, code generation, debugging, and drafting documentation.
+This project was developed with significant assistance from multiple AI tools:
+
+- **Anthropic**: Claude Code with Sonnet was used for design discussions, code generation, debugging, and drafting documentation
+- **OpenAI**: Codex with GPT was used for design discussions, code generation, debugging, and drafting documentation
 
 ---
 
