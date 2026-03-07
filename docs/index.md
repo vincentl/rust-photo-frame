@@ -73,7 +73,7 @@ Two accounts matter on a running frame:
 | Document | What it covers |
 | --- | --- |
 | [hardware.md](hardware.md) | BOM, button wiring, planning |
-| [installation.md](installation.md) | Full install guide (replaces software.md) |
+| [installation.md](installation.md) | Full install guide |
 | [first-boot.md](first-boot.md) | Normal first-boot sequence, wake command |
 | [troubleshooting.md](troubleshooting.md) | Symptom → cause → fix |
 | [quick-reference.md](quick-reference.md) | Daily command cheat sheet |

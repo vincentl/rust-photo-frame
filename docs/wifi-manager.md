@@ -2,7 +2,7 @@
 
 The `wifi-manager` crate is the frame's single entry point for Wi-Fi monitoring, hotspot recovery, and captive portal provisioning. It wraps NetworkManager's `nmcli` tooling, spawns the recovery web UI, and persists all operational breadcrumbs under `/var/lib/photoframe`.
 
-This document is the implementation/reference guide. For fresh-install validation use [`software.md`](software.md), for full QA coverage use [`../developer/test-plan.md`](../developer/test-plan.md), and for incident triage use [`sop.md`](sop.md).
+This document is the implementation/reference guide. For fresh-install validation use [`installation.md`](installation.md), for full QA coverage use [`../developer/test-plan.md`](../developer/test-plan.md), and for incident triage use [`operations.md`](operations.md).
 
 Command context: run commands as your operator account over SSH and use `sudo` where shown. Commands that operate Wi-Fi credentials directly should run as `kiosk` via `sudo -u kiosk`.
 
@@ -16,9 +16,9 @@ Use this sequence for a quick sanity check after changing Wi-Fi logic:
 2. Confirm configuration values in `/opt/photoframe/etc/wifi-manager.yaml` and restart watcher:
    - `sudo systemctl restart photoframe-wifi-manager.service`
 3. Run the fresh-install acceptance flow:
-   - [`software.md#fresh-install-wi-fi-recovery-test`](software.md#fresh-install-wi-fi-recovery-test)
+   - [`installation.md#fresh-install-wi-fi-recovery-test`](installation.md#fresh-install-wi-fi-recovery-test)
 4. If it fails, follow:
-   - [`sop.md#wi-fi-failure-triage`](sop.md#wi-fi-failure-triage)
+   - [`operations.md#wi-fi-failure-triage`](operations.md#wi-fi-failure-triage)
 
 Expected outcome: the watcher service is `active (running)` and `print-status.sh` reports coherent connectivity/hotspot state.
 
@@ -152,9 +152,9 @@ Re-running the scripts is idempotent: binaries are replaced in place, configs ar
 
 ## Validation entry points
 
-- Fresh-install acceptance flow: [`software.md#fresh-install-wi-fi-recovery-test`](software.md#fresh-install-wi-fi-recovery-test)
+- Fresh-install acceptance flow: [`installation.md#fresh-install-wi-fi-recovery-test`](installation.md#fresh-install-wi-fi-recovery-test)
 - Full Wi-Fi validation matrix: [`../developer/test-plan.md#phase-7-wi-fi-provisioning-watcher`](../developer/test-plan.md#phase-7-wi-fi-provisioning-watcher)
-- Day-2 failure triage: [`sop.md#wi-fi-failure-triage`](sop.md#wi-fi-failure-triage)
+- Day-2 failure triage: [`operations.md#wi-fi-failure-triage`](operations.md#wi-fi-failure-triage)
 
 ## Service management
 

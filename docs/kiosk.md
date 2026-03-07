@@ -2,7 +2,7 @@
 
 The photo frame boots straight into the Wayland app using a greetd-managed session on Debian 13 (trixie). greetd launches a dedicated Sway session on virtual terminal 1 and runs the photo frame as the `kiosk` user—no display manager shims or PAM templates are required.
 
-This document is the kiosk stack reference (greetd/Sway wiring and expected system state). For fresh install steps use [`software.md`](software.md), and for day-2 operations use [`sop.md`](sop.md).
+This document is the kiosk stack reference (greetd/Sway wiring and expected system state). For fresh install steps use [`installation.md`](installation.md), and for day-2 operations use [`operations.md`](operations.md).
 
 Command context: run commands as your operator account over SSH and use `sudo` for service inspection.
 
@@ -55,7 +55,7 @@ user = "kiosk"
 
 ## Operations quick reference
 
-- Day-2 runtime commands (restart, logs, control socket): [`sop.md`](sop.md)
+- Day-2 runtime commands (restart, logs, control socket): [`operations.md`](operations.md)
 - Advanced Sway/kiosk-shell debug workflows: [`../developer/kiosk-debug.md`](../developer/kiosk-debug.md)
 
 No `display-manager.service`, login overrides, or tty autologin hacks are required. The greetd unit owns kiosk launch entirely.

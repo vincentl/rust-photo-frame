@@ -2,7 +2,7 @@
 
 This directory houses idempotent provisioning scripts for Raspberry Pi photo frame deployments. Each stage can be re-run safely after OS updates or image refreshes.
 
-If you are installing from a blank microSD card, start with the operator runbook in [`../docs/software.md`](../docs/software.md). This file focuses on setup script behavior and internals.
+If you are installing from a blank microSD card, start with the operator runbook in [`../docs/installation.md`](../docs/installation.md). This file focuses on setup script behavior and internals.
 
 ## Standard deployment flow
 
@@ -50,8 +50,8 @@ The application stage compiles the workspace, stages binaries and documentation 
 
 ## Operator quick reference
 
-- Daily operations and triage: [`../docs/sop.md`](../docs/sop.md)
-- Fresh-install + Wi-Fi recovery validation: [`../docs/software.md`](../docs/software.md)
+- Daily operations and triage: [`../docs/operations.md`](../docs/operations.md)
+- Fresh-install + Wi-Fi recovery validation: [`../docs/installation.md`](../docs/installation.md)
 - Full system validation matrix: [`../developer/test-plan.md`](../developer/test-plan.md)
 
 The kiosk account is unprivileged; use your operator account (for example `frame`) for maintenance commands.

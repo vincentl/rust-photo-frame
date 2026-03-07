@@ -2,7 +2,7 @@
 
 This document is for developer-only debugging on a live Pi when normal operator runbooks are not enough.
 
-For routine operations use [`../docs/sop.md`](../docs/sop.md).
+For routine operations use [`../docs/operations.md`](../docs/operations.md).
 
 ## Manual debug launch (advanced)
 

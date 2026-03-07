@@ -55,7 +55,7 @@ Keep pins only when they are required for reproducible runtime or compatibility 
 
 ## 6) Recovery validation on device
 
-Execute the Wi‑Fi SOP checks in `docs/sop.md`:
+Execute the Wi‑Fi recovery checks in `docs/operations.md`:
 
 - wrong-password recovery path,
 - temporary AP outage auto-reconnect probe,
