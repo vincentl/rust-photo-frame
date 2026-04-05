@@ -98,8 +98,7 @@ Host photoframe
    ```
 
    This script:
-   - Installs system packages and a Rust toolchain (requires `sudo` — you'll be prompted)
-   - Logs out and back in automatically to pick up environment changes
+   - Installs system packages and a Rust toolchain (uses `sudo` internally — no password prompt on standard Raspberry Pi OS)
    - Builds all four crates (`photoframe`, `buttond`, `wifi-manager`, `config-model`)
    - Installs binaries, unit files, and a starter config to `/opt/photoframe`
    - Starts the kiosk session, Wi-Fi watcher, and button daemon
@@ -112,13 +111,19 @@ Host photoframe
    CARGO_BUILD_JOBS=2 ./setup/install-all.sh
    ```
 
-3. After the installer returns, verify everything came up:
+3. After the installer returns, **log out and SSH back in** so your shell picks up the new `kiosk` group membership added during setup — this is required before running the health check:
+
+   ```bash
+   exit
+   ```
+
+   Then reconnect and verify everything came up:
 
    ```bash
    ./setup/tools/verify.sh
    ```
 
-   You should see green / OK for all critical checks. If anything is red, check the message — most issues are a missing config file or a service that needs a restart.
+   You should see all checks in green. Warnings appear in yellow, errors in red — most issues are a missing config file or a service that needs a restart.
 
 ---
 

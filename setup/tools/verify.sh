@@ -10,14 +10,20 @@ source "${SCRIPT_DIR}/../lib/systemd.sh"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photoframe}"
 SERVICE_USER="${SERVICE_USER:-kiosk}"
 
+if [[ -t 1 && "${NO_COLOR:-}" != "1" ]]; then
+  C_OK='\033[0;32m'; C_WARN='\033[0;33m'; C_ERR='\033[0;31m'; C_RESET='\033[0m'
+else
+  C_OK=''; C_WARN=''; C_ERR=''; C_RESET=''
+fi
+
 log() {
   local level="$1"; shift
   printf '[verify] %s\n' "$level: $*"
 }
 
-ok()   { log "OK"    "$*"; }
-warn() { log "WARN"  "$*"; }
-err()  { log "ERROR" "$*"; }
+ok()   { printf "[verify] ${C_OK}OK${C_RESET}: %s\n"    "$*"; }
+warn() { printf "[verify] ${C_WARN}WARN${C_RESET}: %s\n" "$*"; }
+err()  { printf "[verify] ${C_ERR}ERROR${C_RESET}: %s\n" "$*"; }
 
 failures=0
 warnings=0
@@ -237,6 +243,10 @@ else
 fi
 
 echo
-log INFO "Summary: ${failures} error(s), ${warnings} warning(s)"
+if (( failures > 0 )); then
+  printf "[verify] ${C_ERR}INFO${C_RESET}: Summary: ${failures} error(s), ${warnings} warning(s)\n"
+else
+  printf "[verify] ${C_OK}INFO${C_RESET}: Summary: ${failures} error(s), ${warnings} warning(s)\n"
+fi
 
 exit $(( failures > 0 ? 1 : 0 ))
