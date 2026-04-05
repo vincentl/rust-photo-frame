@@ -131,13 +131,7 @@ Host photoframe
 
 The frame scans `/var/lib/photoframe/photos` recursively. Drop photos in the `local/` subdirectory for manual imports:
 
-1. Make sure the directory exists with the right ownership (the installer creates it, but just in case):
-
-   ```bash
-   sudo install -d -m 2775 -o kiosk -g kiosk /var/lib/photoframe/photos/local
-   ```
-
-2. Copy photos to the Pi. From your Mac or Linux machine:
+1. Copy photos to the Pi. From your Mac or Linux machine:
 
    ```bash
    scp /path/to/photos/* frame@photoframe.local:/var/lib/photoframe/photos/local/
@@ -150,13 +144,13 @@ The frame scans `/var/lib/photoframe/photos` recursively. Drop photos in the `lo
    sudo chown kiosk:kiosk /var/lib/photoframe/photos/local/*
    ```
 
-3. If you get a permission error, log out and SSH back in. The installer adds your operator account to the `kiosk` group, but your current session doesn't pick that up until you reconnect.
-
-4. Confirm the files landed:
+2. Confirm the files landed:
 
    ```bash
    find /var/lib/photoframe/photos -type f | wc -l
    ```
+
+**Optional — custom mat backgrounds:** The installer also creates `/var/lib/photoframe/backgrounds/`. If you want to use your own images as matting behind photos (instead of solid colors or studio mats), copy JPEG or PNG files there. See [configuration.md](configuration.md) for how to configure the `fixed-image` matting style.
 
 ---
 
