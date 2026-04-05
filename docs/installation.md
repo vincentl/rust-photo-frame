@@ -219,26 +219,51 @@ Full schedule options are documented in [docs/configuration.md](configuration.md
 
 ## Optional: cloud photo sync
 
-The installer ships a disabled `photoframe-sync` service that runs `rclone` or `rsync` on a timer. To enable it:
+The installer ships a disabled `photoframe-sync` service that pulls photos from a cloud provider or NAS into `/var/lib/photoframe/photos/cloud/` on a timer. It uses [rclone](https://rclone.org) — a command-line tool that connects to Google Drive, Dropbox, S3, OneDrive, and 40+ other services. See [docs/cloud-sync.md](cloud-sync.md) for the full guide including provider details, rsync for NAS, schedule changes, and troubleshooting.
 
-1. Create `/etc/photoframe/sync.env`:
+**Quick start:**
+
+1. Run the interactive setup to authenticate with your cloud provider:
 
    ```bash
-   sudo tee /etc/photoframe/sync.env >/dev/null <<'EOF'
-   # Choose one:
-   # RCLONE_REMOTE=remote-name:path/to/album
-   # RSYNC_SOURCE=/path/to/source/
-   EOF
-   sudo nano /etc/photoframe/sync.env
+   rclone config
    ```
 
-2. Enable the timer:
+   The wizard asks you to name the remote (e.g. `gdrive`) and walks through OAuth login in a browser. When done, confirm it works:
+
+   ```bash
+   rclone listremotes          # shows e.g. "gdrive:"
+   rclone ls gdrive:My\ Photos/Frame
+   ```
+
+2. Copy the rclone config to the kiosk service account (the sync runs as `kiosk`, not your operator user):
+
+   ```bash
+   sudo mkdir -p /home/kiosk/.config/rclone
+   sudo cp ~/.config/rclone/rclone.conf /home/kiosk/.config/rclone/rclone.conf
+   sudo chown -R kiosk:kiosk /home/kiosk/.config/rclone
+   ```
+
+3. Set the sync source in `/etc/photoframe/sync.env` — the format is `remote-name:path` where `remote-name` matches what `rclone listremotes` showed:
+
+   ```bash
+   sudo nano /etc/photoframe/sync.env
+   # Uncomment and set, e.g.:
+   # RCLONE_REMOTE=gdrive:My Photos/Frame
+   ```
+
+4. Test a manual sync and check the logs:
+
+   ```bash
+   sudo systemctl start photoframe-sync.service
+   sudo journalctl -u photoframe-sync.service -n 50
+   ```
+
+5. Enable the hourly timer:
 
    ```bash
    sudo systemctl enable --now photoframe-sync.timer
    ```
-
-3. Synced photos land in `/var/lib/photoframe/photos/cloud`.
 
 ---
 
