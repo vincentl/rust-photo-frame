@@ -40,7 +40,7 @@ transition:
     - kind: fade
       duration-ms: 400
 global-photo-settings:
-  dwell-ms: 2000 # Time an image remains fully visible (ms)
+  dwell-ms: 12000 # Time an image remains fully visible (ms)
   oversample: 1.0 # GPU render oversample vs. screen size
   max-upscale-factor: 1.0 # Limit for enlarging small images
 viewer-preload-count: 3 # Images the viewer preloads; also sets viewer channel capacity
@@ -64,7 +64,7 @@ matting:
       minimum-mat-percentage: 3.5
       sigma: 32.0
       sample-scale: 0.125
-      backend: neon
+      backend: neon  # arm64 vector path; falls back to cpu automatically
 ```
 
 If the frame launches to a black screen, check that `photo-library-path` points to a directory the runtime can read and that the kiosk account has access. The directory should contain `cloud/` and `local/` subdirectories — the runtime merges both. Validate a YAML edit quickly with `cargo run -p photoframe -- --playlist-dry-run 1`, which parses the config without opening the render window.
@@ -387,7 +387,16 @@ photo-effect:
 
 ## Transition examples
 
-### Single inline fade
+### Simple fade
+
+```yaml
+transition:
+  active:
+    - kind: fade
+      duration-ms: 450
+```
+
+### Fade through black
 
 ```yaml
 transition:
