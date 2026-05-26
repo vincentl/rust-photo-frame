@@ -144,7 +144,7 @@ find /var/lib/photoframe/photos -type f | wc -l
 
 **Supported formats:** JPEG, PNG. Other formats are silently skipped.
 
-**Custom mat backgrounds:** drop JPEG/PNG into `/var/lib/photoframe/backgrounds/` if you want to use the `fixed-image` matting style. See [Configure](configure.md).
+**Custom mat backgrounds:** drop JPEG/PNG files into `/var/lib/photoframe/backgrounds/`, then uncomment the `fixed-image` block in `/etc/photoframe/config.yaml`. See [Configure](configure.md).
 
 ---
 

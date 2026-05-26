@@ -48,18 +48,18 @@ transition:
       softness: 0.08
     - kind: push
       duration-ms: 520
-      angle-list-degrees: [0.0, 180.0]
+      angle-list-degrees: [0.0, 90.0, 180.0, 270.0]
       angle-jitter-degrees: 8.0
     - kind: e-ink
       duration-ms: 1600
-      flash-count: 2
+      flash-count: 0
       reveal-portion: 0.55
       stripe-count: 24
       flash-color: [255, 255, 255]
 # Global photo settings
 global-photo-settings:
   # Dwell time (ms) the current image remains fully displayed before the next transition
-  dwell-ms: 12000
+  dwell-ms: 16000
   # GPU render oversample factor (1.0 = native to screen)
   oversample: 1.0
   # Maximum enlargement applied when fitting small photos
@@ -126,16 +126,14 @@ photo-effect:
   # Provide zero or more effect entries; leave empty to disable the stage.
   # Repeat entries (even with the same kind) to weight random selection or
   # alternate presets when using sequential mode.
-  active: []
-  # Example configuration:
-  # active:
-  #   - kind: print-simulation
-  #     light-angle-degrees: 135.0
-  #     relief-strength: 0.35
-  #     ink-spread: 0.18
-  #     sheen-strength: 0.22
-  #     paper-color: [245, 244, 240]
-  #     debug: false # Set true to only treat the left half for side-by-side comparison
+  active:
+    - kind: print-simulation
+      light-angle-degrees: 135.0  # upper-left gallery lighting
+      relief-strength: 0.30       # subtle paper texture
+      ink-spread: 0.15            # slight ink absorption
+      sheen-strength: 0.18        # gentle gloss
+      paper-color: [245, 244, 240] # warm white
+      debug: false
 
 playlist:
   new-multiplicity: 3
@@ -169,10 +167,11 @@ matting:
       texture-strength: 1.0 # 0.0 for smooth paper, 1.0 default weave
       warp-period-px: 5.6 # spacing between vertical warp threads in px
       weft-period-px: 5.2 # spacing between horizontal weft threads in px
-    - kind: fixed-image
-      minimum-mat-percentage: 6.0
-      path:
-        [
-          /var/lib/photoframe/backgrounds/blue-textured-brick-wall-background.jpg,
-        ]
-      fit: cover # options: cover, contain, stretch
+    # fixed-image mat: drop your own JPEG/PNG files into
+    # /var/lib/photoframe/backgrounds/ and uncomment this block.
+    # List as many paths as you like; they are weighted equally.
+    # - kind: fixed-image
+    #   minimum-mat-percentage: 6.0
+    #   path:
+    #     - /var/lib/photoframe/backgrounds/my-background.jpg
+    #   fit: cover # options: cover, contain, stretch
