@@ -126,14 +126,16 @@ photo-effect:
   # Provide zero or more effect entries; leave empty to disable the stage.
   # Repeat entries (even with the same kind) to weight random selection or
   # alternate presets when using sequential mode.
-  active:
-    - kind: print-simulation
-      light-angle-degrees: 135.0  # upper-left gallery lighting
-      relief-strength: 0.30       # subtle paper texture
-      ink-spread: 0.15            # slight ink absorption
-      sheen-strength: 0.18        # gentle gloss
-      paper-color: [245, 244, 240] # warm white
-      debug: false
+  active: []
+  # To enable print simulation (gallery lighting + paper texture), uncomment:
+  # active:
+  #   - kind: print-simulation
+  #     light-angle-degrees: 135.0  # upper-left gallery lighting
+  #     relief-strength: 0.30       # subtle paper texture
+  #     ink-spread: 0.15            # slight ink absorption
+  #     sheen-strength: 0.18        # gentle gloss
+  #     paper-color: [245, 244, 240] # warm white
+  #     debug: false  # true = left half only, for side-by-side comparison
 
 playlist:
   new-multiplicity: 3
