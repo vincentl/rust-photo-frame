@@ -10,6 +10,8 @@ User=kiosk
 Group=kiosk
 WorkingDirectory=/var/lib/photoframe
 ExecStart=/opt/photoframe/bin/buttond --config /etc/photoframe/config.yaml
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_RUNTIME_DIR=/run/user/1001
 Restart=always
 RestartSec=1s
 CapabilityBoundingSet=CAP_KILL CAP_SYS_BOOT
