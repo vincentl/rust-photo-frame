@@ -6,6 +6,8 @@ Blank microSD → running slideshow. Follow the steps in order.
 
 **Command context:** run as your operator account (e.g. `frame`) over SSH; use `sudo` where shown.
 
+> **sudo requires your password.** Raspberry Pi OS no longer configures passwordless sudo. Every `sudo` command in this guide will prompt for the password you set during imaging. Enter it once — your session caches it for ~15 minutes, so subsequent `sudo` calls won't re-prompt.
+
 ---
 
 ## Two accounts you'll meet
@@ -46,7 +48,7 @@ Host photoframe
 5. **Choose Storage:** your microSD.
 6. **Edit Settings**:
    - Hostname: `photoframe`
-   - Username/password: create a dedicated user (e.g. `frame`) with a strong password
+   - Username/password: create a dedicated user (e.g. `frame`) with a strong password — **this password is required even with key-only SSH** because `sudo` authenticates against it
    - Configure Wireless LAN: SSID, passphrase, country code
    - Set locale, timezone, keyboard
 7. **Services**: enable SSH → **Allow public-key authentication only** → paste your public key.
@@ -86,7 +88,7 @@ cd photoframe
 ./setup/install-all.sh
 ```
 
-The script:
+The script uses `sudo` internally for system-level steps (your credential is still cached from Step 2 — no extra prompt). It:
 - Installs system packages (graphics stack, NetworkManager, Sway, greetd, build tools) and a system-wide Rust toolchain.
 - Builds the four crates (`photoframe`, `buttond`, `wifi-manager`, `config-model`).
 - Provisions the `kiosk` user, polkit rules, runtime directories, zram swap, and Pi 5 boot tweaks.
@@ -100,6 +102,7 @@ When the script returns, **log out and SSH back in** so your shell picks up the 
 ```bash
 exit
 ssh frame@photoframe.local
+cd photoframe
 ./setup/tools/verify.sh
 ```
 
@@ -121,17 +124,16 @@ Re-running the installer updates `/opt/photoframe` without touching `/etc/photof
 
 Photos live under `/var/lib/photoframe/photos`, scanned recursively. Use the `local/` subdirectory for manual imports (the `cloud/` subdirectory is reserved for the optional sync service).
 
-From your laptop:
+From your laptop, use `rsync` (not `scp` — the sftp subsystem doesn't load supplementary groups, so `scp` writes silently fail):
 
 ```bash
-scp /path/to/photos/* frame@photoframe.local:/var/lib/photoframe/photos/local/
+rsync -a -e "ssh -i ~/.ssh/photoframe" /path/to/photos/ frame@photoframe.local:/var/lib/photoframe/photos/local/
 ```
 
 Or locally on the Pi:
 
 ```bash
-sudo cp /path/to/photos/* /var/lib/photoframe/photos/local/
-sudo chown kiosk:kiosk /var/lib/photoframe/photos/local/*
+cp /path/to/photos/* /var/lib/photoframe/photos/local/
 ```
 
 Confirm:
