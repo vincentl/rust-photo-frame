@@ -6,7 +6,9 @@ for screenshots or a short demo video.
 
 - **Config:** [`demo.yaml`](demo.yaml) — deterministic (`selection: sequential`
   everywhere, fixed shuffle seed), 2-second dwell.
-- **Photos:** [`photos/`](photos) — the 8-image set below.
+- **Photos:** supply your own — drop 8 images (see the set below) into
+  `demo/photos/`. That folder is gitignored, so the photos are **not** part of
+  this repo; copy them to the Pi separately.
 - Assumes a **16:9 display** (the Pi kiosk is hardwired to 3840×2160).
 
 ## What one lap demonstrates
@@ -24,20 +26,17 @@ with the 5 mat styles.
 
 ## The photo set
 
-`fill-when-fits` eligibility is purely aspect-based: a photo fills the screen
-when it is within ±5% of 16:9 — i.e. **aspect ≈ 1.69–1.87** (16:9 = 1.778) — and
-large enough to fill the screen within `max-upscale-factor` (2.0 here).
+Provide **8 photos**. `fill-when-fits` eligibility is purely aspect-based: a
+photo fills the screen when it is within ±5% of 16:9 — i.e. **aspect ≈ 1.69–1.87**
+(16:9 = 1.778) — and large enough to fill the screen within `max-upscale-factor`
+(2.0 here), so use crisp images at/above your panel resolution.
 
-| File | Role | Aspect | Status |
+| Count | Role | Aspect | Notes |
 |---|---|---|---|
-| `3600x2000.jpeg` | **Fill** (full-bleed) | 1.80 | ✅ |
-| `3840x2160-0.jpeg` | **Fill** (full-bleed) | 1.778 | ⚠️ source is only 1536×864 — re-export at ≥1920×1080 (ideally 3840×2160) or it upscales 2.5× and won't fill |
-| *(8th photo — still needed)* | **Fill** (full-bleed) | ~1.778 | ➕ add a third crisp 16:9 landscape |
-| `1365x2048.jpeg` | Portrait, matted | 2:3 | ✅ |
-| `1526x2048.jpeg` | Portrait, matted | 3:4 | ✅ |
-| `1638x2048.jpeg` | Portrait, matted | 4:5 (intended) | ⚠️ source is 2501×2000 = landscape 1.25 — crop to 4:5 or replace |
-| `3072x2048.jpeg` | Landscape, matted | 3:2 | ✅ matted on purpose: crops ~16% > 5%, so it shows the threshold *declining* a near-fit photo |
-| `3840x1200.jpeg` | **Panorama**, matted | 3:1 | ✅ extreme ratio: best mat demo, and proves fill-when-fits declines wide photos |
+| 3 | **Fill** (full-bleed) | ≈ 16:9 (1.69–1.87) | render edge-to-edge with no mat |
+| 3 | Portrait, matted | e.g. 2:3, 3:4, 4:5 | big pillarbox mats — the best mat showcase |
+| 1 | Landscape, matted | ≈ 3:2 | close-ish but crops > 5%, so it shows the threshold *declining* a near-fit photo |
+| 1 | **Panorama**, matted | extreme wide, e.g. 3:1 | best mat demo, and proves fill-when-fits declines wide photos |
 
 Target balance: **4 landscape (3 fill + 1 matted) : 3 portrait : 1 panorama**,
 including exactly one extreme panorama.
