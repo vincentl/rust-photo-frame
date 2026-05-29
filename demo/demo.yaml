@@ -92,7 +92,7 @@ transition:
 
 # -----------------------------------------------------------------------------
 # Matting — sequential so each matted photo shows the next style in order.
-# 6 mat styles spanning all renderers: solid black, striking crimson, blurred
+# 6 mat styles spanning all renderers: solid black, deep navy, blurred
 # backdrop, studio (photo-average), studio (fixed light swatch), and a
 # fixed-image backdrop.
 #
@@ -109,8 +109,8 @@ matting:
     - kind: fixed-color             # 1. classic black
       colors: [[0, 0, 0]]
       minimum-mat-percentage: 4.0
-    - kind: fixed-color             # 2. striking crimson
-      colors: [[176, 30, 42]]
+    - kind: fixed-color             # 2. deep navy (#233C67)
+      colors: [[35, 60, 103]]
       minimum-mat-percentage: 6.0
     - kind: blur                    # 3. blurred backdrop of the photo itself
       minimum-mat-percentage: 4.0
