@@ -62,6 +62,85 @@ pub struct MattingOptions {
 pub struct MattingConfig {
     selection: MattingSelection,
     options: Vec<MattingOptions>,
+    fill_when_fits: Option<FillWhenFits>,
+}
+
+/// Opt-in behavior that renders photos whose aspect ratio is already close to
+/// the display's edge-to-edge (full-bleed, cover-cropped) instead of matting
+/// them. Evaluated per photo *before* mat selection.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct FillWhenFits {
+    /// A photo is eligible when filling the screen crops less than this
+    /// percentage from the single overflowing axis.
+    #[serde(default = "FillWhenFits::default_maximum_crop_percentage")]
+    pub maximum_crop_percentage: f32,
+    /// For an eligible photo, the biased-coin probability of actually skipping
+    /// the mat. `1.0` always fills when eligible; `0.0` never does.
+    #[serde(default = "FillWhenFits::default_skip_matting_probability")]
+    pub skip_matting_probability: f32,
+}
+
+impl FillWhenFits {
+    const fn default_maximum_crop_percentage() -> f32 {
+        5.0
+    }
+
+    const fn default_skip_matting_probability() -> f32 {
+        1.0
+    }
+
+    /// Returns true when the photo should be rendered full-bleed (no mat).
+    ///
+    /// Eligibility requires both that the cover-crop trims less than
+    /// `maximum_crop_percentage` from the overflowing axis, and that the image
+    /// is large enough to fill the screen within `max_upscale` (so a tiny but
+    /// correctly-proportioned image is not blown up past the budget). When
+    /// eligible, a biased coin decides the outcome.
+    pub fn should_fill<R: Rng + ?Sized>(
+        &self,
+        img_w: u32,
+        img_h: u32,
+        screen_w: u32,
+        screen_h: u32,
+        max_upscale: f32,
+        rng: &mut R,
+    ) -> bool {
+        let iw = img_w.max(1) as f32;
+        let ih = img_h.max(1) as f32;
+        let sw = screen_w.max(1) as f32;
+        let sh = screen_h.max(1) as f32;
+
+        let aspect_img = iw / ih;
+        let aspect_screen = sw / sh;
+        let (lo, hi) = if aspect_img <= aspect_screen {
+            (aspect_img, aspect_screen)
+        } else {
+            (aspect_screen, aspect_img)
+        };
+        if hi <= 0.0 {
+            return false;
+        }
+        let crop_fraction = 1.0 - lo / hi;
+        let max_crop = (self.maximum_crop_percentage / 100.0).max(0.0);
+        if crop_fraction > max_crop {
+            return false;
+        }
+
+        let cover_scale = (sw / iw).max(sh / ih);
+        if cover_scale > max_upscale.max(1.0) {
+            return false;
+        }
+
+        let prob = self.skip_matting_probability;
+        if prob >= 1.0 {
+            return true;
+        }
+        if prob <= 0.0 {
+            return false;
+        }
+        rng.random_bool(prob as f64)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -944,6 +1023,7 @@ impl Default for MattingConfig {
                 kind: MattingKind::FixedColor,
             }),
             options,
+            fill_when_fits: None,
         }
     }
 }
@@ -972,6 +1052,7 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
     {
         let mut selection: Option<PipelineSelection> = None;
         let mut active: Option<Vec<PipelineEntry<MattingKind>>> = None;
+        let mut fill_when_fits: Option<FillWhenFits> = None;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "selection" => {
@@ -986,10 +1067,16 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
                     }
                     active = Some(map.next_value()?);
                 }
+                "fill-when-fits" => {
+                    if fill_when_fits.is_some() {
+                        return Err(de::Error::duplicate_field("fill-when-fits"));
+                    }
+                    fill_when_fits = Some(map.next_value()?);
+                }
                 _ => {
                     return Err(de::Error::unknown_field(
                         key.as_str(),
-                        &["selection", "active"],
+                        &["selection", "active", "fill-when-fits"],
                     ));
                 }
             }
@@ -1032,7 +1119,11 @@ impl<'de> Visitor<'de> for MattingConfigVisitor {
             },
         };
 
-        Ok(MattingConfig { selection, options })
+        Ok(MattingConfig {
+            selection,
+            options,
+            fill_when_fits,
+        })
     }
 }
 
@@ -1045,6 +1136,11 @@ impl MattingConfig {
     /// Exposed for integration tests to inspect the configured matting options.
     pub fn options(&self) -> &[MattingOptions] {
         &self.options
+    }
+
+    /// Opt-in full-bleed behavior for photos already close to the screen aspect.
+    pub fn fill_when_fits(&self) -> Option<&FillWhenFits> {
+        self.fill_when_fits.as_ref()
     }
 
     fn selection_entries(&self) -> SelectionEntries<'_, MattingKind> {

@@ -33,7 +33,7 @@ async fn startup_recursive_scan_emits_photo_added() {
     let (_invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(16);
     let cancel = CancellationToken::new();
 
-    let handle = tokio::spawn(files::run(cfg, inv_tx, invalid_rx, cancel.clone()));
+    let handle = tokio::spawn(files::run(cfg.into(), inv_tx, invalid_rx, cancel.clone()));
 
     // Collect two PhotoAdded events (for a.jpg, nested/b.jpeg)
     let mut added: Vec<PathBuf> = Vec::new();
@@ -84,7 +84,7 @@ async fn invalid_photo_is_deleted_and_emits_removed() {
     let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(16);
     let cancel = CancellationToken::new();
 
-    let handle = tokio::spawn(files::run(cfg, inv_tx, invalid_rx, cancel.clone()));
+    let handle = tokio::spawn(files::run(cfg.into(), inv_tx, invalid_rx, cancel.clone()));
 
     // Wait for startup scan to pick up the file
     let mut saw_added = false;
@@ -165,7 +165,7 @@ async fn startup_shuffle_is_deterministic_with_seed() {
     let (_invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(16);
     let cancel = CancellationToken::new();
 
-    let handle = tokio::spawn(files::run(cfg, inv_tx, invalid_rx, cancel.clone()));
+    let handle = tokio::spawn(files::run(cfg.into(), inv_tx, invalid_rx, cancel.clone()));
 
     let mut actual: Vec<PathBuf> = Vec::new();
     while actual.len() < 2 {

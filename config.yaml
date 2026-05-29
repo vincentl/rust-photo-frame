@@ -143,6 +143,12 @@ playlist:
 
 # Matting settings
 matting:
+  # Optional: render photos that are already close to the screen's aspect ratio
+  # full-bleed (cover-cropped, no mat) to fully use a large display. Evaluated
+  # per photo before mat selection; omit this block to disable.
+  # fill-when-fits:
+  #   maximum-crop-percentage: 5.0   # eligible if filling crops < 5% off one axis
+  #   skip-matting-probability: 1.0  # 1.0 always fills eligible photos, 0.0 never, in between mixes
   # Choose how the viewer advances through the mats below: fixed, random, or sequential.
   selection: random
   # Provide one or more mat definitions. Duplicate entries (or individual colors/paths) to weight them once expanded into the

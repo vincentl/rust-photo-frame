@@ -1,5 +1,5 @@
 use photoframe::config::{
-    Configuration, GlobalPhotoSettings, MattingKind, MattingMode, MattingSelection,
+    Configuration, FillWhenFits, GlobalPhotoSettings, MattingKind, MattingMode, MattingSelection,
     PhotoEffectOptions, StudioMatColor, TransitionKind, TransitionSelection,
 };
 use rand::{SeedableRng, rngs::StdRng};
@@ -1043,5 +1043,108 @@ transition:
             assert!((push.angles.base_deg - 270.0).abs() < f32::EPSILON);
         }
         _ => panic!("expected second push transition"),
+    }
+}
+
+#[test]
+fn parse_matting_fill_when_fits() {
+    let yaml = r#"
+photo-library-path: "/p"
+matting:
+  fill-when-fits:
+    maximum-crop-percentage: 7.5
+    skip-matting-probability: 0.5
+  selection: random
+  active:
+    - kind: fixed-color
+      colors:
+        - [0, 0, 0]
+    - kind: blur
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let fill = cfg
+        .matting
+        .fill_when_fits()
+        .expect("expected fill-when-fits block");
+    assert!((fill.maximum_crop_percentage - 7.5).abs() < f32::EPSILON);
+    assert!((fill.skip_matting_probability - 0.5).abs() < f32::EPSILON);
+}
+
+#[test]
+fn matting_fill_when_fits_defaults_to_disabled() {
+    let yaml = r#"
+photo-library-path: "/p"
+matting:
+  selection: fixed
+  active:
+    - kind: fixed-color
+      colors:
+        - [0, 0, 0]
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert!(cfg.matting.fill_when_fits().is_none());
+}
+
+#[test]
+fn matting_fill_when_fits_rejects_unknown_field() {
+    let yaml = r#"
+photo-library-path: "/p"
+matting:
+  fill-when-fits:
+    maximum-crop-percentage: 5.0
+    bogus: true
+  selection: fixed
+  active:
+    - kind: fixed-color
+      colors:
+        - [0, 0, 0]
+"#;
+    assert!(serde_yaml::from_str::<Configuration>(yaml).is_err());
+}
+
+#[test]
+fn fill_when_fits_eligibility() {
+    let fill = FillWhenFits {
+        maximum_crop_percentage: 5.0,
+        skip_matting_probability: 1.0,
+    };
+    let mut rng = StdRng::seed_from_u64(1);
+
+    // Exact aspect match (16:9 photo on 16:9 screen) → eligible.
+    assert!(fill.should_fill(1920, 1080, 1920, 1080, 4.0, &mut rng));
+
+    // 4:3 photo on a 16:9 screen crops ~25% → ineligible at 5%.
+    assert!(!fill.should_fill(1600, 1200, 1920, 1080, 4.0, &mut rng));
+
+    // Same 4:3 photo becomes eligible with a generous threshold.
+    let generous = FillWhenFits {
+        maximum_crop_percentage: 40.0,
+        skip_matting_probability: 1.0,
+    };
+    assert!(generous.should_fill(1600, 1200, 1920, 1080, 4.0, &mut rng));
+
+    // Correct aspect but tiny image exceeding the upscale budget → ineligible.
+    assert!(!fill.should_fill(320, 180, 1920, 1080, 2.0, &mut rng));
+}
+
+#[test]
+fn fill_when_fits_probability_bounds() {
+    let never = FillWhenFits {
+        maximum_crop_percentage: 5.0,
+        skip_matting_probability: 0.0,
+    };
+    let always = FillWhenFits {
+        maximum_crop_percentage: 5.0,
+        skip_matting_probability: 1.0,
+    };
+    let mut rng = StdRng::seed_from_u64(42);
+
+    // Probability 0.0 never fills, even for a perfectly matching photo.
+    for _ in 0..32 {
+        assert!(!never.should_fill(1920, 1080, 1920, 1080, 4.0, &mut rng));
+    }
+    // Probability 1.0 always fills an eligible photo.
+    for _ in 0..32 {
+        assert!(always.should_fill(1920, 1080, 1920, 1080, 4.0, &mut rng));
     }
 }

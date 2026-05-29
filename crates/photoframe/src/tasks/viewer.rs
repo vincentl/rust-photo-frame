@@ -150,6 +150,9 @@ struct MatParams {
     max_dim: u32,
     max_upscale_factor: f32,
     matting: MattingOptions,
+    /// When true, render the photo full-bleed (cover-crop, no mat); `matting`
+    /// is ignored. Chosen by the `fill-when-fits` pre-check at selection time.
+    fill_screen: bool,
 }
 
 struct MatTask {
@@ -392,14 +395,39 @@ impl<'a> MattingBridge<'a> {
                 break;
             }
             let mut rng = rand::rng();
-            let selected = self.matting.select_active(&mut rng);
+            let fill_screen = self
+                .matting
+                .fill_when_fits()
+                .map(|fill| {
+                    fill.should_fill(
+                        queued.image.width,
+                        queued.image.height,
+                        surface.width.max(1),
+                        surface.height.max(1),
+                        self.max_upscale_factor,
+                        &mut rng,
+                    )
+                })
+                .unwrap_or(false);
+            // When filling the screen, the selected mat is ignored. Use a
+            // non-mutating placeholder so the sequential selector is not
+            // advanced for a photo that renders without a mat.
+            let matting = if fill_screen {
+                self.matting
+                    .primary_option()
+                    .cloned()
+                    .expect("validated matting configuration has at least one option")
+            } else {
+                self.matting.select_active(&mut rng).option.clone()
+            };
             let params = MatParams {
                 screen_w: surface.width.max(1),
                 screen_h: surface.height.max(1),
                 oversample: self.oversample,
                 max_dim: surface.max_texture_dimension,
                 max_upscale_factor: self.max_upscale_factor,
-                matting: selected.option.clone(),
+                matting,
+                fill_screen,
             };
             let QueuedImage {
                 image: img,
@@ -466,12 +494,29 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         max_dim,
         max_upscale_factor,
         matting,
+        fill_screen,
     } = params;
     if screen_w == 0 || screen_h == 0 {
         return None;
     }
 
     let (canvas_w, canvas_h) = compute_canvas_size(screen_w, screen_h, oversample, max_dim);
+
+    // `fill-when-fits`: render the photo full-bleed (cover-crop, no mat).
+    if fill_screen {
+        let canvas = scale_image_to_cover_canvas(&src, canvas_w, canvas_h, max_dim);
+        let canvas = ImagePlane {
+            width: canvas_w,
+            height: canvas_h,
+            pixels: canvas.into_raw(),
+        };
+        return Some(MatResult {
+            path,
+            canvas,
+            priority,
+        });
+    }
+
     let margin = (matting.minimum_mat_percentage / 100.0).clamp(0.0, 0.45);
     let max_upscale = max_upscale_factor.max(1.0);
     let avg_color = average_color(&src);
