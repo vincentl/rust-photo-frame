@@ -1,4 +1,4 @@
-# Photo frame demo / guided tour
+# Photo frame demo
 
 A self-contained slideshow that shows off every transition, every mat style, and
 the **fill-when-fits** full-bleed behavior in a single ~22-second loop. Use it
@@ -41,10 +41,10 @@ photo fills the screen when it is within ±5% of 16:9 — i.e. **aspect ≈ 1.69
 Target balance: **4 landscape (3 fill + 1 matted) : 3 portrait : 1 panorama**,
 including exactly one extreme panorama.
 
-## Running the tour on the Pi
+## Running the demo on the Pi
 
 The kiosk always launches `/etc/photoframe/config.yaml` (baked into the sway
-config), so running the tour means temporarily swapping that file and restarting
+config), so running the demo means temporarily swapping that file and restarting
 the session. Run from the repo root after `git pull`.
 
 ```bash
@@ -52,15 +52,15 @@ the session. Run from the repo root after `git pull`.
 ./setup/application/deploy.sh
 
 # 2. Stage the demo photos (service user is kiosk)
-sudo mkdir -p /var/lib/photoframe/tutorial-photos
-sudo cp demo/photos/* /var/lib/photoframe/tutorial-photos/
-sudo chown -R kiosk:kiosk /var/lib/photoframe/tutorial-photos
+sudo mkdir -p /var/lib/photoframe/demo-photos
+sudo cp demo/photos/* /var/lib/photoframe/demo-photos/
+sudo chown -R kiosk:kiosk /var/lib/photoframe/demo-photos
 
-# 3. Swap in the tutorial config (back up your real one first)
+# 3. Swap in the demo config (back up your real one first)
 sudo cp /etc/photoframe/config.yaml /etc/photoframe/config.yaml.bak
 sudo install -m 0644 demo/demo.yaml /etc/photoframe/config.yaml
 
-# 4. Restart the kiosk — the display relaunches into the tour
+# 4. Restart the kiosk — the display relaunches into the demo
 sudo systemctl restart greetd
 #    Watch it fire: journalctl -t photoframe -f
 
@@ -70,5 +70,5 @@ sudo systemctl restart greetd
 ```
 
 `demo.yaml` points `photo-library-path` at the absolute Pi path
-`/var/lib/photoframe/tutorial-photos`. For local testing on a dev machine,
+`/var/lib/photoframe/demo-photos`. For local testing on a dev machine,
 change it to `demo/photos`.

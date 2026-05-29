@@ -1,5 +1,5 @@
 # =============================================================================
-# demo.yaml — a guided-tour configuration for screenshots / a demo video.
+# demo.yaml — a demo configuration for screenshots / a demo video.
 #
 # Goal: with a 2-second dwell, cycle deterministically through every transition
 # family and every mat style in a single short lap, and showcase the
@@ -16,9 +16,9 @@
 # Absolute path: on the Pi the frame runs as a system service with an unknown
 # working dir, so this cannot be relative. The library is scanned recursively.
 # (For local testing on a dev machine, point this at a local folder instead.)
-photo-library-path: /var/lib/photoframe/tutorial-photos
+photo-library-path: /var/lib/photoframe/demo-photos
 
-# Deterministic shuffle so the tour is reproducible across runs / recordings.
+# Deterministic shuffle so the demo is reproducible across runs / recordings.
 startup-shuffle-seed: 1
 
 global-photo-settings:
@@ -30,7 +30,7 @@ viewer-preload-count: 3
 loader-max-concurrent-decodes: 4
 
 # Every photo appears exactly once per lap (no recency weighting) so the
-# mat/transition cycles stay aligned and predictable for the tour.
+# mat/transition cycles stay aligned and predictable for the demo.
 playlist:
   new-multiplicity: 1
   half-life: 3650 days
@@ -81,7 +81,7 @@ transition:
 matting:
   fill-when-fits:
     maximum-crop-percentage: 5.0    # near-16:9 photos fill the screen edge-to-edge
-    skip-matting-probability: 1.0   # always fill eligible photos (deterministic tour)
+    skip-matting-probability: 1.0   # always fill eligible photos (deterministic demo)
   selection: sequential
   active:
     - kind: fixed-color             # 1. classic black
@@ -112,7 +112,7 @@ matting:
     #    cycle aligned).
     # - kind: fixed-image
     #   minimum-mat-percentage: 6.0
-    #   path: [./tutorial-photos/backdrop.jpg]
+    #   path: [./demo-photos/backdrop.jpg]
     #   fit: cover
 
 # -----------------------------------------------------------------------------
@@ -138,5 +138,5 @@ photo-effect:
 
 # =============================================================================
 # PHOTO GUIDE: the 8-photo set, its aspect-ratio roles, and how to run this
-# tour on the Pi are documented in demo/README.md (next to this file).
+# demo on the Pi are documented in demo/README.md (next to this file).
 # =============================================================================
