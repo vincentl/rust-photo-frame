@@ -64,14 +64,14 @@ transition:
       angle-list-degrees: [90.0]     # new image slides in from the top
     - kind: e-ink
       duration-ms: 1600
-      flash-count: 3
+      flash-count: 0
       reveal-portion: 0.55
       stripe-count: 24
       flash-color: [255, 255, 255]
 
 # -----------------------------------------------------------------------------
 # Matting — sequential so each matted photo shows the next style in order.
-# 5 mat styles spanning all renderers: solid black, gallery white, blurred
+# 5 mat styles spanning all renderers: solid black, striking crimson, blurred
 # backdrop, studio (photo-average), and studio (fixed light swatch).
 #
 # `fill-when-fits` runs BEFORE this list: photos within 5% of the screen aspect
@@ -87,8 +87,8 @@ matting:
     - kind: fixed-color             # 1. classic black
       colors: [[0, 0, 0]]
       minimum-mat-percentage: 4.0
-    - kind: fixed-color             # 2. gallery white
-      colors: [[244, 244, 244]]
+    - kind: fixed-color             # 2. striking crimson
+      colors: [[176, 30, 42]]
       minimum-mat-percentage: 6.0
     - kind: blur                    # 3. blurred backdrop of the photo itself
       minimum-mat-percentage: 4.0

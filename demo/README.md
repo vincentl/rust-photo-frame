@@ -16,7 +16,7 @@ for screenshots or a short demo video.
 | Stage | Shows |
 |---|---|
 | Transitions (7) | fade, fade-through-black, wipe→, wipe↓, push-from-left, push-from-top, e-ink |
-| Mats (5) | black, gallery-white, blur, studio (photo-average), studio (fixed swatch) |
+| Mats (5) | black, crimson, blur, studio (photo-average), studio (fixed swatch) |
 | fill-when-fits | near-16:9 photos render edge-to-edge with **no mat** |
 | Photo effect | print-simulation at two light angles |
 
