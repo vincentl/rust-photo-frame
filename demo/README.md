@@ -4,7 +4,7 @@ A self-contained slideshow that shows off every transition, every mat style, and
 the **fill-when-fits** full-bleed behavior in a single ~22-second loop. Use it
 for screenshots or a short demo video.
 
-- **Config:** [`tutorial.yaml`](tutorial.yaml) — deterministic (`selection: sequential`
+- **Config:** [`demo.yaml`](demo.yaml) — deterministic (`selection: sequential`
   everywhere, fixed shuffle seed), 2-second dwell.
 - **Photos:** [`photos/`](photos) — the 8-image set below.
 - Assumes a **16:9 display** (the Pi kiosk is hardwired to 3840×2160).
@@ -59,7 +59,7 @@ sudo chown -R kiosk:kiosk /var/lib/photoframe/tutorial-photos
 
 # 3. Swap in the tutorial config (back up your real one first)
 sudo cp /etc/photoframe/config.yaml /etc/photoframe/config.yaml.bak
-sudo install -m 0644 demo/tutorial.yaml /etc/photoframe/config.yaml
+sudo install -m 0644 demo/demo.yaml /etc/photoframe/config.yaml
 
 # 4. Restart the kiosk — the display relaunches into the tour
 sudo systemctl restart greetd
@@ -70,6 +70,6 @@ sudo cp /etc/photoframe/config.yaml.bak /etc/photoframe/config.yaml
 sudo systemctl restart greetd
 ```
 
-`tutorial.yaml` points `photo-library-path` at the absolute Pi path
+`demo.yaml` points `photo-library-path` at the absolute Pi path
 `/var/lib/photoframe/tutorial-photos`. For local testing on a dev machine,
 change it to `demo/photos`.

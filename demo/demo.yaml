@@ -1,16 +1,16 @@
 # =============================================================================
-# tutorial.yaml — a guided-tour configuration for screenshots / a demo video.
+# demo.yaml — a guided-tour configuration for screenshots / a demo video.
 #
 # Goal: with a 2-second dwell, cycle deterministically through every transition
 # family and every mat style in a single short lap, and showcase the
 # `fill-when-fits` full-bleed behavior on near-16:9 photos.
 #
 # Assumes a 16:9 display. If your panel is a different shape, adjust the
-# "fill" photos (section A below) to match its aspect ratio.
+# "fill" photos to match its aspect ratio.
 #
-# Drop the tutorial photos into the directory below (see the photo guide at the
-# bottom of this file for the exact set), then run the frame with:
-#   photoframe --config tutorial.yaml
+# Drop the demo photos into the directory below (see demo/README.md for the
+# 8-photo set), then run the frame with:
+#   photoframe demo.yaml
 # =============================================================================
 
 # Absolute path: on the Pi the frame runs as a system service with an unknown
