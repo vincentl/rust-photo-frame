@@ -337,10 +337,18 @@ The `matting` block prepares the background behind each photo. During parsing th
 
 `matting.selection` operates on that expanded list. `random` samples from every canonical slot — duplicates weight the draw — while `sequential` walks the expanded order before looping. Duplicating colors, paths, or `active` entries is the way to bias rotation; the outer `selection` controls traversal.
 
-| Key         | Required? | Default                                                          | Accepted values                | Effect |
-| ----------- | --------- | ---------------------------------------------------------------- | ------------------------------ | ------ |
-| `selection` | Optional  | `fixed` when the canonical list has one slot; otherwise `random` | `fixed`, `random`, or `sequential` | Governs how the viewer iterates through the canonical mat list. |
-| `active`    | Yes       | —                                                                | Array of mat entry maps        | Declares the mat variants. Duplicate swatches or paths expand into multiple canonical slots. |
+| Key              | Required? | Default                                                          | Accepted values                | Effect |
+| ---------------- | --------- | ---------------------------------------------------------------- | ------------------------------ | ------ |
+| `selection`      | Optional  | `fixed` when the canonical list has one slot; otherwise `random` | `fixed`, `random`, or `sequential` | Governs how the viewer iterates through the canonical mat list. |
+| `active`         | Yes       | —                                                                | Array of mat entry maps        | Declares the mat variants. Duplicate swatches or paths expand into multiple canonical slots. |
+| `fill-when-fits` | Optional  | disabled (omit to keep matting on every photo)                   | Map (see below)                | Renders photos already close to the screen aspect full-bleed (no mat) so they fully use a large display. |
+
+### `fill-when-fits`
+
+When present, each photo is evaluated **before** mat selection: if its aspect ratio is close enough to the display that filling the screen only crops a little, the viewer may render it edge-to-edge (center-crop to cover) instead of matting it. Because the decision happens before selection, an ineligible photo simply falls through to normal mat selection — the `sequential` counter and `random`/`fixed` pools are untouched.
+
+- **`maximum-crop-percentage`** (float, default `5.0`): a photo is eligible when filling the screen crops less than this percentage off the single overflowing axis. The check is purely aspect-ratio based, so it is independent of resolution. A photo is also only eligible when it is large enough to fill the screen within `global-photo-settings.max-upscale-factor`.
+- **`skip-matting-probability`** (float, default `1.0`, clamped `0–1`): for an eligible photo, the biased-coin probability of actually skipping the mat. `1.0` always fills eligible photos, `0.0` never does (feature effectively off), and values in between mix full-bleed photos with matted ones.
 
 Each active entry accepts:
 
@@ -489,3 +497,20 @@ matting:
     - kind: studio
       minimum-mat-percentage: 4.0
 ```
+
+### Full-bleed for near-fit photos
+
+```yaml
+matting:
+  fill-when-fits:
+    maximum-crop-percentage: 5.0
+    skip-matting-probability: 1.0
+  selection: random
+  active:
+    - kind: fixed-color
+      colors:
+        - [0, 0, 0]
+    - kind: blur
+```
+
+Photos within 5% of the display's aspect ratio fill the screen edge-to-edge with no mat; everything else rotates through the black swatch and blur mats as usual. Lower `skip-matting-probability` (for example `0.5`) to occasionally still mat the near-fit photos.
