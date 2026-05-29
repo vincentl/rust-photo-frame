@@ -26,6 +26,27 @@ global-photo-settings:
   oversample: 1.0
   max-upscale-factor: 2.0   # generous so smaller demo photos still fill the screen
 
+# Greeting screen displayed while the first images are prepared
+greeting-screen:
+  message: "Warming up your photo memories…"
+  font: "Macondo"
+  stroke-width: 16
+  duration-seconds: 6
+  colors:
+    background: "#f0e8d5"   # warm parchment
+    font: "#2d3748"         # soft charcoal
+    accent: "#7da8a5"       # tranquil sea-glass teal
+
+# Sleep screen displayed when the frame is entering sleep mode
+sleep-screen:
+  message: "Tucking in for a nap…"
+  font: "Macondo"
+  stroke-width: 16
+  colors:
+    background: "#1e293b"   # deep slate blue
+    font: "#f0e8d5"         # warm ivory
+    accent: "#375978"       # muted indigo-teal
+
 viewer-preload-count: 3
 loader-max-concurrent-decodes: 4
 
@@ -71,12 +92,13 @@ transition:
 
 # -----------------------------------------------------------------------------
 # Matting — sequential so each matted photo shows the next style in order.
-# 5 mat styles spanning all renderers: solid black, striking crimson, blurred
-# backdrop, studio (photo-average), and studio (fixed light swatch).
+# 6 mat styles spanning all renderers: solid black, striking crimson, blurred
+# backdrop, studio (photo-average), studio (fixed light swatch), and a
+# fixed-image backdrop.
 #
 # `fill-when-fits` runs BEFORE this list: photos within 5% of the screen aspect
-# render full-bleed (no mat) and do NOT consume a slot here, so the 5 styles
-# stay aligned with the 5 non-fill photos.
+# render full-bleed (no mat) and do NOT consume a slot here, so the 6 styles
+# stay aligned with the 6 non-fill photos.
 # -----------------------------------------------------------------------------
 matting:
   fill-when-fits:
@@ -107,13 +129,12 @@ matting:
       bevel-width-px: 4.0
       bevel-color: [255, 255, 255]
       texture-strength: 1.0
-    # 6. (optional) fixed-image mat — needs your own backdrop file; uncomment and
-    #    point at it to add a sixth style (add a sixth matted photo to keep the
-    #    cycle aligned).
-    # - kind: fixed-image
-    #   minimum-mat-percentage: 6.0
-    #   path: [./demo-photos/backdrop.jpg]
-    #   fit: cover
+    - kind: fixed-image             # 6. your own backdrop image behind the photo
+      minimum-mat-percentage: 6.0
+      # Keep the backdrop OUTSIDE the photo library (a 16:9 image >=3840x2160),
+      # or it would be picked up as a slideshow photo too.
+      path: [/var/lib/photoframe/backgrounds/backdrop.jpg]
+      fit: cover
 
 # -----------------------------------------------------------------------------
 # Photo effect — sequential pair of print-simulation presets so the gallery
