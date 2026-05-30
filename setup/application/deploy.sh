@@ -25,6 +25,32 @@ log() {
     printf '[%s] %s\n' "${SCRIPT_NAME}" "$level: $*"
 }
 
+# RaspberryPi OS ships /etc/systemd/journald.conf.d/40-rpi-volatile-storage.conf
+# which forces Storage=volatile and discards the persistent logs the system
+# setup configured (Storage=persistent in /etc/systemd/journald.conf). Mask the
+# RaspberryPi drop-in by symlinking it to /dev/null so systemd-journald ignores
+# it and our persistent journal survives reboots. Idempotent: re-running only
+# re-asserts the symlink and skips the journald restart when already masked.
+ensure_journald_persistence() {
+    local dropin_dir="/etc/systemd/journald.conf.d"
+    local override="${dropin_dir}/40-rpi-volatile-storage.conf"
+
+    if [[ "$(readlink -f "${override}" 2>/dev/null)" == "/dev/null" ]]; then
+        log INFO "journald volatile-storage override already masked at ${override}"
+        return 0
+    fi
+
+    log INFO "Masking RaspberryPi journald volatile-storage override at ${override}"
+    sudo mkdir -p "${dropin_dir}"
+    sudo ln -sf /dev/null "${override}"
+
+    if command -v systemctl >/dev/null 2>&1; then
+        log INFO "Restarting systemd-journald to apply persistent storage"
+        sudo systemctl restart systemd-journald >/dev/null 2>&1 || \
+            log WARN "Failed to restart systemd-journald; persistent logging applies after next boot"
+    fi
+}
+
 trap 'log ERROR "${SCRIPT_NAME} failed on line ${LINENO}"' ERR
 
 if [[ ! -d "${MODULE_DIR}" ]]; then
@@ -81,6 +107,11 @@ if [[ ${#modules[@]} -eq 0 ]]; then
     log INFO "No application modules found in ${MODULE_DIR}."
     exit 0
 fi
+
+# Re-assert persistent journald logging before running modules so their output
+# (and any failure diagnostics) survive a reboot even after RaspberryPi OS
+# updates restore the volatile-storage drop-in.
+ensure_journald_persistence
 
 log INFO "Executing application deployment modules as user $(id -un)"
 for module in "${modules[@]}"; do
