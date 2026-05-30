@@ -3,6 +3,7 @@
 //! These functions operate only on CPU-side image data and plain numeric
 //! types, so they are easy to unit-test without a GPU or display.
 
+use crate::config::GradientDirection;
 use image::{Rgba, RgbaImage, imageops};
 
 // ── Stride / sizing ──────────────────────────────────────────────────────────
@@ -444,4 +445,235 @@ pub(super) fn angle_to_unit_vec(angle_deg: f32) -> [f32; 2] {
     } else {
         [1.0, 0.0]
     }
+}
+
+// ── New mat renderers ────────────────────────────────────────────────────────
+
+pub(super) fn render_gradient_canvas(
+    canvas_w: u32,
+    canvas_h: u32,
+    start_color: [u8; 3],
+    end_color: [u8; 3],
+    direction: GradientDirection,
+    angle_degrees: f32,
+) -> RgbaImage {
+    let w = canvas_w.max(1);
+    let h = canvas_h.max(1);
+    let start = [
+        start_color[0] as f32 / 255.0,
+        start_color[1] as f32 / 255.0,
+        start_color[2] as f32 / 255.0,
+    ];
+    let end = [
+        end_color[0] as f32 / 255.0,
+        end_color[1] as f32 / 255.0,
+        end_color[2] as f32 / 255.0,
+    ];
+
+    // Max distance from center used to normalize radial gradient (corner to center).
+    let cx = (w as f32) * 0.5;
+    let cy = (h as f32) * 0.5;
+    let max_dist = ((cx * cx + cy * cy).sqrt()).max(1.0);
+
+    // Precompute direction vector for angled linear gradients.
+    let dir = if direction != GradientDirection::Radial && angle_degrees.abs() > f32::EPSILON {
+        Some(angle_to_unit_vec(angle_degrees))
+    } else {
+        None
+    };
+
+    let mut img = RgbaImage::new(w, h);
+    for (x, y, pixel) in img.enumerate_pixels_mut() {
+        let px = x as f32 + 0.5;
+        let py = y as f32 + 0.5;
+
+        let t = match direction {
+            GradientDirection::Vertical => {
+                if let Some(d) = dir {
+                    let proj = d[0] * px + d[1] * py;
+                    let min_p = d[0].min(0.0) * w as f32 + d[1].min(0.0) * h as f32;
+                    let max_p = d[0].max(0.0) * w as f32 + d[1].max(0.0) * h as f32;
+                    let span = (max_p - min_p).max(1.0);
+                    ((proj - min_p) / span).clamp(0.0, 1.0)
+                } else {
+                    (py / (h as f32 - 1.0).max(1.0)).clamp(0.0, 1.0)
+                }
+            }
+            GradientDirection::Horizontal => {
+                if let Some(d) = dir {
+                    let proj = d[0] * px + d[1] * py;
+                    let min_p = d[0].min(0.0) * w as f32 + d[1].min(0.0) * h as f32;
+                    let max_p = d[0].max(0.0) * w as f32 + d[1].max(0.0) * h as f32;
+                    let span = (max_p - min_p).max(1.0);
+                    ((proj - min_p) / span).clamp(0.0, 1.0)
+                } else {
+                    (px / (w as f32 - 1.0).max(1.0)).clamp(0.0, 1.0)
+                }
+            }
+            GradientDirection::Radial => {
+                let dx = px - cx;
+                let dy = py - cy;
+                ((dx * dx + dy * dy).sqrt() / max_dist).clamp(0.0, 1.0)
+            }
+        };
+
+        for c in 0..3 {
+            pixel[c] = srgb_u8(lerp(start[c], end[c], t));
+        }
+        pixel[3] = 255;
+    }
+    img
+}
+
+pub(super) fn render_vignette_canvas(
+    canvas_w: u32,
+    canvas_h: u32,
+    color: [u8; 3],
+    strength: f32,
+    radius: f32,
+    softness: f32,
+) -> RgbaImage {
+    let w = canvas_w.max(1);
+    let h = canvas_h.max(1);
+    let base = [
+        color[0] as f32 / 255.0,
+        color[1] as f32 / 255.0,
+        color[2] as f32 / 255.0,
+    ];
+    let strength = strength.clamp(0.0, 1.0);
+    let radius = radius.clamp(0.0, 1.0);
+    let softness = softness.clamp(0.0, 1.0);
+
+    let cx = (w as f32) * 0.5;
+    let cy = (h as f32) * 0.5;
+    let half_diag = ((cx * cx + cy * cy).sqrt()).max(1.0);
+
+    let mut img = RgbaImage::new(w, h);
+    for (x, y, pixel) in img.enumerate_pixels_mut() {
+        let px = x as f32 + 0.5;
+        let py = y as f32 + 0.5;
+        let dx = px - cx;
+        let dy = py - cy;
+        let d = ((dx * dx + dy * dy).sqrt() / half_diag).clamp(0.0, 1.0);
+
+        let band_end = (radius + softness).clamp(0.0, 1.0);
+        let vignette = smoothstep(radius, band_end, d);
+        let factor = (1.0 - strength * vignette).clamp(0.0, 1.0);
+
+        for c in 0..3 {
+            pixel[c] = srgb_u8(base[c] * factor);
+        }
+        pixel[3] = 255;
+    }
+    img
+}
+
+/// Apply a vignette darkening overlay in-place to an existing image.
+pub(super) fn apply_vignette_overlay(
+    img: &mut RgbaImage,
+    strength: f32,
+    radius: f32,
+    softness: f32,
+) {
+    let w = img.width().max(1);
+    let h = img.height().max(1);
+    let strength = strength.clamp(0.0, 1.0);
+    let radius = radius.clamp(0.0, 1.0);
+    let softness = softness.clamp(0.0, 1.0);
+    let cx = (w as f32) * 0.5;
+    let cy = (h as f32) * 0.5;
+    let half_diag = ((cx * cx + cy * cy).sqrt()).max(1.0);
+    let band_end = (radius + softness).clamp(0.0, 1.0);
+
+    for (x, y, pixel) in img.enumerate_pixels_mut() {
+        let px = x as f32 + 0.5;
+        let py = y as f32 + 0.5;
+        let dx = px - cx;
+        let dy = py - cy;
+        let d = ((dx * dx + dy * dy).sqrt() / half_diag).clamp(0.0, 1.0);
+        let vignette = smoothstep(radius, band_end, d);
+        let factor = (1.0 - strength * vignette).clamp(0.0, 1.0);
+        pixel[0] = ((pixel[0] as f32 * factor).round() as u8).min(255);
+        pixel[1] = ((pixel[1] as f32 * factor).round() as u8).min(255);
+        pixel[2] = ((pixel[2] as f32 * factor).round() as u8).min(255);
+    }
+}
+
+pub(super) fn render_drop_shadow(
+    background: &mut RgbaImage,
+    canvas_w: u32,
+    canvas_h: u32,
+    photo_x: u32,
+    photo_y: u32,
+    photo_w: u32,
+    photo_h: u32,
+    shadow_color: [u8; 3],
+    shadow_opacity: f32,
+    shadow_blur_px: f32,
+    shadow_offset_px: [i32; 2],
+) {
+    let shadow_opacity = shadow_opacity.clamp(0.0, 1.0);
+    let sc = [
+        shadow_color[0] as f32 / 255.0,
+        shadow_color[1] as f32 / 255.0,
+        shadow_color[2] as f32 / 255.0,
+    ];
+
+    let shadow_x = photo_x as i32 + shadow_offset_px[0];
+    let shadow_y = photo_y as i32 + shadow_offset_px[1];
+    let blur_r = shadow_blur_px.max(0.0);
+
+    for (x, y, pixel) in background.enumerate_pixels_mut() {
+        let px = x as f32 + 0.5;
+        let py = y as f32 + 0.5;
+
+        // Distance from the shadow rect (expanded by blur radius).
+        let sx0 = shadow_x as f32;
+        let sy0 = shadow_y as f32;
+        let sx1 = sx0 + photo_w as f32;
+        let sy1 = sy0 + photo_h as f32;
+
+        let ddx = if px < sx0 {
+            sx0 - px
+        } else if px > sx1 {
+            px - sx1
+        } else {
+            0.0
+        };
+        let ddy = if py < sy0 {
+            sy0 - py
+        } else if py > sy1 {
+            py - sy1
+        } else {
+            0.0
+        };
+        let dist = (ddx * ddx + ddy * ddy).sqrt();
+
+        let alpha = if blur_r <= f32::EPSILON {
+            if dist <= 0.0 { 1.0 } else { 0.0 }
+        } else {
+            (1.0 - (dist / blur_r).clamp(0.0, 1.0)).max(0.0)
+        };
+        let a = (alpha * shadow_opacity).clamp(0.0, 1.0);
+        if a <= 0.0 {
+            continue;
+        }
+
+        let bg = [
+            pixel[0] as f32 / 255.0,
+            pixel[1] as f32 / 255.0,
+            pixel[2] as f32 / 255.0,
+        ];
+        for c in 0..3 {
+            let blended = bg[c] * (1.0 - a) + sc[c] * a;
+            pixel[c] = srgb_u8(blended);
+        }
+        _ = canvas_w;
+        _ = canvas_h;
+    }
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0).max(f32::EPSILON)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }

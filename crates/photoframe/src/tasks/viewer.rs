@@ -603,6 +603,146 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         });
     }
 
+    if let MattingMode::PassePartout {
+        bevel_width_px,
+        bevel_color,
+        ..
+    } = &matting.style
+    {
+        let mat_color = matting
+            .runtime
+            .passe_partout_color(avg_color)
+            .unwrap_or(avg_color);
+        let mut bevel_px = bevel_width_px.max(0.0);
+        let margin_x = (canvas_w as f32 * margin).round();
+        let margin_y = (canvas_h as f32 * margin).round();
+        let inner_w = (canvas_w as f32 - 2.0 * margin_x).max(1.0);
+        let inner_h = (canvas_h as f32 - 2.0 * margin_y).max(1.0);
+        let max_bevel = 0.5 * inner_w.min(inner_h).max(0.0);
+        if max_bevel <= 0.0 {
+            bevel_px = 0.0;
+        } else {
+            bevel_px = bevel_px.min(max_bevel);
+        }
+        let photo_space_w = (canvas_w as f32 - 2.0 * (margin_x + bevel_px)).max(1.0);
+        let photo_space_h = (canvas_h as f32 - 2.0 * (margin_y + bevel_px)).max(1.0);
+
+        let iw = width.max(1) as f32;
+        let ih = height.max(1) as f32;
+        let mut scale = (photo_space_w / iw).min(photo_space_h / ih).min(max_upscale);
+        if !scale.is_finite() || scale <= 0.0 {
+            scale = 1.0;
+        }
+        let max_photo_w = photo_space_w.floor().max(1.0);
+        let max_photo_h = photo_space_h.floor().max(1.0);
+        let mut photo_w = (iw * scale).round().clamp(1.0, max_photo_w);
+        let mut photo_h = (ih * scale).round().clamp(1.0, max_photo_h);
+        photo_w = photo_w.clamp(1.0, canvas_w as f32);
+        photo_h = photo_h.clamp(1.0, canvas_h as f32);
+        let photo_w = photo_w as u32;
+        let photo_h = photo_h as u32;
+        let (offset_x, offset_y) = center_offset(photo_w, photo_h, canvas_w, canvas_h);
+
+        let main_img: Cow<'_, RgbaImage> = if photo_w == width && photo_h == height {
+            Cow::Borrowed(&src)
+        } else {
+            Cow::Owned(imageops::resize(
+                &src,
+                photo_w,
+                photo_h,
+                imageops::FilterType::Triangle,
+            ))
+        };
+
+        let canvas = render_studio_mat(
+            canvas_w,
+            canvas_h,
+            offset_x,
+            offset_y,
+            photo_w,
+            photo_h,
+            main_img.as_ref(),
+            mat_color,
+            bevel_px,
+            *bevel_color,
+            0.0,
+            5.6,
+            5.2,
+        );
+
+        let canvas = ImagePlane {
+            width: canvas_w,
+            height: canvas_h,
+            pixels: canvas.into_raw(),
+        };
+
+        return Some(MatResult {
+            path,
+            canvas,
+            priority,
+        });
+    }
+
+    if let MattingMode::DropShadow {
+        color,
+        shadow_color,
+        shadow_opacity,
+        shadow_blur_px,
+        shadow_offset_px,
+    } = &matting.style
+    {
+        let (final_w, final_h) =
+            resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
+        let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
+
+        let main_img: Cow<'_, RgbaImage> = if final_w == width && final_h == height {
+            Cow::Borrowed(&src)
+        } else {
+            Cow::Owned(imageops::resize(
+                &src,
+                final_w,
+                final_h,
+                imageops::FilterType::Triangle,
+            ))
+        };
+
+        let bg_px = Rgba([color[0], color[1], color[2], 255]);
+        let mut background = RgbaImage::from_pixel(canvas_w, canvas_h, bg_px);
+
+        render_drop_shadow(
+            &mut background,
+            canvas_w,
+            canvas_h,
+            offset_x,
+            offset_y,
+            final_w,
+            final_h,
+            *shadow_color,
+            *shadow_opacity,
+            *shadow_blur_px,
+            *shadow_offset_px,
+        );
+
+        imageops::overlay(
+            &mut background,
+            main_img.as_ref(),
+            offset_x as i64,
+            offset_y as i64,
+        );
+
+        let canvas = ImagePlane {
+            width: canvas_w,
+            height: canvas_h,
+            pixels: background.into_raw(),
+        };
+
+        return Some(MatResult {
+            path,
+            canvas,
+            priority,
+        });
+    }
+
     let (final_w, final_h) =
         resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
     let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
@@ -674,6 +814,82 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             }
         }
         MattingMode::Studio { .. } => unreachable!(),
+        MattingMode::PassePartout { .. } => unreachable!(),
+        MattingMode::DropShadow { .. } => unreachable!(),
+        MattingMode::Gradient {
+            start_color,
+            end_color,
+            direction,
+            angle_degrees,
+        } => render_gradient_canvas(
+            canvas_w,
+            canvas_h,
+            *start_color,
+            *end_color,
+            *direction,
+            *angle_degrees,
+        ),
+        MattingMode::Vignette {
+            color,
+            strength,
+            radius,
+            softness,
+        } => render_vignette_canvas(canvas_w, canvas_h, *color, *strength, *radius, *softness),
+        MattingMode::CinematicBlur {
+            sigma,
+            sample_scale,
+            backend,
+            darken,
+            vignette_strength,
+        } => {
+            let bg = scale_image_to_cover_canvas(&src, canvas_w, canvas_h, max_dim);
+            let mut blurred = if *sigma > 0.0 {
+                let mut sample = bg;
+                let mut sigma_px = *sigma;
+                let scale = if sample_scale.is_finite() {
+                    *sample_scale
+                } else {
+                    MattingMode::default_blur_sample_scale()
+                }
+                .clamp(0.01, 1.0);
+                if scale < 1.0 {
+                    let sample_w = ((canvas_w as f32) * scale)
+                        .round()
+                        .clamp(1.0, canvas_w as f32) as u32;
+                    let sample_h = ((canvas_h as f32) * scale)
+                        .round()
+                        .clamp(1.0, canvas_h as f32) as u32;
+                    sample = imageops::resize(
+                        &sample,
+                        sample_w,
+                        sample_h,
+                        imageops::FilterType::CatmullRom,
+                    );
+                    sigma_px *= scale.max(0.01);
+                }
+                let mut b: RgbaImage = apply_blur(&sample, sigma_px, *backend);
+                if b.width() != canvas_w || b.height() != canvas_h {
+                    b = imageops::resize(
+                        &b,
+                        canvas_w,
+                        canvas_h,
+                        imageops::FilterType::CatmullRom,
+                    );
+                }
+                b
+            } else {
+                bg
+            };
+            let darken = darken.clamp(0.0, 1.0);
+            let brightness = 1.0 - darken;
+            for px in blurred.pixels_mut() {
+                px[0] = ((px[0] as f32 * brightness).round() as u8).min(255);
+                px[1] = ((px[1] as f32 * brightness).round() as u8).min(255);
+                px[2] = ((px[2] as f32 * brightness).round() as u8).min(255);
+            }
+            apply_vignette_overlay(&mut blurred, *vignette_strength, 0.75, 0.5);
+            blurred
+        }
         MattingMode::FixedImage { fit, .. } => {
             if let Some(bg) = matting.runtime.fixed_image() {
                 match bg.canvas_for(*fit, canvas_w, canvas_h, max_dim) {

@@ -459,6 +459,7 @@ impl<'de> Deserialize<'de> for StudioMatColor {
 pub struct MattingRuntime {
     fixed_color: Option<[u8; 3]>,
     studio_color: Option<StudioMatColor>,
+    passe_partout_color: Option<StudioMatColor>,
     fixed_image: Option<Arc<FixedImageBackground>>,
 }
 
@@ -471,14 +472,38 @@ impl MattingRuntime {
         self.studio_color.map(|color| color.resolve(fallback))
     }
 
+    pub fn passe_partout_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
+        self.passe_partout_color.map(|color| color.resolve(fallback))
+    }
+
     pub fn fixed_image(&self) -> Option<Arc<FixedImageBackground>> {
         self.fixed_image.clone()
     }
 }
 
 impl MattingKind {
-    const ALL: &'static [Self] = &[Self::FixedColor, Self::Blur, Self::Studio, Self::FixedImage];
-    const NAMES: &'static [&'static str] = &["fixed-color", "blur", "studio", "fixed-image"];
+    const ALL: &'static [Self] = &[
+        Self::FixedColor,
+        Self::Blur,
+        Self::Studio,
+        Self::FixedImage,
+        Self::Gradient,
+        Self::Vignette,
+        Self::CinematicBlur,
+        Self::PassePartout,
+        Self::DropShadow,
+    ];
+    const NAMES: &'static [&'static str] = &[
+        "fixed-color",
+        "blur",
+        "studio",
+        "fixed-image",
+        "gradient",
+        "vignette",
+        "cinematic-blur",
+        "passe-partout",
+        "drop-shadow",
+    ];
 
     fn as_str(&self) -> &'static str {
         match self {
@@ -486,6 +511,11 @@ impl MattingKind {
             Self::Blur => "blur",
             Self::Studio => "studio",
             Self::FixedImage => "fixed-image",
+            Self::Gradient => "gradient",
+            Self::Vignette => "vignette",
+            Self::CinematicBlur => "cinematic-blur",
+            Self::PassePartout => "passe-partout",
+            Self::DropShadow => "drop-shadow",
         }
     }
 }
@@ -517,6 +547,11 @@ pub enum MattingKind {
     Blur,
     Studio,
     FixedImage,
+    Gradient,
+    Vignette,
+    CinematicBlur,
+    PassePartout,
+    DropShadow,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -576,6 +611,82 @@ pub enum MattingMode {
         #[serde(default)]
         fit: FixedImageFit,
     },
+    Gradient {
+        #[serde(default = "MattingMode::default_gradient_start", rename = "start-color")]
+        start_color: [u8; 3],
+        #[serde(default = "MattingMode::default_gradient_end", rename = "end-color")]
+        end_color: [u8; 3],
+        #[serde(default)]
+        direction: GradientDirection,
+        #[serde(default = "MattingMode::default_gradient_angle", rename = "angle-degrees")]
+        angle_degrees: f32,
+    },
+    Vignette {
+        #[serde(default = "MattingMode::default_vignette_color", rename = "color")]
+        color: [u8; 3],
+        #[serde(default = "MattingMode::default_vignette_strength")]
+        strength: f32,
+        #[serde(default = "MattingMode::default_vignette_radius")]
+        radius: f32,
+        #[serde(default = "MattingMode::default_vignette_softness")]
+        softness: f32,
+    },
+    CinematicBlur {
+        #[serde(default = "MattingMode::default_blur_sigma")]
+        sigma: f32,
+        #[serde(
+            default = "MattingMode::default_blur_sample_scale",
+            rename = "sample-scale"
+        )]
+        sample_scale: f32,
+        #[serde(default)]
+        backend: BlurBackend,
+        #[serde(default = "MattingMode::default_cinematic_darken")]
+        darken: f32,
+        #[serde(
+            default = "MattingMode::default_cinematic_vignette_strength",
+            rename = "vignette-strength"
+        )]
+        vignette_strength: f32,
+    },
+    PassePartout {
+        #[serde(default = "MattingMode::default_studio_colors")]
+        colors: Vec<StudioMatColor>,
+        #[serde(
+            default = "MattingMode::default_studio_bevel_width_px",
+            rename = "bevel-width-px"
+        )]
+        bevel_width_px: f32,
+        #[serde(
+            default = "MattingMode::default_studio_bevel_color",
+            rename = "bevel-color"
+        )]
+        bevel_color: [u8; 3],
+    },
+    DropShadow {
+        #[serde(default = "MattingMode::default_drop_shadow_color", rename = "color")]
+        color: [u8; 3],
+        #[serde(
+            default = "MattingMode::default_drop_shadow_shadow_color",
+            rename = "shadow-color"
+        )]
+        shadow_color: [u8; 3],
+        #[serde(
+            default = "MattingMode::default_drop_shadow_opacity",
+            rename = "shadow-opacity"
+        )]
+        shadow_opacity: f32,
+        #[serde(
+            default = "MattingMode::default_drop_shadow_blur_px",
+            rename = "shadow-blur-px"
+        )]
+        shadow_blur_px: f32,
+        #[serde(
+            default = "MattingMode::default_drop_shadow_offset_px",
+            rename = "shadow-offset-px"
+        )]
+        shadow_offset_px: [i32; 2],
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -602,6 +713,20 @@ impl Default for BlurBackend {
 impl Default for FixedImageFit {
     fn default() -> Self {
         Self::Cover
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GradientDirection {
+    Vertical,
+    Horizontal,
+    Radial,
+}
+
+impl Default for GradientDirection {
+    fn default() -> Self {
+        Self::Vertical
     }
 }
 
@@ -677,6 +802,13 @@ impl MattingOptions {
                 "matting.studio.colors must include at least one entry",
             );
             self.runtime.studio_color = colors.first().copied();
+        }
+        if let MattingMode::PassePartout { colors, .. } = &self.style {
+            ensure!(
+                !colors.is_empty(),
+                "matting.passe-partout.colors must include at least one entry",
+            );
+            self.runtime.passe_partout_color = colors.first().copied();
         }
         if let MattingMode::FixedImage { paths, .. } = &self.style {
             if paths.is_empty() {
@@ -757,6 +889,73 @@ impl MattingOptions {
                     .expect("fixed-image matting must supply a path"),
                 fit: base.fixed_image_fit.unwrap_or_default(),
             },
+            MattingKind::Gradient => MattingMode::Gradient {
+                start_color: base
+                    .gradient_start
+                    .unwrap_or_else(MattingMode::default_gradient_start),
+                end_color: base
+                    .gradient_end
+                    .unwrap_or_else(MattingMode::default_gradient_end),
+                direction: base.gradient_direction.unwrap_or_default(),
+                angle_degrees: base
+                    .gradient_angle
+                    .unwrap_or_else(MattingMode::default_gradient_angle),
+            },
+            MattingKind::Vignette => MattingMode::Vignette {
+                color: base
+                    .vignette_color
+                    .unwrap_or_else(MattingMode::default_vignette_color),
+                strength: base
+                    .vignette_strength
+                    .unwrap_or_else(MattingMode::default_vignette_strength),
+                radius: base
+                    .vignette_radius
+                    .unwrap_or_else(MattingMode::default_vignette_radius),
+                softness: base
+                    .vignette_softness
+                    .unwrap_or_else(MattingMode::default_vignette_softness),
+            },
+            MattingKind::CinematicBlur => MattingMode::CinematicBlur {
+                sigma: base.sigma.unwrap_or_else(MattingMode::default_blur_sigma),
+                sample_scale: base
+                    .sample_scale
+                    .unwrap_or_else(MattingMode::default_blur_sample_scale),
+                backend: base.blur_backend.unwrap_or_default(),
+                darken: base
+                    .cinematic_darken
+                    .unwrap_or_else(MattingMode::default_cinematic_darken),
+                vignette_strength: base
+                    .cinematic_vignette_strength
+                    .unwrap_or_else(MattingMode::default_cinematic_vignette_strength),
+            },
+            MattingKind::PassePartout => MattingMode::PassePartout {
+                colors: base
+                    .passe_partout_colors
+                    .unwrap_or_else(MattingMode::default_studio_colors),
+                bevel_width_px: base
+                    .bevel_width_px
+                    .unwrap_or_else(MattingMode::default_studio_bevel_width_px),
+                bevel_color: base
+                    .bevel_color
+                    .unwrap_or_else(MattingMode::default_studio_bevel_color),
+            },
+            MattingKind::DropShadow => MattingMode::DropShadow {
+                color: base
+                    .drop_shadow_color
+                    .unwrap_or_else(MattingMode::default_drop_shadow_color),
+                shadow_color: base
+                    .drop_shadow_shadow_color
+                    .unwrap_or_else(MattingMode::default_drop_shadow_shadow_color),
+                shadow_opacity: base
+                    .drop_shadow_opacity
+                    .unwrap_or_else(MattingMode::default_drop_shadow_opacity),
+                shadow_blur_px: base
+                    .drop_shadow_blur_px
+                    .unwrap_or_else(MattingMode::default_drop_shadow_blur_px),
+                shadow_offset_px: base
+                    .drop_shadow_offset_px
+                    .unwrap_or_else(MattingMode::default_drop_shadow_offset_px),
+            },
         };
         Self {
             minimum_mat_percentage: base
@@ -774,6 +973,11 @@ impl MattingOptions {
             MattingMode::Blur { .. } => MattingKind::Blur,
             MattingMode::Studio { .. } => MattingKind::Studio,
             MattingMode::FixedImage { .. } => MattingKind::FixedImage,
+            MattingMode::Gradient { .. } => MattingKind::Gradient,
+            MattingMode::Vignette { .. } => MattingKind::Vignette,
+            MattingMode::CinematicBlur { .. } => MattingKind::CinematicBlur,
+            MattingMode::PassePartout { .. } => MattingKind::PassePartout,
+            MattingMode::DropShadow { .. } => MattingKind::DropShadow,
         }
     }
 }
@@ -793,6 +997,22 @@ struct MattingOptionBuilder {
     studio_colors: Option<Vec<StudioMatColor>>,
     fixed_image_paths: Option<Vec<PathBuf>>,
     fixed_image_fit: Option<FixedImageFit>,
+    gradient_start: Option<[u8; 3]>,
+    gradient_end: Option<[u8; 3]>,
+    gradient_direction: Option<GradientDirection>,
+    gradient_angle: Option<f32>,
+    vignette_color: Option<[u8; 3]>,
+    vignette_strength: Option<f32>,
+    vignette_radius: Option<f32>,
+    vignette_softness: Option<f32>,
+    cinematic_darken: Option<f32>,
+    cinematic_vignette_strength: Option<f32>,
+    passe_partout_colors: Option<Vec<StudioMatColor>>,
+    drop_shadow_color: Option<[u8; 3]>,
+    drop_shadow_shadow_color: Option<[u8; 3]>,
+    drop_shadow_opacity: Option<f32>,
+    drop_shadow_blur_px: Option<f32>,
+    drop_shadow_offset_px: Option<[i32; 2]>,
 }
 
 fn inline_value_to<T, E>(value: YamlValue) -> Result<T, E>
@@ -960,6 +1180,207 @@ where
                     ));
                 }
             },
+            MattingKind::Gradient => match other {
+                "start-color" => {
+                    if builder.gradient_start.is_some() {
+                        return Err(de::Error::duplicate_field("start-color"));
+                    }
+                    builder.gradient_start = Some(inline_value_to::<[u8; 3], E>(value)?);
+                }
+                "end-color" => {
+                    if builder.gradient_end.is_some() {
+                        return Err(de::Error::duplicate_field("end-color"));
+                    }
+                    builder.gradient_end = Some(inline_value_to::<[u8; 3], E>(value)?);
+                }
+                "direction" => {
+                    if builder.gradient_direction.is_some() {
+                        return Err(de::Error::duplicate_field("direction"));
+                    }
+                    builder.gradient_direction =
+                        Some(inline_value_to::<GradientDirection, E>(value)?);
+                }
+                "angle-degrees" => {
+                    if builder.gradient_angle.is_some() {
+                        return Err(de::Error::duplicate_field("angle-degrees"));
+                    }
+                    builder.gradient_angle = Some(inline_value_to::<f32, E>(value)?);
+                }
+                _ => {
+                    return Err(de::Error::unknown_field(
+                        other,
+                        &[
+                            "start-color",
+                            "end-color",
+                            "direction",
+                            "angle-degrees",
+                            "minimum-mat-percentage",
+                        ],
+                    ));
+                }
+            },
+            MattingKind::Vignette => match other {
+                "color" => {
+                    if builder.vignette_color.is_some() {
+                        return Err(de::Error::duplicate_field("color"));
+                    }
+                    builder.vignette_color = Some(inline_value_to::<[u8; 3], E>(value)?);
+                }
+                "strength" => {
+                    if builder.vignette_strength.is_some() {
+                        return Err(de::Error::duplicate_field("strength"));
+                    }
+                    builder.vignette_strength = Some(inline_value_to::<f32, E>(value)?);
+                }
+                "radius" => {
+                    if builder.vignette_radius.is_some() {
+                        return Err(de::Error::duplicate_field("radius"));
+                    }
+                    builder.vignette_radius = Some(inline_value_to::<f32, E>(value)?);
+                }
+                "softness" => {
+                    if builder.vignette_softness.is_some() {
+                        return Err(de::Error::duplicate_field("softness"));
+                    }
+                    builder.vignette_softness = Some(inline_value_to::<f32, E>(value)?);
+                }
+                _ => {
+                    return Err(de::Error::unknown_field(
+                        other,
+                        &[
+                            "color",
+                            "strength",
+                            "radius",
+                            "softness",
+                            "minimum-mat-percentage",
+                        ],
+                    ));
+                }
+            },
+            MattingKind::CinematicBlur => match other {
+                "sigma" => {
+                    if builder.sigma.is_some() {
+                        return Err(de::Error::duplicate_field("sigma"));
+                    }
+                    builder.sigma = Some(inline_value_to::<f32, E>(value)?);
+                }
+                "sample-scale" => {
+                    if builder.sample_scale.is_some() {
+                        return Err(de::Error::duplicate_field("sample-scale"));
+                    }
+                    builder.sample_scale = Some(inline_value_to::<f32, E>(value)?);
+                }
+                "backend" => {
+                    if builder.blur_backend.is_some() {
+                        return Err(de::Error::duplicate_field("backend"));
+                    }
+                    builder.blur_backend = Some(inline_value_to::<BlurBackend, E>(value)?);
+                }
+                "darken" => {
+                    if builder.cinematic_darken.is_some() {
+                        return Err(de::Error::duplicate_field("darken"));
+                    }
+                    builder.cinematic_darken = Some(inline_value_to::<f32, E>(value)?);
+                }
+                "vignette-strength" => {
+                    if builder.cinematic_vignette_strength.is_some() {
+                        return Err(de::Error::duplicate_field("vignette-strength"));
+                    }
+                    builder.cinematic_vignette_strength = Some(inline_value_to::<f32, E>(value)?);
+                }
+                _ => {
+                    return Err(de::Error::unknown_field(
+                        other,
+                        &[
+                            "sigma",
+                            "sample-scale",
+                            "backend",
+                            "darken",
+                            "vignette-strength",
+                            "minimum-mat-percentage",
+                        ],
+                    ));
+                }
+            },
+            MattingKind::PassePartout => match other {
+                "colors" => {
+                    if builder.passe_partout_colors.is_some() {
+                        return Err(de::Error::duplicate_field("colors"));
+                    }
+                    builder.passe_partout_colors =
+                        Some(inline_value_to::<Vec<StudioMatColor>, E>(value)?);
+                }
+                "bevel-width-px" => {
+                    if builder.bevel_width_px.is_some() {
+                        return Err(de::Error::duplicate_field("bevel-width-px"));
+                    }
+                    builder.bevel_width_px = Some(inline_value_to::<f32, E>(value)?);
+                }
+                "bevel-color" => {
+                    if builder.bevel_color.is_some() {
+                        return Err(de::Error::duplicate_field("bevel-color"));
+                    }
+                    builder.bevel_color = Some(inline_value_to::<[u8; 3], E>(value)?);
+                }
+                _ => {
+                    return Err(de::Error::unknown_field(
+                        other,
+                        &[
+                            "colors",
+                            "bevel-width-px",
+                            "bevel-color",
+                            "minimum-mat-percentage",
+                        ],
+                    ));
+                }
+            },
+            MattingKind::DropShadow => match other {
+                "color" => {
+                    if builder.drop_shadow_color.is_some() {
+                        return Err(de::Error::duplicate_field("color"));
+                    }
+                    builder.drop_shadow_color = Some(inline_value_to::<[u8; 3], E>(value)?);
+                }
+                "shadow-color" => {
+                    if builder.drop_shadow_shadow_color.is_some() {
+                        return Err(de::Error::duplicate_field("shadow-color"));
+                    }
+                    builder.drop_shadow_shadow_color =
+                        Some(inline_value_to::<[u8; 3], E>(value)?);
+                }
+                "shadow-opacity" => {
+                    if builder.drop_shadow_opacity.is_some() {
+                        return Err(de::Error::duplicate_field("shadow-opacity"));
+                    }
+                    builder.drop_shadow_opacity = Some(inline_value_to::<f32, E>(value)?);
+                }
+                "shadow-blur-px" => {
+                    if builder.drop_shadow_blur_px.is_some() {
+                        return Err(de::Error::duplicate_field("shadow-blur-px"));
+                    }
+                    builder.drop_shadow_blur_px = Some(inline_value_to::<f32, E>(value)?);
+                }
+                "shadow-offset-px" => {
+                    if builder.drop_shadow_offset_px.is_some() {
+                        return Err(de::Error::duplicate_field("shadow-offset-px"));
+                    }
+                    builder.drop_shadow_offset_px =
+                        Some(inline_value_to::<[i32; 2], E>(value)?);
+                }
+                _ => {
+                    return Err(de::Error::unknown_field(
+                        other,
+                        &[
+                            "color",
+                            "shadow-color",
+                            "shadow-opacity",
+                            "shadow-blur-px",
+                            "shadow-offset-px",
+                            "minimum-mat-percentage",
+                        ],
+                    ));
+                }
+            },
         },
     }
     Ok(())
@@ -1008,6 +1429,23 @@ impl MattingOptionBuilder {
                 }
             }
             MattingKind::Blur => {}
+            MattingKind::PassePartout => {
+                if let Some(colors) = &self.passe_partout_colors
+                    && colors.len() > 1
+                {
+                    let mut options = Vec::with_capacity(colors.len());
+                    for color in colors.iter().copied() {
+                        let mut builder = self.clone();
+                        builder.passe_partout_colors = Some(vec![color]);
+                        options.push(MattingOptions::with_kind(kind, builder));
+                    }
+                    return options;
+                }
+            }
+            MattingKind::Gradient
+            | MattingKind::Vignette
+            | MattingKind::CinematicBlur
+            | MattingKind::DropShadow => {}
         }
 
         vec![MattingOptions::with_kind(kind, self)]
@@ -1257,6 +1695,62 @@ impl MattingMode {
 
     const fn default_studio_weft_period_px() -> f32 {
         5.2
+    }
+
+    const fn default_gradient_start() -> [u8; 3] {
+        [20, 20, 28]
+    }
+
+    const fn default_gradient_end() -> [u8; 3] {
+        [70, 70, 90]
+    }
+
+    const fn default_gradient_angle() -> f32 {
+        0.0
+    }
+
+    const fn default_vignette_color() -> [u8; 3] {
+        [24, 24, 28]
+    }
+
+    const fn default_vignette_strength() -> f32 {
+        0.6
+    }
+
+    const fn default_vignette_radius() -> f32 {
+        0.75
+    }
+
+    const fn default_vignette_softness() -> f32 {
+        0.5
+    }
+
+    const fn default_cinematic_darken() -> f32 {
+        0.35
+    }
+
+    const fn default_cinematic_vignette_strength() -> f32 {
+        0.5
+    }
+
+    const fn default_drop_shadow_color() -> [u8; 3] {
+        [235, 235, 235]
+    }
+
+    const fn default_drop_shadow_shadow_color() -> [u8; 3] {
+        [0, 0, 0]
+    }
+
+    const fn default_drop_shadow_opacity() -> f32 {
+        0.4
+    }
+
+    const fn default_drop_shadow_blur_px() -> f32 {
+        24.0
+    }
+
+    const fn default_drop_shadow_offset_px() -> [i32; 2] {
+        [0, 12]
     }
 }
 

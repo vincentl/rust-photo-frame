@@ -1,6 +1,6 @@
 use photoframe::config::{
-    Configuration, FillWhenFits, GlobalPhotoSettings, MattingKind, MattingMode, MattingSelection,
-    PhotoEffectOptions, StudioMatColor, TransitionKind, TransitionSelection,
+    Configuration, FillWhenFits, GlobalPhotoSettings, GradientDirection, MattingKind, MattingMode,
+    MattingSelection, PhotoEffectOptions, StudioMatColor, TransitionKind, TransitionSelection,
 };
 use rand::{SeedableRng, rngs::StdRng};
 use std::path::PathBuf;
@@ -1146,5 +1146,188 @@ fn fill_when_fits_probability_bounds() {
     // Probability 1.0 always fills an eligible photo.
     for _ in 0..32 {
         assert!(always.should_fill(1920, 1080, 1920, 1080, 4.0, &mut rng));
+    }
+}
+
+#[test]
+fn parse_gradient_matting_defaults() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  selection: fixed
+  active:
+    - kind: gradient
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg.matting.iter_selected().next().expect("expected gradient mat");
+    assert!(matches!(selected.entry.kind, MattingKind::Gradient));
+    match &selected.option.style {
+        MattingMode::Gradient {
+            start_color,
+            end_color,
+            direction,
+            angle_degrees,
+        } => {
+            assert_eq!(*start_color, [20, 20, 28]);
+            assert_eq!(*end_color, [70, 70, 90]);
+            assert!(matches!(direction, GradientDirection::Vertical));
+            assert!(angle_degrees.abs() < f32::EPSILON);
+        }
+        _ => panic!("expected gradient matting"),
+    }
+}
+
+#[test]
+fn parse_gradient_matting_custom() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  selection: fixed
+  active:
+    - kind: gradient
+      start-color: [0, 0, 0]
+      end-color: [255, 255, 255]
+      direction: horizontal
+      angle-degrees: 45.0
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg.matting.iter_selected().next().expect("expected gradient mat");
+    match &selected.option.style {
+        MattingMode::Gradient {
+            start_color,
+            end_color,
+            direction,
+            angle_degrees,
+        } => {
+            assert_eq!(*start_color, [0, 0, 0]);
+            assert_eq!(*end_color, [255, 255, 255]);
+            assert!(matches!(direction, GradientDirection::Horizontal));
+            assert!((angle_degrees - 45.0).abs() < f32::EPSILON);
+        }
+        _ => panic!("expected gradient matting"),
+    }
+}
+
+#[test]
+fn parse_vignette_matting_defaults() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  selection: fixed
+  active:
+    - kind: vignette
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg.matting.iter_selected().next().expect("expected vignette mat");
+    assert!(matches!(selected.entry.kind, MattingKind::Vignette));
+    match &selected.option.style {
+        MattingMode::Vignette {
+            color,
+            strength,
+            radius,
+            softness,
+        } => {
+            assert_eq!(*color, [24, 24, 28]);
+            assert!((strength - 0.6).abs() < 1e-5);
+            assert!((radius - 0.75).abs() < 1e-5);
+            assert!((softness - 0.5).abs() < 1e-5);
+        }
+        _ => panic!("expected vignette matting"),
+    }
+}
+
+#[test]
+fn parse_cinematic_blur_matting_defaults() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  selection: fixed
+  active:
+    - kind: cinematic-blur
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg
+        .matting
+        .iter_selected()
+        .next()
+        .expect("expected cinematic-blur mat");
+    assert!(matches!(selected.entry.kind, MattingKind::CinematicBlur));
+    match &selected.option.style {
+        MattingMode::CinematicBlur {
+            sigma,
+            darken,
+            vignette_strength,
+            ..
+        } => {
+            assert!((sigma - 32.0).abs() < 1e-5);
+            assert!((darken - 0.35).abs() < 1e-5);
+            assert!((vignette_strength - 0.5).abs() < 1e-5);
+        }
+        _ => panic!("expected cinematic-blur matting"),
+    }
+}
+
+#[test]
+fn parse_passe_partout_matting_defaults() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  selection: fixed
+  active:
+    - kind: passe-partout
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg
+        .matting
+        .iter_selected()
+        .next()
+        .expect("expected passe-partout mat");
+    assert!(matches!(selected.entry.kind, MattingKind::PassePartout));
+    match &selected.option.style {
+        MattingMode::PassePartout {
+            colors,
+            bevel_width_px,
+            bevel_color,
+        } => {
+            assert_eq!(colors.len(), 1);
+            assert!(matches!(colors[0], StudioMatColor::PhotoAverage));
+            assert!((bevel_width_px - 3.0).abs() < 1e-5);
+            assert_eq!(*bevel_color, [255, 255, 255]);
+        }
+        _ => panic!("expected passe-partout matting"),
+    }
+}
+
+#[test]
+fn parse_drop_shadow_matting_defaults() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  selection: fixed
+  active:
+    - kind: drop-shadow
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg
+        .matting
+        .iter_selected()
+        .next()
+        .expect("expected drop-shadow mat");
+    assert!(matches!(selected.entry.kind, MattingKind::DropShadow));
+    match &selected.option.style {
+        MattingMode::DropShadow {
+            color,
+            shadow_color,
+            shadow_opacity,
+            shadow_blur_px,
+            shadow_offset_px,
+        } => {
+            assert_eq!(*color, [235, 235, 235]);
+            assert_eq!(*shadow_color, [0, 0, 0]);
+            assert!((shadow_opacity - 0.4).abs() < 1e-5);
+            assert!((shadow_blur_px - 24.0).abs() < 1e-5);
+            assert_eq!(*shadow_offset_px, [0, 12]);
+        }
+        _ => panic!("expected drop-shadow matting"),
     }
 }

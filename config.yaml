@@ -184,3 +184,39 @@ matting:
     #   path:
     #     - /var/lib/photoframe/backgrounds/my-background.jpg
     #   fit: cover # options: cover, contain, stretch
+    # gradient mat: linear or radial gradient between two colors.
+    # - kind: gradient
+    #   minimum-mat-percentage: 4.0
+    #   start-color: [20, 20, 28]   # color at top/left/center
+    #   end-color:   [70, 70, 90]   # color at bottom/right/edge
+    #   direction: vertical         # vertical | horizontal | radial
+    #   angle-degrees: 0.0          # optional rotation for linear gradients
+    # vignette mat: solid color with darkened edges.
+    # - kind: vignette
+    #   minimum-mat-percentage: 4.0
+    #   color: [24, 24, 28]   # base mat color
+    #   strength: 0.6         # 0 = no darkening, 1 = edges go black
+    #   radius: 0.75          # fraction of half-diagonal where darkening starts
+    #   softness: 0.5         # how gradual the falloff is
+    # cinematic-blur mat: blurred photo background with darken + vignette overlay.
+    # - kind: cinematic-blur
+    #   minimum-mat-percentage: 3.5
+    #   sigma: 32.0
+    #   sample-scale: 0.125
+    #   backend: neon
+    #   darken: 0.35          # 0 = no darkening, 1 = black overlay
+    #   vignette-strength: 0.5
+    # passe-partout mat: clean 45° bevel mat board without linen weave.
+    # - kind: passe-partout
+    #   minimum-mat-percentage: 6.0
+    #   colors: [photo-average]  # same palette format as studio
+    #   bevel-width-px: 4.0
+    #   bevel-color: [255, 255, 255]
+    # drop-shadow mat: soft drop shadow under the photo on a solid mat.
+    # - kind: drop-shadow
+    #   minimum-mat-percentage: 8.0
+    #   color: [235, 235, 235]     # mat background color
+    #   shadow-color: [0, 0, 0]
+    #   shadow-opacity: 0.4
+    #   shadow-blur-px: 24.0
+    #   shadow-offset-px: [0, 12]  # [x, y] positive y = down

@@ -373,6 +373,32 @@ The remaining controls depend on `kind`:
 - **`fixed-image`**
   - **`path`** (string or string array, required): filesystem paths to the backdrop image(s). The renderer loads them at startup; an empty array disables the entry.
   - **`fit`** (`cover`, `contain`, or `stretch`; default `cover`).
+- **`gradient`** — linear or radial gradient between two colors.
+  - **`start-color`** (`[r, g, b]`, default `[20, 20, 28]`): color at the top / left / center.
+  - **`end-color`** (`[r, g, b]`, default `[70, 70, 90]`): color at the bottom / right / outer edge.
+  - **`direction`** (`vertical`, `horizontal`, or `radial`; default `vertical`).
+  - **`angle-degrees`** (float, default `0.0`): optional rotation for linear gradients; ignored for `radial`.
+- **`vignette`** — solid color with darkened edges.
+  - **`color`** (`[r, g, b]`, default `[24, 24, 28]`): base mat color.
+  - **`strength`** (float 0–1, default `0.6`): how dark the corners get.
+  - **`radius`** (float 0–1, default `0.75`): where the falloff begins, as a fraction of the half-diagonal.
+  - **`softness`** (float 0–1, default `0.5`): width of the falloff band.
+- **`cinematic-blur`** — blurred photo backdrop with a darken and vignette overlay (Apple-TV-aerial look).
+  - **`sigma`** (float, default `32.0`): same as `blur.sigma`.
+  - **`sample-scale`** (float, default `0.125`): same as `blur.sample-scale`.
+  - **`backend`** (`cpu` or `neon`, default `neon`): same as `blur.backend`.
+  - **`darken`** (float 0–1, default `0.35`): uniform darkening applied over the blur.
+  - **`vignette-strength`** (float 0–1, default `0.5`): extra edge darkening.
+- **`passe-partout`** — clean 45° core-bevel mat board without linen weave (crisper alternative to `studio`).
+  - **`colors`** (array of `[r, g, b]` triples and/or `photo-average`; default `[photo-average]`): mat board color(s). Multiple entries expand to multiple slots.
+  - **`bevel-width-px`** (float, default `3.0`).
+  - **`bevel-color`** (`[r, g, b]`, default `[255, 255, 255]`).
+- **`drop-shadow`** — soft drop shadow under the photo on a solid mat.
+  - **`color`** (`[r, g, b]`, default `[235, 235, 235]`): mat background color.
+  - **`shadow-color`** (`[r, g, b]`, default `[0, 0, 0]`): shadow tint.
+  - **`shadow-opacity`** (float 0–1, default `0.4`): shadow strength at its darkest.
+  - **`shadow-blur-px`** (float, default `24.0`): softness of the shadow edge.
+  - **`shadow-offset-px`** (`[x, y]` integer pair, default `[0, 12]`): shadow displacement; positive y is downward.
 
 > Store operator-managed background images under `/var/lib/photoframe/backgrounds`. The setup pipeline treats `/opt/photoframe` as read-only and refreshes it on redeploy.
 
