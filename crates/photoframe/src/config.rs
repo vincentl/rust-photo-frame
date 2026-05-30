@@ -2162,11 +2162,36 @@ pub enum TransitionKind {
     Wipe,
     Push,
     EInk,
+    Dissolve,
+    Iris,
+    RadialWipe,
+    VenetianBlinds,
+    CrossfadeZoom,
 }
 
 impl TransitionKind {
-    const ALL: &'static [Self] = &[Self::Fade, Self::Wipe, Self::Push, Self::EInk];
-    const NAMES: &'static [&'static str] = &["fade", "wipe", "push", "e-ink"];
+    const ALL: &'static [Self] = &[
+        Self::Fade,
+        Self::Wipe,
+        Self::Push,
+        Self::EInk,
+        Self::Dissolve,
+        Self::Iris,
+        Self::RadialWipe,
+        Self::VenetianBlinds,
+        Self::CrossfadeZoom,
+    ];
+    const NAMES: &'static [&'static str] = &[
+        "fade",
+        "wipe",
+        "push",
+        "e-ink",
+        "dissolve",
+        "iris",
+        "radial-wipe",
+        "venetian-blinds",
+        "crossfade-zoom",
+    ];
 
     fn as_str(&self) -> &'static str {
         match self {
@@ -2174,6 +2199,11 @@ impl TransitionKind {
             Self::Wipe => "wipe",
             Self::Push => "push",
             Self::EInk => "e-ink",
+            Self::Dissolve => "dissolve",
+            Self::Iris => "iris",
+            Self::RadialWipe => "radial-wipe",
+            Self::VenetianBlinds => "venetian-blinds",
+            Self::CrossfadeZoom => "crossfade-zoom",
         }
     }
 
@@ -2183,6 +2213,11 @@ impl TransitionKind {
             Self::Wipe => 2,
             Self::Push => 3,
             Self::EInk => 4,
+            Self::Dissolve => 5,
+            Self::Iris => 7,
+            Self::RadialWipe => 8,
+            Self::VenetianBlinds => 9,
+            Self::CrossfadeZoom => 10,
         }
     }
 }
@@ -2341,6 +2376,19 @@ impl TransitionOptions {
             TransitionKind::Wipe => (400, TransitionMode::Wipe(WipeTransition::default())),
             TransitionKind::Push => (400, TransitionMode::Push(PushTransition::default())),
             TransitionKind::EInk => (1600, TransitionMode::EInk(EInkTransition::default())),
+            TransitionKind::Dissolve => {
+                (600, TransitionMode::Dissolve(DissolveTransition::default()))
+            }
+            TransitionKind::Iris => (700, TransitionMode::Iris(IrisTransition::default())),
+            TransitionKind::RadialWipe => {
+                (500, TransitionMode::RadialWipe(RadialWipeTransition::default()))
+            }
+            TransitionKind::VenetianBlinds => {
+                (600, TransitionMode::VenetianBlinds(VenetianBlindsTransition::default()))
+            }
+            TransitionKind::CrossfadeZoom => {
+                (700, TransitionMode::CrossfadeZoom(CrossfadeZoomTransition::default()))
+            }
         };
         Self {
             kind,
@@ -2393,6 +2441,42 @@ impl TransitionOptions {
                     eink.stripe_count = 1;
                 }
                 eink.flash_count = eink.flash_count.min(6);
+            }
+            TransitionMode::Dissolve(d) => {
+                d.softness = d.softness.clamp(0.0, 0.5);
+                if !d.scale.is_finite() || d.scale <= 0.0 {
+                    d.scale = 64.0;
+                }
+            }
+            TransitionMode::Iris(iris) => {
+                if iris.blades < 3 {
+                    iris.blades = 3;
+                }
+                iris.softness = iris.softness.clamp(0.0, 0.5);
+                if !iris.rotation_degrees.is_finite() {
+                    iris.rotation_degrees = 30.0;
+                }
+                if !iris.center[0].is_finite() || !iris.center[1].is_finite() {
+                    iris.center = [0.5, 0.5];
+                }
+            }
+            TransitionMode::RadialWipe(rw) => {
+                rw.softness = rw.softness.clamp(0.0, 0.5);
+                if !rw.center[0].is_finite() || !rw.center[1].is_finite() {
+                    rw.center = [0.5, 0.5];
+                }
+            }
+            TransitionMode::VenetianBlinds(vb) => {
+                if vb.stripe_count == 0 {
+                    vb.stripe_count = 1;
+                }
+                vb.softness = vb.softness.clamp(0.0, 0.5);
+            }
+            TransitionMode::CrossfadeZoom(cz) => {
+                if !cz.zoom.is_finite() {
+                    cz.zoom = 0.06;
+                }
+                cz.zoom = cz.zoom.clamp(0.0, 0.5);
             }
         }
         Ok(())
@@ -2462,6 +2546,80 @@ impl TransitionOptions {
                     flash_color: builder.eink_flash_color.unwrap_or(defaults.flash_color),
                 })
             }
+            TransitionKind::Dissolve => {
+                let defaults = DissolveTransition::default();
+                let mut d = DissolveTransition {
+                    softness: builder.dissolve_softness.unwrap_or(defaults.softness),
+                    scale: builder.dissolve_scale.unwrap_or(defaults.scale),
+                };
+                d.softness = d.softness.clamp(0.0, 0.5);
+                if !d.scale.is_finite() || d.scale <= 0.0 {
+                    d.scale = 64.0;
+                }
+                TransitionMode::Dissolve(d)
+            }
+            TransitionKind::Iris => {
+                let defaults = IrisTransition::default();
+                let mut iris = IrisTransition {
+                    blades: builder.iris_blades.unwrap_or(defaults.blades).max(3),
+                    rotation_degrees: builder
+                        .iris_rotation_degrees
+                        .unwrap_or(defaults.rotation_degrees),
+                    softness: builder.iris_softness.unwrap_or(defaults.softness),
+                    center: builder.iris_center.unwrap_or(defaults.center),
+                };
+                iris.softness = iris.softness.clamp(0.0, 0.5);
+                if !iris.rotation_degrees.is_finite() {
+                    iris.rotation_degrees = 30.0;
+                }
+                if !iris.center[0].is_finite() || !iris.center[1].is_finite() {
+                    iris.center = [0.5, 0.5];
+                }
+                TransitionMode::Iris(iris)
+            }
+            TransitionKind::RadialWipe => {
+                let defaults = RadialWipeTransition::default();
+                let mut rw = RadialWipeTransition {
+                    softness: builder.radial_wipe_softness.unwrap_or(defaults.softness),
+                    shape: builder.radial_wipe_shape.unwrap_or(defaults.shape),
+                    center: builder.radial_wipe_center.unwrap_or(defaults.center),
+                };
+                rw.softness = rw.softness.clamp(0.0, 0.5);
+                if !rw.center[0].is_finite() || !rw.center[1].is_finite() {
+                    rw.center = [0.5, 0.5];
+                }
+                TransitionMode::RadialWipe(rw)
+            }
+            TransitionKind::VenetianBlinds => {
+                let defaults = VenetianBlindsTransition::default();
+                let mut vb = VenetianBlindsTransition {
+                    stripe_count: builder
+                        .venetian_stripe_count
+                        .unwrap_or(defaults.stripe_count)
+                        .max(1),
+                    softness: builder.venetian_softness.unwrap_or(defaults.softness),
+                    vertical: builder.venetian_vertical.unwrap_or(defaults.vertical),
+                };
+                vb.softness = vb.softness.clamp(0.0, 0.5);
+                TransitionMode::VenetianBlinds(vb)
+            }
+            TransitionKind::CrossfadeZoom => {
+                let defaults = CrossfadeZoomTransition::default();
+                let mut cz = CrossfadeZoomTransition {
+                    zoom: builder.crossfade_zoom.unwrap_or(defaults.zoom),
+                    current_zooms_in: builder
+                        .crossfade_current_zooms_in
+                        .unwrap_or(defaults.current_zooms_in),
+                    next_zooms_in: builder
+                        .crossfade_next_zooms_in
+                        .unwrap_or(defaults.next_zooms_in),
+                };
+                if !cz.zoom.is_finite() {
+                    cz.zoom = 0.06;
+                }
+                cz.zoom = cz.zoom.clamp(0.0, 0.5);
+                TransitionMode::CrossfadeZoom(cz)
+            }
         };
         let mut option = Self {
             kind,
@@ -2490,6 +2648,11 @@ impl TransitionOptions {
                 }
                 eink.flash_count = eink.flash_count.min(6);
             }
+            TransitionMode::Dissolve(_)
+            | TransitionMode::Iris(_)
+            | TransitionMode::RadialWipe(_)
+            | TransitionMode::VenetianBlinds(_)
+            | TransitionMode::CrossfadeZoom(_) => {}
         }
 
         Ok(option)
@@ -2502,6 +2665,11 @@ pub enum TransitionMode {
     Wipe(WipeTransition),
     Push(PushTransition),
     EInk(EInkTransition),
+    Dissolve(DissolveTransition),
+    Iris(IrisTransition),
+    RadialWipe(RadialWipeTransition),
+    VenetianBlinds(VenetianBlindsTransition),
+    CrossfadeZoom(CrossfadeZoomTransition),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2593,6 +2761,104 @@ impl Default for EInkTransition {
             reveal_portion: 0.55,
             stripe_count: 24,
             flash_color: [255, 255, 255],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DissolveTransition {
+    pub softness: f32,
+    pub scale: f32,
+}
+
+impl Default for DissolveTransition {
+    fn default() -> Self {
+        Self {
+            softness: 0.1,
+            scale: 64.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RadialShape {
+    Circle,
+    Diamond,
+}
+
+impl Default for RadialShape {
+    fn default() -> Self {
+        Self::Circle
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RadialWipeTransition {
+    pub softness: f32,
+    pub shape: RadialShape,
+    pub center: [f32; 2],
+}
+
+impl Default for RadialWipeTransition {
+    fn default() -> Self {
+        Self {
+            softness: 0.1,
+            shape: RadialShape::Circle,
+            center: [0.5, 0.5],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VenetianBlindsTransition {
+    pub stripe_count: u32,
+    pub softness: f32,
+    pub vertical: bool,
+}
+
+impl Default for VenetianBlindsTransition {
+    fn default() -> Self {
+        Self {
+            stripe_count: 16,
+            softness: 0.1,
+            vertical: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CrossfadeZoomTransition {
+    pub zoom: f32,
+    pub current_zooms_in: bool,
+    pub next_zooms_in: bool,
+}
+
+impl Default for CrossfadeZoomTransition {
+    fn default() -> Self {
+        Self {
+            zoom: 0.06,
+            current_zooms_in: true,
+            next_zooms_in: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IrisTransition {
+    pub blades: u32,
+    pub rotation_degrees: f32,
+    pub softness: f32,
+    pub center: [f32; 2],
+}
+
+impl Default for IrisTransition {
+    fn default() -> Self {
+        Self {
+            blades: 6,
+            rotation_degrees: 30.0,
+            softness: 0.04,
+            center: [0.5, 0.5],
         }
     }
 }
@@ -2695,6 +2961,21 @@ struct TransitionOptionBuilder {
     eink_reveal_portion: Option<f32>,
     eink_stripe_count: Option<u32>,
     eink_flash_color: Option<[u8; 3]>,
+    dissolve_softness: Option<f32>,
+    dissolve_scale: Option<f32>,
+    iris_blades: Option<u32>,
+    iris_rotation_degrees: Option<f32>,
+    iris_softness: Option<f32>,
+    iris_center: Option<[f32; 2]>,
+    radial_wipe_softness: Option<f32>,
+    radial_wipe_shape: Option<RadialShape>,
+    radial_wipe_center: Option<[f32; 2]>,
+    venetian_stripe_count: Option<u32>,
+    venetian_softness: Option<f32>,
+    venetian_vertical: Option<bool>,
+    crossfade_zoom: Option<f32>,
+    crossfade_current_zooms_in: Option<bool>,
+    crossfade_next_zooms_in: Option<bool>,
 }
 
 impl TransitionOptionBuilder {
@@ -2799,8 +3080,34 @@ fn apply_transition_inline_field<E: de::Error>(
                 _ => {}
             }
         }
-        "softness" if matches!(kind, TransitionKind::Wipe) => {
-            builder.wipe_softness = Some(inline_value_to::<f32, E>(value)?);
+        "softness"
+            if matches!(
+                kind,
+                TransitionKind::Wipe
+                    | TransitionKind::Dissolve
+                    | TransitionKind::RadialWipe
+                    | TransitionKind::VenetianBlinds
+                    | TransitionKind::Iris
+            ) =>
+        {
+            match kind {
+                TransitionKind::Wipe => {
+                    builder.wipe_softness = Some(inline_value_to::<f32, E>(value)?)
+                }
+                TransitionKind::Dissolve => {
+                    builder.dissolve_softness = Some(inline_value_to::<f32, E>(value)?)
+                }
+                TransitionKind::RadialWipe => {
+                    builder.radial_wipe_softness = Some(inline_value_to::<f32, E>(value)?)
+                }
+                TransitionKind::VenetianBlinds => {
+                    builder.venetian_softness = Some(inline_value_to::<f32, E>(value)?)
+                }
+                TransitionKind::Iris => {
+                    builder.iris_softness = Some(inline_value_to::<f32, E>(value)?)
+                }
+                _ => {}
+            }
         }
         "flash-count" if matches!(kind, TransitionKind::EInk) => {
             builder.eink_flash_count = Some(inline_value_to::<u32, E>(value)?);
@@ -2808,11 +3115,66 @@ fn apply_transition_inline_field<E: de::Error>(
         "reveal-portion" if matches!(kind, TransitionKind::EInk) => {
             builder.eink_reveal_portion = Some(inline_value_to::<f32, E>(value)?);
         }
-        "stripe-count" if matches!(kind, TransitionKind::EInk) => {
-            builder.eink_stripe_count = Some(inline_value_to::<u32, E>(value)?);
+        "stripe-count"
+            if matches!(kind, TransitionKind::EInk | TransitionKind::VenetianBlinds) =>
+        {
+            match kind {
+                TransitionKind::EInk => {
+                    builder.eink_stripe_count = Some(inline_value_to::<u32, E>(value)?)
+                }
+                TransitionKind::VenetianBlinds => {
+                    builder.venetian_stripe_count = Some(inline_value_to::<u32, E>(value)?)
+                }
+                _ => {}
+            }
         }
         "flash-color" if matches!(kind, TransitionKind::EInk) => {
             builder.eink_flash_color = Some(inline_value_to::<[u8; 3], E>(value)?);
+        }
+        "scale" if matches!(kind, TransitionKind::Dissolve) => {
+            builder.dissolve_scale = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "blades" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_blades = Some(inline_value_to::<u32, E>(value)?);
+        }
+        "rotation-degrees" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_rotation_degrees = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "center" if matches!(kind, TransitionKind::Iris | TransitionKind::RadialWipe) => {
+            match kind {
+                TransitionKind::Iris => {
+                    builder.iris_center = Some(inline_value_to::<[f32; 2], E>(value)?)
+                }
+                TransitionKind::RadialWipe => {
+                    builder.radial_wipe_center = Some(inline_value_to::<[f32; 2], E>(value)?)
+                }
+                _ => {}
+            }
+        }
+        "shape" if matches!(kind, TransitionKind::RadialWipe) => {
+            builder.radial_wipe_shape = Some(inline_value_to::<RadialShape, E>(value)?);
+        }
+        "orientation" if matches!(kind, TransitionKind::VenetianBlinds) => {
+            let s = inline_value_to::<String, E>(value)?;
+            builder.venetian_vertical = Some(match s.as_str() {
+                "vertical" => true,
+                "horizontal" => false,
+                other => {
+                    return Err(de::Error::unknown_variant(
+                        other,
+                        &["horizontal", "vertical"],
+                    ));
+                }
+            });
+        }
+        "zoom" if matches!(kind, TransitionKind::CrossfadeZoom) => {
+            builder.crossfade_zoom = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "current-zooms-in" if matches!(kind, TransitionKind::CrossfadeZoom) => {
+            builder.crossfade_current_zooms_in = Some(inline_value_to::<bool, E>(value)?);
+        }
+        "next-zooms-in" if matches!(kind, TransitionKind::CrossfadeZoom) => {
+            builder.crossfade_next_zooms_in = Some(inline_value_to::<bool, E>(value)?);
         }
         _ => {
             return Err(de::Error::unknown_field(
@@ -2828,6 +3190,15 @@ fn apply_transition_inline_field<E: de::Error>(
                     "reveal-portion",
                     "stripe-count",
                     "flash-color",
+                    "scale",
+                    "blades",
+                    "rotation-degrees",
+                    "center",
+                    "shape",
+                    "orientation",
+                    "zoom",
+                    "current-zooms-in",
+                    "next-zooms-in",
                 ],
             ));
         }

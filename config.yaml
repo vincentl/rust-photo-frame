@@ -57,6 +57,36 @@ transition:
       reveal-portion: 0.55
       stripe-count: 24
       flash-color: [255, 255, 255]
+    # dissolve: threshold value-noise field by progress
+    # - kind: dissolve
+    #   duration-ms: 600
+    #   softness: 0.1    # 0 = hard per-pixel pop, up to ~0.5 = soft edge
+    #   scale: 64.0      # noise cell size in pixels
+    # radial-wipe: circle or diamond reveal from center
+    # - kind: radial-wipe
+    #   duration-ms: 500
+    #   softness: 0.1
+    #   shape: circle    # circle | diamond
+    #   center: [0.5, 0.5]
+    # venetian-blinds: horizontal/vertical stripe reveal
+    # - kind: venetian-blinds
+    #   duration-ms: 600
+    #   stripe-count: 16
+    #   softness: 0.1
+    #   orientation: horizontal  # horizontal | vertical
+    # crossfade-zoom: fade combined with subtle scale
+    # - kind: crossfade-zoom
+    #   duration-ms: 700
+    #   zoom: 0.06
+    #   current-zooms-in: true
+    #   next-zooms-in: true
+    # iris: polygon-SDF aperture reveal
+    # - kind: iris
+    #   duration-ms: 700
+    #   blades: 6
+    #   rotation-degrees: 30
+    #   softness: 0.04
+    #   center: [0.5, 0.5]
 # Global photo settings
 global-photo-settings:
   # Dwell time (ms) the current image remains fully displayed before the next transition

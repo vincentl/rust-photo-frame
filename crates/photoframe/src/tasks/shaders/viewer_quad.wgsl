@@ -147,6 +147,74 @@ switch (U.kind) {
         color = mix(ghost, next, mask);
       }
     }
+    case 5u: {
+      // dissolve: threshold value-noise by progress
+      let softness = clamp(U.params0.x, 0.0, 0.5);
+      let scale = max(U.params0.y, 1.0);
+      let cell = floor(screen_pos / scale);
+      let n = fract(sin(dot(cell, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+      let lo = clamp(progress - softness, 0.0, 1.0);
+      let hi = clamp(progress + softness, 0.0, 1.0);
+      let mask = smoothstep(lo, max(hi, lo + 1e-3), n);
+      color = mix(next, current, mask);
+    }
+    case 7u: {
+      // iris: SDF regular N-gon aperture reveal
+      let center = U.params0.xy * U.screen_size;
+      let n = max(U.params0.z, 3.0);
+      let softness = clamp(U.params0.w, 0.001, 0.5);
+      let rot = U.params1.x * progress;
+      let max_r = 0.5 * length(U.screen_size);
+      let d = screen_pos - center;
+      var ang = atan2(d.y, d.x) + rot;
+      let radius = length(d) / max(max_r, 1e-3);
+      let seg = 6.2831853 / n;
+      let half_seg = 0.5 * seg;
+      let wrapped = abs(((ang % seg) + seg) % seg - half_seg);
+      let apothem = cos(half_seg) / max(cos(wrapped), 1e-3);
+      let opening = progress * 1.2;
+      let edge = radius * apothem;
+      let mask = 1.0 - smoothstep(opening - softness, opening + softness, edge);
+      color = mix(current, next, mask);
+    }
+    case 8u: {
+      // radial-wipe: circle or diamond reveal from center
+      let center = U.params0.xy * U.screen_size;
+      let softness = clamp(U.params0.z, 0.0, 0.5);
+      let diamond = U.params0.w > 0.5;
+      let dv = screen_pos - center;
+      let max_r = length(U.screen_size);
+      var dist = length(dv) / max(max_r, 1e-3);
+      if (diamond) { dist = (abs(dv.x) + abs(dv.y)) / max(max_r, 1e-3); }
+      let lo = clamp(progress - softness, 0.0, 1.0);
+      let hi = clamp(progress + softness, 0.0, 1.0);
+      let mask = 1.0 - smoothstep(lo, max(hi, lo + 1e-3), dist);
+      color = mix(current, next, mask);
+    }
+    case 9u: {
+      // venetian-blinds: stripe reveal
+      let stripes = max(U.params0.x, 1.0);
+      let softness = clamp(U.params0.y, 0.001, 0.5);
+      let vertical = U.params0.z > 0.5;
+      let axis = select(in.screen_uv.y, in.screen_uv.x, vertical);
+      let local = fract(axis * stripes);
+      let mask = smoothstep(progress - softness, progress + softness, 1.0 - local);
+      color = mix(current, next, 1.0 - mask);
+    }
+    case 10u: {
+      // crossfade-zoom: fade + subtle scale
+      let zoom = U.params0.x;
+      let cur_in = U.params0.y > 0.5;
+      let next_in = U.params0.z > 0.5;
+      let center = U.screen_size * 0.5;
+      let cur_scale = select(1.0, 1.0 + zoom * progress, cur_in);
+      let next_scale = select(1.0, 1.0 + zoom * (1.0 - progress), next_in);
+      let cur_pos = center + (screen_pos - center) / max(cur_scale, 1e-3);
+      let next_pos = center + (screen_pos - center) / max(next_scale, 1e-3);
+      let c = sample_plane(cur_tex, cur_samp, U.current_dest, cur_pos);
+      let nxt = sample_plane(next_tex, next_samp, U.next_dest, next_pos);
+      color = mix(c, nxt, progress);
+    }
     case 6u: {
       // Debug: stroke a single quadratic Bezier over the current image
       // params0.xy = P0 (uv), params0.zw = P1 (uv), params1.xy = P2 (uv)

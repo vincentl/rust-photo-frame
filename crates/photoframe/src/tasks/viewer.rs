@@ -47,6 +47,31 @@ pub(super) enum ActiveTransition {
         flash_color: [f32; 3],
         noise_seed: [f32; 2],
     },
+    Dissolve {
+        softness: f32,
+        scale: f32,
+    },
+    Iris {
+        center: [f32; 2],
+        blades: f32,
+        softness: f32,
+        rotation_radians: f32,
+    },
+    RadialWipe {
+        softness: f32,
+        shape_is_diamond: bool,
+        center: [f32; 2],
+    },
+    VenetianBlinds {
+        stripe_count: u32,
+        softness: f32,
+        vertical: bool,
+    },
+    CrossfadeZoom {
+        zoom: f32,
+        current_zooms_in: bool,
+        next_zooms_in: bool,
+    },
 }
 
 pub(super) struct TexturePlane {
@@ -102,6 +127,31 @@ impl TransitionState {
                     .flash_color
                     .map(|channel| (channel as f32 / 255.0).clamp(0.0, 1.0)),
                 noise_seed: [rng.random_range(0.0..=1.0), rng.random_range(0.0..=1.0)],
+            },
+            TransitionMode::Dissolve(cfg) => ActiveTransition::Dissolve {
+                softness: cfg.softness,
+                scale: cfg.scale,
+            },
+            TransitionMode::Iris(cfg) => ActiveTransition::Iris {
+                center: cfg.center,
+                blades: cfg.blades.max(3) as f32,
+                softness: cfg.softness,
+                rotation_radians: cfg.rotation_degrees.to_radians(),
+            },
+            TransitionMode::RadialWipe(cfg) => ActiveTransition::RadialWipe {
+                softness: cfg.softness,
+                shape_is_diamond: cfg.shape == crate::config::RadialShape::Diamond,
+                center: cfg.center,
+            },
+            TransitionMode::VenetianBlinds(cfg) => ActiveTransition::VenetianBlinds {
+                stripe_count: cfg.stripe_count.max(1),
+                softness: cfg.softness,
+                vertical: cfg.vertical,
+            },
+            TransitionMode::CrossfadeZoom(cfg) => ActiveTransition::CrossfadeZoom {
+                zoom: cfg.zoom,
+                current_zooms_in: cfg.current_zooms_in,
+                next_zooms_in: cfg.next_zooms_in,
             },
         };
 
@@ -2586,6 +2636,54 @@ pub fn run_windowed(
                                         uniforms.params1[1] = flash_color[0].clamp(0.0, 1.0);
                                         uniforms.params1[2] = flash_color[1].clamp(0.0, 1.0);
                                         uniforms.params1[3] = flash_color[2].clamp(0.0, 1.0);
+                                    }
+                                    ActiveTransition::Dissolve { softness, scale } => {
+                                        uniforms.params0[0] = *softness;
+                                        uniforms.params0[1] = *scale;
+                                    }
+                                    ActiveTransition::Iris {
+                                        center,
+                                        blades,
+                                        softness,
+                                        rotation_radians,
+                                    } => {
+                                        uniforms.params0[0] = center[0];
+                                        uniforms.params0[1] = center[1];
+                                        uniforms.params0[2] = *blades;
+                                        uniforms.params0[3] = *softness;
+                                        uniforms.params1[0] = *rotation_radians;
+                                    }
+                                    ActiveTransition::RadialWipe {
+                                        softness,
+                                        shape_is_diamond,
+                                        center,
+                                    } => {
+                                        uniforms.params0[0] = center[0];
+                                        uniforms.params0[1] = center[1];
+                                        uniforms.params0[2] = *softness;
+                                        uniforms.params0[3] =
+                                            if *shape_is_diamond { 1.0 } else { 0.0 };
+                                    }
+                                    ActiveTransition::VenetianBlinds {
+                                        stripe_count,
+                                        softness,
+                                        vertical,
+                                    } => {
+                                        uniforms.params0[0] = (*stripe_count).max(1) as f32;
+                                        uniforms.params0[1] = *softness;
+                                        uniforms.params0[2] =
+                                            if *vertical { 1.0 } else { 0.0 };
+                                    }
+                                    ActiveTransition::CrossfadeZoom {
+                                        zoom,
+                                        current_zooms_in,
+                                        next_zooms_in,
+                                    } => {
+                                        uniforms.params0[0] = *zoom;
+                                        uniforms.params0[1] =
+                                            if *current_zooms_in { 1.0 } else { 0.0 };
+                                        uniforms.params0[2] =
+                                            if *next_zooms_in { 1.0 } else { 0.0 };
                                     }
                                 }
                             } else if have_current {

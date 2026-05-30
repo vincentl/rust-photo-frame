@@ -295,7 +295,7 @@ The optional `photo-effect` task sits between the loader and the viewer. When en
 
 ## Transition configuration
 
-The `transition` block controls how the viewer blends between photos. Supply one or more entries under `transition.active`; each begins with a required `kind` (`fade`, `wipe`, `push`, or `e-ink`) followed by family-specific fields.
+The `transition` block controls how the viewer blends between photos. Supply one or more entries under `transition.active`; each begins with a required `kind` (`fade`, `wipe`, `push`, `e-ink`, `dissolve`, `radial-wipe`, `venetian-blinds`, `crossfade-zoom`, or `iris`) followed by family-specific fields.
 
 | Key         | Required? | Default                                                       | Accepted values                           | Effect |
 | ----------- | --------- | ------------------------------------------------------------- | ----------------------------------------- | ------ |
@@ -324,6 +324,26 @@ The remaining knobs depend on the family:
   - **`reveal-portion`** (float, default `0.55`, clamped `0.05–0.95`): fraction of the timeline spent flashing before stripes start uncovering.
   - **`stripe-count`** (integer ≥ 1, default `24`): horizontal bands sweeping in.
   - **`flash-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB color for the bright flash phases. Channels outside `0–255` are clamped.
+- **`dissolve`** — threshold a value-noise field by progress (classic film dissolve).
+  - **`softness`** (float 0–0.5, default `0.1`): width of the smoothstep band around the threshold. `0` = hard per-pixel pop.
+  - **`scale`** (float > 0, default `64.0`): noise cell size in pixels (smaller = finer grain).
+- **`radial-wipe`** — circle or diamond reveal growing from a center point.
+  - **`softness`** (float 0–0.5, default `0.1`): edge feather width.
+  - **`shape`** (`circle` or `diamond`, default `circle`): distance metric (Euclidean vs. Manhattan).
+  - **`center`** (`[x, y]` normalized UV, default `[0.5, 0.5]`): reveal origin.
+- **`venetian-blinds`** — horizontal or vertical stripe reveal.
+  - **`stripe-count`** (integer ≥ 1, default `16`): number of blind slats.
+  - **`softness`** (float 0–0.5, default `0.1`): feather of each slat's edge.
+  - **`orientation`** (`horizontal` or `vertical`, default `horizontal`): slat direction.
+- **`crossfade-zoom`** — fade combined with a subtle scale (gentle Ken-Burns dissolve).
+  - **`zoom`** (float 0–0.5, default `0.06`): maximum fractional scale change.
+  - **`current-zooms-in`** (boolean, default `true`): if true the outgoing photo scales up while fading.
+  - **`next-zooms-in`** (boolean, default `true`): if true the incoming photo starts slightly zoomed and settles.
+- **`iris`** — polygon-SDF aperture reveal (N-sided opening, not a physical blade model).
+  - **`blades`** (integer ≥ 3, default `6`): number of aperture sides.
+  - **`rotation-degrees`** (float, default `30.0`): total polygon rotation across the transition.
+  - **`softness`** (float 0–0.5, default `0.04`): edge feather.
+  - **`center`** (`[x, y]` normalized UV, default `[0.5, 0.5]`): aperture origin.
 
 Examples are in [Transition examples](#transition-examples).
 

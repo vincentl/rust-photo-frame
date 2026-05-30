@@ -1,6 +1,7 @@
 use photoframe::config::{
     Configuration, FillWhenFits, GlobalPhotoSettings, GradientDirection, MattingKind, MattingMode,
-    MattingSelection, PhotoEffectOptions, StudioMatColor, TransitionKind, TransitionSelection,
+    MattingSelection, PhotoEffectOptions, RadialShape, StudioMatColor, TransitionKind,
+    TransitionMode, TransitionSelection,
 };
 use rand::{SeedableRng, rngs::StdRng};
 use std::path::PathBuf;
@@ -1329,5 +1330,131 @@ matting:
             assert_eq!(*shadow_offset_px, [0, 12]);
         }
         _ => panic!("expected drop-shadow matting"),
+    }
+}
+
+#[test]
+fn parse_dissolve_transition_defaults() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  active:
+    - kind: dissolve
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg
+        .transition
+        .iter_selected()
+        .next()
+        .expect("expected transition");
+    assert!(matches!(selected.entry.kind, TransitionKind::Dissolve));
+    match selected.option.mode() {
+        TransitionMode::Dissolve(d) => {
+            assert!((d.softness - 0.1).abs() < 1e-5);
+            assert!((d.scale - 64.0).abs() < 1e-5);
+        }
+        _ => panic!("expected dissolve"),
+    }
+}
+
+#[test]
+fn parse_radial_wipe_transition_defaults() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  active:
+    - kind: radial-wipe
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg
+        .transition
+        .iter_selected()
+        .next()
+        .expect("expected transition");
+    assert!(matches!(selected.entry.kind, TransitionKind::RadialWipe));
+    match selected.option.mode() {
+        TransitionMode::RadialWipe(rw) => {
+            assert!((rw.softness - 0.1).abs() < 1e-5);
+            assert!(matches!(rw.shape, RadialShape::Circle));
+            assert!((rw.center[0] - 0.5).abs() < 1e-5);
+            assert!((rw.center[1] - 0.5).abs() < 1e-5);
+        }
+        _ => panic!("expected radial-wipe"),
+    }
+}
+
+#[test]
+fn parse_venetian_blinds_transition_defaults() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  active:
+    - kind: venetian-blinds
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg
+        .transition
+        .iter_selected()
+        .next()
+        .expect("expected transition");
+    assert!(matches!(selected.entry.kind, TransitionKind::VenetianBlinds));
+    match selected.option.mode() {
+        TransitionMode::VenetianBlinds(vb) => {
+            assert_eq!(vb.stripe_count, 16);
+            assert!((vb.softness - 0.1).abs() < 1e-5);
+            assert!(!vb.vertical);
+        }
+        _ => panic!("expected venetian-blinds"),
+    }
+}
+
+#[test]
+fn parse_crossfade_zoom_transition_defaults() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  active:
+    - kind: crossfade-zoom
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg
+        .transition
+        .iter_selected()
+        .next()
+        .expect("expected transition");
+    assert!(matches!(selected.entry.kind, TransitionKind::CrossfadeZoom));
+    match selected.option.mode() {
+        TransitionMode::CrossfadeZoom(cz) => {
+            assert!((cz.zoom - 0.06).abs() < 1e-5);
+            assert!(cz.current_zooms_in);
+            assert!(cz.next_zooms_in);
+        }
+        _ => panic!("expected crossfade-zoom"),
+    }
+}
+
+#[test]
+fn parse_iris_transition_defaults() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  active:
+    - kind: iris
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg
+        .transition
+        .iter_selected()
+        .next()
+        .expect("expected transition");
+    assert!(matches!(selected.entry.kind, TransitionKind::Iris));
+    match selected.option.mode() {
+        TransitionMode::Iris(iris) => {
+            assert_eq!(iris.blades, 6);
+            assert!((iris.rotation_degrees - 30.0).abs() < 1e-5);
+            assert!((iris.softness - 0.04).abs() < 1e-5);
+            assert!((iris.center[0] - 0.5).abs() < 1e-5);
+        }
+        _ => panic!("expected iris"),
     }
 }
