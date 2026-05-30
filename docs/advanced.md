@@ -284,7 +284,7 @@ echo '{"command":"set-state","state":"asleep"}' | sudo -u kiosk socat - UNIX-CON
 echo '{"command":"ToggleState"}'                | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock
 ```
 
-Manual overrides persist until the next schedule boundary (after `sleep-grace-ms` elapses).
+Manual overrides persist until the next schedule boundary — the override clears the moment the schedule's own desired state matches it, at which point the frame resumes following the schedule. Pressing again toward the opposite state agrees with the schedule and clears the override immediately (a natural "undo"). Overrides are in-memory, so a `buttond` restart resets to schedule-following.
 
 ### Pi 5 + Dell S2725QC notes
 

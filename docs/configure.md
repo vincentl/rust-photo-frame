@@ -201,7 +201,6 @@ buttond:
   shutdown-command:
     program: /usr/bin/systemctl
     args: [poweroff]
-  sleep-grace-ms: 300000            # defer scheduled sleep this long after last activity
   screen:
     off-delay-ms: 3500
     display-name: HDMI-A-2          # wlr-randr output name; null = auto-detect
@@ -230,7 +229,8 @@ Common values: `HDMI-A-1`, `HDMI-A-2`. Setting `display-name` explicitly avoids 
 - **Single press:** writes `{ "command": "ToggleState" }` to the control socket, then toggles the screen. If the display was off it immediately runs the wake command; if on, it delays for `off-delay-ms` (so the sleep card renders) before running the sleep command. The daemon inspects `wlr-randr` on each press, so restarts and manual overrides stay in sync.
 - **Double press:** executes `shutdown-command`. Polkit allows `kiosk` to issue the request without prompting.
 - **Long press:** bypassed so Pi 5 firmware can force power-off.
-- **Scheduled transitions:** when `awake-schedule` is present, `buttond` waits for the greeting delay, applies the schedule's current state, then drives transitions using `set-state`. `sleep-grace-ms` lets recent manual activity briefly delay an automatic sleep.
+- **Scheduled transitions:** when `awake-schedule` is present, `buttond` waits for the greeting delay, applies the schedule's current state, then drives transitions using `set-state`.
+- **Manual override:** a single press overrides the schedule until the next scheduled wake/sleep boundary, then the frame resumes following the schedule automatically. Press again to undo immediately. For example, pressing to sleep during a wake window keeps the frame asleep until that window ends; pressing to wake during a sleep window keeps it awake until the next scheduled wake.
 
 `buttond` auto-derives `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` for its `wlr-randr`/sway probes. Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. Set `buttond.device` if the wrong input is chosen. Provisioning pins `HandlePowerKey=ignore` in `/etc/systemd/logind.conf` so logind doesn't interpret presses as shutdown requests; only `buttond` reacts.
 

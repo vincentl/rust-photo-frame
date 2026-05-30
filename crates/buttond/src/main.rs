@@ -148,7 +148,6 @@ struct ButtondSettings {
     screen_display_name: Option<String>,
     greeting_screen_delay: Duration,
     awake_schedule: Option<AwakeScheduleConfig>,
-    sleep_grace: Duration,
 }
 
 const FORCE_SHUTDOWN_FLAG: &str = "-i";
@@ -200,7 +199,6 @@ fn configure_shutdown_flag(args: &mut Vec<String>, flag: &str, enabled: bool) {
 struct SchedulerConfig {
     schedule: AwakeScheduleConfig,
     greeting_delay: Duration,
-    sleep_grace: Duration,
 }
 
 impl ButtondSettings {
@@ -217,7 +215,6 @@ impl ButtondSettings {
             single_window_ms,
             double_window_ms,
             debounce_ms,
-            sleep_grace_ms,
             shutdown_command,
             screen,
             force_shutdown,
@@ -239,7 +236,6 @@ impl ButtondSettings {
         } = screen;
         let screen_off_delay = Duration::from_millis(off_delay_ms);
         let greeting_screen_delay = greeting_screen.effective_duration();
-        let sleep_grace = Duration::from_millis(sleep_grace_ms);
 
         let mut screen_on_command = on_command.into_spec("screen-on");
         let mut screen_off_command = off_command.into_spec("screen-off");
@@ -259,7 +255,6 @@ impl ButtondSettings {
             screen_display_name: display_name,
             greeting_screen_delay,
             awake_schedule,
-            sleep_grace,
         })
     }
 
@@ -301,7 +296,6 @@ impl ButtondSettings {
         let scheduler = self.awake_schedule.map(|schedule| SchedulerConfig {
             schedule,
             greeting_delay: self.greeting_screen_delay,
-            sleep_grace: self.sleep_grace,
         });
 
         Ok((runtime, scheduler))
@@ -377,8 +371,6 @@ struct ButtondFileConfig {
     double_window_ms: u64,
     #[serde(default = "ButtondFileConfig::default_debounce_ms")]
     debounce_ms: u64,
-    #[serde(default = "ButtondFileConfig::default_sleep_grace_ms")]
-    sleep_grace_ms: u64,
     #[serde(default = "ButtondFileConfig::default_force_shutdown")]
     force_shutdown: bool,
     #[serde(default = "ButtondFileConfig::default_shutdown_command")]
@@ -398,10 +390,6 @@ impl ButtondFileConfig {
 
     const fn default_debounce_ms() -> u64 {
         20
-    }
-
-    const fn default_sleep_grace_ms() -> u64 {
-        300_000
     }
 
     const fn default_force_shutdown() -> bool {
@@ -424,7 +412,6 @@ impl Default for ButtondFileConfig {
             single_window_ms: Self::default_single_window_ms(),
             double_window_ms: Self::default_double_window_ms(),
             debounce_ms: Self::default_debounce_ms(),
-            sleep_grace_ms: Self::default_sleep_grace_ms(),
             force_shutdown: Self::default_force_shutdown(),
             shutdown_command: Self::default_shutdown_command(),
             screen: ScreenConfig::default(),
@@ -653,15 +640,31 @@ impl Runtime {
     }
 
     fn handle_manual_toggle(&mut self) -> Result<()> {
-        let detected = self.screen.detect_state()?;
-        debug!(output = %detected.name, state = detected.state.as_str(), "detected screen state");
+        // Prefer the physically detected screen state, but never let a detection
+        // failure swallow the press: fall back to the tracked viewer mode so a
+        // single press always toggles something.
+        let current = match self.screen.detect_state() {
+            Ok(detected) => {
+                debug!(output = %detected.name, state = detected.state.as_str(), "detected screen state");
+                ViewerMode::from(detected.state)
+            }
+            Err(err) => {
+                let fallback = self.current_viewer_mode();
+                warn!(
+                    ?err,
+                    fallback = fallback.as_str(),
+                    "screen detection failed; toggling based on tracked viewer mode",
+                );
+                fallback
+            }
+        };
 
-        match detected.state {
-            ScreenState::On => {
+        match current {
+            ViewerMode::Awake => {
                 info!("single press → putting frame to sleep");
                 self.go_to_sleep(TransitionSource::Manual)?;
             }
-            ScreenState::Off => {
+            ViewerMode::Asleep => {
                 info!("single press → waking frame");
                 self.wake_up(TransitionSource::Manual)?;
             }
@@ -759,15 +762,39 @@ impl TransitionSource {
     }
 }
 
-#[derive(Clone, Copy)]
-struct ManualOverride {
-    at: Instant,
-    target: ViewerMode,
+/// Manual override applied by a button press. It supersedes the schedule until
+/// the schedule itself would produce the same state (see
+/// `FrameState::reconcile_override`), at which point it clears so the frame
+/// resumes following the schedule automatically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Override {
+    Unset,
+    ForceWake,
+    ForceSleep,
+}
+
+impl Override {
+    /// The viewer mode this override forces, if any.
+    fn target(self) -> Option<ViewerMode> {
+        match self {
+            Override::Unset => None,
+            Override::ForceWake => Some(ViewerMode::Awake),
+            Override::ForceSleep => Some(ViewerMode::Asleep),
+        }
+    }
+
+    /// The override implied by a manual transition to `mode`.
+    fn for_manual(mode: ViewerMode) -> Self {
+        match mode {
+            ViewerMode::Awake => Override::ForceWake,
+            ViewerMode::Asleep => Override::ForceSleep,
+        }
+    }
 }
 
 struct FrameState {
     mode: ViewerMode,
-    last_manual_override: Option<ManualOverride>,
+    override_state: Override,
     greeting_complete: bool,
 }
 
@@ -775,23 +802,19 @@ impl FrameState {
     fn new(mode: ViewerMode) -> Self {
         Self {
             mode,
-            last_manual_override: None,
+            override_state: Override::Unset,
             greeting_complete: mode == ViewerMode::Awake,
         }
     }
 
     fn update(&mut self, mode: ViewerMode, source: TransitionSource) {
         self.mode = mode;
-        match source {
-            TransitionSource::Manual => {
-                self.last_manual_override = Some(ManualOverride {
-                    at: Instant::now(),
-                    target: mode,
-                });
-            }
-            TransitionSource::Scheduled => {
-                self.last_manual_override = None;
-            }
+        // A manual press records an override toward its own target. Scheduled
+        // transitions simply follow the schedule and never set an override; an
+        // existing override is cleared by `reconcile_override` once the schedule
+        // agrees with it.
+        if let TransitionSource::Manual = source {
+            self.override_state = Override::for_manual(mode);
         }
 
         if mode == ViewerMode::Awake {
@@ -799,16 +822,14 @@ impl FrameState {
         }
     }
 
-    fn last_manual_awake(&self) -> Option<Instant> {
-        self.last_manual_override
-            .as_ref()
-            .and_then(|override_info| {
-                if override_info.target == ViewerMode::Awake {
-                    Some(override_info.at)
-                } else {
-                    None
-                }
-            })
+    /// Clears the override once the schedule wants the same state the override is
+    /// forcing (equivalent to "reset at the next schedule boundary", but
+    /// stateless). Returns the resulting override and the current mode.
+    fn reconcile_override(&mut self, schedule_desired: ViewerMode) -> (Override, ViewerMode) {
+        if self.override_state.target() == Some(schedule_desired) {
+            self.override_state = Override::Unset;
+        }
+        (self.override_state, self.mode)
     }
 
     fn greeting_complete(&self) -> bool {
@@ -1358,16 +1379,22 @@ fn scheduler_loop(
         let now_instant = Instant::now();
         let timezone = config.schedule.timezone();
         let now = Utc::now().with_timezone(&timezone);
-        let should_be_awake = config.schedule.is_awake_at(now);
-
-        let (current_mode, last_manual_awake, greeting_complete) = {
-            let guard = shared_state.lock().expect("frame state poisoned");
-            (
-                guard.mode,
-                guard.last_manual_awake(),
-                guard.greeting_complete(),
-            )
+        let schedule_desired = if config.schedule.is_awake_at(now) {
+            ViewerMode::Awake
+        } else {
+            ViewerMode::Asleep
         };
+
+        // Reconcile clears a manual override once the schedule agrees with it,
+        // so an override holds only until the next schedule boundary. The
+        // resulting desired mode is the override target when set, otherwise the
+        // schedule's desired mode.
+        let (override_state, current_mode, greeting_complete) = {
+            let mut guard = shared_state.lock().expect("frame state poisoned");
+            let (override_state, current_mode) = guard.reconcile_override(schedule_desired);
+            (override_state, current_mode, guard.greeting_complete())
+        };
+        let desired_mode = override_state.target().unwrap_or(schedule_desired);
 
         if let Some((command, _)) = pending_command.as_ref()
             && current_mode == command.target_mode()
@@ -1375,8 +1402,19 @@ fn scheduler_loop(
             pending_command = None;
         }
 
-        if should_be_awake && current_mode != ViewerMode::Awake {
-            if !greeting_complete && now_instant < greeting_ready_at {
+        if desired_mode != current_mode {
+            let command = match desired_mode {
+                ViewerMode::Awake => SchedulerCommand::WakeUp,
+                ViewerMode::Asleep => SchedulerCommand::GoToSleep,
+            };
+
+            // Hold the initial wake until the greeting screen has had time to
+            // display, so the viewer doesn't flash straight past it on boot.
+            let waiting_for_greeting = command == SchedulerCommand::WakeUp
+                && !greeting_complete
+                && now_instant < greeting_ready_at;
+
+            if waiting_for_greeting {
                 sleep_for(
                     greeting_ready_at.saturating_duration_since(now_instant),
                     MAX_SLEEP,
@@ -1384,45 +1422,19 @@ fn scheduler_loop(
                 continue;
             }
 
-            if let Some((command, last_sent)) = pending_command.as_ref()
-                && *command == SchedulerCommand::WakeUp
-                && now_instant.duration_since(*last_sent) < COMMAND_RETRY
-            {
+            let recently_sent = pending_command
+                .as_ref()
+                .is_some_and(|(pending, last_sent)| {
+                    *pending == command && now_instant.duration_since(*last_sent) < COMMAND_RETRY
+                });
+            if recently_sent {
                 sleep_for(COMMAND_SETTLE, MAX_SLEEP);
                 continue;
             }
 
-            match tx.send(SchedulerCommand::WakeUp) {
+            match tx.send(command) {
                 Ok(()) => {
-                    pending_command = Some((SchedulerCommand::WakeUp, Instant::now()));
-                    sleep_for(COMMAND_SETTLE, MAX_SLEEP);
-                    continue;
-                }
-                Err(_) => {
-                    debug!("scheduler exiting after receiver closed");
-                    break;
-                }
-            }
-        } else if !should_be_awake && current_mode != ViewerMode::Asleep {
-            if let Some(manual_awake_at) = last_manual_awake {
-                let deadline = manual_awake_at + config.sleep_grace;
-                if now_instant < deadline {
-                    sleep_for(deadline.saturating_duration_since(now_instant), MAX_SLEEP);
-                    continue;
-                }
-            }
-
-            if let Some((command, last_sent)) = pending_command.as_ref()
-                && *command == SchedulerCommand::GoToSleep
-                && now_instant.duration_since(*last_sent) < COMMAND_RETRY
-            {
-                sleep_for(COMMAND_SETTLE, MAX_SLEEP);
-                continue;
-            }
-
-            match tx.send(SchedulerCommand::GoToSleep) {
-                Ok(()) => {
-                    pending_command = Some((SchedulerCommand::GoToSleep, Instant::now()));
+                    pending_command = Some((command, Instant::now()));
                     sleep_for(COMMAND_SETTLE, MAX_SLEEP);
                     continue;
                 }
@@ -1446,13 +1458,6 @@ fn scheduler_loop(
 
         if !greeting_complete && now_instant < greeting_ready_at && greeting_ready_at < next_check {
             next_check = greeting_ready_at;
-        }
-
-        if let Some(manual_awake_at) = last_manual_awake {
-            let deadline = manual_awake_at + config.sleep_grace;
-            if deadline < next_check {
-                next_check = deadline;
-            }
         }
 
         let sleep_duration = next_check.saturating_duration_since(Instant::now());
@@ -1685,12 +1690,17 @@ impl ButtonTracker {
             State::Pressed { down_at, is_second } => {
                 let held = now.saturating_duration_since(down_at);
                 self.state = State::Idle;
-                if held > self.durations.single_window {
-                    debug!(duration = ?held, "ignored long press");
-                    return None;
-                }
                 if is_second {
+                    // Second tap of a sequence completes a double regardless of
+                    // how long it was held.
                     return Some(Action::Double);
+                }
+                if held > self.durations.single_window {
+                    // A deliberate long press is unambiguously a single action;
+                    // fire it immediately rather than waiting for a second tap
+                    // (and never silently drop it).
+                    debug!(duration = ?held, "long press → single action");
+                    return Some(Action::Single);
                 }
                 self.state = State::WaitingForSecond {
                     deadline: now + self.durations.double_window,
@@ -1744,7 +1754,7 @@ impl ButtonTracker {
 mod tests {
     use super::{
         Action, ButtonTracker, CommandExecutor, CommandSpec, ControlSocket, Durations,
-        FORCE_SHUTDOWN_FLAG, FrameState, NO_ASK_PASSWORD_FLAG, Runtime, SchedulerCommand,
+        FORCE_SHUTDOWN_FLAG, FrameState, NO_ASK_PASSWORD_FLAG, Override, Runtime, SchedulerCommand,
         SchedulerConfig, ScreenDetection, ScreenDetector, ScreenRuntime, ScreenState,
         SwayEnvironment, SwayScreenDetector, TransitionSource, UnixControlSocket, ViewerMode,
         configure_shutdown_args, find_sway_socket_with_proc_root, override_proc_root,
@@ -1971,6 +1981,52 @@ awake-scheduled: {}
             tracker.handle_timeout(start + Duration::from_millis(600)),
             Some(Action::Single)
         );
+    }
+
+    #[test]
+    fn long_press_fires_single_immediately() {
+        // Regression: a press held longer than single_window must not be
+        // silently dropped — it fires a Single action on release.
+        let mut tracker = ButtonTracker::new(durations());
+        let start = Instant::now();
+
+        tracker.on_press(start);
+        let held = durations().single_window + Duration::from_millis(500);
+        assert_eq!(tracker.on_release(start + held), Some(Action::Single));
+    }
+
+    #[test]
+    fn reconcile_override_clears_when_schedule_agrees() {
+        // ForceSleep holds while the schedule wants Awake, then clears the
+        // moment the schedule also wants Asleep (== next boundary).
+        let mut state = FrameState::new(ViewerMode::Awake);
+        state.update(ViewerMode::Asleep, TransitionSource::Manual);
+        assert_eq!(state.override_state, Override::ForceSleep);
+
+        // Schedule still wants awake → override holds, mode stays asleep.
+        let (ov, mode) = state.reconcile_override(ViewerMode::Awake);
+        assert_eq!(ov, Override::ForceSleep);
+        assert_eq!(mode, ViewerMode::Asleep);
+
+        // Schedule now wants asleep → override clears.
+        let (ov, _) = state.reconcile_override(ViewerMode::Asleep);
+        assert_eq!(ov, Override::Unset);
+    }
+
+    #[test]
+    fn reconcile_override_undo_press_clears_override() {
+        // Pressing again to the opposite of an active override agrees with the
+        // schedule and auto-clears, returning to schedule-following.
+        let mut state = FrameState::new(ViewerMode::Asleep);
+        // Force-wake during a sleep window.
+        state.update(ViewerMode::Awake, TransitionSource::Manual);
+        assert_eq!(state.override_state, Override::ForceWake);
+
+        // User presses again → manual sleep. Override is now ForceSleep, which
+        // agrees with the asleep schedule and clears on the next reconcile.
+        state.update(ViewerMode::Asleep, TransitionSource::Manual);
+        let (ov, _) = state.reconcile_override(ViewerMode::Asleep);
+        assert_eq!(ov, Override::Unset);
     }
 
     #[test]
@@ -2313,7 +2369,6 @@ awake-scheduled: {}
         let config = SchedulerConfig {
             schedule: always_awake_schedule(),
             greeting_delay: Duration::from_millis(60),
-            sleep_grace: Duration::from_millis(0),
         };
         let state = Arc::new(Mutex::new(FrameState::new(ViewerMode::Asleep)));
         let (tx, rx) = mpsc::channel();
@@ -2335,13 +2390,46 @@ awake-scheduled: {}
     }
 
     #[test]
-    fn scheduler_respects_manual_sleep_grace() {
+    fn scheduler_does_not_rewake_after_manual_sleep_in_wake_window() {
+        // Regression: a manual sleep during a scheduled wake window must stick.
+        // The frame is awake, the schedule wants it awake, but the user pressed
+        // to sleep (ForceSleep override). The scheduler must NOT re-wake it.
+        let config = SchedulerConfig {
+            schedule: always_awake_schedule(),
+            greeting_delay: Duration::from_millis(0),
+        };
+        let state = Arc::new(Mutex::new(FrameState::new(ViewerMode::Awake)));
+        {
+            let mut guard = state.lock().expect("state poisoned");
+            // Manual press took the frame from awake to asleep.
+            guard.update(ViewerMode::Asleep, TransitionSource::Manual);
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn({
+            let config = config.clone();
+            let state = Arc::clone(&state);
+            move || scheduler_loop(config, state, tx)
+        });
+
+        // No wake command should arrive: the override keeps it asleep.
+        assert!(rx.recv_timeout(Duration::from_millis(150)).is_err());
+
+        // The scheduler is in steady state (desired == current) and only exits
+        // on a failed send, which never happens here. Detach rather than join.
+        drop(rx);
+        drop(handle);
+    }
+
+    #[test]
+    fn scheduler_force_wake_persists_through_sleep_window() {
+        // A manual wake during a scheduled sleep window stays on until the next
+        // scheduled wake (no grace timer in the override model).
         let config = SchedulerConfig {
             schedule: always_asleep_schedule(),
             greeting_delay: Duration::from_millis(0),
-            sleep_grace: Duration::from_millis(80),
         };
-        let state = Arc::new(Mutex::new(FrameState::new(ViewerMode::Awake)));
+        let state = Arc::new(Mutex::new(FrameState::new(ViewerMode::Asleep)));
         {
             let mut guard = state.lock().expect("state poisoned");
             guard.update(ViewerMode::Awake, TransitionSource::Manual);
@@ -2354,14 +2442,13 @@ awake-scheduled: {}
             move || scheduler_loop(config, state, tx)
         });
 
-        assert!(rx.recv_timeout(Duration::from_millis(40)).is_err());
-        let command = rx
-            .recv_timeout(Duration::from_millis(200))
-            .expect("scheduler sleep");
-        assert_eq!(command, SchedulerCommand::GoToSleep);
+        // No sleep command should arrive: the force-wake override holds.
+        assert!(rx.recv_timeout(Duration::from_millis(150)).is_err());
 
+        // The scheduler is in steady state (desired == current) and only exits
+        // on a failed send, which never happens here. Detach rather than join.
         drop(rx);
-        handle.join().expect("scheduler thread");
+        drop(handle);
     }
 
     #[test]
@@ -2369,7 +2456,6 @@ awake-scheduled: {}
         let config = SchedulerConfig {
             schedule: always_awake_schedule(),
             greeting_delay: Duration::from_millis(0),
-            sleep_grace: Duration::from_millis(0),
         };
         let state = Arc::new(Mutex::new(FrameState::new(ViewerMode::Asleep)));
 
