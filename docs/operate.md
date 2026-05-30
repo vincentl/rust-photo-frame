@@ -62,6 +62,26 @@ Day-to-day commands, status checks, and troubleshooting for a frame you own and 
 
 ## Daily operations
 
+### Running the showcase
+
+The showcase is a labeled tour of every transition and mat so you can choose which to configure. See [demo/README.md](../demo/README.md) for the full guide and photo setup.
+
+**Locally (dev machine):**
+```bash
+# Edit demo/showcase.yaml → photo-library-path to demo/photos, then:
+make showcase
+```
+
+**On the Pi (temporary config swap):**
+```bash
+sudo cp /etc/photoframe/config.yaml /etc/photoframe/config.yaml.bak
+sudo install -m 0644 demo/showcase.yaml /etc/photoframe/config.yaml
+sudo systemctl restart greetd
+# Watch captions; restore when done:
+sudo cp /etc/photoframe/config.yaml.bak /etc/photoframe/config.yaml
+sudo systemctl restart greetd
+```
+
 ### Daily health check
 
 ```bash

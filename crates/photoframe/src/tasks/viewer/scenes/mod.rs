@@ -7,15 +7,191 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use glyphon::{
+    Attrs, Buffer, Cache, Color as GlyphonColor, FamilyOwned, FontSystem, Metrics, Resolution,
+    Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
+};
 use rand::Rng;
 use wgpu::{CommandEncoder, TextureView};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::config::{Configuration, TransitionConfig};
+use crate::config::{Configuration, MattingKind, TransitionConfig, TransitionKind};
 use crate::tasks::greeting_screen::GreetingScreen;
 
 use super::{ImgTex, TransitionState};
+
+// ── Caption overlay ───────────────────────────────────────────────────────────
+
+/// Lightweight text overlay rendered on top of the live photo via `LoadOp::Load`.
+/// Draws a single short line in the bottom-left corner.
+pub(super) struct CaptionOverlay {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    viewport: Viewport,
+    atlas: TextAtlas,
+    text_renderer: TextRenderer,
+    text_buffer: Buffer,
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    text: String,
+    size: PhysicalSize<u32>,
+    dirty: bool,
+}
+
+impl CaptionOverlay {
+    pub(super) fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+    ) -> Self {
+        let mut font_system = FontSystem::new();
+        let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(28.0, 34.0));
+        text_buffer.set_wrap(&mut font_system, Wrap::None);
+
+        let cache = Cache::new(device);
+        let viewport = Viewport::new(device, &cache);
+        let mut atlas = TextAtlas::new(device, queue, &cache, format);
+        let text_renderer =
+            TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
+        let swash_cache = SwashCache::new();
+
+        Self {
+            device: device.clone(),
+            queue: queue.clone(),
+            viewport,
+            atlas,
+            text_renderer,
+            text_buffer,
+            font_system,
+            swash_cache,
+            text: String::new(),
+            size: PhysicalSize::new(0, 0),
+            dirty: false,
+        }
+    }
+
+    pub(super) fn set_text(&mut self, text: impl Into<String>) {
+        let t = text.into();
+        if self.text != t {
+            self.text = t;
+            self.dirty = true;
+        }
+    }
+
+    pub(super) fn resize(&mut self, new_size: PhysicalSize<u32>) {
+        if self.size != new_size {
+            self.size = new_size;
+            self.dirty = true;
+        }
+    }
+
+    pub(super) fn render(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+    ) -> bool {
+        if self.size.width == 0 || self.size.height == 0 || self.text.is_empty() {
+            return false;
+        }
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.size.width,
+                height: self.size.height,
+            },
+        );
+        if self.dirty {
+            self.text_buffer.set_metrics_and_size(
+                &mut self.font_system,
+                Metrics::new(28.0, 34.0),
+                Some(self.size.width as f32),
+                Some(self.size.height as f32),
+            );
+            let attrs = Attrs::new().family(FamilyOwned::SansSerif.as_family());
+            self.text_buffer
+                .set_text(&mut self.font_system, &self.text, &attrs, Shaping::Basic, None);
+            self.dirty = false;
+        }
+
+        let margin = 20.0_f32;
+        // Position at bottom-left; offset up by one line height.
+        let top = (self.size.height as f32 - 34.0 - margin).max(0.0);
+
+        let text_color = GlyphonColor::rgb(255, 255, 255);
+
+        if let Err(err) = self.text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            [TextArea {
+                buffer: &self.text_buffer,
+                left: margin,
+                top,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.size.width as i32,
+                    bottom: self.size.height as i32,
+                },
+                default_color: text_color,
+                custom_glyphs: &[],
+            }],
+            &mut self.swash_cache,
+        ) {
+            tracing::warn!(error = %err, "caption_overlay_prepare_failed");
+            return false;
+        }
+
+        let mut render_error = None;
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("caption-overlay"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            if let Err(err) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+                render_error = Some(err);
+            }
+        }
+        if let Some(err) = render_error {
+            tracing::warn!(error = %err, "caption_overlay_render_failed");
+        }
+        self.atlas.trim();
+        true
+    }
+
+    pub(super) fn after_submit(&mut self) {
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+}
+
+/// Build the showcase caption string from the current transition and mat.
+pub(super) fn showcase_caption(
+    transition_kind: Option<TransitionKind>,
+    mat_kind: Option<MattingKind>,
+) -> String {
+    let t = transition_kind
+        .map(|k| k.to_string())
+        .unwrap_or_else(|| "—".to_string());
+    let m = mat_kind
+        .map(|k| k.to_string())
+        .unwrap_or_else(|| "full-bleed".to_string());
+    format!("transition: {t}    mat: {m}")
+}
 
 struct OverlayScene {
     screen: GreetingScreen,

@@ -82,6 +82,7 @@ If the frame launches to a black screen, check that `photo-library-path` points 
 | **Runtime control**     | `control-socket-path`                                                                      |
 | **External scheduling** | `awake-schedule` (consumed by `buttond`)                                                   |
 | **Power button daemon** | `buttond`                                                                                  |
+| **Showcase / preview**  | `showcase`                                                                                 |
 
 ## Key reference
 
@@ -241,6 +242,39 @@ Common values: `HDMI-A-1`, `HDMI-A-2`. Setting `display-name` explicitly avoids 
 - **Defaults:** `{ selection: fixed, active: [{ kind: fixed-color }] }` with a black swatch.
 
 See [Matting configuration](#matting-configuration) for the full reference.
+
+### `showcase`
+
+- **Purpose:** Turns the slideshow into a labeled, deterministic tour of every registered transition and mat. On-screen captions identify each effect so you can copy the name directly into your real config.
+- **Required?** Optional; defaults to disabled.
+- **Keys:**
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `enabled` | `bool` | `false` | Activates showcase mode. Overrides `transition.active` and `matting.active` with auto-enumerated sequential lists. |
+| `caption` | `bool` | `true` | Show a text label (`transition: X    mat: Y`) in the bottom-left corner of each frame. |
+| `dwell-ms` | `u64` | `4000` | Milliseconds each photo is held; overrides `global-photo-settings.dwell-ms` when showcase is on. |
+| `fixed-image-path` | path | — | Opt-in: include the `fixed-image` mat in the tour using this file as the backdrop. Omitting the path silently skips `fixed-image`. |
+
+When `showcase.enabled` is true, `startup-shuffle-seed` defaults to `1` if unset, and `transition.active`/`matting.active` in the same file are ignored.
+
+See [demo/README.md](../demo/README.md) and [Showcase mode](#showcase-mode) for usage.
+
+## Showcase mode
+
+Showcase mode is the fastest way to choose transitions and mats. It auto-enumerates every built-in effect, displays each one with a live caption, and advances to the next after a configurable dwell.
+
+**Workflow:**
+
+1. Create or copy `demo/showcase.yaml` (see [demo/README.md](../demo/README.md)).
+2. Set `photo-library-path` to a folder with a few test photos.
+3. Run: `make showcase` (or `cargo run -p photoframe -- demo/showcase.yaml`).
+4. Watch the captions. When you see an effect you like, the caption tells you the exact `kind` key.
+5. Copy the kind(s) into your real `config.yaml` under `transition.active` and/or `matting.active`.
+
+**Self-maintaining:** the tour is built at startup from `TransitionKind::ALL` and `MattingKind::ALL`. When future effects are added to the frame, they automatically appear in the tour without any edits to `showcase.yaml`.
+
+**Interactive control** (e.g. advancing manually via a socket command) is not implemented — the tour advances on a timed dwell. This fits the frame's passive, keyboard-less Pi kiosk model; a `showcase-next` control command may be added in the future.
 
 ## Playlist weighting
 

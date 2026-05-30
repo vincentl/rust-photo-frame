@@ -15,7 +15,8 @@ use serde_yaml::{Mapping, Value as YamlValue};
 use crate::processing::fixed_image::FixedImageBackground;
 
 pub use config_model::{
-    AwakeScheduleConfig, GreetingScreenConfig, ScreenMessageConfig, SleepScreenConfig,
+    AwakeScheduleConfig, GreetingScreenConfig, ScreenMessageConfig, ShowcaseConfig,
+    SleepScreenConfig,
 };
 
 pub const DEFAULT_CONTROL_SOCKET_PATH: &str = "/run/photoframe/control.sock";
@@ -966,8 +967,28 @@ impl MattingOptions {
         }
     }
 
-    #[allow(dead_code)]
-    fn kind(&self) -> MattingKind {
+    /// Build a `MattingOptions` with showcase-appropriate defaults for `kind`.
+    /// For `FixedImage`, `fixed_image_path` must be `Some` (callers skip it when None).
+    pub(crate) fn default_for_showcase(
+        kind: MattingKind,
+        minimum_mat_percentage: f32,
+        fixed_image_path: Option<PathBuf>,
+    ) -> Option<Self> {
+        let mut builder = MattingOptionBuilder::default();
+        builder.minimum_mat_percentage = Some(minimum_mat_percentage);
+        match kind {
+            MattingKind::FixedImage => {
+                let path = fixed_image_path?;
+                builder.fixed_image_paths = Some(vec![path]);
+            }
+            _ => {}
+        }
+        let mut opt = MattingOptions::with_kind(kind, builder);
+        opt.minimum_mat_percentage = minimum_mat_percentage;
+        Some(opt)
+    }
+
+    pub(crate) fn kind(&self) -> MattingKind {
         match &self.style {
             MattingMode::FixedColor { .. } => MattingKind::FixedColor,
             MattingMode::Blur { .. } => MattingKind::Blur,
@@ -1645,6 +1666,28 @@ impl MattingConfig {
     #[allow(dead_code)]
     pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> MattingOptions {
         self.select_active(rng).option.clone()
+    }
+
+    /// Build a sequential `MattingConfig` from a list of options.
+    /// Used by showcase mode to replace the author-supplied matting list.
+    pub(crate) fn sequential_from(options: Vec<MattingOptions>) -> Self {
+        let entries: Arc<[SelectionEntry<MattingKind>]> = options
+            .iter()
+            .enumerate()
+            .map(|(index, opt)| SelectionEntry {
+                index,
+                kind: opt.kind(),
+            })
+            .collect::<Vec<_>>()
+            .into();
+        Self {
+            selection: MattingSelection::Sequential {
+                entries,
+                runtime: SequentialState::default(),
+            },
+            options,
+            fill_when_fits: None,
+        }
     }
 }
 
@@ -2324,6 +2367,27 @@ impl TransitionConfig {
     #[allow(dead_code)]
     pub fn choose_option<R: Rng + ?Sized>(&self, rng: &mut R) -> TransitionOptions {
         self.select_active(rng).option.clone()
+    }
+
+    /// Build a sequential `TransitionConfig` from a list of options.
+    /// Used by showcase mode to replace the author-supplied transition list.
+    pub(crate) fn sequential_from(options: Vec<TransitionOptions>) -> Self {
+        let entries: Arc<[SelectionEntry<TransitionKind>]> = options
+            .iter()
+            .enumerate()
+            .map(|(index, opt)| SelectionEntry {
+                index,
+                kind: opt.kind(),
+            })
+            .collect::<Vec<_>>()
+            .into();
+        Self {
+            selection: TransitionSelection::Sequential {
+                entries,
+                runtime: SequentialState::default(),
+            },
+            options,
+        }
     }
 
     pub fn validate(&mut self) -> Result<()> {
@@ -3248,12 +3312,63 @@ pub struct Configuration {
     #[serde(default)]
     #[allow(dead_code)] // reserved for external consumer (buttond service)
     pub buttond: Option<YamlValue>,
+    /// Showcase mode: auto-enumerate all effects with on-screen caption labels.
+    #[serde(default)]
+    pub showcase: ShowcaseConfig,
 }
 
 impl Configuration {
     pub fn from_yaml_file(path: impl AsRef<Path>) -> Result<Self> {
         let s = std::fs::read_to_string(path)?;
         Ok(serde_yaml::from_str(&s)?)
+    }
+
+    /// Replace transition/matting with auto-enumerated sequential lists when `showcase.enabled`.
+    /// Called before `prepare_runtime` so runtime color resolution runs on the synthesized list.
+    fn apply_showcase_overrides(&mut self) {
+        if !self.showcase.enabled {
+            return;
+        }
+        let min_pct = 6.0_f32;
+        let fixed_image_path = self.showcase.fixed_image_path.clone();
+
+        let matting_options: Vec<MattingOptions> = MattingKind::ALL
+            .iter()
+            .filter_map(|&kind| {
+                MattingOptions::default_for_showcase(kind, min_pct, fixed_image_path.clone())
+            })
+            .collect();
+
+        if matting_options.is_empty() {
+            tracing::warn!("showcase mode produced zero matting options; keeping original config");
+        } else {
+            let missing_fixed_image = fixed_image_path.is_none()
+                && MattingKind::ALL.contains(&MattingKind::FixedImage);
+            if missing_fixed_image {
+                tracing::info!(
+                    "showcase: fixed-image mat omitted (set showcase.fixed-image-path to include it)"
+                );
+            }
+            self.matting = MattingConfig::sequential_from(matting_options);
+        }
+
+        let transition_options: Vec<TransitionOptions> = TransitionKind::ALL
+            .iter()
+            .map(|&kind| TransitionOptions::default_for(kind))
+            .collect();
+
+        self.transition = TransitionConfig::sequential_from(transition_options);
+
+        self.global_photo_settings.dwell_ms = self.showcase.effective_dwell_ms();
+        if self.startup_shuffle_seed.is_none() {
+            self.startup_shuffle_seed = Some(1);
+        }
+
+        tracing::info!(
+            mat_count = self.matting.options().len(),
+            transition_count = self.transition.options().len(),
+            "showcase mode active: sequential effect tour enabled"
+        );
     }
 
     /// Validate runtime invariants that cannot be expressed via serde defaults alone.
@@ -3282,6 +3397,7 @@ impl Configuration {
             self.control_socket_path.file_name().is_some(),
             "control-socket-path must include a socket file name"
         );
+        self.apply_showcase_overrides();
         self.transition
             .validate()
             .context("invalid transition configuration")?;
@@ -3324,6 +3440,7 @@ impl Default for Configuration {
             sleep_screen: SleepScreenConfig::default(),
             awake_schedule: None,
             buttond: None,
+            showcase: ShowcaseConfig::default(),
         }
     }
 }

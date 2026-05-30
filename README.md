@@ -37,8 +37,9 @@ Full BOM and physical assembly: **[docs/build.md](docs/build.md)**.
 
 1. **Build the frame** — [docs/build.md](docs/build.md): BOM, button wiring, fabrication
 2. **Install the software** — [docs/install.md](docs/install.md): SD card → first wake
-3. **Tune the experience** — [docs/configure.md](docs/configure.md): transitions, mats, schedule
-4. **Run it day-to-day** — [docs/operate.md](docs/operate.md): commands and troubleshooting
+3. **Preview effects** — `make showcase` runs a labeled tour of every transition and mat so you can choose which to configure (see [demo/README.md](demo/README.md))
+4. **Tune the experience** — [docs/configure.md](docs/configure.md): transitions, mats, schedule
+5. **Run it day-to-day** — [docs/operate.md](docs/operate.md): commands and troubleshooting
 
 Optional deeper dives (cloud sync, Wi-Fi internals, power model, memory tuning, kiosk stack) live in **[docs/advanced.md](docs/advanced.md)**.
 
@@ -55,6 +56,7 @@ crates/wifi-manager/   Captive portal and Wi-Fi recovery agent
 crates/config-model/   Shared configuration types
 setup/                 Provisioning scripts for Raspberry Pi OS
 docs/                  build, install, configure, operate, advanced
+demo/                  showcase.yaml and photo-set guide — labeled tour of every effect
 maker/                 Physical build files (STL, SVG, SCAD)
 developer/             Debug helpers and Wi-Fi fault-injection scripts
 tests/                 Manual smoke tests and diagnostics scripts

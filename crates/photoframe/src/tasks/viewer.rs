@@ -83,6 +83,8 @@ pub(super) struct TexturePlane {
 pub(super) struct ImgTex {
     pub(super) plane: TexturePlane,
     pub(super) path: std::path::PathBuf,
+    /// Mat kind that was baked for this image; `None` means full-bleed (no mat).
+    pub(super) mat_kind: Option<crate::config::MattingKind>,
 }
 
 pub(super) struct TransitionState {
@@ -209,6 +211,7 @@ struct MatTask {
     image: PreparedImageCpu,
     params: MatParams,
     priority: bool,
+    mat_kind: Option<crate::config::MattingKind>,
 }
 
 struct ImagePlane {
@@ -221,6 +224,7 @@ struct MatResult {
     path: std::path::PathBuf,
     canvas: ImagePlane,
     priority: bool,
+    mat_kind: Option<crate::config::MattingKind>,
 }
 
 struct QueuedImage {
@@ -479,6 +483,11 @@ impl<'a> MattingBridge<'a> {
                 matting,
                 fill_screen,
             };
+            let mat_kind = if fill_screen {
+                None
+            } else {
+                Some(params.matting.kind())
+            };
             let QueuedImage {
                 image: img,
                 priority,
@@ -487,6 +496,7 @@ impl<'a> MattingBridge<'a> {
                 image: img,
                 params,
                 priority,
+                mat_kind,
             };
             match self.mat_pipeline.try_submit(task) {
                 Ok(()) => {
@@ -526,6 +536,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         image,
         params,
         priority,
+        mat_kind,
     } = task;
     let PreparedImageCpu {
         path,
@@ -564,6 +575,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             path,
             canvas,
             priority,
+            mat_kind,
         });
     }
 
@@ -650,6 +662,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             path,
             canvas,
             priority,
+            mat_kind,
         });
     }
 
@@ -730,6 +743,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             path,
             canvas,
             priority,
+            mat_kind,
         });
     }
 
@@ -790,6 +804,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             path,
             canvas,
             priority,
+            mat_kind,
         });
     }
 
@@ -975,6 +990,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         path,
         canvas,
         priority,
+        mat_kind,
     })
 }
 
@@ -1190,9 +1206,18 @@ pub fn run_windowed(
     }
 
     fn upload_mat_result(gpu: &GpuCtx, result: MatResult) -> Option<ImgTex> {
-        let MatResult { path, canvas, .. } = result;
+        let MatResult {
+            path,
+            canvas,
+            mat_kind,
+            ..
+        } = result;
         let plane = upload_plane(gpu, canvas)?;
-        Some(ImgTex { plane, path })
+        Some(ImgTex {
+            plane,
+            path,
+            mat_kind,
+        })
     }
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -1313,6 +1338,8 @@ pub fn run_windowed(
         surface_timeout_streak: u32,
         // Last surface size that we considered "configured" and stabilized
         configured_surface_size: Option<(u32, u32)>,
+        /// Caption overlay for showcase mode; `None` when showcase is disabled.
+        caption_overlay: Option<scenes::CaptionOverlay>,
     }
 
     impl App {
@@ -1797,6 +1824,10 @@ pub fn run_windowed(
                 self.full_config.sleep_screen.screen(),
             ));
 
+            if self.full_config.showcase.enabled && self.full_config.showcase.caption_enabled() {
+                self.caption_overlay =
+                    Some(scenes::CaptionOverlay::new(&device, &queue, format));
+            }
             self.window = Some(window);
             let gpu = GpuCtx {
                 device,
@@ -2210,6 +2241,9 @@ pub fn run_windowed(
                             });
                         }
                         if ready {
+                            if let Some(cap) = self.caption_overlay.as_mut() {
+                                cap.resize(new_size);
+                            }
                             let scale_factor = window.scale_factor();
                             let _ = self.with_active_scene(|scene, ctx| {
                                 scene.handle_resize(ctx, new_size, scale_factor);
@@ -2721,8 +2755,29 @@ pub fn run_windowed(
                                 rpass.draw(0..6, 0..1);
                             }
                             encoder.pop_debug_group();
+
+                            if let Some(cap) = self.caption_overlay.as_mut() {
+                                let transition_kind = wake
+                                    .transition_state()
+                                    .map(|s| s.kind());
+                                let mat_kind = wake
+                                    .current()
+                                    .and_then(|img| img.mat_kind);
+                                let text = scenes::showcase_caption(transition_kind, mat_kind);
+                                cap.set_text(text);
+                                let surface_size = winit::dpi::PhysicalSize::new(
+                                    gpu.config.width,
+                                    gpu.config.height,
+                                );
+                                cap.resize(surface_size);
+                                cap.render(&mut encoder, &view);
+                            }
+
                             gpu.queue.submit(Some(encoder.finish()));
                             frame.present();
+                            if let Some(cap) = self.caption_overlay.as_mut() {
+                                cap.after_submit();
+                            }
                             wake.after_present();
                             self.record_frame_presented();
                         }
@@ -2855,6 +2910,7 @@ pub fn run_windowed(
         full_config: cfg,
         surface_timeout_streak: 0,
         configured_surface_size: None,
+        caption_overlay: None,
     };
     app.enter_greeting();
     event_loop.run_app(&mut app)?;

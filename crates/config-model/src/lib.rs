@@ -14,6 +14,7 @@ pub use awake::{AwakeScheduleConfig, AwakeScheduleRules, AwakeTimeRange};
 pub use greeting::{
     GreetingScreenColorsConfig, GreetingScreenConfig, ScreenMessageConfig, SleepScreenConfig,
 };
+pub use showcase::ShowcaseConfig;
 
 mod greeting {
     use super::*;
@@ -170,6 +171,30 @@ mod greeting {
                     ..ScreenMessageConfig::default()
                 },
             }
+        }
+    }
+}
+
+mod showcase {
+    use std::path::PathBuf;
+    use serde::Deserialize;
+
+    #[derive(Debug, Clone, Deserialize, Default)]
+    #[serde(rename_all = "kebab-case", default)]
+    pub struct ShowcaseConfig {
+        pub enabled: bool,
+        pub caption: Option<bool>,
+        pub dwell_ms: Option<u64>,
+        pub fixed_image_path: Option<PathBuf>,
+    }
+
+    impl ShowcaseConfig {
+        pub fn caption_enabled(&self) -> bool {
+            self.caption.unwrap_or(true)
+        }
+
+        pub fn effective_dwell_ms(&self) -> u64 {
+            self.dwell_ms.unwrap_or(4000).max(1)
         }
     }
 }

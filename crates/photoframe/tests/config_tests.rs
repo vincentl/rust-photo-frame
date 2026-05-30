@@ -1458,3 +1458,94 @@ transition:
         _ => panic!("expected iris"),
     }
 }
+
+#[test]
+fn parse_showcase_enabled() {
+    let yaml = r#"
+photo-library-path: "/photos"
+showcase:
+  enabled: true
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert!(cfg.showcase.enabled);
+    assert!(cfg.showcase.caption_enabled());
+    assert_eq!(cfg.showcase.effective_dwell_ms(), 4000);
+}
+
+#[test]
+fn parse_showcase_defaults_to_disabled() {
+    let yaml = r#"
+photo-library-path: "/photos"
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert!(!cfg.showcase.enabled);
+}
+
+#[test]
+fn parse_showcase_caption_false() {
+    let yaml = r#"
+photo-library-path: "/photos"
+showcase:
+  enabled: true
+  caption: false
+  dwell-ms: 3000
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    assert!(cfg.showcase.enabled);
+    assert!(!cfg.showcase.caption_enabled());
+    assert_eq!(cfg.showcase.effective_dwell_ms(), 3000);
+}
+
+#[test]
+fn showcase_synthesizes_all_mats_and_transitions() {
+    let yaml = r#"
+photo-library-path: "/photos"
+showcase:
+  enabled: true
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let validated = cfg.validated().expect("showcase config should be valid");
+    // 9 mat kinds - 1 (fixed-image excluded when no path provided) = 8
+    assert_eq!(
+        validated.matting.options().len(),
+        8,
+        "showcase should have 8 mat options (all 9 kinds minus fixed-image which needs a path)"
+    );
+    // 9 transition kinds
+    assert_eq!(
+        validated.transition.options().len(),
+        9,
+        "showcase should have 9 transition options (all TransitionKind::ALL)"
+    );
+    // Selection should be sequential.
+    assert!(matches!(
+        validated.matting.selection(),
+        MattingSelection::Sequential { .. }
+    ));
+    assert!(matches!(
+        validated.transition.selection(),
+        TransitionSelection::Sequential { .. }
+    ));
+    // Dwell should be overridden.
+    assert_eq!(validated.global_photo_settings.dwell_ms, 4000);
+    // Shuffle seed should be set.
+    assert_eq!(validated.startup_shuffle_seed, Some(1));
+}
+
+#[test]
+fn showcase_with_fixed_image_path_includes_all_mats() {
+    let yaml = r#"
+photo-library-path: "/photos"
+showcase:
+  enabled: true
+  fixed-image-path: "/var/lib/photoframe/backgrounds/backdrop.jpg"
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let validated = cfg.validated().expect("showcase config should be valid");
+    // With fixed-image-path provided, all 9 mat kinds should appear.
+    assert_eq!(
+        validated.matting.options().len(),
+        9,
+        "all 9 mat kinds should appear when fixed-image-path is provided"
+    );
+}

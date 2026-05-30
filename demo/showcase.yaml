@@ -1,0 +1,50 @@
+# =============================================================================
+# showcase.yaml — a self-maintaining tour of EVERY transition and mat.
+#
+# The frame enumerates effects automatically from its built-in list, so this
+# file never needs editing when new effects are added. Each photo is labeled
+# with the active transition and mat in the bottom-left corner.
+#
+# Run locally:
+#   cargo run -p photoframe -- demo/showcase.yaml
+#   (change photo-library-path below to demo/photos for local testing)
+#
+# Run on the Pi (swap config, restart kiosk):
+#   sudo cp /etc/photoframe/config.yaml /etc/photoframe/config.yaml.bak
+#   sudo install -m 0644 demo/showcase.yaml /etc/photoframe/config.yaml
+#   sudo systemctl restart greetd
+#   # Restore when done:
+#   sudo cp /etc/photoframe/config.yaml.bak /etc/photoframe/config.yaml
+#   sudo systemctl restart greetd
+#
+# See demo/README.md for the recommended photo set.
+# =============================================================================
+
+# On the Pi the frame runs as a system service; use the absolute path.
+# For local testing, change this to: demo/photos
+photo-library-path: /var/lib/photoframe/demo-photos
+
+# Deterministic shuffle so the tour is reproducible across runs.
+startup-shuffle-seed: 1
+
+global-photo-settings:
+  dwell-ms: 4000          # hold each photo 4 s so you can read the caption
+  oversample: 1.0
+  max-upscale-factor: 2.0
+
+greeting-screen:
+  message: "Showcasing every transition and mat…"
+  font: "Macondo"
+
+sleep-screen:
+  message: "Showcase complete."
+  font: "Macondo"
+
+viewer-preload-count: 3
+loader-max-concurrent-decodes: 4
+
+showcase:
+  enabled: true
+  caption: true           # set false for a clean screen-recording
+  # Uncomment to include the fixed-image mat in the tour (needs a backdrop file):
+  # fixed-image-path: /var/lib/photoframe/backgrounds/backdrop.jpg
