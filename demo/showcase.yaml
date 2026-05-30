@@ -1,9 +1,26 @@
 # =============================================================================
 # showcase.yaml — a self-maintaining tour of EVERY transition and mat.
 #
-# The frame enumerates effects automatically from its built-in list, so this
-# file never needs editing when new effects are added. Each photo is labeled
-# with the active transition and mat in the bottom-left corner.
+# NOTE: There is intentionally NO `transition:` or `matting:` block below.
+# When `showcase.enabled: true`, the frame BUILDS those lists itself from its
+# built-in effect registry and ignores any you write here. This is what keeps
+# the tour from going stale: new effects appear automatically, with no edits.
+#
+# The tour cycles sequentially through every built-in effect. As of this
+# writing the binary ships:
+#
+#   Transitions (9): fade, wipe, push, e-ink, dissolve, radial-wipe,
+#                    venetian-blinds, crossfade-zoom, iris
+#   Mats (9):        fixed-color, blur, studio, fixed-image*, gradient,
+#                    vignette, cinematic-blur, passe-partout, drop-shadow
+#
+#   * fixed-image is skipped unless you set `showcase.fixed-image-path` below
+#     (it needs a backdrop file). The tour always reflects whatever the binary
+#     actually supports, so this list is just a snapshot — to tune any of these
+#     effects, copy its `kind` into your real config.yaml. See docs/configure.md.
+#
+# Each frame is labeled in the bottom-left with the active transition and mat,
+# e.g. "transition: iris    mat: passe-partout".
 #
 # Run locally:
 #   cargo run -p photoframe -- demo/showcase.yaml
@@ -43,8 +60,11 @@ sleep-screen:
 viewer-preload-count: 3
 loader-max-concurrent-decodes: 4
 
+# Showcase mode. This is the ONLY block that drives the tour; `transition:` and
+# `matting:` are deliberately omitted (see the header note above).
 showcase:
   enabled: true
   caption: true           # set false for a clean screen-recording
-  # Uncomment to include the fixed-image mat in the tour (needs a backdrop file):
+  # Uncomment to include the fixed-image mat in the tour (needs a backdrop file
+  # kept OUTSIDE the photo library so it isn't shown as a slideshow photo):
   # fixed-image-path: /var/lib/photoframe/backgrounds/backdrop.jpg
