@@ -64,22 +64,22 @@ Day-to-day commands, status checks, and troubleshooting for a frame you own and 
 
 ### Running the showcase
 
-The showcase is a labeled tour of every transition and mat so you can choose which to configure. See [demo/README.md](../demo/README.md) for the full guide and photo setup.
+The showcase is a labeled tour of every transition and mat so you can choose which to configure. See [showcase/README.md](../showcase/README.md) for the full guide and photo setup.
 
-**Locally (dev machine):**
 ```bash
-# Edit demo/showcase.yaml → photo-library-path to demo/photos, then:
-make showcase
-```
+# 1. Stage media (once)
+sudo install -d -o kiosk -g kiosk -m 0755 \
+  /var/lib/photoframe/showcase/photos /var/lib/photoframe/showcase/backgrounds
+sudo cp /path/to/*.jpg /var/lib/photoframe/showcase/photos/
+sudo cp /path/to/backdrop.jpg /var/lib/photoframe/showcase/backgrounds/background.jpg
+sudo chown -R kiosk:kiosk /var/lib/photoframe/showcase
 
-**On the Pi (temporary config swap):**
-```bash
-sudo cp /etc/photoframe/config.yaml /etc/photoframe/config.yaml.bak
-sudo install -m 0644 demo/showcase.yaml /etc/photoframe/config.yaml
-sudo systemctl restart greetd
-# Watch captions; restore when done:
-sudo cp /etc/photoframe/config.yaml.bak /etc/photoframe/config.yaml
-sudo systemctl restart greetd
+# 2. Activate (backs up config, swaps in showcase.yaml, restarts the kiosk)
+./showcase/activate.sh
+journalctl -t photoframe -f          # watch the tour
+
+# 3. Restore your normal slideshow
+./showcase/deactivate.sh
 ```
 
 ### Daily health check

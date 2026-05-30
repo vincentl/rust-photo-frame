@@ -3,8 +3,8 @@
 **/target/
 Cargo.lock
 photo-library-test/
-demo/photos/
-demo/backgrounds/
+showcase/photos/
+showcase/backgrounds/
 setup/app/build/
 *.local.md
 logs/

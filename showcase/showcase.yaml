@@ -14,32 +14,26 @@
 #   Mats (9):        fixed-color, blur, studio, fixed-image*, gradient,
 #                    vignette, cinematic-blur, passe-partout, drop-shadow
 #
-#   * fixed-image is skipped unless you set `showcase.fixed-image-path` below
-#     (it needs a backdrop file). The tour always reflects whatever the binary
-#     actually supports, so this list is just a snapshot — to tune any of these
-#     effects, copy its `kind` into your real config.yaml. See docs/configure.md.
+#   * fixed-image is skipped unless the backdrop file referenced by
+#     `showcase.fixed-image-path` (below) exists. The tour always reflects
+#     whatever the binary supports, so this list is just a snapshot — to tune
+#     any effect, copy its `kind` into your real config.yaml (docs/configure.md).
 #
 # Each frame is labeled in the bottom-left with the active transition and mat,
 # e.g. "transition: iris    mat: passe-partout".
 #
-# Run locally:
-#   cargo run -p photoframe -- demo/showcase.yaml
-#   (change photo-library-path below to demo/photos for local testing)
+# Run it on the Pi with the helper scripts next to this file:
+#   ./showcase/activate.sh     # back up your config, swap in this one, restart
+#   ./showcase/deactivate.sh   # restore your normal config
 #
-# Run on the Pi (swap config, restart kiosk):
-#   sudo cp /etc/photoframe/config.yaml /etc/photoframe/config.yaml.bak
-#   sudo install -m 0644 demo/showcase.yaml /etc/photoframe/config.yaml
-#   sudo systemctl restart greetd
-#   # Restore when done:
-#   sudo cp /etc/photoframe/config.yaml.bak /etc/photoframe/config.yaml
-#   sudo systemctl restart greetd
-#
-# See demo/README.md for the recommended photo set.
+# Put your media here first (see showcase/README.md):
+#   /var/lib/photoframe/showcase/photos/                       (slideshow photos)
+#   /var/lib/photoframe/showcase/backgrounds/background.jpg     (fixed-image mat)
 # =============================================================================
 
-# On the Pi the frame runs as a system service; use the absolute path.
-# For local testing, change this to: demo/photos
-photo-library-path: ./photos
+# Showcase media lives under /var/lib/photoframe/showcase so the service user
+# (kiosk) can read it. activate.sh creates these directories for you.
+photo-library-path: /var/lib/photoframe/showcase/photos
 
 # Deterministic shuffle so the tour is reproducible across runs.
 startup-shuffle-seed: 1
@@ -65,6 +59,6 @@ loader-max-concurrent-decodes: 4
 showcase:
   enabled: true
   caption: true           # set false for a clean screen-recording
-  # Uncomment to include the fixed-image mat in the tour (needs a backdrop file
-  # kept OUTSIDE the photo library so it isn't shown as a slideshow photo):
-  fixed-image-path: ./backgrounds/backdrop.jpg
+  # Backdrop for the fixed-image mat. Kept OUTSIDE photos/ so it isn't shown as
+  # a slideshow photo. If the file is missing, the fixed-image mat is skipped.
+  fixed-image-path: /var/lib/photoframe/showcase/backgrounds/background.jpg

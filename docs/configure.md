@@ -258,19 +258,19 @@ See [Matting configuration](#matting-configuration) for the full reference.
 
 When `showcase.enabled` is true, `startup-shuffle-seed` defaults to `1` if unset, and `transition.active`/`matting.active` in the same file are ignored.
 
-See [demo/README.md](../demo/README.md) and [Showcase mode](#showcase-mode) for usage.
+See [showcase/README.md](../showcase/README.md) and [Showcase mode](#showcase-mode) for usage.
 
 ## Showcase mode
 
 Showcase mode is the fastest way to choose transitions and mats. It auto-enumerates every built-in effect, displays each one with a live caption, and advances to the next after a configurable dwell.
 
-**Workflow:**
+**Workflow (on the Pi):**
 
-1. Create or copy `demo/showcase.yaml` (see [demo/README.md](../demo/README.md)).
-2. Set `photo-library-path` to a folder with a few test photos.
-3. Run: `make showcase` (or `cargo run -p photoframe -- demo/showcase.yaml`).
-4. Watch the captions. When you see an effect you like, the caption tells you the exact `kind` key.
-5. Copy the kind(s) into your real `config.yaml` under `transition.active` and/or `matting.active`.
+1. Stage media under `/var/lib/photoframe/showcase/photos/` (and optionally a `backgrounds/background.jpg` backdrop). See [showcase/README.md](../showcase/README.md).
+2. Run `./showcase/activate.sh` — it backs up your live config, swaps in `showcase/showcase.yaml`, and restarts the kiosk into the tour.
+3. Watch the captions. When you see an effect you like, the caption tells you the exact `kind` key.
+4. Copy the kind(s) into your real `config.yaml` under `transition.active` and/or `matting.active`.
+5. Run `./showcase/deactivate.sh` to restore your normal slideshow.
 
 **Self-maintaining:** the tour is built at startup from `TransitionKind::ALL` and `MattingKind::ALL`. When future effects are added to the frame, they automatically appear in the tour without any edits to `showcase.yaml`.
 
