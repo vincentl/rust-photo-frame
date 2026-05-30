@@ -4,6 +4,7 @@
 Cargo.lock
 photo-library-test/
 demo/photos/
+demo/backgrounds/
 setup/app/build/
 *.local.md
 logs/

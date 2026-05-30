@@ -39,7 +39,7 @@
 
 # On the Pi the frame runs as a system service; use the absolute path.
 # For local testing, change this to: demo/photos
-photo-library-path: /var/lib/photoframe/demo-photos
+photo-library-path: ./photos
 
 # Deterministic shuffle so the tour is reproducible across runs.
 startup-shuffle-seed: 1
@@ -67,4 +67,4 @@ showcase:
   caption: true           # set false for a clean screen-recording
   # Uncomment to include the fixed-image mat in the tour (needs a backdrop file
   # kept OUTSIDE the photo library so it isn't shown as a slideshow photo):
-  # fixed-image-path: /var/lib/photoframe/backgrounds/backdrop.jpg
+  fixed-image-path: ./backgrounds/backdrop.jpg
