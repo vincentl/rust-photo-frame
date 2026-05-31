@@ -38,19 +38,22 @@ transition:
   # Choose how the viewer advances through the entries below: fixed, random, or sequential.
   selection: random
   # Declare one or more transition entries. Repeat a kind to weight it more heavily.
+  # These entries mirror the showcase tour's defaults, so keeping this file as-is
+  # reproduces what `showcase.yaml` previews (minus the on-screen labels). Tweak
+  # any value to taste, or delete entries you don't want.
   active:
     - kind: fade
-      duration-ms: 450
-      # through-black: true  # alternate: fade to black before revealing next photo
+      duration-ms: 400
+      through-black: false # true: fade to black before revealing the next photo
     - kind: wipe
-      duration-ms: 600
-      angle-list-degrees: [0.0, 90.0, 180.0, 270.0]
-      angle-jitter-degrees: 12.0
-      softness: 0.08
+      duration-ms: 400
+      angle-list-degrees: [0.0] # add angles (e.g. [0.0, 90.0, 180.0, 270.0]) for variety
+      angle-jitter-degrees: 0.0 # randomize direction by ±this many degrees
+      softness: 0.05
     - kind: push
-      duration-ms: 520
-      angle-list-degrees: [0.0, 90.0, 180.0, 270.0]
-      angle-jitter-degrees: 8.0
+      duration-ms: 400
+      angle-list-degrees: [0.0]
+      angle-jitter-degrees: 0.0
     - kind: e-ink
       duration-ms: 1600
       flash-count: 0
@@ -171,26 +174,24 @@ matting:
   #   skip-matting-probability: 1.0  # 1.0 always fills eligible photos, 0.0 never, in between mixes
   # Choose how the viewer advances through the mats below: fixed, random, or sequential.
   selection: random
-  # Provide one or more mat definitions. Duplicate entries (or individual colors/paths) to weight them once expanded into the
-  # canonical list; matting.selection controls how that list is traversed.
+  # These entries mirror the showcase tour's defaults (every mat at
+  # minimum-mat-percentage 6.0), so keeping this file as-is reproduces what
+  # `showcase.yaml` previews. Tweak any value to taste, or delete mats you don't
+  # want. Duplicate an entry (or list multiple colors/paths) to weight it more.
   active:
     - kind: fixed-color
+      minimum-mat-percentage: 6.0
       colors:
-        - [0, 0, 0]
-        - [32, 32, 32]
-      minimum-mat-percentage: 2.0
+        - [0, 0, 0] # add more swatches (e.g. - [32, 32, 32]) to rotate through them
     - kind: blur
-      minimum-mat-percentage: 3.5
+      minimum-mat-percentage: 6.0
       sigma: 32.0
       sample-scale: 0.125 # raise toward 1.0 for sharper mats at higher cost
       backend: neon # options: cpu, neon (auto-falls back to cpu if unsupported)
     - kind: studio
-      colors:
-        - [24, 24, 24]
-        - photo-average
-        - [210, 210, 210]
-      minimum-mat-percentage: 8.0
-      bevel-width-px: 4.0
+      minimum-mat-percentage: 6.0
+      colors: [photo-average] # [r,g,b] swatches and/or photo-average
+      bevel-width-px: 3.0
       bevel-color: [255, 255, 255]
       texture-strength: 1.0 # 0.0 for smooth paper, 1.0 default weave
       warp-period-px: 5.6 # spacing between vertical warp threads in px
@@ -204,19 +205,19 @@ matting:
     #     - /var/lib/photoframe/backgrounds/my-background.jpg
     #   fit: cover # options: cover, contain, stretch
     - kind: gradient # linear or radial gradient between two colors
-      minimum-mat-percentage: 4.0
+      minimum-mat-percentage: 6.0
       start-color: [20, 20, 28] # color at top/left/center
       end-color: [70, 70, 90] # color at bottom/right/edge
       direction: vertical # vertical | horizontal | radial
       angle-degrees: 0.0 # optional rotation for linear gradients
     - kind: vignette # solid color with darkened edges
-      minimum-mat-percentage: 4.0
+      minimum-mat-percentage: 6.0
       color: [24, 24, 28] # base mat color
       strength: 0.6 # 0 = no darkening, 1 = edges go black
       radius: 0.75 # fraction of half-diagonal where darkening starts
       softness: 0.5 # how gradual the falloff is
     - kind: cinematic-blur # blurred photo background with darken + vignette overlay
-      minimum-mat-percentage: 3.5
+      minimum-mat-percentage: 6.0
       sigma: 32.0
       sample-scale: 0.125
       backend: neon
@@ -225,10 +226,10 @@ matting:
     - kind: passe-partout # clean 45° bevel mat board without linen weave
       minimum-mat-percentage: 6.0
       colors: [photo-average] # same palette format as studio
-      bevel-width-px: 4.0
+      bevel-width-px: 3.0
       bevel-color: [255, 255, 255]
     - kind: drop-shadow # soft drop shadow under the photo on a solid mat
-      minimum-mat-percentage: 8.0
+      minimum-mat-percentage: 6.0
       color: [235, 235, 235] # mat background color
       shadow-color: [0, 0, 0]
       shadow-opacity: 0.4
