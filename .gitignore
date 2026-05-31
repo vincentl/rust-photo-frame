@@ -6,6 +6,6 @@ photo-library-test/
 showcase/photos/
 showcase/backgrounds/
 setup/app/build/
-*.local.md
+local-markdown/
 logs/
 
