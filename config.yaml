@@ -57,36 +57,31 @@ transition:
       reveal-portion: 0.55
       stripe-count: 24
       flash-color: [255, 255, 255]
-    # dissolve: threshold value-noise field by progress
-    # - kind: dissolve
-    #   duration-ms: 600
-    #   softness: 0.1    # 0 = hard per-pixel pop, up to ~0.5 = soft edge
-    #   scale: 64.0      # noise cell size in pixels
-    # radial-wipe: circle or diamond reveal from center
-    # - kind: radial-wipe
-    #   duration-ms: 500
-    #   softness: 0.1
-    #   shape: circle    # circle | diamond
-    #   center: [0.5, 0.5]
-    # venetian-blinds: horizontal/vertical stripe reveal
-    # - kind: venetian-blinds
-    #   duration-ms: 600
-    #   stripe-count: 16
-    #   softness: 0.1
-    #   orientation: horizontal  # horizontal | vertical
-    # crossfade-zoom: fade combined with subtle scale
-    # - kind: crossfade-zoom
-    #   duration-ms: 700
-    #   zoom: 0.06
-    #   current-zooms-in: true
-    #   next-zooms-in: true
-    # iris: polygon-SDF aperture reveal
-    # - kind: iris
-    #   duration-ms: 700
-    #   blades: 6
-    #   rotation-degrees: 30
-    #   softness: 0.04
-    #   center: [0.5, 0.5]
+    - kind: dissolve # threshold value-noise field by progress
+      duration-ms: 600
+      softness: 0.1 # 0 = hard per-pixel pop, up to ~0.5 = soft edge
+      scale: 64.0 # noise cell size in pixels
+    - kind: radial-wipe # circle or diamond reveal from center
+      duration-ms: 500
+      softness: 0.1
+      shape: circle # circle | diamond
+      center: [0.5, 0.5]
+    - kind: venetian-blinds # horizontal/vertical stripe reveal
+      duration-ms: 600
+      stripe-count: 16
+      softness: 0.1
+      orientation: horizontal # horizontal | vertical
+    - kind: crossfade-zoom # fade combined with subtle scale
+      duration-ms: 700
+      zoom: 0.06
+      current-zooms-in: true
+      next-zooms-in: true
+    - kind: iris # polygon-SDF aperture reveal
+      duration-ms: 700
+      blades: 6
+      rotation-degrees: 30
+      softness: 0.04
+      center: [0.5, 0.5]
 # Global photo settings
 global-photo-settings:
   # Dwell time (ms) the current image remains fully displayed before the next transition
@@ -214,39 +209,34 @@ matting:
     #   path:
     #     - /var/lib/photoframe/backgrounds/my-background.jpg
     #   fit: cover # options: cover, contain, stretch
-    # gradient mat: linear or radial gradient between two colors.
-    # - kind: gradient
-    #   minimum-mat-percentage: 4.0
-    #   start-color: [20, 20, 28]   # color at top/left/center
-    #   end-color:   [70, 70, 90]   # color at bottom/right/edge
-    #   direction: vertical         # vertical | horizontal | radial
-    #   angle-degrees: 0.0          # optional rotation for linear gradients
-    # vignette mat: solid color with darkened edges.
-    # - kind: vignette
-    #   minimum-mat-percentage: 4.0
-    #   color: [24, 24, 28]   # base mat color
-    #   strength: 0.6         # 0 = no darkening, 1 = edges go black
-    #   radius: 0.75          # fraction of half-diagonal where darkening starts
-    #   softness: 0.5         # how gradual the falloff is
-    # cinematic-blur mat: blurred photo background with darken + vignette overlay.
-    # - kind: cinematic-blur
-    #   minimum-mat-percentage: 3.5
-    #   sigma: 32.0
-    #   sample-scale: 0.125
-    #   backend: neon
-    #   darken: 0.35          # 0 = no darkening, 1 = black overlay
-    #   vignette-strength: 0.5
-    # passe-partout mat: clean 45° bevel mat board without linen weave.
-    # - kind: passe-partout
-    #   minimum-mat-percentage: 6.0
-    #   colors: [photo-average]  # same palette format as studio
-    #   bevel-width-px: 4.0
-    #   bevel-color: [255, 255, 255]
-    # drop-shadow mat: soft drop shadow under the photo on a solid mat.
-    # - kind: drop-shadow
-    #   minimum-mat-percentage: 8.0
-    #   color: [235, 235, 235]     # mat background color
-    #   shadow-color: [0, 0, 0]
-    #   shadow-opacity: 0.4
-    #   shadow-blur-px: 24.0
-    #   shadow-offset-px: [0, 12]  # [x, y] positive y = down
+    - kind: gradient # linear or radial gradient between two colors
+      minimum-mat-percentage: 4.0
+      start-color: [20, 20, 28] # color at top/left/center
+      end-color: [70, 70, 90] # color at bottom/right/edge
+      direction: vertical # vertical | horizontal | radial
+      angle-degrees: 0.0 # optional rotation for linear gradients
+    - kind: vignette # solid color with darkened edges
+      minimum-mat-percentage: 4.0
+      color: [24, 24, 28] # base mat color
+      strength: 0.6 # 0 = no darkening, 1 = edges go black
+      radius: 0.75 # fraction of half-diagonal where darkening starts
+      softness: 0.5 # how gradual the falloff is
+    - kind: cinematic-blur # blurred photo background with darken + vignette overlay
+      minimum-mat-percentage: 3.5
+      sigma: 32.0
+      sample-scale: 0.125
+      backend: neon
+      darken: 0.35 # 0 = no darkening, 1 = black overlay
+      vignette-strength: 0.5
+    - kind: passe-partout # clean 45° bevel mat board without linen weave
+      minimum-mat-percentage: 6.0
+      colors: [photo-average] # same palette format as studio
+      bevel-width-px: 4.0
+      bevel-color: [255, 255, 255]
+    - kind: drop-shadow # soft drop shadow under the photo on a solid mat
+      minimum-mat-percentage: 8.0
+      color: [235, 235, 235] # mat background color
+      shadow-color: [0, 0, 0]
+      shadow-opacity: 0.4
+      shadow-blur-px: 24.0
+      shadow-offset-px: [0, 12] # [x, y] positive y = down

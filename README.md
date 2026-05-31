@@ -47,6 +47,38 @@ If you want to modify the code, see **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ---
 
+## Transitions & mats
+
+The frame ships nine GPU **transitions** (how one photo gives way to the next) and nine **mats** (the border/background framing each photo).
+
+| Transitions | |
+| --- | --- |
+| `fade` | cross-fade (optionally through black) |
+| `wipe` | directional linear wipe with a feathered edge |
+| `push` | incoming photo slides in, pushing the old one out |
+| `e-ink` | e-paper-style flash + stripe reveal |
+| `dissolve` | film-style value-noise threshold dissolve |
+| `radial-wipe` | circle or diamond reveal growing from a center point |
+| `venetian-blinds` | horizontal/vertical slat reveal |
+| `crossfade-zoom` | cross-fade with a gentle Ken-Burns zoom |
+| `iris` | polygon camera-aperture opening |
+
+| Mats | |
+| --- | --- |
+| `fixed-color` | solid color border (one or more swatches) |
+| `blur` | blurred copy of the photo as the backdrop |
+| `studio` | museum mat board with a 45° bevel and linen-weave texture |
+| `fixed-image` | your own image as the backdrop |
+| `gradient` | linear or radial gradient between two colors |
+| `vignette` | solid color with darkened edges |
+| `cinematic-blur` | blurred backdrop with darken + vignette (Apple-TV-aerial look) |
+| `passe-partout` | clean 45° bevel mat board, no weave (a crisper `studio`) |
+| `drop-shadow` | photo floated above a solid mat with a soft drop shadow |
+
+Preview them live with the [showcase](showcase/README.md) tour. For commented examples of every option see [`config.yaml`](config.yaml); for the complete reference (every key, default, and behavior) see the Transition and Matting sections of [docs/configure.md](docs/configure.md).
+
+---
+
 ## Repository layout
 
 ```
