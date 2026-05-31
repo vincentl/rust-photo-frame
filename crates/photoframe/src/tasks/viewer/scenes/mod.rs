@@ -118,34 +118,47 @@ impl CaptionOverlay {
         // Position at bottom-left; offset up by one line height.
         let top = (self.size.height as f32 - 34.0 - margin).max(0.0);
 
-        // Light-cyan fill reads on dark mats; a near-black shadow underneath keeps
-        // it legible on light mats (e.g. the white drop-shadow background).
-        let text_color = GlyphonColor::rgb(150, 240, 240);
-        let shadow_color = GlyphonColor::rgb(0, 20, 24);
+        // Light-cyan fill with a solid black outline (8 offset copies) so the
+        // caption stays legible over any mat — light, dark, or busy/mid-tone.
+        let fill_color = GlyphonColor::rgb(150, 240, 240);
+        let outline_color = GlyphonColor::rgb(0, 0, 0);
         let bounds = TextBounds {
             left: 0,
             top: 0,
             right: self.size.width as i32,
             bottom: self.size.height as i32,
         };
-        let shadow = TextArea {
-            buffer: &self.text_buffer,
-            left: margin + 2.0,
-            top: top + 2.0,
-            scale: 1.0,
-            bounds,
-            default_color: shadow_color,
-            custom_glyphs: &[],
-        };
-        let main = TextArea {
+        let r = 2.0_f32;
+        let mut areas: Vec<TextArea> = Vec::with_capacity(9);
+        for (dx, dy) in [
+            (-r, -r),
+            (0.0, -r),
+            (r, -r),
+            (-r, 0.0),
+            (r, 0.0),
+            (-r, r),
+            (0.0, r),
+            (r, r),
+        ] {
+            areas.push(TextArea {
+                buffer: &self.text_buffer,
+                left: margin + dx,
+                top: top + dy,
+                scale: 1.0,
+                bounds,
+                default_color: outline_color,
+                custom_glyphs: &[],
+            });
+        }
+        areas.push(TextArea {
             buffer: &self.text_buffer,
             left: margin,
             top,
             scale: 1.0,
             bounds,
-            default_color: text_color,
+            default_color: fill_color,
             custom_glyphs: &[],
-        };
+        });
 
         if let Err(err) = self.text_renderer.prepare(
             &self.device,
@@ -153,7 +166,7 @@ impl CaptionOverlay {
             &mut self.font_system,
             &mut self.atlas,
             &self.viewport,
-            [shadow, main],
+            areas,
             &mut self.swash_cache,
         ) {
             tracing::warn!(error = %err, "caption_overlay_prepare_failed");
@@ -670,6 +683,7 @@ impl WakeScene {
                     self.pending.len()
                 );
             }
+            self.last_transition_kind = Some(kind);
             self.transition_state = Some(state);
         }
     }
