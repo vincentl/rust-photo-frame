@@ -1,6 +1,10 @@
 # Example configuration for photoframe
 # Adjust values to match your hardware, library layout, and visual preferences.
 
+# Config schema version. Leave at 1 unless a release note tells you to change it;
+# the binary rejects a version it doesn't understand with a clear message.
+config-version: 1
+
 # Root directory for images. Keep media in the managed subdirectories to
 # separate synced libraries from ad-hoc drops:
 #   cloud/ — populated by rclone or other sync jobs; safe to wipe/reseed.

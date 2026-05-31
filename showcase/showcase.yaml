@@ -31,6 +31,9 @@
 #   /var/lib/photoframe/showcase/backgrounds/background.jpg     (fixed-image mat)
 # =============================================================================
 
+# Config schema version (see config.yaml).
+config-version: 1
+
 # Showcase media lives under /var/lib/photoframe/showcase so the service user
 # (kiosk) can read it. activate.sh creates these directories for you.
 photo-library-path: /var/lib/photoframe/showcase/photos

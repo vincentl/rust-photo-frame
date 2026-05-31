@@ -1684,3 +1684,48 @@ transition:
     let result: Result<Configuration, _> = serde_yaml::from_str(yaml);
     assert!(result.is_err(), "singular `orientation` should no longer be accepted");
 }
+
+#[test]
+fn config_version_defaults_and_accepts_supported() {
+    // Omitted ⇒ accepted (assumed current).
+    let cfg: Configuration = serde_yaml::from_str("photo-library-path: \"/p\"\n").unwrap();
+    cfg.validated().expect("omitted config-version should validate");
+    // Explicit supported version ⇒ accepted.
+    let cfg: Configuration =
+        serde_yaml::from_str("photo-library-path: \"/p\"\nconfig-version: 1\n").unwrap();
+    cfg.validated().expect("config-version 1 should validate");
+}
+
+#[test]
+fn config_version_rejects_unsupported() {
+    for bad in ["0", "2", "99"] {
+        let yaml = format!("photo-library-path: \"/p\"\nconfig-version: {bad}\n");
+        let cfg: Configuration = serde_yaml::from_str(&yaml).unwrap();
+        let err = cfg
+            .validated()
+            .expect_err(&format!("config-version {bad} should be rejected"));
+        assert!(
+            format!("{err:#}").contains("config-version"),
+            "error should mention config-version: {err:#}"
+        );
+    }
+}
+
+/// The example configs shipped in the repo must parse AND validate. This guards
+/// against shipping a config that references a renamed/removed key (exactly the
+/// kind of breakage that otherwise only surfaces on the device).
+#[test]
+fn shipped_config_yaml_validates() {
+    let raw = include_str!("../../../config.yaml");
+    let cfg: Configuration =
+        serde_yaml::from_str(raw).expect("repo config.yaml should parse");
+    cfg.validated().expect("repo config.yaml should validate");
+}
+
+#[test]
+fn shipped_showcase_yaml_validates() {
+    let raw = include_str!("../../../showcase/showcase.yaml");
+    let cfg: Configuration =
+        serde_yaml::from_str(raw).expect("showcase.yaml should parse");
+    cfg.validated().expect("showcase.yaml should validate");
+}

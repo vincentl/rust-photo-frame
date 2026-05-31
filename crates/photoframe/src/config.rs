@@ -3313,6 +3313,11 @@ fn apply_transition_inline_field<E: de::Error>(
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
 pub struct Configuration {
+    /// Schema version of this config file. Lets the binary detect a config written
+    /// for a newer, incompatible schema and fail with a clear message instead of a
+    /// confusing per-key error. Omitted ⇒ assumed current.
+    #[serde(default = "Configuration::default_config_version")]
+    pub config_version: u32,
     /// Root directory to scan recursively for images.
     pub photo_library_path: PathBuf,
     /// Unix domain socket accepting runtime control commands.
@@ -3358,6 +3363,14 @@ pub struct Configuration {
 }
 
 impl Configuration {
+    /// Highest `config-version` this build understands. Bump only on a breaking
+    /// config-schema change; document the migration when you do.
+    pub const SUPPORTED_CONFIG_VERSION: u32 = 1;
+
+    const fn default_config_version() -> u32 {
+        Self::SUPPORTED_CONFIG_VERSION
+    }
+
     pub fn from_yaml_file(path: impl AsRef<Path>) -> Result<Self> {
         let s = std::fs::read_to_string(path)?;
         Ok(serde_yaml::from_str(&s)?)
@@ -3414,6 +3427,13 @@ impl Configuration {
     /// Validate runtime invariants that cannot be expressed via serde defaults alone.
     pub fn validated(mut self) -> Result<Self> {
         ensure!(
+            self.config_version >= 1 && self.config_version <= Self::SUPPORTED_CONFIG_VERSION,
+            "config-version {} is not supported by this build (supports 1..={}); \
+             update photoframe or set config-version to a supported value",
+            self.config_version,
+            Self::SUPPORTED_CONFIG_VERSION
+        );
+        ensure!(
             self.viewer_preload_count > 0,
             "viewer-preload-count must be greater than zero"
         );
@@ -3466,6 +3486,7 @@ impl Configuration {
 impl Default for Configuration {
     fn default() -> Self {
         Self {
+            config_version: Self::SUPPORTED_CONFIG_VERSION,
             photo_library_path: PathBuf::new(),
             control_socket_path: Self::default_control_socket_path(),
             global_photo_settings: GlobalPhotoSettings::default(),

@@ -74,6 +74,7 @@ If the frame launches to a black screen, check that `photo-library-path` points 
 | Role                    | Keys                                                                                       |
 | ----------------------- | ------------------------------------------------------------------------------------------ |
 | **Required**            | `photo-library-path`                                                                       |
+| **Schema**              | `config-version`                                                                           |
 | **Core timing**         | `transition`, `global-photo-settings`, `playlist`                                          |
 | **Performance tuning**  | `viewer-preload-count`, `loader-max-concurrent-decodes`, `global-photo-settings.oversample` |
 | **Deterministic runs**  | `startup-shuffle-seed`                                                                     |
@@ -85,6 +86,13 @@ If the frame launches to a black screen, check that `photo-library-path` points 
 | **Showcase / preview**  | `showcase`                                                                                 |
 
 ## Key reference
+
+### `config-version`
+
+- **Purpose:** Declares which config-schema version the file targets, so a config written for a newer, incompatible schema fails fast with a clear message instead of a confusing per-key error.
+- **Required?** Optional; defaults to the current supported version (`1`).
+- **Accepted values & defaults:** A positive integer. This build supports `1`. A value higher than the build supports is rejected at startup with a message telling you to update photoframe.
+- **Notes:** Leave at `1` unless a release note instructs otherwise. The version only bumps on a breaking config-schema change, which will be documented in the git history / release notes.
 
 ### `photo-library-path`
 
@@ -170,8 +178,8 @@ See [Playlist weighting](#playlist-weighting) for the algorithm.
 
 ### Wake/sleep control
 
-- **How it works:** The application has no internal schedule. After startup it remains asleep until another client sends `set-state` or `ToggleState` commands over the control socket.
-- **Manual control:** Pipe JSON such as `{"command":"set-state","state":"awake"}` or `{"command":"ToggleState"}` to `/run/photoframe/control.sock` (override via `control-socket-path`).
+- **How it works:** The application has no internal schedule. After startup it remains asleep until another client sends `set-state` or `toggle-state` commands over the control socket.
+- **Manual control:** Pipe JSON such as `{"command":"set-state","state":"awake"}` or `{"command":"toggle-state"}` to `/run/photoframe/control.sock` (override via `control-socket-path`).
 - **Automation:** Deploy `buttond` (see below) and populate the shared `awake-schedule` block. `buttond` evaluates the schedule, issues `set-state` commands at the appropriate boundaries, and runs display power hooks on your behalf.
 
 Example schedule fragment consumed by `buttond`:
@@ -227,7 +235,7 @@ Common values: `HDMI-A-1`, `HDMI-A-2`. Setting `display-name` explicitly avoids 
 
 **Runtime behavior:**
 
-- **Single press:** writes `{ "command": "ToggleState" }` to the control socket, then toggles the screen. If the display was off it immediately runs the wake command; if on, it delays for `off-delay-ms` (so the sleep card renders) before running the sleep command. The daemon inspects `wlr-randr` on each press, so restarts and manual overrides stay in sync.
+- **Single press:** resolves the current screen state and sends the appropriate `set-state` command to the control socket, then toggles the screen. If the display was off it immediately runs the wake command; if on, it delays for `off-delay-ms` (so the sleep card renders) before running the sleep command. The daemon inspects `wlr-randr` on each press, so restarts and manual overrides stay in sync.
 - **Double press:** executes `shutdown-command`. Polkit allows `kiosk` to issue the request without prompting.
 - **Long press:** bypassed so Pi 5 firmware can force power-off.
 - **Scheduled transitions:** when `awake-schedule` is present, `buttond` waits for the greeting delay, applies the schedule's current state, then drives transitions using `set-state`.
