@@ -65,13 +65,13 @@ transition:
     - kind: radial-wipe # circle or diamond reveal from center
       duration-ms: 500
       softness: 0.1
-      shape: circle # circle | diamond; or shapes: [circle, diamond] for both
+      shapes: [circle] # circle | diamond; list several for variety, e.g. [circle, diamond]
       center: [0.5, 0.5]
     - kind: venetian-blinds # horizontal/vertical stripe reveal
       duration-ms: 600
       stripe-count: 16
       softness: 0.1
-      orientation: horizontal # horizontal | vertical; or orientations: [horizontal, vertical]
+      orientations: [horizontal] # list several, e.g. [horizontal, vertical]
     - kind: crossfade-zoom # fade combined with subtle scale
       duration-ms: 700
       zoom: 0.06

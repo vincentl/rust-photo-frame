@@ -1159,6 +1159,13 @@ where
                     }
                     builder.studio_colors = Some(inline_value_to::<Vec<StudioMatColor>, E>(value)?);
                 }
+                "color" => {
+                    if builder.studio_colors.is_some() {
+                        return Err(de::Error::duplicate_field("color"));
+                    }
+                    builder.studio_colors =
+                        Some(vec![inline_value_to::<StudioMatColor, E>(value)?]);
+                }
                 "bevel-width-px" => {
                     if builder.bevel_width_px.is_some() {
                         return Err(de::Error::duplicate_field("bevel-width-px"));
@@ -1194,6 +1201,7 @@ where
                         other,
                         &[
                             "colors",
+                            "color",
                             "bevel-width-px",
                             "bevel-color",
                             "texture-strength",
@@ -1364,6 +1372,13 @@ where
                     builder.passe_partout_colors =
                         Some(inline_value_to::<Vec<StudioMatColor>, E>(value)?);
                 }
+                "color" => {
+                    if builder.passe_partout_colors.is_some() {
+                        return Err(de::Error::duplicate_field("color"));
+                    }
+                    builder.passe_partout_colors =
+                        Some(vec![inline_value_to::<StudioMatColor, E>(value)?]);
+                }
                 "bevel-width-px" => {
                     if builder.bevel_width_px.is_some() {
                         return Err(de::Error::duplicate_field("bevel-width-px"));
@@ -1381,6 +1396,7 @@ where
                         other,
                         &[
                             "colors",
+                            "color",
                             "bevel-width-px",
                             "bevel-color",
                             "minimum-mat-percentage",
@@ -3248,15 +3264,8 @@ fn apply_transition_inline_field<E: de::Error>(
         "center" if matches!(kind, TransitionKind::RadialWipe) => {
             builder.radial_wipe_center = Some(inline_value_to::<[f32; 2], E>(value)?);
         }
-        "shape" if matches!(kind, TransitionKind::RadialWipe) => {
-            builder.radial_wipe_shapes = Some(vec![inline_value_to::<RadialShape, E>(value)?]);
-        }
         "shapes" if matches!(kind, TransitionKind::RadialWipe) => {
             builder.radial_wipe_shapes = Some(inline_value_to::<Vec<RadialShape>, E>(value)?);
-        }
-        "orientation" if matches!(kind, TransitionKind::VenetianBlinds) => {
-            builder.venetian_orientations =
-                Some(vec![parse_orientation::<E>(inline_value_to::<String, E>(value)?)?]);
         }
         "orientations" if matches!(kind, TransitionKind::VenetianBlinds) => {
             let raw = inline_value_to::<Vec<String>, E>(value)?;
@@ -3291,9 +3300,7 @@ fn apply_transition_inline_field<E: de::Error>(
                     "flash-color",
                     "scale",
                     "center",
-                    "shape",
                     "shapes",
-                    "orientation",
                     "orientations",
                     "zoom",
                     "current-zooms-in",

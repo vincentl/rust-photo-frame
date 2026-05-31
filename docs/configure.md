@@ -363,12 +363,12 @@ The remaining knobs depend on the family:
   - **`scale`** (float > 0, default `64.0`): noise cell size in pixels (smaller = finer grain).
 - **`radial-wipe`** — circle or diamond reveal growing from a center point.
   - **`softness`** (float 0–0.5, default `0.1`): edge feather width.
-  - **`shape`** (`circle` or `diamond`, default `circle`): distance metric (Euclidean vs. Manhattan). Use **`shapes`** (list, e.g. `[circle, diamond]`) to include several — each expands into its own slot.
+  - **`shapes`** (list of `circle` and/or `diamond`, default `[circle]`): distance metric (Euclidean vs. Manhattan). Each entry expands into its own slot, so `[circle, diamond]` shows both.
   - **`center`** (`[x, y]` normalized UV, default `[0.5, 0.5]`): reveal origin.
 - **`venetian-blinds`** — horizontal or vertical stripe reveal.
   - **`stripe-count`** (integer ≥ 1, default `16`): number of blind slats.
   - **`softness`** (float 0–0.5, default `0.1`): feather of each slat's edge.
-  - **`orientation`** (`horizontal` or `vertical`, default `horizontal`): slat direction. Use **`orientations`** (list, e.g. `[horizontal, vertical]`) to include both — each expands into its own slot.
+  - **`orientations`** (list of `horizontal` and/or `vertical`, default `[horizontal]`): slat direction. Each entry expands into its own slot, so `[horizontal, vertical]` shows both.
 - **`crossfade-zoom`** — fade combined with a subtle scale (gentle Ken-Burns dissolve).
   - **`zoom`** (float 0–0.5, default `0.06`): maximum fractional scale change.
   - **`current-zooms-in`** (boolean, default `true`): if true the outgoing photo scales up while fading.
@@ -413,7 +413,7 @@ The remaining controls depend on `kind`:
   - **`sample-scale`** (float, default `0.125`): ratio between canvas resolution and the intermediate blur buffer. Higher values sharpen the backdrop at higher cost.
   - **`backend`** (`cpu` or `neon`, default `neon`): blur implementation. `neon` opts into the vector-accelerated path on 64-bit ARM and falls back to `cpu` when unavailable.
 - **`studio`**
-  - **`colors`** (array containing `[r, g, b]` triples and/or the string `photo-average`; default `[photo-average]`): palette entries used for the mat base. `photo-average` reuses the slide's average color.
+  - **`colors`** (array containing `[r, g, b]` triples and/or the string `photo-average`; default `[photo-average]`): palette entries used for the mat base. `photo-average` reuses the slide's average color. **`color`** is a convenience alias for a single entry.
   - **`bevel-width-px`** (float, default `3.0`).
   - **`bevel-color`** (`[r, g, b]` array, default `[255, 255, 255]`).
   - **`texture-strength`** (float, default `1.0`): strength of the simulated paper weave (`0.0` = flat matte).
@@ -439,7 +439,7 @@ The remaining controls depend on `kind`:
   - **`darken`** (float 0–1, default `0.35`): uniform darkening applied over the blur.
   - **`vignette-strength`** (float 0–1, default `0.5`): extra edge darkening.
 - **`passe-partout`** — clean 45° core-bevel mat board without linen weave (crisper alternative to `studio`).
-  - **`colors`** (array of `[r, g, b]` triples and/or `photo-average`; default `[photo-average]`): mat board color(s). Multiple entries expand to multiple slots.
+  - **`colors`** (array of `[r, g, b]` triples and/or `photo-average`; default `[photo-average]`): mat board color(s). Multiple entries expand to multiple slots. **`color`** is a convenience alias for a single entry.
   - **`bevel-width-px`** (float, default `3.0`).
   - **`bevel-color`** (`[r, g, b]`, default `[255, 255, 255]`).
 - **`drop-shadow`** — soft drop shadow under the photo on a solid mat.

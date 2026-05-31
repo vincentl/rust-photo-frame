@@ -1616,3 +1616,71 @@ matting:
         _ => panic!("expected drop-shadow"),
     }
 }
+
+#[test]
+fn studio_color_singular_alias_accepts_photo_average() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  selection: fixed
+  active:
+    - kind: studio
+      color: photo-average
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg.matting.primary_selected().expect("expected studio");
+    match &selected.option.style {
+        MattingMode::Studio { colors, .. } => {
+            assert_eq!(colors.as_slice(), &[StudioMatColor::PhotoAverage]);
+        }
+        _ => panic!("expected studio"),
+    }
+}
+
+#[test]
+fn passe_partout_color_singular_alias() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  selection: fixed
+  active:
+    - kind: passe-partout
+      color: [12, 34, 56]
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg.matting.primary_selected().expect("expected passe-partout");
+    match &selected.option.style {
+        MattingMode::PassePartout { colors, .. } => {
+            assert_eq!(colors.as_slice(), &[StudioMatColor::Rgb([12, 34, 56])]);
+        }
+        _ => panic!("expected passe-partout"),
+    }
+}
+
+#[test]
+fn radial_wipe_rejects_singular_shape_key() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  selection: fixed
+  active:
+    - kind: radial-wipe
+      shape: circle
+"#;
+    let result: Result<Configuration, _> = serde_yaml::from_str(yaml);
+    assert!(result.is_err(), "singular `shape` should no longer be accepted");
+}
+
+#[test]
+fn venetian_blinds_rejects_singular_orientation_key() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  selection: fixed
+  active:
+    - kind: venetian-blinds
+      orientation: horizontal
+"#;
+    let result: Result<Configuration, _> = serde_yaml::from_str(yaml);
+    assert!(result.is_err(), "singular `orientation` should no longer be accepted");
+}
