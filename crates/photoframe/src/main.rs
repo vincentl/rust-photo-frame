@@ -38,7 +38,7 @@ use events::{
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "photoframe", version, about = "photo frame minimal scaffold")]
+#[command(name = "photoframe", version, about = "GPU-accelerated digital photo frame slideshow")]
 struct Args {
     /// Path to YAML config
     #[arg(value_name = "CONFIG")]

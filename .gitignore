@@ -1,7 +1,6 @@
 .DS_Store
 /target
 **/target/
-Cargo.lock
 photo-library-test/
 showcase/photos/
 showcase/backgrounds/

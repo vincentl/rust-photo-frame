@@ -49,7 +49,7 @@ If you want to modify the code, see **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ## Transitions & mats
 
-The frame ships nine GPU **transitions** (how one photo gives way to the next) and nine **mats** (the border/background framing each photo).
+The frame ships eight GPU **transitions** (how one photo gives way to the next) and nine **mats** (the border/background framing each photo).
 
 | Transitions | |
 | --- | --- |
@@ -145,4 +145,4 @@ This project was developed with significant assistance from multiple AI tools:
 
 MIT License — see [LICENSE](LICENSE) for full text.
 
-© 2025 Vincent Lucarelli
+© 2026 Vincent Lucarelli

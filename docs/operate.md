@@ -14,7 +14,7 @@ Day-to-day commands, status checks, and troubleshooting for a frame you own and 
 | --- | --- |
 | Wake (start cycling) | `echo '{"command":"set-state","state":"awake"}' \| sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock` |
 | Sleep (stop cycling, blank) | `echo '{"command":"set-state","state":"asleep"}' \| sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock` |
-| Toggle wake ↔ sleep | `echo '{"command":"ToggleState"}' \| sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock` |
+| Toggle wake ↔ sleep | `echo '{"command":"toggle-state"}' \| sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock` |
 | Screen on (DPMS) | `sudo -u kiosk /opt/photoframe/bin/powerctl wake` |
 | Screen off (DPMS) | `sudo -u kiosk /opt/photoframe/bin/powerctl sleep` |
 | Screen on, explicit output | `sudo -u kiosk /opt/photoframe/bin/powerctl wake HDMI-A-2` |
@@ -40,7 +40,7 @@ Day-to-day commands, status checks, and troubleshooting for a frame you own and 
 | Restart kiosk (reliable) | `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service` |
 | Edit config | `sudo nano /etc/photoframe/config.yaml` |
 | Apply config changes | restart kiosk (above) |
-| Add photos from laptop | `scp /path/to/photos/* frame@photoframe.local:/var/lib/photoframe/photos/local/` |
+| Add photos from laptop | `rsync -a -e ssh /path/to/photos/ frame@photoframe.local:/var/lib/photoframe/photos/local/` |
 | Add photos locally | `sudo cp /path/*.jpg /var/lib/photoframe/photos/local/ && sudo chown kiosk:kiosk /var/lib/photoframe/photos/local/*` |
 | Trigger manual cloud sync | `sudo systemctl start photoframe-sync.service` |
 | Update software | `git pull && ./setup/application/deploy.sh` |
@@ -109,12 +109,12 @@ Expected: all three services `active (running)`, `print-status.sh` exits cleanly
 
 Both `local/` (manual imports, never overwritten by sync) and `cloud/` (managed by the sync service) under `/var/lib/photoframe/photos` are scanned recursively. Supported formats: JPEG, PNG.
 
-From your laptop:
+From your laptop, use `rsync` (not `scp` — the sftp subsystem doesn't load supplementary groups, so `scp` writes silently fail):
 
 ```bash
-scp /path/to/photos/*.jpg frame@photoframe.local:/var/lib/photoframe/photos/local/
+rsync -a -e "ssh" /path/to/photos/ frame@photoframe.local:/var/lib/photoframe/photos/local/
 # With a non-default key:
-scp -i ~/.ssh/photoframe /path/to/photos/*.jpg frame@photoframe.local:/var/lib/photoframe/photos/local/
+rsync -a -e "ssh -i ~/.ssh/photoframe" /path/to/photos/ frame@photoframe.local:/var/lib/photoframe/photos/local/
 ```
 
 Or locally on the Pi:
@@ -124,7 +124,7 @@ sudo cp /path/to/photos/*.jpg /var/lib/photoframe/photos/local/
 sudo chown kiosk:kiosk /var/lib/photoframe/photos/local/*.jpg
 ```
 
-If you get **permission denied** during `scp`, your SSH session predates the install (which added your account to the `kiosk` group). Log out and reconnect.
+If you get **permission denied** during `rsync`, your SSH session predates the install (which added your account to the `kiosk` group). Log out and reconnect.
 
 ### Editing configuration
 
