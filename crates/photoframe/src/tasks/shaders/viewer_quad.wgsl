@@ -202,13 +202,18 @@ switch (U.kind) {
       color = mix(current, next, 1.0 - mask);
     }
     case 10u: {
-      // crossfade-zoom: fade + subtle scale
+      // crossfade-zoom: fade + a shared, gentle Ken-Burns scale.
+      // Both planes share ONE scale that is 0 at the ends and bumps up in the
+      // middle (1 + zoom*sin(pi*progress)). Locking both layers to the same
+      // scale avoids the double-image "swim" of opposing zoom directions, is
+      // pop-free at both ends, and keeps scale >= 1 so edges never go empty.
       let zoom = U.params0.x;
       let cur_in = U.params0.y > 0.5;
       let next_in = U.params0.z > 0.5;
       let center = U.screen_size * 0.5;
-      let cur_scale = select(1.0, 1.0 + zoom * progress, cur_in);
-      let next_scale = select(1.0, 1.0 + zoom * (1.0 - progress), next_in);
+      let bump = zoom * sin(3.14159265 * progress);
+      let cur_scale = select(1.0, 1.0 + bump, cur_in);
+      let next_scale = select(1.0, 1.0 + bump, next_in);
       let cur_pos = center + (screen_pos - center) / max(cur_scale, 1e-3);
       let next_pos = center + (screen_pos - center) / max(next_scale, 1e-3);
       let c = sample_plane(cur_tex, cur_samp, U.current_dest, cur_pos);
