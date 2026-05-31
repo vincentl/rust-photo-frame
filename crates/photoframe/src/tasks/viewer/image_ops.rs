@@ -598,35 +598,38 @@ pub(super) fn apply_vignette_overlay(
         let d = ((dx * dx + dy * dy).sqrt() / half_diag).clamp(0.0, 1.0);
         let vignette = smoothstep(radius, band_end, d);
         let factor = (1.0 - strength * vignette).clamp(0.0, 1.0);
-        pixel[0] = ((pixel[0] as f32 * factor).round() as u8).min(255);
-        pixel[1] = ((pixel[1] as f32 * factor).round() as u8).min(255);
-        pixel[2] = ((pixel[2] as f32 * factor).round() as u8).min(255);
+        pixel[0] = (pixel[0] as f32 * factor).round() as u8;
+        pixel[1] = (pixel[1] as f32 * factor).round() as u8;
+        pixel[2] = (pixel[2] as f32 * factor).round() as u8;
     }
+}
+
+/// Soft drop-shadow parameters for [`render_drop_shadow`].
+pub(super) struct DropShadowParams {
+    pub color: [u8; 3],
+    pub opacity: f32,
+    pub blur_px: f32,
+    pub offset_px: [i32; 2],
 }
 
 pub(super) fn render_drop_shadow(
     background: &mut RgbaImage,
-    canvas_w: u32,
-    canvas_h: u32,
     photo_x: u32,
     photo_y: u32,
     photo_w: u32,
     photo_h: u32,
-    shadow_color: [u8; 3],
-    shadow_opacity: f32,
-    shadow_blur_px: f32,
-    shadow_offset_px: [i32; 2],
+    shadow: DropShadowParams,
 ) {
-    let shadow_opacity = shadow_opacity.clamp(0.0, 1.0);
+    let shadow_opacity = shadow.opacity.clamp(0.0, 1.0);
     let sc = [
-        shadow_color[0] as f32 / 255.0,
-        shadow_color[1] as f32 / 255.0,
-        shadow_color[2] as f32 / 255.0,
+        shadow.color[0] as f32 / 255.0,
+        shadow.color[1] as f32 / 255.0,
+        shadow.color[2] as f32 / 255.0,
     ];
 
-    let shadow_x = photo_x as i32 + shadow_offset_px[0];
-    let shadow_y = photo_y as i32 + shadow_offset_px[1];
-    let blur_r = shadow_blur_px.max(0.0);
+    let shadow_x = photo_x as i32 + shadow.offset_px[0];
+    let shadow_y = photo_y as i32 + shadow.offset_px[1];
+    let blur_r = shadow.blur_px.max(0.0);
 
     for (x, y, pixel) in background.enumerate_pixels_mut() {
         let px = x as f32 + 0.5;
@@ -673,8 +676,6 @@ pub(super) fn render_drop_shadow(
             let blended = bg[c] * (1.0 - a) + sc[c] * a;
             pixel[c] = srgb_u8(blended);
         }
-        _ = canvas_w;
-        _ = canvas_h;
     }
 }
 

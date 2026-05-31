@@ -998,14 +998,12 @@ impl MattingOptions {
         minimum_mat_percentage: f32,
         fixed_image_path: Option<PathBuf>,
     ) -> Option<Self> {
-        let mut builder = MattingOptionBuilder::default();
-        builder.minimum_mat_percentage = Some(minimum_mat_percentage);
-        match kind {
-            MattingKind::FixedImage => {
-                let path = fixed_image_path?;
-                builder.fixed_image_paths = Some(vec![path]);
-            }
-            _ => {}
+        let mut builder = MattingOptionBuilder {
+            minimum_mat_percentage: Some(minimum_mat_percentage),
+            ..Default::default()
+        };
+        if kind == MattingKind::FixedImage {
+            builder.fixed_image_paths = Some(vec![fixed_image_path?]);
         }
         let mut opt = MattingOptions::with_kind(kind, builder);
         opt.minimum_mat_percentage = minimum_mat_percentage;

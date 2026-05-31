@@ -93,10 +93,9 @@ async fn invalid_photo_is_deleted_and_emits_removed() {
             tokio::time::timeout(std::time::Duration::from_secs(5), inv_rx.recv())
                 .await
                 .expect("timeout waiting for inventory event")
+            && info.path == bad
         {
-            if info.path == bad {
-                saw_added = true;
-            }
+            saw_added = true;
         }
     }
 
@@ -109,11 +108,10 @@ async fn invalid_photo_is_deleted_and_emits_removed() {
     while std::time::Instant::now() < deadline {
         if let Ok(Some(InventoryEvent::PhotoRemoved(p))) =
             tokio::time::timeout(std::time::Duration::from_millis(200), inv_rx.recv()).await
+            && p == bad
         {
-            if p == bad {
-                saw_removed = true;
-                break;
-            }
+            saw_removed = true;
+            break;
         }
     }
     assert!(saw_removed, "did not see PhotoRemoved for quarantined file");

@@ -22,7 +22,6 @@ use rand::Rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{MissedTickBehavior, interval};
@@ -769,16 +768,16 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
 
         render_drop_shadow(
             &mut background,
-            canvas_w,
-            canvas_h,
             offset_x,
             offset_y,
             final_w,
             final_h,
-            *shadow_color,
-            *shadow_opacity,
-            *shadow_blur_px,
-            *shadow_offset_px,
+            DropShadowParams {
+                color: *shadow_color,
+                opacity: *shadow_opacity,
+                blur_px: *shadow_blur_px,
+                offset_px: *shadow_offset_px,
+            },
         );
 
         imageops::overlay(
@@ -949,9 +948,9 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             let darken = darken.clamp(0.0, 1.0);
             let brightness = 1.0 - darken;
             for px in blurred.pixels_mut() {
-                px[0] = ((px[0] as f32 * brightness).round() as u8).min(255);
-                px[1] = ((px[1] as f32 * brightness).round() as u8).min(255);
-                px[2] = ((px[2] as f32 * brightness).round() as u8).min(255);
+                px[0] = (px[0] as f32 * brightness).round() as u8;
+                px[1] = (px[1] as f32 * brightness).round() as u8;
+                px[2] = (px[2] as f32 * brightness).round() as u8;
             }
             apply_vignette_overlay(&mut blurred, *vignette_strength, 0.75, 0.5);
             blurred
@@ -993,24 +992,6 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         priority,
         mat_kind,
     })
-}
-
-fn wait_for_retry(cancel: &CancellationToken, mut remaining: Duration) -> bool {
-    if remaining.is_zero() {
-        return cancel.is_cancelled();
-    }
-
-    const SLICE: Duration = Duration::from_millis(250);
-    while remaining > Duration::ZERO {
-        if cancel.is_cancelled() {
-            return true;
-        }
-        let sleep_for = if remaining > SLICE { SLICE } else { remaining };
-        thread::sleep(sleep_for);
-        remaining = remaining.saturating_sub(sleep_for);
-    }
-
-    cancel.is_cancelled()
 }
 
 #[derive(Debug)]
@@ -2807,41 +2788,26 @@ pub fn run_windowed(
         }
     }
 
-    let mut retry_attempt = 0usize;
-    let mut retry_delay = Duration::from_secs(2);
-    let max_retry_delay = Duration::from_secs(30);
-    let event_loop = loop {
-        match EventLoop::<ViewerEvent>::with_user_event().build() {
-            Ok(event_loop) => {
-                if retry_attempt > 0 {
-                    info!("viewer compositor connection restored");
-                }
-                break event_loop;
+    // winit permits only one EventLoop per process, even after a failed attempt,
+    // so retrying in-process can never recover — it would just surface a confusing
+    // "EventLoop can't be recreated" error. Build once and, on failure, return an
+    // actionable message. A missing compositor (no WAYLAND_DISPLAY/DISPLAY) is the
+    // usual cause: photoframe must run inside the kiosk's Wayland session, not from
+    // a bare SSH shell.
+    let event_loop = match EventLoop::<ViewerEvent>::with_user_event().build() {
+        Ok(event_loop) => event_loop,
+        Err(winit::error::EventLoopError::Os(os_err)) => {
+            if cancel.is_cancelled() {
+                info!("viewer initialization cancelled before compositor became available");
+                return Ok(());
             }
-            Err(winit::error::EventLoopError::Os(os_err)) => {
-                if cancel.is_cancelled() {
-                    info!("viewer initialization cancelled before compositor became available");
-                    return Ok(());
-                }
-
-                let wait_for = retry_delay;
-                retry_attempt += 1;
-                warn!(
-                    attempt = retry_attempt,
-                    wait_secs = wait_for.as_secs_f32(),
-                    error = %os_err,
-                    "failed to initialize display compositor; retrying"
-                );
-
-                if wait_for_retry(&cancel, wait_for) {
-                    info!("viewer initialization cancelled while waiting to retry");
-                    return Ok(());
-                }
-
-                retry_delay = (retry_delay * 2).min(max_retry_delay);
-            }
-            Err(other) => return Err(other.into()),
+            return Err(anyhow::anyhow!(os_err).context(
+                "failed to initialize display compositor: no Wayland/X display is available. \
+                 photoframe must run inside the kiosk's Wayland session \
+                 (check WAYLAND_DISPLAY / DISPLAY); it cannot open a window from a bare SSH shell",
+            ));
         }
+        Err(other) => return Err(other.into()),
     };
     let worker_count = std::thread::available_parallelism()
         .map(|n| n.get())
