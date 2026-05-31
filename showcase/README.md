@@ -15,7 +15,7 @@ see to a config key.
 ## Quick start (on the Pi)
 
 ```bash
-# 1. Stage your media (see "The photo set" below for what to pick)
+# 1. Stage your media (use your own or grab the reference set — see "The photo set" below)
 sudo install -d -o kiosk -g kiosk -m 0755 \
   /var/lib/photoframe/showcase/photos \
   /var/lib/photoframe/showcase/backgrounds
@@ -67,6 +67,10 @@ mat showcase effective (portrait photos in a widescreen frame show the most mat)
 | 1 | **Panorama**, matted | extreme wide, e.g. 3:1 | best mat demo, and proves fill-when-fits declines wide photos |
 
 Target balance: **4 landscape (3 fill + 1 matted) : 4 portrait : 1 panorama**.
+
+A reference set with this exact spread is available as a release asset. Run
+`showcase/download-photos.sh` to fetch it into `showcase/photos/` (already
+gitignored), then copy from there when staging on the Pi.
 
 For the `fixed-image` backdrop, use a 16:9 image ≥ 3840×2160 at
 `backgrounds/background.jpg`.
