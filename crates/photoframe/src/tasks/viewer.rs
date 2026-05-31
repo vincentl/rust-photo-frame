@@ -51,12 +51,6 @@ pub(super) enum ActiveTransition {
         softness: f32,
         scale: f32,
     },
-    Iris {
-        center: [f32; 2],
-        blades: f32,
-        softness: f32,
-        rotation_radians: f32,
-    },
     RadialWipe {
         softness: f32,
         shape_is_diamond: bool,
@@ -133,12 +127,6 @@ impl TransitionState {
             TransitionMode::Dissolve(cfg) => ActiveTransition::Dissolve {
                 softness: cfg.softness,
                 scale: cfg.scale,
-            },
-            TransitionMode::Iris(cfg) => ActiveTransition::Iris {
-                center: cfg.center,
-                blades: cfg.blades.max(3) as f32,
-                softness: cfg.softness,
-                rotation_radians: cfg.rotation_degrees.to_radians(),
             },
             TransitionMode::RadialWipe(cfg) => ActiveTransition::RadialWipe {
                 softness: cfg.softness,
@@ -2674,18 +2662,6 @@ pub fn run_windowed(
                                     ActiveTransition::Dissolve { softness, scale } => {
                                         uniforms.params0[0] = *softness;
                                         uniforms.params0[1] = *scale;
-                                    }
-                                    ActiveTransition::Iris {
-                                        center,
-                                        blades,
-                                        softness,
-                                        rotation_radians,
-                                    } => {
-                                        uniforms.params0[0] = center[0];
-                                        uniforms.params0[1] = center[1];
-                                        uniforms.params0[2] = *blades;
-                                        uniforms.params0[3] = *softness;
-                                        uniforms.params1[0] = *rotation_radians;
                                     }
                                     ActiveTransition::RadialWipe {
                                         softness,

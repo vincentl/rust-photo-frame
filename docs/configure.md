@@ -329,7 +329,7 @@ The optional `photo-effect` task sits between the loader and the viewer. When en
 
 ## Transition configuration
 
-The `transition` block controls how the viewer blends between photos. Supply one or more entries under `transition.active`; each begins with a required `kind` (`fade`, `wipe`, `push`, `e-ink`, `dissolve`, `radial-wipe`, `venetian-blinds`, `crossfade-zoom`, or `iris`) followed by family-specific fields.
+The `transition` block controls how the viewer blends between photos. Supply one or more entries under `transition.active`; each begins with a required `kind` (`fade`, `wipe`, `push`, `e-ink`, `dissolve`, `radial-wipe`, `venetian-blinds`, or `crossfade-zoom`) followed by family-specific fields.
 
 | Key         | Required? | Default                                                       | Accepted values                           | Effect |
 | ----------- | --------- | ------------------------------------------------------------- | ----------------------------------------- | ------ |
@@ -373,11 +373,6 @@ The remaining knobs depend on the family:
   - **`zoom`** (float 0–0.5, default `0.06`): maximum fractional scale change.
   - **`current-zooms-in`** (boolean, default `true`): if true the outgoing photo scales up while fading.
   - **`next-zooms-in`** (boolean, default `true`): if true the incoming photo starts slightly zoomed and settles.
-- **`iris`** — polygon-SDF aperture reveal (N-sided opening, not a physical blade model).
-  - **`blades`** (integer ≥ 3, default `6`): number of aperture sides.
-  - **`rotation-degrees`** (float, default `30.0`): total polygon rotation across the transition.
-  - **`softness`** (float 0–0.5, default `0.04`): edge feather.
-  - **`center`** (`[x, y]` normalized UV, default `[0.5, 0.5]`): aperture origin.
 
 Examples are in [Transition examples](#transition-examples).
 

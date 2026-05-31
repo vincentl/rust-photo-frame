@@ -61,7 +61,6 @@ The frame ships nine GPU **transitions** (how one photo gives way to the next) a
 | `radial-wipe` | circle or diamond reveal growing from a center point |
 | `venetian-blinds` | horizontal/vertical slat reveal |
 | `crossfade-zoom` | cross-fade with a gentle Ken-Burns zoom |
-| `iris` | polygon camera-aperture opening |
 
 | Mats | |
 | --- | --- |

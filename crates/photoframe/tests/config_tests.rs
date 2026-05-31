@@ -1434,32 +1434,6 @@ transition:
 }
 
 #[test]
-fn parse_iris_transition_defaults() {
-    let yaml = r#"
-photo-library-path: "/photos"
-transition:
-  active:
-    - kind: iris
-"#;
-    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    let selected = cfg
-        .transition
-        .iter_selected()
-        .next()
-        .expect("expected transition");
-    assert!(matches!(selected.entry.kind, TransitionKind::Iris));
-    match selected.option.mode() {
-        TransitionMode::Iris(iris) => {
-            assert_eq!(iris.blades, 6);
-            assert!((iris.rotation_degrees - 30.0).abs() < 1e-5);
-            assert!((iris.softness - 0.04).abs() < 1e-5);
-            assert!((iris.center[0] - 0.5).abs() < 1e-5);
-        }
-        _ => panic!("expected iris"),
-    }
-}
-
-#[test]
 fn parse_showcase_enabled() {
     let yaml = r#"
 photo-library-path: "/photos"
@@ -1511,11 +1485,11 @@ showcase:
         8,
         "showcase should have 8 mat options (all 9 kinds minus fixed-image which needs a path)"
     );
-    // 9 transition kinds
+    // 8 transition kinds
     assert_eq!(
         validated.transition.options().len(),
-        9,
-        "showcase should have 9 transition options (all TransitionKind::ALL)"
+        8,
+        "showcase should have 8 transition options (all TransitionKind::ALL)"
     );
     // Selection should be sequential.
     assert!(matches!(

@@ -158,25 +158,6 @@ switch (U.kind) {
       let mask = smoothstep(lo, max(hi, lo + 1e-3), n);
       color = mix(next, current, mask);
     }
-    case 7u: {
-      // iris: SDF regular N-gon aperture reveal
-      let center = U.params0.xy * U.screen_size;
-      let n = max(U.params0.z, 3.0);
-      let softness = clamp(U.params0.w, 0.001, 0.5);
-      let rot = U.params1.x * progress;
-      let max_r = 0.5 * length(U.screen_size);
-      let d = screen_pos - center;
-      var ang = atan2(d.y, d.x) + rot;
-      let radius = length(d) / max(max_r, 1e-3);
-      let seg = 6.2831853 / n;
-      let half_seg = 0.5 * seg;
-      let wrapped = abs(((ang % seg) + seg) % seg - half_seg);
-      let apothem = cos(half_seg) / max(cos(wrapped), 1e-3);
-      let opening = progress * 1.2;
-      let edge = radius * apothem;
-      let mask = 1.0 - smoothstep(opening - softness, opening + softness, edge);
-      color = mix(current, next, mask);
-    }
     case 8u: {
       // radial-wipe: circle or diamond reveal from center
       let center = U.params0.xy * U.screen_size;

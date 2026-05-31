@@ -47,7 +47,7 @@ photos after — but the slideshow stays empty until photos are present.
 Each frame displays a single line in the bottom-left, e.g.:
 
 ```
-transition: iris    mat: passe-partout
+transition: crossfade-zoom    mat: passe-partout
 ```
 
 When `fill-when-fits` triggers (a near-16:9 photo renders full-bleed), the mat

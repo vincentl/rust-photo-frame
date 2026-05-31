@@ -9,8 +9,8 @@
 # The tour cycles sequentially through every built-in effect. As of this
 # writing the binary ships:
 #
-#   Transitions (9): fade, wipe, push, e-ink, dissolve, radial-wipe,
-#                    venetian-blinds, crossfade-zoom, iris
+#   Transitions (8): fade, wipe, push, e-ink, dissolve, radial-wipe,
+#                    venetian-blinds, crossfade-zoom
 #   Mats (9):        fixed-color, blur, studio, fixed-image*, gradient,
 #                    vignette, cinematic-blur, passe-partout, drop-shadow
 #
@@ -20,7 +20,7 @@
 #     any effect, copy its `kind` into your real config.yaml (docs/configure.md).
 #
 # Each frame is labeled in the bottom-left with the active transition and mat,
-# e.g. "transition: iris    mat: passe-partout".
+# e.g. "transition: crossfade-zoom    mat: passe-partout".
 #
 # Run it on the Pi with the helper scripts next to this file:
 #   ./showcase/activate.sh     # back up your config, swap in this one, restart

@@ -2206,7 +2206,6 @@ pub enum TransitionKind {
     Push,
     EInk,
     Dissolve,
-    Iris,
     RadialWipe,
     VenetianBlinds,
     CrossfadeZoom,
@@ -2219,7 +2218,6 @@ impl TransitionKind {
         Self::Push,
         Self::EInk,
         Self::Dissolve,
-        Self::Iris,
         Self::RadialWipe,
         Self::VenetianBlinds,
         Self::CrossfadeZoom,
@@ -2230,7 +2228,6 @@ impl TransitionKind {
         "push",
         "e-ink",
         "dissolve",
-        "iris",
         "radial-wipe",
         "venetian-blinds",
         "crossfade-zoom",
@@ -2243,7 +2240,6 @@ impl TransitionKind {
             Self::Push => "push",
             Self::EInk => "e-ink",
             Self::Dissolve => "dissolve",
-            Self::Iris => "iris",
             Self::RadialWipe => "radial-wipe",
             Self::VenetianBlinds => "venetian-blinds",
             Self::CrossfadeZoom => "crossfade-zoom",
@@ -2257,7 +2253,8 @@ impl TransitionKind {
             Self::Push => 3,
             Self::EInk => 4,
             Self::Dissolve => 5,
-            Self::Iris => 7,
+            // 7 was iris (removed); leaving the gap is fine — indices only need
+            // to match the shader `case` integers, which need not be contiguous.
             Self::RadialWipe => 8,
             Self::VenetianBlinds => 9,
             Self::CrossfadeZoom => 10,
@@ -2443,7 +2440,6 @@ impl TransitionOptions {
             TransitionKind::Dissolve => {
                 (600, TransitionMode::Dissolve(DissolveTransition::default()))
             }
-            TransitionKind::Iris => (700, TransitionMode::Iris(IrisTransition::default())),
             TransitionKind::RadialWipe => {
                 (500, TransitionMode::RadialWipe(RadialWipeTransition::default()))
             }
@@ -2510,18 +2506,6 @@ impl TransitionOptions {
                 d.softness = d.softness.clamp(0.0, 0.5);
                 if !d.scale.is_finite() || d.scale <= 0.0 {
                     d.scale = 64.0;
-                }
-            }
-            TransitionMode::Iris(iris) => {
-                if iris.blades < 3 {
-                    iris.blades = 3;
-                }
-                iris.softness = iris.softness.clamp(0.0, 0.5);
-                if !iris.rotation_degrees.is_finite() {
-                    iris.rotation_degrees = 30.0;
-                }
-                if !iris.center[0].is_finite() || !iris.center[1].is_finite() {
-                    iris.center = [0.5, 0.5];
                 }
             }
             TransitionMode::RadialWipe(rw) => {
@@ -2622,25 +2606,6 @@ impl TransitionOptions {
                 }
                 TransitionMode::Dissolve(d)
             }
-            TransitionKind::Iris => {
-                let defaults = IrisTransition::default();
-                let mut iris = IrisTransition {
-                    blades: builder.iris_blades.unwrap_or(defaults.blades).max(3),
-                    rotation_degrees: builder
-                        .iris_rotation_degrees
-                        .unwrap_or(defaults.rotation_degrees),
-                    softness: builder.iris_softness.unwrap_or(defaults.softness),
-                    center: builder.iris_center.unwrap_or(defaults.center),
-                };
-                iris.softness = iris.softness.clamp(0.0, 0.5);
-                if !iris.rotation_degrees.is_finite() {
-                    iris.rotation_degrees = 30.0;
-                }
-                if !iris.center[0].is_finite() || !iris.center[1].is_finite() {
-                    iris.center = [0.5, 0.5];
-                }
-                TransitionMode::Iris(iris)
-            }
             TransitionKind::RadialWipe => {
                 let defaults = RadialWipeTransition::default();
                 let mut rw = RadialWipeTransition {
@@ -2713,7 +2678,6 @@ impl TransitionOptions {
                 eink.flash_count = eink.flash_count.min(6);
             }
             TransitionMode::Dissolve(_)
-            | TransitionMode::Iris(_)
             | TransitionMode::RadialWipe(_)
             | TransitionMode::VenetianBlinds(_)
             | TransitionMode::CrossfadeZoom(_) => {}
@@ -2730,7 +2694,6 @@ pub enum TransitionMode {
     Push(PushTransition),
     EInk(EInkTransition),
     Dissolve(DissolveTransition),
-    Iris(IrisTransition),
     RadialWipe(RadialWipeTransition),
     VenetianBlinds(VenetianBlindsTransition),
     CrossfadeZoom(CrossfadeZoomTransition),
@@ -2908,25 +2871,6 @@ impl Default for CrossfadeZoomTransition {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct IrisTransition {
-    pub blades: u32,
-    pub rotation_degrees: f32,
-    pub softness: f32,
-    pub center: [f32; 2],
-}
-
-impl Default for IrisTransition {
-    fn default() -> Self {
-        Self {
-            blades: 6,
-            rotation_degrees: 30.0,
-            softness: 0.04,
-            center: [0.5, 0.5],
-        }
-    }
-}
-
 impl<'de> Deserialize<'de> for TransitionConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -3027,10 +2971,6 @@ struct TransitionOptionBuilder {
     eink_flash_color: Option<[u8; 3]>,
     dissolve_softness: Option<f32>,
     dissolve_scale: Option<f32>,
-    iris_blades: Option<u32>,
-    iris_rotation_degrees: Option<f32>,
-    iris_softness: Option<f32>,
-    iris_center: Option<[f32; 2]>,
     radial_wipe_softness: Option<f32>,
     radial_wipe_shape: Option<RadialShape>,
     radial_wipe_center: Option<[f32; 2]>,
@@ -3151,7 +3091,6 @@ fn apply_transition_inline_field<E: de::Error>(
                     | TransitionKind::Dissolve
                     | TransitionKind::RadialWipe
                     | TransitionKind::VenetianBlinds
-                    | TransitionKind::Iris
             ) =>
         {
             match kind {
@@ -3166,9 +3105,6 @@ fn apply_transition_inline_field<E: de::Error>(
                 }
                 TransitionKind::VenetianBlinds => {
                     builder.venetian_softness = Some(inline_value_to::<f32, E>(value)?)
-                }
-                TransitionKind::Iris => {
-                    builder.iris_softness = Some(inline_value_to::<f32, E>(value)?)
                 }
                 _ => {}
             }
@@ -3198,22 +3134,8 @@ fn apply_transition_inline_field<E: de::Error>(
         "scale" if matches!(kind, TransitionKind::Dissolve) => {
             builder.dissolve_scale = Some(inline_value_to::<f32, E>(value)?);
         }
-        "blades" if matches!(kind, TransitionKind::Iris) => {
-            builder.iris_blades = Some(inline_value_to::<u32, E>(value)?);
-        }
-        "rotation-degrees" if matches!(kind, TransitionKind::Iris) => {
-            builder.iris_rotation_degrees = Some(inline_value_to::<f32, E>(value)?);
-        }
-        "center" if matches!(kind, TransitionKind::Iris | TransitionKind::RadialWipe) => {
-            match kind {
-                TransitionKind::Iris => {
-                    builder.iris_center = Some(inline_value_to::<[f32; 2], E>(value)?)
-                }
-                TransitionKind::RadialWipe => {
-                    builder.radial_wipe_center = Some(inline_value_to::<[f32; 2], E>(value)?)
-                }
-                _ => {}
-            }
+        "center" if matches!(kind, TransitionKind::RadialWipe) => {
+            builder.radial_wipe_center = Some(inline_value_to::<[f32; 2], E>(value)?);
         }
         "shape" if matches!(kind, TransitionKind::RadialWipe) => {
             builder.radial_wipe_shape = Some(inline_value_to::<RadialShape, E>(value)?);
@@ -3255,8 +3177,6 @@ fn apply_transition_inline_field<E: de::Error>(
                     "stripe-count",
                     "flash-color",
                     "scale",
-                    "blades",
-                    "rotation-degrees",
                     "center",
                     "shape",
                     "orientation",
