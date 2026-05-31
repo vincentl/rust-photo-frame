@@ -118,7 +118,34 @@ impl CaptionOverlay {
         // Position at bottom-left; offset up by one line height.
         let top = (self.size.height as f32 - 34.0 - margin).max(0.0);
 
-        let text_color = GlyphonColor::rgb(255, 255, 255);
+        // Light-cyan fill reads on dark mats; a near-black shadow underneath keeps
+        // it legible on light mats (e.g. the white drop-shadow background).
+        let text_color = GlyphonColor::rgb(150, 240, 240);
+        let shadow_color = GlyphonColor::rgb(0, 20, 24);
+        let bounds = TextBounds {
+            left: 0,
+            top: 0,
+            right: self.size.width as i32,
+            bottom: self.size.height as i32,
+        };
+        let shadow = TextArea {
+            buffer: &self.text_buffer,
+            left: margin + 2.0,
+            top: top + 2.0,
+            scale: 1.0,
+            bounds,
+            default_color: shadow_color,
+            custom_glyphs: &[],
+        };
+        let main = TextArea {
+            buffer: &self.text_buffer,
+            left: margin,
+            top,
+            scale: 1.0,
+            bounds,
+            default_color: text_color,
+            custom_glyphs: &[],
+        };
 
         if let Err(err) = self.text_renderer.prepare(
             &self.device,
@@ -126,20 +153,7 @@ impl CaptionOverlay {
             &mut self.font_system,
             &mut self.atlas,
             &self.viewport,
-            [TextArea {
-                buffer: &self.text_buffer,
-                left: margin,
-                top,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: self.size.width as i32,
-                    bottom: self.size.height as i32,
-                },
-                default_color: text_color,
-                custom_glyphs: &[],
-            }],
+            [shadow, main],
             &mut self.swash_cache,
         ) {
             tracing::warn!(error = %err, "caption_overlay_prepare_failed");
@@ -186,7 +200,7 @@ pub(super) fn showcase_caption(
 ) -> String {
     let t = transition_kind
         .map(|k| k.to_string())
-        .unwrap_or_else(|| "—".to_string());
+        .unwrap_or_else(|| "none".to_string());
     let m = mat_kind
         .map(|k| k.to_string())
         .unwrap_or_else(|| "full-bleed".to_string());
@@ -446,6 +460,9 @@ pub(super) struct WakeScene {
     current: Option<ImgTex>,
     next: Option<ImgTex>,
     transition_state: Option<TransitionState>,
+    /// Kind of the most recent transition (in-progress or just-finished), so the
+    /// showcase caption can keep naming it after the transition completes.
+    last_transition_kind: Option<TransitionKind>,
     displayed_at: Option<Instant>,
     pending: VecDeque<ImgTex>,
     pending_redraw: bool,
@@ -469,6 +486,7 @@ impl WakeScene {
             current: None,
             next: None,
             transition_state: None,
+            last_transition_kind: None,
             displayed_at: None,
             pending: VecDeque::new(),
             pending_redraw: false,
@@ -482,6 +500,7 @@ impl WakeScene {
         self.current = None;
         self.next = None;
         self.transition_state = None;
+        self.last_transition_kind = None;
         self.displayed_at = None;
         self.pending.clear();
         self.pending_redraw = false;
@@ -557,8 +576,17 @@ impl WakeScene {
         self.transition_state.as_ref()
     }
 
+    /// The most recent transition kind (in-progress or just-finished), for the
+    /// showcase caption. Persists after the transition completes.
+    pub(super) fn last_transition_kind(&self) -> Option<TransitionKind> {
+        self.last_transition_kind
+    }
+
     /// Replaces the active transition state.
     pub(super) fn set_transition_state(&mut self, state: Option<TransitionState>) {
+        if let Some(state) = &state {
+            self.last_transition_kind = Some(state.kind());
+        }
         self.transition_state = state;
     }
 

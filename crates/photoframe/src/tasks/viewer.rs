@@ -2757,9 +2757,9 @@ pub fn run_windowed(
                             encoder.pop_debug_group();
 
                             if let Some(cap) = self.caption_overlay.as_mut() {
-                                let transition_kind = wake
-                                    .transition_state()
-                                    .map(|s| s.kind());
+                                // Show the most recent transition (kept after it
+                                // finishes) and the current photo's mat.
+                                let transition_kind = wake.last_transition_kind();
                                 let mat_kind = wake
                                     .current()
                                     .and_then(|img| img.mat_kind);
