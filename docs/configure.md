@@ -363,12 +363,12 @@ The remaining knobs depend on the family:
   - **`scale`** (float > 0, default `64.0`): noise cell size in pixels (smaller = finer grain).
 - **`radial-wipe`** — circle or diamond reveal growing from a center point.
   - **`softness`** (float 0–0.5, default `0.1`): edge feather width.
-  - **`shape`** (`circle` or `diamond`, default `circle`): distance metric (Euclidean vs. Manhattan).
+  - **`shape`** (`circle` or `diamond`, default `circle`): distance metric (Euclidean vs. Manhattan). Use **`shapes`** (list, e.g. `[circle, diamond]`) to include several — each expands into its own slot.
   - **`center`** (`[x, y]` normalized UV, default `[0.5, 0.5]`): reveal origin.
 - **`venetian-blinds`** — horizontal or vertical stripe reveal.
   - **`stripe-count`** (integer ≥ 1, default `16`): number of blind slats.
   - **`softness`** (float 0–0.5, default `0.1`): feather of each slat's edge.
-  - **`orientation`** (`horizontal` or `vertical`, default `horizontal`): slat direction.
+  - **`orientation`** (`horizontal` or `vertical`, default `horizontal`): slat direction. Use **`orientations`** (list, e.g. `[horizontal, vertical]`) to include both — each expands into its own slot.
 - **`crossfade-zoom`** — fade combined with a subtle scale (gentle Ken-Burns dissolve).
   - **`zoom`** (float 0–0.5, default `0.06`): maximum fractional scale change.
   - **`current-zooms-in`** (boolean, default `true`): if true the outgoing photo scales up while fading.
@@ -428,7 +428,7 @@ The remaining controls depend on `kind`:
   - **`direction`** (`vertical`, `horizontal`, or `radial`; default `vertical`).
   - **`angle-degrees`** (float, default `0.0`): optional rotation for linear gradients; ignored for `radial`.
 - **`vignette`** — solid color with darkened edges.
-  - **`color`** (`[r, g, b]`, default `[24, 24, 28]`): base mat color.
+  - **`colors`** (array of `[r, g, b]` triples and/or `photo-average`; default `[[24, 24, 28]]`): base mat color(s). Multiple entries expand to multiple slots. **`color`** is a convenience alias for a single value (also accepts `photo-average`).
   - **`strength`** (float 0–1, default `0.6`): how dark the corners get.
   - **`radius`** (float 0–1, default `0.75`): where the falloff begins, as a fraction of the half-diagonal.
   - **`softness`** (float 0–1, default `0.5`): width of the falloff band.
@@ -443,7 +443,7 @@ The remaining controls depend on `kind`:
   - **`bevel-width-px`** (float, default `3.0`).
   - **`bevel-color`** (`[r, g, b]`, default `[255, 255, 255]`).
 - **`drop-shadow`** — soft drop shadow under the photo on a solid mat.
-  - **`color`** (`[r, g, b]`, default `[235, 235, 235]`): mat background color.
+  - **`colors`** (array of `[r, g, b]` triples and/or `photo-average`; default `[[235, 235, 235]]`): mat background color(s). Multiple entries expand to multiple slots. **`color`** is a convenience alias for a single value (also accepts `photo-average`).
   - **`shadow-color`** (`[r, g, b]`, default `[0, 0, 0]`): shadow tint.
   - **`shadow-opacity`** (float 0–1, default `0.4`): shadow strength at its darkest.
   - **`shadow-blur-px`** (float, default `24.0`): softness of the shadow edge.

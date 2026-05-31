@@ -1223,12 +1223,12 @@ matting:
     assert!(matches!(selected.entry.kind, MattingKind::Vignette));
     match &selected.option.style {
         MattingMode::Vignette {
-            color,
+            colors,
             strength,
             radius,
             softness,
         } => {
-            assert_eq!(*color, [24, 24, 28]);
+            assert_eq!(colors.as_slice(), &[StudioMatColor::Rgb([24, 24, 28])]);
             assert!((strength - 0.6).abs() < 1e-5);
             assert!((radius - 0.75).abs() < 1e-5);
             assert!((softness - 0.5).abs() < 1e-5);
@@ -1317,13 +1317,13 @@ matting:
     assert!(matches!(selected.entry.kind, MattingKind::DropShadow));
     match &selected.option.style {
         MattingMode::DropShadow {
-            color,
+            colors,
             shadow_color,
             shadow_opacity,
             shadow_blur_px,
             shadow_offset_px,
         } => {
-            assert_eq!(*color, [235, 235, 235]);
+            assert_eq!(colors.as_slice(), &[StudioMatColor::Rgb([235, 235, 235])]);
             assert_eq!(*shadow_color, [0, 0, 0]);
             assert!((shadow_opacity - 0.4).abs() < 1e-5);
             assert!((shadow_blur_px - 24.0).abs() < 1e-5);
@@ -1522,4 +1522,97 @@ showcase:
         9,
         "all 9 mat kinds should appear when fixed-image-path is provided"
     );
+}
+
+#[test]
+fn venetian_blinds_orientations_expand_to_slots() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  selection: random
+  active:
+    - kind: venetian-blinds
+      orientations: [horizontal, vertical]
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let opts: Vec<_> = cfg.transition.iter_selected().collect();
+    assert_eq!(opts.len(), 2, "two orientations should expand to two slots");
+    let verticals: Vec<bool> = opts
+        .iter()
+        .map(|o| match o.option.mode() {
+            TransitionMode::VenetianBlinds(vb) => vb.vertical,
+            _ => panic!("expected venetian-blinds"),
+        })
+        .collect();
+    assert_eq!(verticals, vec![false, true]);
+}
+
+#[test]
+fn radial_wipe_shapes_expand_to_slots() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  selection: random
+  active:
+    - kind: radial-wipe
+      shapes: [circle, diamond]
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let opts: Vec<_> = cfg.transition.iter_selected().collect();
+    assert_eq!(opts.len(), 2, "two shapes should expand to two slots");
+    let shapes: Vec<RadialShape> = opts
+        .iter()
+        .map(|o| match o.option.mode() {
+            TransitionMode::RadialWipe(rw) => rw.shape,
+            _ => panic!("expected radial-wipe"),
+        })
+        .collect();
+    assert_eq!(shapes, vec![RadialShape::Circle, RadialShape::Diamond]);
+}
+
+#[test]
+fn vignette_colors_list_expands_and_supports_photo_average() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  selection: random
+  active:
+    - kind: vignette
+      colors: [[10, 20, 30], photo-average]
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let sel: Vec<_> = cfg.matting.iter_selected().collect();
+    assert_eq!(sel.len(), 2, "two vignette colors should expand to two slots");
+    match &sel[0].option.style {
+        MattingMode::Vignette { colors, .. } => {
+            assert_eq!(colors.as_slice(), &[StudioMatColor::Rgb([10, 20, 30])]);
+        }
+        _ => panic!("expected vignette"),
+    }
+    match &sel[1].option.style {
+        MattingMode::Vignette { colors, .. } => {
+            assert_eq!(colors.as_slice(), &[StudioMatColor::PhotoAverage]);
+        }
+        _ => panic!("expected vignette"),
+    }
+}
+
+#[test]
+fn drop_shadow_accepts_photo_average_color() {
+    let yaml = r#"
+photo-library-path: "/photos"
+matting:
+  selection: fixed
+  active:
+    - kind: drop-shadow
+      color: photo-average
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let selected = cfg.matting.primary_selected().expect("expected drop-shadow");
+    match &selected.option.style {
+        MattingMode::DropShadow { colors, .. } => {
+            assert_eq!(colors.as_slice(), &[StudioMatColor::PhotoAverage]);
+        }
+        _ => panic!("expected drop-shadow"),
+    }
 }

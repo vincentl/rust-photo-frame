@@ -461,6 +461,8 @@ pub struct MattingRuntime {
     fixed_color: Option<[u8; 3]>,
     studio_color: Option<StudioMatColor>,
     passe_partout_color: Option<StudioMatColor>,
+    vignette_color: Option<StudioMatColor>,
+    drop_shadow_color: Option<StudioMatColor>,
     fixed_image: Option<Arc<FixedImageBackground>>,
 }
 
@@ -475,6 +477,14 @@ impl MattingRuntime {
 
     pub fn passe_partout_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
         self.passe_partout_color.map(|color| color.resolve(fallback))
+    }
+
+    pub fn vignette_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
+        self.vignette_color.map(|color| color.resolve(fallback))
+    }
+
+    pub fn drop_shadow_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
+        self.drop_shadow_color.map(|color| color.resolve(fallback))
     }
 
     pub fn fixed_image(&self) -> Option<Arc<FixedImageBackground>> {
@@ -623,8 +633,8 @@ pub enum MattingMode {
         angle_degrees: f32,
     },
     Vignette {
-        #[serde(default = "MattingMode::default_vignette_color", rename = "color")]
-        color: [u8; 3],
+        #[serde(default = "MattingMode::default_vignette_colors")]
+        colors: Vec<StudioMatColor>,
         #[serde(default = "MattingMode::default_vignette_strength")]
         strength: f32,
         #[serde(default = "MattingMode::default_vignette_radius")]
@@ -665,8 +675,8 @@ pub enum MattingMode {
         bevel_color: [u8; 3],
     },
     DropShadow {
-        #[serde(default = "MattingMode::default_drop_shadow_color", rename = "color")]
-        color: [u8; 3],
+        #[serde(default = "MattingMode::default_drop_shadow_colors")]
+        colors: Vec<StudioMatColor>,
         #[serde(
             default = "MattingMode::default_drop_shadow_shadow_color",
             rename = "shadow-color"
@@ -811,6 +821,20 @@ impl MattingOptions {
             );
             self.runtime.passe_partout_color = colors.first().copied();
         }
+        if let MattingMode::Vignette { colors, .. } = &self.style {
+            ensure!(
+                !colors.is_empty(),
+                "matting.vignette.colors must include at least one entry",
+            );
+            self.runtime.vignette_color = colors.first().copied();
+        }
+        if let MattingMode::DropShadow { colors, .. } = &self.style {
+            ensure!(
+                !colors.is_empty(),
+                "matting.drop-shadow.colors must include at least one entry",
+            );
+            self.runtime.drop_shadow_color = colors.first().copied();
+        }
         if let MattingMode::FixedImage { paths, .. } = &self.style {
             if paths.is_empty() {
                 return Ok(());
@@ -903,9 +927,9 @@ impl MattingOptions {
                     .unwrap_or_else(MattingMode::default_gradient_angle),
             },
             MattingKind::Vignette => MattingMode::Vignette {
-                color: base
-                    .vignette_color
-                    .unwrap_or_else(MattingMode::default_vignette_color),
+                colors: base
+                    .vignette_colors
+                    .unwrap_or_else(MattingMode::default_vignette_colors),
                 strength: base
                     .vignette_strength
                     .unwrap_or_else(MattingMode::default_vignette_strength),
@@ -941,9 +965,9 @@ impl MattingOptions {
                     .unwrap_or_else(MattingMode::default_studio_bevel_color),
             },
             MattingKind::DropShadow => MattingMode::DropShadow {
-                color: base
-                    .drop_shadow_color
-                    .unwrap_or_else(MattingMode::default_drop_shadow_color),
+                colors: base
+                    .drop_shadow_colors
+                    .unwrap_or_else(MattingMode::default_drop_shadow_colors),
                 shadow_color: base
                     .drop_shadow_shadow_color
                     .unwrap_or_else(MattingMode::default_drop_shadow_shadow_color),
@@ -1022,14 +1046,14 @@ struct MattingOptionBuilder {
     gradient_end: Option<[u8; 3]>,
     gradient_direction: Option<GradientDirection>,
     gradient_angle: Option<f32>,
-    vignette_color: Option<[u8; 3]>,
+    vignette_colors: Option<Vec<StudioMatColor>>,
     vignette_strength: Option<f32>,
     vignette_radius: Option<f32>,
     vignette_softness: Option<f32>,
     cinematic_darken: Option<f32>,
     cinematic_vignette_strength: Option<f32>,
     passe_partout_colors: Option<Vec<StudioMatColor>>,
-    drop_shadow_color: Option<[u8; 3]>,
+    drop_shadow_colors: Option<Vec<StudioMatColor>>,
     drop_shadow_shadow_color: Option<[u8; 3]>,
     drop_shadow_opacity: Option<f32>,
     drop_shadow_blur_px: Option<f32>,
@@ -1242,10 +1266,18 @@ where
             },
             MattingKind::Vignette => match other {
                 "color" => {
-                    if builder.vignette_color.is_some() {
+                    if builder.vignette_colors.is_some() {
                         return Err(de::Error::duplicate_field("color"));
                     }
-                    builder.vignette_color = Some(inline_value_to::<[u8; 3], E>(value)?);
+                    builder.vignette_colors =
+                        Some(vec![inline_value_to::<StudioMatColor, E>(value)?]);
+                }
+                "colors" => {
+                    if builder.vignette_colors.is_some() {
+                        return Err(de::Error::duplicate_field("colors"));
+                    }
+                    builder.vignette_colors =
+                        Some(inline_value_to::<Vec<StudioMatColor>, E>(value)?);
                 }
                 "strength" => {
                     if builder.vignette_strength.is_some() {
@@ -1270,6 +1302,7 @@ where
                         other,
                         &[
                             "color",
+                            "colors",
                             "strength",
                             "radius",
                             "softness",
@@ -1357,10 +1390,18 @@ where
             },
             MattingKind::DropShadow => match other {
                 "color" => {
-                    if builder.drop_shadow_color.is_some() {
+                    if builder.drop_shadow_colors.is_some() {
                         return Err(de::Error::duplicate_field("color"));
                     }
-                    builder.drop_shadow_color = Some(inline_value_to::<[u8; 3], E>(value)?);
+                    builder.drop_shadow_colors =
+                        Some(vec![inline_value_to::<StudioMatColor, E>(value)?]);
+                }
+                "colors" => {
+                    if builder.drop_shadow_colors.is_some() {
+                        return Err(de::Error::duplicate_field("colors"));
+                    }
+                    builder.drop_shadow_colors =
+                        Some(inline_value_to::<Vec<StudioMatColor>, E>(value)?);
                 }
                 "shadow-color" => {
                     if builder.drop_shadow_shadow_color.is_some() {
@@ -1393,6 +1434,7 @@ where
                         other,
                         &[
                             "color",
+                            "colors",
                             "shadow-color",
                             "shadow-opacity",
                             "shadow-blur-px",
@@ -1463,10 +1505,33 @@ impl MattingOptionBuilder {
                     return options;
                 }
             }
-            MattingKind::Gradient
-            | MattingKind::Vignette
-            | MattingKind::CinematicBlur
-            | MattingKind::DropShadow => {}
+            MattingKind::Vignette => {
+                if let Some(colors) = &self.vignette_colors
+                    && colors.len() > 1
+                {
+                    let mut options = Vec::with_capacity(colors.len());
+                    for color in colors.iter().copied() {
+                        let mut builder = self.clone();
+                        builder.vignette_colors = Some(vec![color]);
+                        options.push(MattingOptions::with_kind(kind, builder));
+                    }
+                    return options;
+                }
+            }
+            MattingKind::DropShadow => {
+                if let Some(colors) = &self.drop_shadow_colors
+                    && colors.len() > 1
+                {
+                    let mut options = Vec::with_capacity(colors.len());
+                    for color in colors.iter().copied() {
+                        let mut builder = self.clone();
+                        builder.drop_shadow_colors = Some(vec![color]);
+                        options.push(MattingOptions::with_kind(kind, builder));
+                    }
+                    return options;
+                }
+            }
+            MattingKind::Gradient | MattingKind::CinematicBlur => {}
         }
 
         vec![MattingOptions::with_kind(kind, self)]
@@ -1752,8 +1817,8 @@ impl MattingMode {
         0.0
     }
 
-    const fn default_vignette_color() -> [u8; 3] {
-        [24, 24, 28]
+    fn default_vignette_colors() -> Vec<StudioMatColor> {
+        vec![StudioMatColor::Rgb([24, 24, 28])]
     }
 
     const fn default_vignette_strength() -> f32 {
@@ -1776,8 +1841,8 @@ impl MattingMode {
         0.5
     }
 
-    const fn default_drop_shadow_color() -> [u8; 3] {
-        [235, 235, 235]
+    fn default_drop_shadow_colors() -> Vec<StudioMatColor> {
+        vec![StudioMatColor::Rgb([235, 235, 235])]
     }
 
     const fn default_drop_shadow_shadow_color() -> [u8; 3] {
@@ -2610,7 +2675,11 @@ impl TransitionOptions {
                 let defaults = RadialWipeTransition::default();
                 let mut rw = RadialWipeTransition {
                     softness: builder.radial_wipe_softness.unwrap_or(defaults.softness),
-                    shape: builder.radial_wipe_shape.unwrap_or(defaults.shape),
+                    shape: builder
+                        .radial_wipe_shapes
+                        .as_ref()
+                        .and_then(|s| s.first().copied())
+                        .unwrap_or(defaults.shape),
                     center: builder.radial_wipe_center.unwrap_or(defaults.center),
                 };
                 rw.softness = rw.softness.clamp(0.0, 0.5);
@@ -2627,7 +2696,11 @@ impl TransitionOptions {
                         .unwrap_or(defaults.stripe_count)
                         .max(1),
                     softness: builder.venetian_softness.unwrap_or(defaults.softness),
-                    vertical: builder.venetian_vertical.unwrap_or(defaults.vertical),
+                    vertical: builder
+                        .venetian_orientations
+                        .as_ref()
+                        .and_then(|o| o.first().copied())
+                        .unwrap_or(defaults.vertical),
                 };
                 vb.softness = vb.softness.clamp(0.0, 0.5);
                 TransitionMode::VenetianBlinds(vb)
@@ -2972,11 +3045,13 @@ struct TransitionOptionBuilder {
     dissolve_softness: Option<f32>,
     dissolve_scale: Option<f32>,
     radial_wipe_softness: Option<f32>,
-    radial_wipe_shape: Option<RadialShape>,
+    // One canonical slot per shape; `shape` (singular) or `shapes` (list).
+    radial_wipe_shapes: Option<Vec<RadialShape>>,
     radial_wipe_center: Option<[f32; 2]>,
     venetian_stripe_count: Option<u32>,
     venetian_softness: Option<f32>,
-    venetian_vertical: Option<bool>,
+    // One canonical slot per orientation (true = vertical); `orientation` or `orientations`.
+    venetian_orientations: Option<Vec<bool>>,
     crossfade_zoom: Option<f32>,
     crossfade_current_zooms_in: Option<bool>,
     crossfade_next_zooms_in: Option<bool>,
@@ -2998,6 +3073,34 @@ impl TransitionOptionBuilder {
                 self.into_canonical_with_angles(kind, angles, jitter, |builder, base| {
                     builder.push_angle_list_deg = Some(vec![base])
                 })
+            }
+            TransitionKind::RadialWipe => {
+                if let Some(shapes) = self.radial_wipe_shapes.clone()
+                    && shapes.len() > 1
+                {
+                    let mut options = Vec::with_capacity(shapes.len());
+                    for shape in shapes {
+                        let mut builder = self.clone();
+                        builder.radial_wipe_shapes = Some(vec![shape]);
+                        options.push(TransitionOptions::with_kind(kind, builder)?);
+                    }
+                    return Ok(options);
+                }
+                Ok(vec![TransitionOptions::with_kind(kind, self)?])
+            }
+            TransitionKind::VenetianBlinds => {
+                if let Some(orientations) = self.venetian_orientations.clone()
+                    && orientations.len() > 1
+                {
+                    let mut options = Vec::with_capacity(orientations.len());
+                    for vertical in orientations {
+                        let mut builder = self.clone();
+                        builder.venetian_orientations = Some(vec![vertical]);
+                        options.push(TransitionOptions::with_kind(kind, builder)?);
+                    }
+                    return Ok(options);
+                }
+                Ok(vec![TransitionOptions::with_kind(kind, self)?])
             }
             _ => {
                 let option = TransitionOptions::with_kind(kind, self)?;
@@ -3052,6 +3155,14 @@ impl TransitionOptionBuilder {
             options.push(option);
         }
         Ok(options)
+    }
+}
+
+fn parse_orientation<E: de::Error>(value: String) -> Result<bool, E> {
+    match value.as_str() {
+        "vertical" => Ok(true),
+        "horizontal" => Ok(false),
+        other => Err(de::Error::unknown_variant(other, &["horizontal", "vertical"])),
     }
 }
 
@@ -3138,20 +3249,22 @@ fn apply_transition_inline_field<E: de::Error>(
             builder.radial_wipe_center = Some(inline_value_to::<[f32; 2], E>(value)?);
         }
         "shape" if matches!(kind, TransitionKind::RadialWipe) => {
-            builder.radial_wipe_shape = Some(inline_value_to::<RadialShape, E>(value)?);
+            builder.radial_wipe_shapes = Some(vec![inline_value_to::<RadialShape, E>(value)?]);
+        }
+        "shapes" if matches!(kind, TransitionKind::RadialWipe) => {
+            builder.radial_wipe_shapes = Some(inline_value_to::<Vec<RadialShape>, E>(value)?);
         }
         "orientation" if matches!(kind, TransitionKind::VenetianBlinds) => {
-            let s = inline_value_to::<String, E>(value)?;
-            builder.venetian_vertical = Some(match s.as_str() {
-                "vertical" => true,
-                "horizontal" => false,
-                other => {
-                    return Err(de::Error::unknown_variant(
-                        other,
-                        &["horizontal", "vertical"],
-                    ));
-                }
-            });
+            builder.venetian_orientations =
+                Some(vec![parse_orientation::<E>(inline_value_to::<String, E>(value)?)?]);
+        }
+        "orientations" if matches!(kind, TransitionKind::VenetianBlinds) => {
+            let raw = inline_value_to::<Vec<String>, E>(value)?;
+            let mut out = Vec::with_capacity(raw.len());
+            for s in raw {
+                out.push(parse_orientation::<E>(s)?);
+            }
+            builder.venetian_orientations = Some(out);
         }
         "zoom" if matches!(kind, TransitionKind::CrossfadeZoom) => {
             builder.crossfade_zoom = Some(inline_value_to::<f32, E>(value)?);
@@ -3179,7 +3292,9 @@ fn apply_transition_inline_field<E: de::Error>(
                     "scale",
                     "center",
                     "shape",
+                    "shapes",
                     "orientation",
+                    "orientations",
                     "zoom",
                     "current-zooms-in",
                     "next-zooms-in",

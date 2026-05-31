@@ -65,13 +65,13 @@ transition:
     - kind: radial-wipe # circle or diamond reveal from center
       duration-ms: 500
       softness: 0.1
-      shape: circle # circle | diamond
+      shape: circle # circle | diamond; or shapes: [circle, diamond] for both
       center: [0.5, 0.5]
     - kind: venetian-blinds # horizontal/vertical stripe reveal
       duration-ms: 600
       stripe-count: 16
       softness: 0.1
-      orientation: horizontal # horizontal | vertical
+      orientation: horizontal # horizontal | vertical; or orientations: [horizontal, vertical]
     - kind: crossfade-zoom # fade combined with subtle scale
       duration-ms: 700
       zoom: 0.06
@@ -210,6 +210,8 @@ matting:
       angle-degrees: 0.0 # optional rotation for linear gradients
     - kind: vignette # solid color with darkened edges
       minimum-mat-percentage: 6.0
+      # `color` accepts an [r,g,b] triple or photo-average; use `colors: [...]`
+      # to rotate several base colors (each expands into its own slot).
       color: [24, 24, 28] # base mat color
       strength: 0.6 # 0 = no darkening, 1 = edges go black
       radius: 0.75 # fraction of half-diagonal where darkening starts
@@ -228,6 +230,8 @@ matting:
       bevel-color: [255, 255, 255]
     - kind: drop-shadow # soft drop shadow under the photo on a solid mat
       minimum-mat-percentage: 6.0
+      # `color` accepts an [r,g,b] triple or photo-average; use `colors: [...]`
+      # to rotate several mat colors (each expands into its own slot).
       color: [235, 235, 235] # mat background color
       shadow-color: [0, 0, 0]
       shadow-opacity: 0.4

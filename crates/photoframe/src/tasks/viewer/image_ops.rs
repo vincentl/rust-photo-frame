@@ -321,6 +321,11 @@ pub(super) fn srgb_u8(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+/// Convert a linear `[f32; 3]` color in `0.0..=1.0` to `[u8; 3]`.
+pub(super) fn f32_rgb_to_u8(c: [f32; 3]) -> [u8; 3] {
+    [srgb_u8(c[0]), srgb_u8(c[1]), srgb_u8(c[2])]
+}
+
 pub(super) fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }

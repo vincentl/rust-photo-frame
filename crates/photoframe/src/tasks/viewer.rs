@@ -736,13 +736,19 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
     }
 
     if let MattingMode::DropShadow {
-        color,
         shadow_color,
         shadow_opacity,
         shadow_blur_px,
         shadow_offset_px,
+        ..
     } = &matting.style
     {
+        let color = f32_rgb_to_u8(
+            matting
+                .runtime
+                .drop_shadow_color(avg_color)
+                .unwrap_or(avg_color),
+        );
         let (final_w, final_h) =
             resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
         let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
@@ -883,11 +889,18 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             *angle_degrees,
         ),
         MattingMode::Vignette {
-            color,
             strength,
             radius,
             softness,
-        } => render_vignette_canvas(canvas_w, canvas_h, *color, *strength, *radius, *softness),
+            ..
+        } => {
+            let resolved = matting
+                .runtime
+                .vignette_color(avg_color)
+                .unwrap_or(avg_color);
+            let color = f32_rgb_to_u8(resolved);
+            render_vignette_canvas(canvas_w, canvas_h, color, *strength, *radius, *softness)
+        }
         MattingMode::CinematicBlur {
             sigma,
             sample_scale,
