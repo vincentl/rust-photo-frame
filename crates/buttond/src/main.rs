@@ -1036,7 +1036,11 @@ impl ScreenDetector for SwayScreenDetector {
 
 struct SwayEnvironment {
     runtime_dir: PathBuf,
-    socket_path: PathBuf,
+    /// Socket explicitly pinned via the `SWAYSOCK` environment variable at
+    /// startup (dev/test override). It is re-validated on every use and we fall
+    /// back to live discovery if it disappears, so a pinned-but-dead socket
+    /// never strands us.
+    explicit_socket: Option<PathBuf>,
 }
 
 impl SwayEnvironment {
@@ -1053,30 +1057,59 @@ impl SwayEnvironment {
             bail!("XDG_RUNTIME_DIR '{}' does not exist", runtime_dir.display());
         }
 
-        if let Some(sock) = env::var_os("SWAYSOCK") {
-            let candidate = PathBuf::from(sock);
-            if is_socket(&candidate)? {
-                return Ok(Self {
-                    runtime_dir,
-                    socket_path: candidate,
-                });
+        let explicit_socket = match env::var_os("SWAYSOCK") {
+            Some(sock) if !sock.is_empty() => {
+                let candidate = PathBuf::from(sock);
+                if is_socket(&candidate)? {
+                    Some(candidate)
+                } else {
+                    bail!(
+                        "SWAYSOCK '{}' is not a valid sway IPC socket",
+                        candidate.display()
+                    );
+                }
             }
-            bail!(
-                "SWAYSOCK '{}' is not a valid sway IPC socket",
-                candidate.display()
-            );
-        }
+            _ => None,
+        };
 
-        let socket_path = find_sway_socket(&runtime_dir)?;
         Ok(Self {
             runtime_dir,
-            socket_path,
+            explicit_socket,
         })
+    }
+
+    /// Resolve the *live* sway IPC socket. This re-discovers on every call so
+    /// that a sway restart (new PID → new socket path) does not leave buttond
+    /// pinned to a dead endpoint for the rest of its lifetime. The compositor is
+    /// launched by greetd independently of this long-lived system service, so it
+    /// can and does cycle underneath us.
+    fn resolve_socket(&self) -> Result<PathBuf> {
+        if let Some(sock) = &self.explicit_socket
+            && is_socket(sock).unwrap_or(false)
+        {
+            return Ok(sock.clone());
+        }
+        find_sway_socket(&self.runtime_dir)
     }
 
     fn configure(&self, command: &mut Command) {
         command.env("XDG_RUNTIME_DIR", &self.runtime_dir);
-        command.env("SWAYSOCK", &self.socket_path);
+        match self.resolve_socket() {
+            Ok(socket_path) => {
+                command.env("SWAYSOCK", socket_path);
+            }
+            Err(err) => {
+                // Never forward a stale SWAYSOCK: a crashed sway often leaves its
+                // socket file on disk, and powerctl/swaymsg would trust an
+                // inherited SWAYSOCK that points at it. Clear it so the child can
+                // rediscover the live socket on its own.
+                warn!(
+                    ?err,
+                    "no live sway IPC socket; clearing SWAYSOCK for child command"
+                );
+                command.env_remove("SWAYSOCK");
+            }
+        }
     }
 }
 
@@ -1371,9 +1404,12 @@ fn scheduler_loop(
 ) {
     const MAX_SLEEP: Duration = Duration::from_secs(60);
     const COMMAND_SETTLE: Duration = Duration::from_millis(100);
-    const COMMAND_RETRY: Duration = Duration::from_secs(1);
     let greeting_ready_at = Instant::now() + config.greeting_delay;
-    let mut pending_command: Option<(SchedulerCommand, Instant)> = None;
+    // Tracks the command we're trying to apply, when it was last dispatched, and
+    // how many times we've sent it without it taking effect. The attempt count
+    // drives exponential backoff so a persistently failing transition (e.g. the
+    // compositor is down) can't spin in a tight 1s retry loop.
+    let mut pending_command: Option<(SchedulerCommand, Instant, u32)> = None;
 
     loop {
         let now_instant = Instant::now();
@@ -1396,9 +1432,11 @@ fn scheduler_loop(
         };
         let desired_mode = override_state.target().unwrap_or(schedule_desired);
 
-        if let Some((command, _)) = pending_command.as_ref()
+        if let Some((command, _, _)) = pending_command.as_ref()
             && current_mode == command.target_mode()
         {
+            // The transition took effect; clear the backoff so the next command
+            // starts fresh at the base retry interval.
             pending_command = None;
         }
 
@@ -1422,19 +1460,36 @@ fn scheduler_loop(
                 continue;
             }
 
-            let recently_sent = pending_command
-                .as_ref()
-                .is_some_and(|(pending, last_sent)| {
-                    *pending == command && now_instant.duration_since(*last_sent) < COMMAND_RETRY
-                });
-            if recently_sent {
-                sleep_for(COMMAND_SETTLE, MAX_SLEEP);
-                continue;
-            }
+            // If we've already dispatched this exact command and it hasn't taken
+            // effect, wait out its (growing) backoff before trying again. Sleeping
+            // the remaining interval—rather than polling every COMMAND_SETTLE—keeps
+            // a wedged compositor from burning CPU while still capping the sleep at
+            // MAX_SLEEP so we stay responsive to schedule changes and channel close.
+            let attempts = match pending_command.as_ref() {
+                Some((pending, last_sent, attempts)) if *pending == command => {
+                    let backoff = retry_backoff(*attempts);
+                    let elapsed = now_instant.saturating_duration_since(*last_sent);
+                    if elapsed < backoff {
+                        sleep_for(backoff - elapsed, MAX_SLEEP);
+                        continue;
+                    }
+                    *attempts
+                }
+                _ => 0,
+            };
 
             match tx.send(command) {
                 Ok(()) => {
-                    pending_command = Some((command, Instant::now()));
+                    let attempts = attempts.saturating_add(1);
+                    if attempts > 1 {
+                        warn!(
+                            ?command,
+                            attempt = attempts,
+                            backoff = %format_duration(retry_backoff(attempts)),
+                            "scheduled transition has not taken effect; retrying with backoff",
+                        );
+                    }
+                    pending_command = Some((command, Instant::now(), attempts));
                     sleep_for(COMMAND_SETTLE, MAX_SLEEP);
                     continue;
                 }
@@ -1463,6 +1518,18 @@ fn scheduler_loop(
         let sleep_duration = next_check.saturating_duration_since(Instant::now());
         sleep_for(sleep_duration, MAX_SLEEP);
     }
+}
+
+/// Exponential backoff between repeated dispatches of an unapplied scheduled
+/// command. `attempts` is the number of times the command has already been sent;
+/// the resulting delay doubles per attempt from a 1s base, capped at 60s.
+fn retry_backoff(attempts: u32) -> Duration {
+    const BASE: Duration = Duration::from_secs(1);
+    const MAX: Duration = Duration::from_secs(60);
+    // Clamp the shift so the multiply can't overflow (2^6 = 64 already exceeds
+    // the cap with a 1s base).
+    let shift = attempts.saturating_sub(1).min(6);
+    BASE.saturating_mul(1u32 << shift).min(MAX)
 }
 
 fn sleep_for(duration: Duration, max_sleep: Duration) {
@@ -1758,7 +1825,7 @@ mod tests {
         SchedulerConfig, ScreenDetection, ScreenDetector, ScreenRuntime, ScreenState,
         SwayEnvironment, SwayScreenDetector, TransitionSource, UnixControlSocket, ViewerMode,
         configure_shutdown_args, find_sway_socket_with_proc_root, override_proc_root,
-        parse_sway_outputs, scheduler_loop,
+        parse_sway_outputs, retry_backoff, scheduler_loop,
     };
     use config_model::AwakeScheduleConfig;
     use serde_yaml::from_str;
@@ -2061,7 +2128,71 @@ awake-scheduled: {}
 
         let env = SwayEnvironment::prepare().expect("env configured");
         assert_eq!(env.runtime_dir, runtime_path);
-        assert_eq!(env.socket_path, socket_path);
+        assert_eq!(env.explicit_socket, Some(socket_path.clone()));
+        assert_eq!(env.resolve_socket().expect("resolve explicit"), socket_path);
+    }
+
+    #[test]
+    fn explicit_socket_falls_back_to_discovery_when_removed() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let runtime = tempdir().expect("tempdir");
+        let runtime_path = runtime.path().to_path_buf();
+        let uid = fs::metadata(&runtime_path).expect("runtime metadata").uid();
+
+        // Pin an explicit socket, then delete it to simulate a sway restart.
+        let pinned = runtime_path.join("sway-ipc.pinned.sock");
+        let pinned_listener = UnixListener::bind(&pinned).expect("pinned socket");
+        let _runtime_guard = EnvGuard::replace("XDG_RUNTIME_DIR", Some(runtime_path.as_os_str()));
+        let _socket_guard = EnvGuard::replace("SWAYSOCK", Some(pinned.as_os_str()));
+        let env = SwayEnvironment::prepare().expect("env configured");
+
+        drop(pinned_listener);
+        fs::remove_file(&pinned).expect("remove pinned socket");
+
+        // A live sway is discoverable via /proc + a fresh runtime socket.
+        let pid = 47474;
+        let live_socket = runtime_path.join(format!("sway-ipc.{uid}.{pid}.sock"));
+        let _live_listener = UnixListener::bind(&live_socket).expect("live socket");
+        let procfs = tempdir().expect("procfs");
+        write_proc_status(procfs.path(), pid, "sway", uid);
+        let _proc_guard = override_proc_root(procfs.path());
+
+        assert_eq!(env.resolve_socket().expect("resolve fallback"), live_socket);
+    }
+
+    #[test]
+    fn resolve_socket_rediscovers_live_socket_after_restart() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let runtime = tempdir().expect("tempdir");
+        let runtime_path = runtime.path().to_path_buf();
+        let uid = fs::metadata(&runtime_path).expect("runtime metadata").uid();
+        let procfs = tempdir().expect("procfs");
+        let _proc_guard = override_proc_root(procfs.path());
+        let _runtime_guard = EnvGuard::replace("XDG_RUNTIME_DIR", Some(runtime_path.as_os_str()));
+        let _socket_guard = EnvGuard::replace("SWAYSOCK", None);
+
+        // First sway generation.
+        let old_pid = 11111;
+        let old_socket = runtime_path.join(format!("sway-ipc.{uid}.{old_pid}.sock"));
+        let old_listener = UnixListener::bind(&old_socket).expect("old socket");
+        write_proc_status(procfs.path(), old_pid, "sway", uid);
+
+        let env = SwayEnvironment::prepare().expect("env configured");
+        assert_eq!(env.resolve_socket().expect("resolve old"), old_socket);
+
+        // Sway restarts: old process and socket are gone, a new PID takes over.
+        drop(old_listener);
+        fs::remove_file(&old_socket).expect("remove old socket");
+        fs::remove_dir_all(procfs.path().join(old_pid.to_string())).expect("remove old proc");
+        let new_pid = 22222;
+        let new_socket = runtime_path.join(format!("sway-ipc.{uid}.{new_pid}.sock"));
+        let _new_listener = UnixListener::bind(&new_socket).expect("new socket");
+        write_proc_status(procfs.path(), new_pid, "sway", uid);
+
+        // The same long-lived env must now resolve the NEW socket, not the stale
+        // one it returned a moment ago. This is the regression behind the frame
+        // failing to wake after a compositor restart.
+        assert_eq!(env.resolve_socket().expect("resolve new"), new_socket);
     }
 
     #[test]
@@ -2125,7 +2256,8 @@ awake-scheduled: {}
 
         let env = SwayEnvironment::prepare().expect("env configured");
         assert_eq!(env.runtime_dir, runtime_path);
-        assert_eq!(env.socket_path, socket_path);
+        assert_eq!(env.explicit_socket, None);
+        assert_eq!(env.resolve_socket().expect("discover socket"), socket_path);
     }
 
     #[test]
@@ -2191,7 +2323,7 @@ awake-scheduled: {}
 
         let env = Arc::new(SwayEnvironment {
             runtime_dir: dir.path().to_path_buf(),
-            socket_path: dir.path().join("sway-ipc.test.sock"),
+            explicit_socket: None,
         });
 
         let detector = SwayScreenDetector::new(env, Some(script_path));
@@ -2214,7 +2346,7 @@ awake-scheduled: {}
 
         let env = Arc::new(SwayEnvironment {
             runtime_dir: dir.path().to_path_buf(),
-            socket_path: dir.path().join("sway-ipc.test.sock"),
+            explicit_socket: None,
         });
 
         let detector = SwayScreenDetector::new(env, Some(script_path));
@@ -2476,5 +2608,21 @@ awake-scheduled: {}
 
         drop(rx);
         handle.join().expect("scheduler thread");
+    }
+
+    #[test]
+    fn retry_backoff_grows_then_caps() {
+        // attempts == 0 (no send yet) and the first send both use the base delay.
+        assert_eq!(retry_backoff(0), Duration::from_secs(1));
+        assert_eq!(retry_backoff(1), Duration::from_secs(1));
+        assert_eq!(retry_backoff(2), Duration::from_secs(2));
+        assert_eq!(retry_backoff(3), Duration::from_secs(4));
+        assert_eq!(retry_backoff(4), Duration::from_secs(8));
+        assert_eq!(retry_backoff(5), Duration::from_secs(16));
+        assert_eq!(retry_backoff(6), Duration::from_secs(32));
+        // Capped at 60s thereafter, with no overflow for large attempt counts.
+        assert_eq!(retry_backoff(7), Duration::from_secs(60));
+        assert_eq!(retry_backoff(100), Duration::from_secs(60));
+        assert_eq!(retry_backoff(u32::MAX), Duration::from_secs(60));
     }
 }
