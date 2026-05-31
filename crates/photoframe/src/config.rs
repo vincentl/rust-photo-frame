@@ -2815,21 +2815,21 @@ impl AnglePicker {
         ensure!(
             self.base_deg.is_finite(),
             format!(
-                "transition option {} has non-finite values in angle-list-degrees",
+                "transition option {} has non-finite values in angles",
                 kind
             )
         );
         ensure!(
             self.jitter_deg.is_finite(),
             format!(
-                "transition option {} has non-finite angle-jitter-degrees",
+                "transition option {} has non-finite angle-jitter",
                 kind
             )
         );
         ensure!(
             self.jitter_deg >= 0.0,
             format!(
-                "transition option {} requires angle-jitter-degrees >= 0",
+                "transition option {} requires angle-jitter >= 0",
                 kind
             )
         );
@@ -3136,14 +3136,14 @@ impl TransitionOptionBuilder {
         ensure!(
             jitter_value.is_finite(),
             format!(
-                "transition option {} has non-finite angle-jitter-degrees",
+                "transition option {} has non-finite angle-jitter",
                 kind
             )
         );
         ensure!(
             jitter_value >= 0.0,
             format!(
-                "transition option {} requires angle-jitter-degrees >= 0",
+                "transition option {} requires angle-jitter >= 0",
                 kind
             )
         );
@@ -3151,7 +3151,7 @@ impl TransitionOptionBuilder {
         ensure!(
             !base_angles.is_empty(),
             format!(
-                "transition option {} requires angle-list-degrees to include at least one entry",
+                "transition option {} requires angles to include at least one entry",
                 kind
             )
         );
@@ -3161,7 +3161,7 @@ impl TransitionOptionBuilder {
             ensure!(
                 base.is_finite(),
                 format!(
-                    "transition option {} has non-finite values in angle-list-degrees",
+                    "transition option {} has non-finite values in angles",
                     kind
                 )
             );
@@ -3195,7 +3195,7 @@ fn apply_transition_inline_field<E: de::Error>(
         "through-black" if matches!(kind, TransitionKind::Fade) => {
             builder.fade_through_black = Some(inline_value_to::<bool, E>(value)?);
         }
-        "angle-list-degrees" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
+        "angles" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
             let angles = inline_value_to::<Vec<f32>, E>(value)?;
             match kind {
                 TransitionKind::Wipe => builder.wipe_angle_list_deg = Some(angles),
@@ -3203,7 +3203,7 @@ fn apply_transition_inline_field<E: de::Error>(
                 _ => {}
             }
         }
-        "angle-jitter-degrees" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
+        "angle-jitter" if matches!(kind, TransitionKind::Wipe | TransitionKind::Push) => {
             let jitter = inline_value_to::<f32, E>(value)?;
             match kind {
                 TransitionKind::Wipe => builder.wipe_angle_jitter_deg = Some(jitter),
@@ -3290,9 +3290,9 @@ fn apply_transition_inline_field<E: de::Error>(
                 &[
                     "duration-ms",
                     "through-black",
-                    "angle-list-degrees",
+                    "angles",
                     "angle-selection",
-                    "angle-jitter-degrees",
+                    "angle-jitter",
                     "softness",
                     "flash-count",
                     "reveal-portion",

@@ -45,13 +45,13 @@ transition:
       through-black: false # true: fade to black before revealing the next photo
     - kind: wipe
       duration-ms: 400
-      angle-list-degrees: [0.0] # add angles (e.g. [0.0, 90.0, 180.0, 270.0]) for variety
-      angle-jitter-degrees: 0.0 # randomize direction by ±this many degrees
+      angles: [0.0] # add angles (e.g. [0.0, 90.0, 180.0, 270.0]) for variety
+      angle-jitter: 0.0 # randomize direction by ±this many degrees
       softness: 0.05
     - kind: push
       duration-ms: 400
-      angle-list-degrees: [0.0]
-      angle-jitter-degrees: 0.0
+      angles: [0.0]
+      angle-jitter: 0.0
     - kind: e-ink
       duration-ms: 1600
       flash-count: 0

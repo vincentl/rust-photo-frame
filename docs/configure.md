@@ -347,12 +347,12 @@ The remaining knobs depend on the family:
 - **`fade`**
   - **`through-black`** (boolean, default `false`): fade to black completely before revealing the next image.
 - **`wipe`**
-  - **`angle-list-degrees`** (array of floats, default `[0.0]`): wipe directions in degrees (`0°` left→right, `90°` top→bottom). At least one finite value required. Each angle expands into its own canonical option; repeat values to bias direction.
-  - **`angle-jitter-degrees`** (float ≥ 0, default `0.0`): random jitter within ±the supplied degrees.
+  - **`angles`** (array of floats, default `[0.0]`): wipe directions in degrees (`0°` left→right, `90°` top→bottom). At least one finite value required. Each angle expands into its own canonical option; repeat values to bias direction.
+  - **`angle-jitter`** (float ≥ 0, default `0.0`): random jitter within ±the supplied degrees.
   - **`softness`** (float, default `0.05`, clamped `0.0–0.5`): feathers the wipe edge.
 - **`push`**
-  - **`angle-list-degrees`** (array of floats, default `[0.0]`): direction the new image pushes from.
-  - **`angle-jitter-degrees`** (float ≥ 0, default `0.0`): randomizes the push direction.
+  - **`angles`** (array of floats, default `[0.0]`): direction the new image pushes from.
+  - **`angle-jitter`** (float ≥ 0, default `0.0`): randomizes the push direction.
 - **`e-ink`**
   - **`flash-count`** (integer, default `0`, capped at `6`): alternating black/flash pulses before the reveal.
   - **`reveal-portion`** (float, default `0.55`, clamped `0.05–0.95`): fraction of the timeline spent flashing before stripes start uncovering.
@@ -499,10 +499,10 @@ transition:
       duration-ms: 450
     - kind: push
       duration-ms: 520
-      angle-list-degrees: [0.0]
+      angles: [0.0]
     - kind: push
       duration-ms: 520
-      angle-list-degrees: [180.0]
+      angles: [180.0]
 ```
 
 Repeating the `push` entry gives that family twice the draw weight versus `fade`.
@@ -515,13 +515,13 @@ transition:
   active:
     - kind: push
       duration-ms: 520
-      angle-list-degrees: [0.0]
+      angles: [0.0]
     - kind: wipe
       duration-ms: 520
-      angle-list-degrees: [90.0]
+      angles: [90.0]
     - kind: push
       duration-ms: 520
-      angle-list-degrees: [180.0]
+      angles: [180.0]
 ```
 
 ## Matting examples

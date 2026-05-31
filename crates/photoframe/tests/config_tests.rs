@@ -697,11 +697,11 @@ transition:
       duration-ms: 450
     - kind: wipe
       duration-ms: 600
-      angle-list-degrees: [90.0]
+      angles: [90.0]
       softness: 0.1
     - kind: push
       duration-ms: 640
-      angle-list-degrees: [0.0, 180.0]
+      angles: [0.0, 180.0]
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -789,13 +789,13 @@ transition:
   active:
     - kind: push
       duration-ms: 640
-      angle-list-degrees: [0.0, 180.0]
+      angles: [0.0, 180.0]
     - kind: wipe
       duration-ms: 520
-      angle-list-degrees: [90.0]
+      angles: [90.0]
     - kind: push
       duration-ms: 640
-      angle-list-degrees: [0.0, 180.0]
+      angles: [0.0, 180.0]
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
@@ -901,7 +901,7 @@ transition:
       duration-ms: 250
     - kind: wipe
       duration-ms: 400
-      angle-list-degrees: [0.0]
+      angles: [0.0]
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
@@ -965,13 +965,13 @@ transition:
   selection: fixed
   active:
     - kind: wipe
-      angle-jitter-degrees: -15.0
+      angle-jitter: -15.0
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
     assert!(
         err.to_string()
-            .contains("requires angle-jitter-degrees >= 0")
+            .contains("requires angle-jitter >= 0")
     );
 }
 
@@ -983,12 +983,12 @@ transition:
   selection: fixed
   active:
     - kind: wipe
-      angle-list-degrees: []
+      angles: []
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
     assert!(err.to_string().contains(
-        "transition option wipe requires angle-list-degrees to include at least one entry"
+        "transition option wipe requires angles to include at least one entry"
     ));
 }
 
@@ -1000,13 +1000,13 @@ transition:
   selection: fixed
   active:
     - kind: push
-      angle-jitter-degrees: -30.0
+      angle-jitter: -30.0
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
     assert!(
         err.to_string()
-            .contains("requires angle-jitter-degrees >= 0")
+            .contains("requires angle-jitter >= 0")
     );
 }
 
@@ -1018,7 +1018,7 @@ transition:
   active:
     - kind: push
       duration-ms: 725
-      angle-list-degrees: [90.0, 270.0]
+      angles: [90.0, 270.0]
 "#;
 
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
