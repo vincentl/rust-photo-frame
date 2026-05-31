@@ -23,8 +23,19 @@ use super::{ImgTex, TransitionState};
 
 // ── Caption overlay ───────────────────────────────────────────────────────────
 
+/// Uniform for the caption backing panel (must match caption_panel.wgsl).
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct PanelUniforms {
+    resolution: [f32; 2],
+    _pad0: [f32; 2],
+    rect: [f32; 4],
+    color: [f32; 4],
+}
+
 /// Lightweight text overlay rendered on top of the live photo via `LoadOp::Load`.
-/// Draws a single short line in the bottom-left corner.
+/// Draws a single short line in the bottom-left corner, on a solid backing panel
+/// so it stays legible over any mat (light, dark, or busy).
 pub(super) struct CaptionOverlay {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -34,6 +45,9 @@ pub(super) struct CaptionOverlay {
     text_buffer: Buffer,
     font_system: FontSystem,
     swash_cache: SwashCache,
+    panel_pipeline: wgpu::RenderPipeline,
+    panel_bind_group: wgpu::BindGroup,
+    panel_uniform_buffer: wgpu::Buffer,
     text: String,
     size: PhysicalSize<u32>,
     dirty: bool,
@@ -56,6 +70,72 @@ impl CaptionOverlay {
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         let swash_cache = SwashCache::new();
 
+        // Backing-panel pipeline: one alpha-blended quad positioned in pixel space.
+        let panel_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("caption-panel-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("caption_panel.wgsl").into()),
+        });
+        let panel_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("caption-panel-uniforms"),
+            size: std::mem::size_of::<PanelUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let panel_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("caption-panel-bind-layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<PanelUniforms>() as u64,
+                    ),
+                },
+                count: None,
+            }],
+        });
+        let panel_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("caption-panel-bind-group"),
+            layout: &panel_bind_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: panel_uniform_buffer.as_entire_binding(),
+            }],
+        });
+        let panel_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("caption-panel-pipeline-layout"),
+                bind_group_layouts: &[&panel_bind_layout],
+                push_constant_ranges: &[],
+            });
+        let panel_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("caption-panel-pipeline"),
+            layout: Some(&panel_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &panel_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &panel_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -65,6 +145,9 @@ impl CaptionOverlay {
             text_buffer,
             font_system,
             swash_cache,
+            panel_pipeline,
+            panel_bind_group,
+            panel_uniform_buffer,
             text: String::new(),
             size: PhysicalSize::new(0, 0),
             dirty: false,
@@ -115,42 +198,44 @@ impl CaptionOverlay {
         }
 
         let margin = 20.0_f32;
+        let line_h = 34.0_f32;
         // Position at bottom-left; offset up by one line height.
-        let top = (self.size.height as f32 - 34.0 - margin).max(0.0);
+        let top = (self.size.height as f32 - line_h - margin).max(0.0);
 
-        // Light-cyan fill with a solid black outline (8 offset copies) so the
-        // caption stays legible over any mat — light, dark, or busy/mid-tone.
-        let fill_color = GlyphonColor::rgb(150, 240, 240);
-        let outline_color = GlyphonColor::rgb(0, 0, 0);
+        // Measure the laid-out text so the backing panel fits it.
+        let mut text_w = 0.0_f32;
+        for run in self.text_buffer.layout_runs() {
+            text_w = text_w.max(run.line_w);
+        }
+        if text_w <= 0.0 {
+            return false;
+        }
+
+        // Backing panel: a near-opaque dark rectangle so the caption is legible
+        // over ANY mat. Drawn first (under the text) in the same pass.
+        let pad_x = 14.0_f32;
+        let pad_y = 8.0_f32;
+        let rect_x = (margin - pad_x).max(0.0);
+        let rect_y = (top - pad_y).max(0.0);
+        let rect_w = text_w + 2.0 * pad_x;
+        let rect_h = line_h + 2.0 * pad_y;
+        let panel = PanelUniforms {
+            resolution: [self.size.width as f32, self.size.height as f32],
+            _pad0: [0.0, 0.0],
+            rect: [rect_x, rect_y, rect_w, rect_h],
+            color: [0.0, 0.04, 0.06, 0.72], // dark, ~72% opaque
+        };
+        self.queue
+            .write_buffer(&self.panel_uniform_buffer, 0, bytemuck::bytes_of(&panel));
+
+        let fill_color = GlyphonColor::rgb(170, 244, 244); // light cyan
         let bounds = TextBounds {
             left: 0,
             top: 0,
             right: self.size.width as i32,
             bottom: self.size.height as i32,
         };
-        let r = 2.0_f32;
-        let mut areas: Vec<TextArea> = Vec::with_capacity(9);
-        for (dx, dy) in [
-            (-r, -r),
-            (0.0, -r),
-            (r, -r),
-            (-r, 0.0),
-            (r, 0.0),
-            (-r, r),
-            (0.0, r),
-            (r, r),
-        ] {
-            areas.push(TextArea {
-                buffer: &self.text_buffer,
-                left: margin + dx,
-                top: top + dy,
-                scale: 1.0,
-                bounds,
-                default_color: outline_color,
-                custom_glyphs: &[],
-            });
-        }
-        areas.push(TextArea {
+        let main = TextArea {
             buffer: &self.text_buffer,
             left: margin,
             top,
@@ -158,7 +243,7 @@ impl CaptionOverlay {
             bounds,
             default_color: fill_color,
             custom_glyphs: &[],
-        });
+        };
 
         if let Err(err) = self.text_renderer.prepare(
             &self.device,
@@ -166,7 +251,7 @@ impl CaptionOverlay {
             &mut self.font_system,
             &mut self.atlas,
             &self.viewport,
-            areas,
+            [main],
             &mut self.swash_cache,
         ) {
             tracing::warn!(error = %err, "caption_overlay_prepare_failed");
@@ -190,6 +275,10 @@ impl CaptionOverlay {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
+            // Panel first (under the text), then the glyphs on top.
+            pass.set_pipeline(&self.panel_pipeline);
+            pass.set_bind_group(0, &self.panel_bind_group, &[]);
+            pass.draw(0..6, 0..1);
             if let Err(err) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
                 render_error = Some(err);
             }
