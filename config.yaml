@@ -17,8 +17,6 @@ buttond:
   debounce-ms: 20
   single-window-ms: 250
   double-window-ms: 400
-  # A manual press now overrides the schedule until the next scheduled
-  # wake/sleep boundary (no grace timer). A second press undoes the override.
   force-shutdown: true # For systemctl: add -i and --no-ask-password
   shutdown-command:
     program: /usr/bin/systemctl
