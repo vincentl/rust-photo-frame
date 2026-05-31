@@ -54,8 +54,12 @@ pub struct HotspotConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct UiConfig {
-    #[serde(default = "default_ui_bind")]
-    pub bind_address: String,
+    /// Address the portal listener binds to.  When unset, the UI binds to the
+    /// hotspot's `ipv4_addr` so it is reachable only on the recovery AP and
+    /// never on the home LAN (see `run_ui`).  Set explicitly (e.g. `0.0.0.0`)
+    /// only for local testing.
+    #[serde(default)]
+    pub bind_address: Option<String>,
     #[serde(default = "default_ui_port")]
     pub port: u16,
 }
@@ -105,7 +109,7 @@ impl Default for HotspotConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            bind_address: default_ui_bind(),
+            bind_address: None,
             port: default_ui_port(),
         }
     }
@@ -176,10 +180,6 @@ fn default_hotspot_ssid() -> String {
 
 fn default_hotspot_ip() -> Ipv4Addr {
     Ipv4Addr::new(192, 168, 4, 1)
-}
-
-fn default_ui_bind() -> String {
-    "0.0.0.0".to_string()
 }
 
 fn default_ui_port() -> u16 {

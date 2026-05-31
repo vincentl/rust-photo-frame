@@ -46,7 +46,15 @@ pub async fn run_ui(config: Config) -> Result<()> {
         .route("/qr.png", get(serve_qr))
         .with_state(state.clone());
 
-    let addr = SocketAddr::new(state.config.ui.bind_address.parse()?, state.config.ui.port);
+    // Bind to the hotspot address by default so the unauthenticated portal is
+    // reachable only on the recovery AP — never on the home LAN, not even during
+    // the brief reconnect-probe window before the UI child is killed.  An
+    // explicit `bind-address` (e.g. 0.0.0.0 for local testing) overrides this.
+    let bind_ip = match &state.config.ui.bind_address {
+        Some(addr) => addr.parse()?,
+        None => state.config.hotspot.ipv4_addr.into(),
+    };
+    let addr = SocketAddr::new(bind_ip, state.config.ui.port);
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind UI listener on {addr}"))?;
@@ -83,7 +91,7 @@ async fn render_form(State(state): State<UiState>) -> Html<String> {
     let ssid_value = if last_ssid.is_empty() {
         String::new()
     } else {
-        format!(" value='{}'", html_attr_escape(&last_ssid))
+        format!(" value='{}'", html_escape(&last_ssid))
     };
     let body = format!(
         "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>\
@@ -218,9 +226,9 @@ fn render_status_html(config: &Config) -> String {
         Ok(Some(record)) => format!(
             "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta http-equiv='refresh' content='5'><title>Connection Status</title><style>{}</style></head><body><main><section class='status'><h1>Connection Status</h1><p><strong>Status:</strong> {}</p><p>{}</p><p>Last network: {}</p><p class='back'><a href='/'>Return to setup</a></p></section></main></body></html>",
             styles(),
-            record.status,
-            record.message,
-            record.ssid
+            html_escape(&record.status),
+            html_escape(&record.message),
+            html_escape(&record.ssid)
         ),
         _ => format!(
             "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta http-equiv='refresh' content='5'><title>No status</title><style>{}</style></head><body><main><section class='status'><h1>No status yet</h1><p>Submit credentials to see progress.</p><p class='back'><a href='/'>Return to setup</a></p></section></main></body></html>",
@@ -233,7 +241,7 @@ fn success_page(message: &str) -> String {
     format!(
         "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Connecting\u{2026}</title><style>{}</style></head><body><main><section class='status'><h1>Connecting to your network\u{2026}</h1><p>{}</p><p>The hotspot will shut down in a moment while the frame joins your Wi-Fi. You can safely rejoin your home network now.</p><p>If the frame connects successfully the recovery screen closes and the slideshow resumes. If it fails, the <strong>PhotoFrame-Setup</strong> hotspot reappears and you can try again.</p></section></main></body></html>",
         styles(),
-        message
+        html_escape(message)
     )
 }
 
@@ -241,7 +249,7 @@ fn error_page(message: &str) -> String {
     format!(
         "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Submission error</title><style>{}</style></head><body><main><section class='status error'><h1>Check and try again</h1><p>{}</p><p class='back'><a href='/'>Back to form</a></p></section></main></body></html>",
         styles(),
-        message
+        html_escape(message)
     )
 }
 
@@ -278,7 +286,9 @@ struct WifiForm {
     password: String,
 }
 
-fn html_attr_escape(s: &str) -> String {
+/// Escape text for safe interpolation into both HTML attribute values and
+/// element content (covers `& < > " '`).
+fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
