@@ -12,7 +12,7 @@ use std::time::SystemTime;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Image file extensions recognised by the scanner (lowercase, without leading dot).
 const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
@@ -64,10 +64,13 @@ pub async fn run(
                 break;
             }
 
-            // From Manager/Loader: delete the bad file, then tell Manager it disappeared.
+            // From Manager/Loader: a photo failed to decode. Do NOT delete it.
+            // A decode failure can be transient (the file is still being copied
+            // in by the sync job, or a momentary read error), and destroying a
+            // user's photo is never acceptable. Drop it from the current rotation
+            // only; it is retried on the next startup scan or re-add event.
             Some(InvalidPhoto(path)) = invalid_rx.recv() => {
-                info!(path = %path.display(), "deleting invalid photo");
-                delete_if_exists(&path)?;
+                warn!(path = %path.display(), "photo failed to decode; skipping (left on disk)");
                 let _ = to_manager.send(InventoryEvent::PhotoRemoved(path)).await;
             }
 
@@ -122,27 +125,6 @@ fn is_image(p: &Path) -> bool {
         .and_then(OsStr::to_str)
         .map(|s| s.to_ascii_lowercase())
         .is_some_and(|ext| SUPPORTED_EXTENSIONS.contains(&ext.as_str()))
-}
-
-fn delete_if_exists(p: &Path) -> Result<()> {
-    // The exists() check is a TOCTOU optimisation only; if the file is removed between
-    // this check and remove_file(), the NotFound arm below handles it gracefully.
-    if !p.exists() {
-        debug!(path = %p.display(), "delete: source missing; skipping");
-        return Ok(());
-    }
-    debug!(path = %p.display(), "delete: removing file");
-    match fs::remove_file(p) {
-        Ok(_) => {
-            info!(path = %p.display(), "delete: removed");
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            debug!(path = %p.display(), "delete: source vanished during remove; skipping");
-            Ok(())
-        }
-        Err(e) => Err(e.into()),
-    }
 }
 
 fn photo_created_at(path: &Path) -> SystemTime {

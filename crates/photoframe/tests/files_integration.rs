@@ -63,7 +63,7 @@ async fn startup_recursive_scan_emits_photo_added() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn invalid_photo_is_deleted_and_emits_removed() {
+async fn invalid_photo_is_kept_and_emits_removed() {
     let tmp = tempdir().unwrap();
     let lib = tmp.path().join("lib");
     fs::create_dir_all(&lib).unwrap();
@@ -114,10 +114,14 @@ async fn invalid_photo_is_deleted_and_emits_removed() {
             break;
         }
     }
-    assert!(saw_removed, "did not see PhotoRemoved for quarantined file");
+    assert!(saw_removed, "did not see PhotoRemoved for skipped file");
 
-    // Original should be gone
-    assert!(!bad.exists(), "original file should be deleted");
+    // The file must NOT be deleted: a decode failure can be transient, so the
+    // photo is only dropped from rotation and left on disk for a later retry.
+    assert!(
+        bad.exists(),
+        "original file must be left on disk, not deleted, on decode failure"
+    );
 
     cancel.cancel();
     let _ = handle.await;

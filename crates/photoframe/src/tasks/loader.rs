@@ -9,6 +9,13 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
+/// Upper bound on peak allocation while decoding a single image. On a
+/// memory-constrained Pi a pathological image (e.g. a multi-gigapixel scan or
+/// panorama) could otherwise OOM-kill the whole process. ~512 MiB comfortably
+/// covers >100 MP photos while rejecting absurd inputs; an over-limit image
+/// surfaces as a normal decode error and is skipped (never deleted).
+const MAX_DECODE_ALLOC_BYTES: u64 = 512 * 1024 * 1024;
+
 // Decodes an image to RGBA8 and applies EXIF orientation if available.
 // Note: Orientation handling is a best-effort; if metadata is missing, the original
 // orientation is preserved. The file is opened only once: EXIF is read first, then
@@ -30,10 +37,11 @@ fn decode_rgba8_apply_exif(path: &Path) -> anyhow::Result<image::RgbaImage> {
     // Seek back to the start so the image decoder reads from the beginning.
     buf.seek(std::io::SeekFrom::Start(0))?;
 
-    let mut img = image::ImageReader::new(buf)
-        .with_guessed_format()?
-        .decode()?
-        .to_rgba8();
+    let mut reader = image::ImageReader::new(buf).with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
+    reader.limits(limits);
+    let mut img = reader.decode()?.to_rgba8();
 
     // Map common EXIF orientations. Unsupported cases fall through as-is.
     match orientation {
