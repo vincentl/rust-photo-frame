@@ -688,14 +688,12 @@ fn record_attempt_error(config: &Config, request: &ProvisionRequest, message: &s
     }
 }
 
-async fn ensure_hotspot_active(
-    config: &Config,
-    recovery: &mut Option<ActiveRecovery>,
-    overlay: &mut OverlayController,
-) -> Result<()> {
-    if let Some(active) = recovery.as_mut() {
-        active.last_reconnect_probe = Instant::now();
-    }
+async fn ensure_hotspot_active(config: &Config, overlay: &mut OverlayController) -> Result<()> {
+    // NB: do NOT reset last_reconnect_probe here. ensure_hotspot_active runs on
+    // every provisioning failure (via restore_hotspot_or_reset); resetting the
+    // probe timer here let repeated wrong-password attempts indefinitely postpone
+    // the automatic reconnect probe. That timer is owned by run_reconnect_probe
+    // and enter_recovery.
     nm::bring_hotspot_up(&config.hotspot).await?;
     if let Err(err) = overlay.show(&overlay_request(config)).await {
         warn!(error = ?err, "failed to restore overlay while bringing hotspot back");
@@ -715,7 +713,7 @@ async fn restore_hotspot_or_reset(
     overlay: &mut OverlayController,
     context: &str,
 ) {
-    match ensure_hotspot_active(config, recovery, overlay).await {
+    match ensure_hotspot_active(config, overlay).await {
         Ok(()) => {}
         Err(err) => {
             warn!(

@@ -3,6 +3,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
 use std::collections::HashSet;
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
@@ -487,13 +488,27 @@ fn ensure_psk_rules(psk: &str) -> Result<()> {
     }
 }
 
+/// Hard cap on any single nmcli invocation. nmcli talks to NetworkManager over
+/// D-Bus, which can wedge (NM restarting, bus under load) and otherwise hang the
+/// whole watcher loop indefinitely; a timeout turns that into a transient error.
+const NMCLI_TIMEOUT: Duration = Duration::from_secs(20);
+
 async fn nmcli(args: &[&str]) -> Result<String> {
     debug!(command = %display_args(args), "running nmcli");
     let mut cmd = Command::new("nmcli");
     cmd.args(args);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    let output = cmd.output().await.context("failed to execute nmcli")?;
+    let output = tokio::time::timeout(NMCLI_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "nmcli {} timed out after {}s",
+                display_args(args),
+                NMCLI_TIMEOUT.as_secs()
+            )
+        })?
+        .context("failed to execute nmcli")?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
