@@ -818,6 +818,12 @@ impl MattingOptions {
     }
 
     pub fn prepare_runtime(&mut self) -> Result<()> {
+        ensure!(
+            self.minimum_mat_percentage.is_finite()
+                && (0.0..=100.0).contains(&self.minimum_mat_percentage),
+            "matting.minimum-mat-percentage must be between 0 and 100 (got {})",
+            self.minimum_mat_percentage
+        );
         self.runtime = MattingRuntime::default();
         if let MattingMode::FixedColor { colors, .. } = &self.style {
             ensure!(

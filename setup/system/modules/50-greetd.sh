@@ -155,9 +155,10 @@ bar {
     mode invisible
 }
 
-exec_always swaybg -m solid_color -c '#000000'
-# Launch the app fullscreen
-exec_always /usr/local/bin/photoframe "$config_path"
+exec swaybg -m solid_color -c '#000000'
+# Launch the app fullscreen. Use `exec` (not `exec_always`) so a `swaymsg reload`
+# doesn't spawn a second photoframe alongside the running one.
+exec /usr/local/bin/photoframe "$config_path"
 CONFIG
     chmod 0644 "${config_file}"
 }

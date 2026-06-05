@@ -17,5 +17,6 @@ EnvironmentFile=-/etc/photoframe/sync.env
 # Syncs remote content into the cloud-backed mirror inside ${PHOTO_LIBRARY_PATH}.
 ExecStart=/opt/photoframe/bin/photoframe-cloud-sync
 
-[Install]
-WantedBy=multi-user.target
+# No [Install] section: this oneshot is triggered only by photoframe-sync.timer,
+# never enabled on its own. Enabling the service directly would run the sync on
+# every boot, bypassing the timer's sync.env gating.
