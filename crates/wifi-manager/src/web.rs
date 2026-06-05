@@ -263,11 +263,12 @@ fn validate_ssid(ssid: &str) -> Result<()> {
 }
 
 fn validate_password(password: &str) -> Result<()> {
-    let len = password.chars().count();
+    // WPA/WPA2 passphrases are 8-63 bytes, not characters (see ensure_psk_rules).
+    let len = password.len();
     if (8..=63).contains(&len) {
         Ok(())
     } else {
-        anyhow::bail!("Password must be between 8 and 63 characters")
+        anyhow::bail!("Password must be between 8 and 63 bytes")
     }
 }
 

@@ -480,11 +480,14 @@ fn sanitize_id(ssid: &str) -> String {
 }
 
 fn ensure_psk_rules(psk: &str) -> Result<()> {
-    let len = psk.chars().count();
+    // WPA/WPA2 passphrases are 8-63 *bytes* (not characters). Validating the byte
+    // length matches what nmcli/wpa_supplicant enforce, so a multibyte passphrase
+    // gets a clear error here instead of an opaque downstream nmcli failure.
+    let len = psk.len();
     if (8..=63).contains(&len) {
         Ok(())
     } else {
-        Err(anyhow!("Password must be between 8 and 63 characters"))
+        Err(anyhow!("Password must be between 8 and 63 bytes"))
     }
 }
 

@@ -13,9 +13,9 @@ use std::path::PathBuf;
 /// entry needed.  The portal URL QR is shown separately so the user can scan
 /// to join the hotspot and then scan to open the setup page.
 ///
-/// Format: `WIFI:T:WPA;S:<ssid>;P:<password>;;`
-/// Characters `\`, `;`, `,`, `"` would need escaping, but our SSID
-/// (`PhotoFrame-Setup`) and three-word passwords never contain them.
+/// Format: `WIFI:T:WPA;S:<ssid>;P:<password>;;`. The SSID and password are
+/// backslash-escaped (`\ ; , : "`) so a custom hotspot SSID or password
+/// containing those characters can't corrupt the encoded URI.
 pub fn generate(config: &Config) -> Result<()> {
     let password_path = hotspot_password_path(config);
     let password = fs::read_to_string(&password_path).with_context(|| {
@@ -28,8 +28,8 @@ pub fn generate(config: &Config) -> Result<()> {
 
     let wifi_uri = format!(
         "WIFI:T:WPA;S:{ssid};P:{password};;",
-        ssid = config.hotspot.ssid,
-        password = password,
+        ssid = escape_wifi_uri_field(&config.hotspot.ssid),
+        password = escape_wifi_uri_field(password),
     );
 
     let code = QrCode::new(wifi_uri.as_bytes()).context("failed to generate Wi-Fi join QR code")?;
@@ -41,6 +41,20 @@ pub fn generate(config: &Config) -> Result<()> {
         .save(&path)
         .with_context(|| format!("failed to write Wi-Fi join QR code to {}", path.display()))?;
     Ok(())
+}
+
+/// Backslash-escape the characters that are special in a `WIFI:` URI field
+/// (`\ ; , : "`). Without this a custom hotspot SSID/password containing e.g.
+/// `;` would produce a malformed or ambiguous join code.
+fn escape_wifi_uri_field(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '\\' | ';' | ',' | ':' | '"') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Generate a QR code that encodes the portal setup URL so users can scan to
