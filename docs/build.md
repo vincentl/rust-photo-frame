@@ -77,11 +77,12 @@ The button is **optional**. The frame can be controlled entirely over SSH or via
 
 **What it does:**
 
-| Monitor State | Press              | Action                                                                                                     |
-| ------------- | ------------------ | ---------------------------------------------------------------------------------------------------------- |
-| On            | Short press (< 3s) | `buttond` toggles wake/sleep via the control socket                                                        |
-| On            | Long press (≥ 3s)  | Pi 5 hardware initiates clean shutdown (`systemctl poweroff`) — works even if the software is unresponsive |
-| Off           | Press              | Powers Pi on                                                                                               |
+| Monitor State | Press        | Action                                                                                                       |
+| ------------- | ------------ | ------------------------------------------------------------------------------------------------------------ |
+| On            | Single press | `buttond` toggles wake/sleep via the control socket                                                          |
+| On            | Double press | Executes the configured shutdown command (`systemctl poweroff`)                                              |
+| On            | Long hold    | Bypassed in software — Pi 5 firmware forces a hardware power-off (works even if the software is unresponsive) |
+| Off           | Press        | Powers Pi on                                                                                                 |
 
 **Skipping the button:** leave J2 unwired and use SSH commands (see [Operate](operate.md)) or an `awake-schedule` (see [Configure](configure.md)) instead. The default `buttond` config has `device: null`, which skips evdev enumeration.
 

@@ -170,7 +170,7 @@ interface: wlan0
 check-interval-sec: 5
 offline-grace-sec: 30
 recovery-mode: app-handoff
-recovery-reconnect-probe-sec: 60
+recovery-reconnect-probe-sec: 300
 recovery-connect-timeout-sec: 20
 wordlist-path: /opt/photoframe/share/wordlist.txt
 var-dir: /var/lib/photoframe
@@ -179,7 +179,10 @@ hotspot:
   ssid: PhotoFrame-Setup
   ipv4-addr: 192.168.4.1
 ui:
-  bind-address: 0.0.0.0
+  # Bind the recovery portal to the hotspot address so it is reachable only on
+  # the recovery AP, never on the home LAN.  Leave unset to follow hotspot
+  # ipv4-addr automatically; set 0.0.0.0 only for local testing.
+  bind-address: 192.168.4.1
   port: 8080
 photo-app:
   launch-command:

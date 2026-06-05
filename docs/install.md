@@ -153,7 +153,7 @@ find /var/lib/photoframe/photos -type f | wc -l
 When everything is working, the display goes through these states in order:
 
 1. **Blank** (a few seconds) — greetd is launching Sway and handing off the compositor.
-2. **Greeting card** ("Warming up your photo memories…", ~16 seconds) — the app is scanning the library and pre-decoding the first images.
+2. **Greeting card** ("Warming up your photo memories…", a few seconds) — the app is scanning the library and pre-decoding the first images.
 3. **Display goes dark — this is normal.** After the greeting the frame enters sleep state. The process is running, the GPU is idle, and it's waiting for either a wake command or a scheduled wake window.
 4. **Photos cycle** — once awake, the slideshow begins.
 

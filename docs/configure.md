@@ -107,7 +107,7 @@ If the frame launches to a black screen, check that `photo-library-path` points 
 - **Purpose:** Selects where the application exposes its Unix domain control socket.
 - **Required?** Optional; defaults to `/run/photoframe/control.sock`.
 - **Accepted values & defaults:** Any filesystem path, typically under `/run`, `/run/user/<uid>`, or another writable runtime directory.
-- **Notes:** The kiosk provisioning script creates `/run/photoframe` (mode `0770`, owned by `kiosk:kiosk`) and installs a tmpfiles entry so the directory exists after every boot. If you override the setting, pre-create the directory with matching ownership: `sudo install -d -m 0770 -o kiosk -g kiosk /var/lib/photoframe/runtime`.
+- **Notes:** The kiosk provisioning script creates `/run/photoframe` (mode `0770`, owned by `kiosk:kiosk`) and installs a tmpfiles entry so the directory exists after every boot. If you override the setting, pre-create the directory with matching ownership: `sudo install -d -m 0770 -o kiosk -g kiosk /run/photoframe`.
 
 ### `transition`
 
@@ -163,7 +163,7 @@ See [Playlist weighting](#playlist-weighting) for the algorithm.
 - **Keys:**
   - `message` (string, default `Initializing…`)
   - `font` (string font name; falls back to bundled face)
-  - `stroke-width` (float DIP, default `12.0`)
+  - `stroke-width` (float DIP, default `16.0`)
   - `corner-radius` (float DIP, default `0.75 × stroke-width`)
   - `duration-seconds` (float ≥ 0, default `4.0`)
   - `colors.background`, `colors.font`, `colors.accent` (hex sRGB strings)
