@@ -97,7 +97,7 @@ async fn render_form(State(state): State<UiState>) -> Html<String> {
         "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>\
 <title>Photo Frame Wi-Fi Setup</title><style>{}</style></head><body><main><section class='hero'><h1>Photo Frame Wi-Fi Recovery</h1><p>Connect to the hotspot <strong>{}</strong> using the password shown on the frame, then submit your home Wi-Fi details below.</p></section><section class='form'><form method='post' action='/submit'><label>Wi-Fi Name (SSID)<input name='ssid' required maxlength='32'{}></label><label>Password<input name='password' type='password' minlength='8' maxlength='63' required></label><button type='submit'>Connect</button></form></section></main></body></html>",
         styles(),
-        state.config.hotspot.ssid,
+        html_escape(&state.config.hotspot.ssid),
         ssid_value
     );
     Html(body)
