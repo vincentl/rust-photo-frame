@@ -118,7 +118,7 @@ flowchart LR
 ```
 
 - **PhotoFiles** — watches the library and maintains an inventory of available images
-- **PhotoManager** — builds a weighted playlist; new photos appear more often and decay toward equal weight over a configurable half-life
+- **PhotoManager** — schedules photos on a virtual timeline; new photos appear more often and decay toward equal weight over a configurable half-life, with each photo spaced apart so repeats and bursts are avoided
 - **PhotoLoader** — decodes JPEG/PNG in parallel (configurable concurrency) to RGBA pixel buffers
 - **PhotoEffect** — optionally applies print-simulation effects (paper texture, gallery lighting)
 - **PhotoViewer** — GPU-accelerated rendering with configurable matting and transitions via WGPU/Wayland

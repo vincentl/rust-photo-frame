@@ -286,13 +286,15 @@ Showcase mode is the fastest way to choose transitions and mats. It auto-enumera
 
 ## Playlist weighting
 
-The playlist treats every photo as a node in a cycle. Brand-new photos are temporarily duplicated so they appear multiple times per cycle, then decay back toward a single appearance as they age:
+Each photo is scheduled on a virtual timeline. A photo's **weight** sets how often it
+appears: `weight(age) = max(1, new_multiplicity × 0.5^(age / half_life))`. Brand-new
+photos peak at `new-multiplicity` and decay by half every `half-life` toward the
+equilibrium weight of 1. After each showing a photo is rescheduled a random gap ahead
+whose average length is `1 / weight`, so higher-weight photos recur sooner while still
+being spaced apart (no bursts, no back-to-back repeats). Adding or removing photos
+updates the schedule incrementally without resetting progress.
 
-```rust
-multiplicity(age) = ceil(max(1, new_multiplicity) * 0.5^(age / half_life))
-```
-
-`age` is the difference between the playlist clock and the photo's creation timestamp. The clock defaults to `SystemTime::now()` but can be frozen via `--playlist-now <RFC3339>`. Each cycle shuffles scheduled copies; new arrivals are pinned to the front of the queue for an immediate first showing.
+`age` is the difference between the current time and the photo's filesystem creation timestamp. The clock defaults to `SystemTime::now()` but can be frozen via `--playlist-now <RFC3339>`.
 
 ### Testing the weighting
 
@@ -304,14 +306,14 @@ cargo run -p photoframe --release -- \
   --playlist-seed 1234
 ```
 
-Prints the multiplicity for each discovered photo and the first 32 scheduled entries. Run with `RUST_LOG=info` (or `debug`) during a normal session to watch the manager log multiplicity calculations as the playlist rebuilds.
+Prints the **weight** (relative show frequency; equilibrium = 1.0) for each discovered photo and the first 32 scheduled entries. Run with the same seed twice to confirm deterministic output.
 
 ### Playlist knobs
 
 | Field              | Required? | Default | Accepted values                                                                | Effect on the slideshow                                                                                     |
 | ------------------ | --------- | ------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
-| `new-multiplicity` | Optional  | `3`     | Integer ≥ 1                                                                    | Sets how many times a brand-new photo appears in the next loop; higher values surface newcomers more often. |
-| `half-life`        | Optional  | `1 day` | Positive duration string parsed by [`humantime`](https://docs.rs/humantime)    | Controls how quickly the extra repeats decay; shorter half-lives return the playlist to equilibrium faster. |
+| `new-multiplicity` | Optional  | `3`     | Integer ≥ 1                                                                    | Sets the peak weight for a brand-new photo; higher values surface newcomers more often before they decay.   |
+| `half-life`        | Optional  | `1 day` | Positive duration string parsed by [`humantime`](https://docs.rs/humantime)    | Controls how quickly the weight decays back to equilibrium; shorter half-lives return to normal faster.     |
 
 ## Photo-effect configuration
 

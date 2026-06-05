@@ -3531,13 +3531,15 @@ impl PlaylistOptions {
         Duration::from_secs(60 * 60 * 24)
     }
 
-    pub fn multiplicity_for(&self, created_at: SystemTime, now: SystemTime) -> usize {
+    /// Continuous scheduling weight for a photo of the given age.
+    /// Peaks at `new_multiplicity` for a brand-new photo and decays by half every
+    /// `half_life`, flooring at the equilibrium weight of 1.0.
+    pub fn weight_for(&self, created_at: SystemTime, now: SystemTime) -> f64 {
         let age = now.duration_since(created_at).unwrap_or_default();
         let half_life = self.half_life.max(Duration::from_secs(1));
         let exponent = age.as_secs_f64() / half_life.as_secs_f64();
         let base = f64::from(self.new_multiplicity.max(1));
-        let weight = base * 0.5_f64.powf(exponent);
-        weight.ceil().max(1.0) as usize
+        (base * 0.5_f64.powf(exponent)).max(1.0)
     }
 
     fn validate(&self) -> Result<()> {

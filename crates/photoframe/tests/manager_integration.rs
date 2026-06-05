@@ -166,7 +166,11 @@ fn simulate_playlist_respects_seed_and_weights() {
     let plan = manager::simulate_playlist(photos.clone(), options.clone(), now, 8, Some(42));
 
     assert!(plan.len() >= 4, "expected several scheduled items");
-    assert_eq!(plan[0], fresh_path, "fresh photo should appear first");
+    // Fresh photo should surface early (probabilistic, but within the first few entries)
+    assert!(
+        plan[..4].contains(&fresh_path),
+        "fresh photo should appear within the first 4 entries"
+    );
 
     let fresh_count = plan.iter().filter(|p| *p == &fresh_path).count();
     let old_count = plan.iter().filter(|p| *p == &old_path).count();
@@ -177,4 +181,126 @@ fn simulate_playlist_respects_seed_and_weights() {
 
     let plan_again = manager::simulate_playlist(photos, options, now, 8, Some(42));
     assert_eq!(plan, plan_again, "seeded runs should be deterministic");
+}
+
+/// Bulk import: 50 brand-new photos plus 10 older ones. Old photos must not be starved
+/// behind a wall of newcomers — they should appear within the first 50 entries.
+#[test]
+fn bulk_import_does_not_starve_old_photos() {
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000);
+    let options = PlaylistOptions {
+        new_multiplicity: 3,
+        half_life: Duration::from_secs(86_400),
+    };
+
+    let old_paths: Vec<PathBuf> = (0..10)
+        .map(|i| PathBuf::from(format!("old_{i}.jpg")))
+        .collect();
+    let mut photos: Vec<PhotoInfo> = (0..50)
+        .map(|i| photo_info(PathBuf::from(format!("new_{i}.jpg")), now))
+        .collect();
+    for p in &old_paths {
+        photos.push(photo_info(
+            p.clone(),
+            now - Duration::from_secs(86_400 * 30),
+        ));
+    }
+
+    let plan = manager::simulate_playlist(photos, options, now, 100, Some(7));
+
+    // Within the first 50 entries at least one old photo must appear.
+    let has_old_early = plan[..50].iter().any(|p| old_paths.contains(p));
+    assert!(
+        has_old_early,
+        "old photos should appear within the first 50 entries despite 50 newcomers"
+    );
+}
+
+/// Tombstone and generation: remove a photo mid-run, verify it eventually disappears;
+/// re-add and verify it returns. Covers the lazy-skip and generation-bump code paths.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manager_churn_tombstone_and_generation() {
+    let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(16);
+    let (_displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(16);
+    let (to_load_tx, mut to_load_rx) = mpsc::channel::<LoadPhoto>(1);
+    let cancel = CancellationToken::new();
+
+    let handle = tokio::spawn(manager::run(
+        inv_rx,
+        displayed_rx,
+        to_load_tx,
+        cancel.clone(),
+        PlaylistOptions::default(),
+        None,
+        Some(42),
+    ));
+
+    let path_a = PathBuf::from("/photos/a.jpg");
+    let path_b = PathBuf::from("/photos/b.jpg");
+
+    // Add A; receive it a few times to confirm it's in the rotation.
+    inv_tx
+        .send(InventoryEvent::PhotoAdded(photo_info(
+            path_a.clone(),
+            SystemTime::now(),
+        )))
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        let p = receive_with_timeout(&mut to_load_rx).await;
+        assert_eq!(p, path_a, "only A should appear before removal");
+    }
+
+    // Remove A and immediately add B.
+    // Due to channel buffering, one or two more As may arrive before the remove takes
+    // effect. Drain until B appears — that confirms the manager has processed the remove.
+    inv_tx
+        .send(InventoryEvent::PhotoRemoved(path_a.clone()))
+        .await
+        .unwrap();
+    inv_tx
+        .send(InventoryEvent::PhotoAdded(photo_info(
+            path_b.clone(),
+            SystemTime::now(),
+        )))
+        .await
+        .unwrap();
+
+    // Drain until B is seen; the remove precedes the add in the channel so once B
+    // appears the remove has already been processed by the manager.
+    for _ in 0..20 {
+        let p = receive_with_timeout(&mut to_load_rx).await;
+        if p == path_b {
+            break;
+        }
+        assert_eq!(p, path_a, "unexpected path during post-remove drain");
+    }
+
+    // Now A is confirmed removed: it must not reappear.
+    for _ in 0..5 {
+        let p = receive_with_timeout(&mut to_load_rx).await;
+        assert_ne!(p, path_a, "A must not appear once remove is confirmed");
+    }
+
+    // Re-add A; it should reappear in the rotation (generation bump path).
+    inv_tx
+        .send(InventoryEvent::PhotoAdded(photo_info(
+            path_a.clone(),
+            SystemTime::now(),
+        )))
+        .await
+        .unwrap();
+
+    let mut seen_a_again = false;
+    for _ in 0..10 {
+        let p = receive_with_timeout(&mut to_load_rx).await;
+        if p == path_a {
+            seen_a_again = true;
+            break;
+        }
+    }
+    assert!(seen_a_again, "A should reappear after re-add");
+
+    cancel.cancel();
+    let _ = handle.await;
 }

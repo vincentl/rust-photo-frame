@@ -280,10 +280,10 @@ fn run_playlist_dry_run(
         return Ok(());
     }
 
-    println!("# weights (multiplicity per cycle):");
+    println!("# weights (relative show frequency; equilibrium = 1.0):");
     for info in &photos {
-        let multiplicity = cfg.playlist.multiplicity_for(info.created_at, now);
-        println!("  {:>3} × {}", multiplicity, info.path.display());
+        let weight = cfg.playlist.weight_for(info.created_at, now);
+        println!("  {:>5.2} × {}", weight, info.path.display());
     }
 
     let plan = tasks::manager::simulate_playlist(
