@@ -96,6 +96,10 @@ fn main() -> Result<()> {
         }
 
         let now = Instant::now();
+        // Fire any deferred screen power-off whose delay has elapsed. Runs every
+        // iteration so the panel powers down without ever blocking on a sleep.
+        runtime.poll_pending_power_off(now);
+
         if let Some(action) = tracker.handle_timeout(now) {
             perform_action(action, &mut runtime);
             continue;
@@ -127,9 +131,13 @@ fn main() -> Result<()> {
         };
 
         if idle {
-            let sleep_for = tracker
+            let mut sleep_for = tracker
                 .time_until_deadline(Instant::now())
                 .unwrap_or(Duration::from_millis(50));
+            // Don't oversleep past a pending power-off deadline.
+            if let Some(until_off) = runtime.time_until_power_off(Instant::now()) {
+                sleep_for = sleep_for.min(until_off);
+            }
             if !sleep_for.is_zero() {
                 thread::sleep(sleep_for.min(Duration::from_millis(100)));
             }
@@ -609,12 +617,30 @@ impl ControlSocket for UnixControlSocket {
     }
 }
 
+/// A panel power-off that has been scheduled but not yet fired. The viewer is
+/// already in the Asleep state; only the physical power-off is deferred, so the
+/// event loop keeps servicing button presses during the screen-off delay.
+struct PendingPowerOff {
+    deadline: Instant,
+    attempts: u32,
+    source: TransitionSource,
+}
+
+/// Delay before retrying a deferred power-off that failed (e.g. the compositor
+/// was momentarily unreachable).
+const POWER_OFF_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+/// Stop retrying a failing power-off after this many attempts (~30s); a later
+/// press or schedule change re-enforces it via the self-heal path.
+const MAX_POWER_OFF_ATTEMPTS: u32 = 30;
+
 struct Runtime {
     control_socket: Arc<dyn ControlSocket>,
     shutdown_command: CommandSpec,
     screen: ScreenRuntime,
     executor: Arc<dyn CommandExecutor>,
     state: Arc<Mutex<FrameState>>,
+    /// Deferred panel power-off for an in-flight sleep transition, if any.
+    pending_power_off: Option<PendingPowerOff>,
 }
 
 impl Runtime {
@@ -632,6 +658,7 @@ impl Runtime {
             screen,
             executor,
             state,
+            pending_power_off: None,
         }
     }
 
@@ -640,6 +667,12 @@ impl Runtime {
     }
 
     fn handle_manual_toggle(&mut self) -> Result<()> {
+        // If a sleep is mid-flight (the panel power-off is still pending), a
+        // press cancels it and wakes — the user clearly wants the frame on.
+        if self.pending_power_off.is_some() {
+            info!("single press during sleep delay → cancelling pending sleep and waking");
+            return self.wake_up(TransitionSource::Manual);
+        }
         // Prefer the physically detected screen state, but never let a detection
         // failure swallow the press: fall back to the tracked viewer mode so a
         // single press always toggles something.
@@ -678,13 +711,35 @@ impl Runtime {
     }
 
     fn wake_up(&mut self, source: TransitionSource) -> Result<()> {
+        // A wake request wins over an in-flight sleep: cancel any deferred
+        // panel power-off so we never power the screen off right after waking.
+        self.pending_power_off = None;
+
         if self.current_viewer_mode() == ViewerMode::Awake {
-            info!(
-                reason = source.as_str(),
-                "wake_up requested but frame already awake"
-            );
-            self.record_state(ViewerMode::Awake, source);
-            return Ok(());
+            // Viewer believes it's awake; verify the panel is actually on.
+            // Something outside buttond (DPMS, the monitor's own button, an
+            // out-of-band powerctl) may have turned it off while our tracked
+            // mode stayed Awake — in that case we must still power it on.
+            if let Ok(detected) = self.screen.detect_state() {
+                if detected.state == ScreenState::On {
+                    info!(
+                        reason = source.as_str(),
+                        "wake_up requested but frame already awake"
+                    );
+                    self.record_state(ViewerMode::Awake, source);
+                    return Ok(());
+                }
+                debug!(
+                    output = %detected.name,
+                    state = detected.state.as_str(),
+                    "viewer awake but screen off; enforcing power on",
+                );
+            } else {
+                debug!(
+                    reason = source.as_str(),
+                    "viewer awake; could not detect screen state, enforcing power on",
+                );
+            }
         }
 
         self.screen.power_on()?;
@@ -721,19 +776,89 @@ impl Runtime {
         }
 
         self.control_socket.send_set_state(ViewerMode::Asleep)?;
-        // Record the asleep mode immediately so the scheduler stops re-sending
-        // duplicate sleep commands during the off-delay window.
+        // Record the asleep mode immediately so the scheduler (which reconciles
+        // against the tracked viewer mode) stops re-sending sleep commands while
+        // the panel power-off below is deferred.
         self.record_state(ViewerMode::Asleep, source);
+
         let delay = self.screen.off_delay();
-        if !delay.is_zero() {
-            info!(reason = source.as_str(), delay = %format_duration(delay), "waiting before powering screen off");
-            thread::sleep(delay);
+        if delay.is_zero() {
+            self.power_off_now(source);
+        } else {
+            info!(
+                reason = source.as_str(),
+                delay = %format_duration(delay),
+                "scheduling screen power-off after delay (event loop stays responsive)"
+            );
+            self.pending_power_off = Some(PendingPowerOff {
+                deadline: Instant::now() + delay,
+                attempts: 0,
+                source,
+            });
         }
-        self.screen.power_off()?;
-        info!(reason = source.as_str(), "frame sleep request completed");
-        // Maintain idempotence; recording again is harmless and keeps timestamps fresh.
-        self.record_state(ViewerMode::Asleep, source);
         Ok(())
+    }
+
+    /// Power the panel off immediately and refresh the tracked state. Used when
+    /// the configured off-delay is zero.
+    fn power_off_now(&mut self, source: TransitionSource) {
+        match self.screen.power_off() {
+            Ok(()) => {
+                info!(reason = source.as_str(), "frame sleep request completed");
+                self.record_state(ViewerMode::Asleep, source);
+            }
+            Err(err) => {
+                error!(reason = source.as_str(), ?err, "failed to power screen off");
+            }
+        }
+    }
+
+    /// Remaining time until a deferred power-off should fire, if one is armed.
+    fn time_until_power_off(&self, now: Instant) -> Option<Duration> {
+        self.pending_power_off
+            .as_ref()
+            .map(|pending| pending.deadline.saturating_duration_since(now))
+    }
+
+    /// Fire a deferred power-off whose deadline has arrived. Called every event
+    /// loop iteration so the panel powers down without blocking button input.
+    /// On failure it retries a bounded number of times, then gives up (a later
+    /// press or schedule change re-enforces via the self-heal path).
+    fn poll_pending_power_off(&mut self, now: Instant) {
+        let Some(pending) = self.pending_power_off.as_ref() else {
+            return;
+        };
+        if now < pending.deadline {
+            return;
+        }
+        let attempts = pending.attempts;
+        let source = pending.source;
+        self.pending_power_off = None;
+
+        match self.screen.power_off() {
+            Ok(()) => {
+                info!(reason = source.as_str(), "frame sleep request completed");
+                // Keep the tracked timestamp fresh now that the panel is off.
+                self.record_state(ViewerMode::Asleep, source);
+            }
+            Err(err) => {
+                let attempts = attempts.saturating_add(1);
+                if attempts >= MAX_POWER_OFF_ATTEMPTS {
+                    error!(
+                        ?err,
+                        attempts,
+                        "failed to power screen off; giving up (a later press or schedule change will re-enforce)"
+                    );
+                } else {
+                    warn!(?err, attempts, "failed to power screen off; will retry");
+                    self.pending_power_off = Some(PendingPowerOff {
+                        deadline: now + POWER_OFF_RETRY_INTERVAL,
+                        attempts,
+                        source,
+                    });
+                }
+            }
+        }
     }
 
     fn current_viewer_mode(&self) -> ViewerMode {
@@ -2396,7 +2521,7 @@ awake-scheduled: {}
     }
 
     #[test]
-    fn sleep_request_waits_before_power_off() {
+    fn sleep_request_defers_power_off_until_delay_elapses() {
         let executor = RecordingExecutor::new();
         let control = RecordingControlSocket::new();
         let detector = StaticDetector::new(ScreenState::On);
@@ -2424,19 +2549,33 @@ awake-scheduled: {}
             .go_to_sleep(TransitionSource::Manual)
             .expect("sleep should succeed");
 
+        // The viewer is told to sleep immediately, but the panel power-off is
+        // deferred — go_to_sleep must not block on the off-delay.
+        {
+            let calls = executor.calls();
+            let events = control.events();
+            let call_guard = calls.lock().expect("executor calls poisoned");
+            let event_guard = events.lock().expect("control events poisoned");
+            assert_eq!(event_guard.len(), 1);
+            assert_eq!(event_guard[0].0, ViewerMode::Asleep);
+            assert!(
+                call_guard.is_empty(),
+                "power-off must be deferred, not run synchronously"
+            );
+        }
+        assert!(runtime.time_until_power_off(Instant::now()).is_some());
+
+        // Polling before the deadline does nothing.
+        runtime.poll_pending_power_off(Instant::now());
+        assert!(executor.calls().lock().expect("calls poisoned").is_empty());
+
+        // Polling after the deadline fires the power-off exactly once.
+        runtime.poll_pending_power_off(Instant::now() + off_delay + Duration::from_millis(5));
         let calls = executor.calls();
-        let events = control.events();
         let call_guard = calls.lock().expect("executor calls poisoned");
-        let event_guard = events.lock().expect("control events poisoned");
         assert_eq!(call_guard.len(), 1);
         assert_eq!(call_guard[0].0, "screen-off");
-        assert_eq!(event_guard.len(), 1);
-        assert_eq!(event_guard[0].0, ViewerMode::Asleep);
-        assert!(event_guard[0].1 <= call_guard[0].1);
-        assert!(
-            call_guard[0].1.saturating_duration_since(event_guard[0].1)
-                >= off_delay - Duration::from_millis(5)
-        );
+        assert!(runtime.time_until_power_off(Instant::now()).is_none());
     }
 
     #[test]
@@ -2444,7 +2583,8 @@ awake-scheduled: {}
         let executor = RecordingExecutor::new();
         // Detector reports the physical screen is ON, even though viewer mode is Asleep.
         let detector = StaticDetector::new(ScreenState::On);
-        let off_delay = Duration::from_millis(10);
+        // Zero delay so the enforced power-off runs synchronously in this test.
+        let off_delay = Duration::from_millis(0);
 
         let screen = ScreenRuntime::new(
             command("screen-on"),
