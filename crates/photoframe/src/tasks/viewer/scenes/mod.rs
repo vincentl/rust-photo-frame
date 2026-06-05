@@ -90,7 +90,7 @@ impl CaptionOverlay {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<PanelUniforms>() as u64,
+                        std::mem::size_of::<PanelUniforms>() as u64
                     ),
                 },
                 count: None,
@@ -192,8 +192,13 @@ impl CaptionOverlay {
                 Some(self.size.height as f32),
             );
             let attrs = Attrs::new().family(FamilyOwned::SansSerif.as_family());
-            self.text_buffer
-                .set_text(&mut self.font_system, &self.text, &attrs, Shaping::Basic, None);
+            self.text_buffer.set_text(
+                &mut self.font_system,
+                &self.text,
+                &attrs,
+                Shaping::Basic,
+                None,
+            );
             self.dirty = false;
         }
 
@@ -279,7 +284,10 @@ impl CaptionOverlay {
             pass.set_pipeline(&self.panel_pipeline);
             pass.set_bind_group(0, &self.panel_bind_group, &[]);
             pass.draw(0..6, 0..1);
-            if let Err(err) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+            if let Err(err) = self
+                .text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+            {
                 render_error = Some(err);
             }
         }

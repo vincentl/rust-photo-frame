@@ -679,7 +679,9 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
 
         let iw = width.max(1) as f32;
         let ih = height.max(1) as f32;
-        let mut scale = (photo_space_w / iw).min(photo_space_h / ih).min(max_upscale);
+        let mut scale = (photo_space_w / iw)
+            .min(photo_space_h / ih)
+            .min(max_upscale);
         if !scale.is_finite() || scale <= 0.0 {
             scale = 1.0;
         }
@@ -934,12 +936,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
                 }
                 let mut b: RgbaImage = apply_blur(&sample, sigma_px, *backend);
                 if b.width() != canvas_w || b.height() != canvas_h {
-                    b = imageops::resize(
-                        &b,
-                        canvas_w,
-                        canvas_h,
-                        imageops::FilterType::CatmullRom,
-                    );
+                    b = imageops::resize(&b, canvas_w, canvas_h, imageops::FilterType::CatmullRom);
                 }
                 b
             } else {
@@ -1823,8 +1820,7 @@ pub fn run_windowed(
             ));
 
             if self.full_config.showcase.enabled && self.full_config.showcase.caption_enabled() {
-                self.caption_overlay =
-                    Some(scenes::CaptionOverlay::new(&device, &queue, format));
+                self.caption_overlay = Some(scenes::CaptionOverlay::new(&device, &queue, format));
             }
             self.window = Some(window);
             let gpu = GpuCtx {
@@ -2691,8 +2687,7 @@ pub fn run_windowed(
                                     } => {
                                         uniforms.params0[0] = (*stripe_count).max(1) as f32;
                                         uniforms.params0[1] = *softness;
-                                        uniforms.params0[2] =
-                                            if *vertical { 1.0 } else { 0.0 };
+                                        uniforms.params0[2] = if *vertical { 1.0 } else { 0.0 };
                                     }
                                     ActiveTransition::CrossfadeZoom {
                                         zoom,
@@ -2746,9 +2741,7 @@ pub fn run_windowed(
                                 // Show the most recent transition (kept after it
                                 // finishes) and the current photo's mat.
                                 let transition_kind = wake.last_transition_kind();
-                                let mat_kind = wake
-                                    .current()
-                                    .and_then(|img| img.mat_kind);
+                                let mat_kind = wake.current().and_then(|img| img.mat_kind);
                                 let text = scenes::showcase_caption(transition_kind, mat_kind);
                                 cap.set_text(text);
                                 let surface_size = winit::dpi::PhysicalSize::new(

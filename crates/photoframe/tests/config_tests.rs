@@ -969,10 +969,7 @@ transition:
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("requires angle-jitter >= 0")
-    );
+    assert!(err.to_string().contains("requires angle-jitter >= 0"));
 }
 
 #[test]
@@ -987,9 +984,10 @@ transition:
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(err.to_string().contains(
-        "transition option wipe requires angles to include at least one entry"
-    ));
+    assert!(
+        err.to_string()
+            .contains("transition option wipe requires angles to include at least one entry")
+    );
 }
 
 #[test]
@@ -1004,10 +1002,7 @@ transition:
 "#;
 
     let err = serde_yaml::from_str::<Configuration>(yaml).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("requires angle-jitter >= 0")
-    );
+    assert!(err.to_string().contains("requires angle-jitter >= 0"));
 }
 
 #[test]
@@ -1202,7 +1197,11 @@ matting:
     - kind: gradient
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    let selected = cfg.matting.iter_selected().next().expect("expected gradient mat");
+    let selected = cfg
+        .matting
+        .iter_selected()
+        .next()
+        .expect("expected gradient mat");
     assert!(matches!(selected.entry.kind, MattingKind::Gradient));
     match &selected.option.style {
         MattingMode::Gradient {
@@ -1234,7 +1233,11 @@ matting:
       angle-degrees: 45.0
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    let selected = cfg.matting.iter_selected().next().expect("expected gradient mat");
+    let selected = cfg
+        .matting
+        .iter_selected()
+        .next()
+        .expect("expected gradient mat");
     match &selected.option.style {
         MattingMode::Gradient {
             start_color,
@@ -1261,7 +1264,11 @@ matting:
     - kind: vignette
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    let selected = cfg.matting.iter_selected().next().expect("expected vignette mat");
+    let selected = cfg
+        .matting
+        .iter_selected()
+        .next()
+        .expect("expected vignette mat");
     assert!(matches!(selected.entry.kind, MattingKind::Vignette));
     match &selected.option.style {
         MattingMode::Vignette {
@@ -1439,7 +1446,10 @@ transition:
         .iter_selected()
         .next()
         .expect("expected transition");
-    assert!(matches!(selected.entry.kind, TransitionKind::VenetianBlinds));
+    assert!(matches!(
+        selected.entry.kind,
+        TransitionKind::VenetianBlinds
+    ));
     match selected.option.mode() {
         TransitionMode::VenetianBlinds(vb) => {
             assert_eq!(vb.stripe_count, 16);
@@ -1624,7 +1634,11 @@ matting:
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     let sel: Vec<_> = cfg.matting.iter_selected().collect();
-    assert_eq!(sel.len(), 2, "two vignette colors should expand to two slots");
+    assert_eq!(
+        sel.len(),
+        2,
+        "two vignette colors should expand to two slots"
+    );
     match &sel[0].option.style {
         MattingMode::Vignette { colors, .. } => {
             assert_eq!(colors.as_slice(), &[StudioMatColor::Rgb([10, 20, 30])]);
@@ -1650,7 +1664,10 @@ matting:
       color: photo-average
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    let selected = cfg.matting.primary_selected().expect("expected drop-shadow");
+    let selected = cfg
+        .matting
+        .primary_selected()
+        .expect("expected drop-shadow");
     match &selected.option.style {
         MattingMode::DropShadow { colors, .. } => {
             assert_eq!(colors.as_slice(), &[StudioMatColor::PhotoAverage]);
@@ -1690,7 +1707,10 @@ matting:
       color: [12, 34, 56]
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
-    let selected = cfg.matting.primary_selected().expect("expected passe-partout");
+    let selected = cfg
+        .matting
+        .primary_selected()
+        .expect("expected passe-partout");
     match &selected.option.style {
         MattingMode::PassePartout { colors, .. } => {
             assert_eq!(colors.as_slice(), &[StudioMatColor::Rgb([12, 34, 56])]);
@@ -1710,7 +1730,10 @@ transition:
       shape: circle
 "#;
     let result: Result<Configuration, _> = serde_yaml::from_str(yaml);
-    assert!(result.is_err(), "singular `shape` should no longer be accepted");
+    assert!(
+        result.is_err(),
+        "singular `shape` should no longer be accepted"
+    );
 }
 
 #[test]
@@ -1724,14 +1747,18 @@ transition:
       orientation: horizontal
 "#;
     let result: Result<Configuration, _> = serde_yaml::from_str(yaml);
-    assert!(result.is_err(), "singular `orientation` should no longer be accepted");
+    assert!(
+        result.is_err(),
+        "singular `orientation` should no longer be accepted"
+    );
 }
 
 #[test]
 fn config_version_defaults_and_accepts_supported() {
     // Omitted ⇒ accepted (assumed current).
     let cfg: Configuration = serde_yaml::from_str("photo-library-path: \"/p\"\n").unwrap();
-    cfg.validated().expect("omitted config-version should validate");
+    cfg.validated()
+        .expect("omitted config-version should validate");
     // Explicit supported version ⇒ accepted.
     let cfg: Configuration =
         serde_yaml::from_str("photo-library-path: \"/p\"\nconfig-version: 1\n").unwrap();
@@ -1759,15 +1786,13 @@ fn config_version_rejects_unsupported() {
 #[test]
 fn shipped_config_yaml_validates() {
     let raw = include_str!("../../../config.yaml");
-    let cfg: Configuration =
-        serde_yaml::from_str(raw).expect("repo config.yaml should parse");
+    let cfg: Configuration = serde_yaml::from_str(raw).expect("repo config.yaml should parse");
     cfg.validated().expect("repo config.yaml should validate");
 }
 
 #[test]
 fn shipped_showcase_yaml_validates() {
     let raw = include_str!("../../../showcase/showcase.yaml");
-    let cfg: Configuration =
-        serde_yaml::from_str(raw).expect("showcase.yaml should parse");
+    let cfg: Configuration = serde_yaml::from_str(raw).expect("showcase.yaml should parse");
     cfg.validated().expect("showcase.yaml should validate");
 }

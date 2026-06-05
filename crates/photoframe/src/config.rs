@@ -495,7 +495,8 @@ impl MattingRuntime {
     }
 
     pub fn passe_partout_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
-        self.passe_partout_color.map(|color| color.resolve(fallback))
+        self.passe_partout_color
+            .map(|color| color.resolve(fallback))
     }
 
     pub fn vignette_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
@@ -642,13 +643,19 @@ pub enum MattingMode {
         fit: FixedImageFit,
     },
     Gradient {
-        #[serde(default = "MattingMode::default_gradient_start", rename = "start-color")]
+        #[serde(
+            default = "MattingMode::default_gradient_start",
+            rename = "start-color"
+        )]
         start_color: [u8; 3],
         #[serde(default = "MattingMode::default_gradient_end", rename = "end-color")]
         end_color: [u8; 3],
         #[serde(default)]
         direction: GradientDirection,
-        #[serde(default = "MattingMode::default_gradient_angle", rename = "angle-degrees")]
+        #[serde(
+            default = "MattingMode::default_gradient_angle",
+            rename = "angle-degrees"
+        )]
         angle_degrees: f32,
     },
     Vignette {
@@ -1446,8 +1453,7 @@ where
                     if builder.drop_shadow_shadow_color.is_some() {
                         return Err(de::Error::duplicate_field("shadow-color"));
                     }
-                    builder.drop_shadow_shadow_color =
-                        Some(inline_value_to::<[u8; 3], E>(value)?);
+                    builder.drop_shadow_shadow_color = Some(inline_value_to::<[u8; 3], E>(value)?);
                 }
                 "shadow-opacity" => {
                     if builder.drop_shadow_opacity.is_some() {
@@ -1465,8 +1471,7 @@ where
                     if builder.drop_shadow_offset_px.is_some() {
                         return Err(de::Error::duplicate_field("shadow-offset-px"));
                     }
-                    builder.drop_shadow_offset_px =
-                        Some(inline_value_to::<[i32; 2], E>(value)?);
+                    builder.drop_shadow_offset_px = Some(inline_value_to::<[i32; 2], E>(value)?);
                 }
                 _ => {
                     return Err(de::Error::unknown_field(
@@ -2544,15 +2549,18 @@ impl TransitionOptions {
             TransitionKind::Dissolve => {
                 (600, TransitionMode::Dissolve(DissolveTransition::default()))
             }
-            TransitionKind::RadialWipe => {
-                (500, TransitionMode::RadialWipe(RadialWipeTransition::default()))
-            }
-            TransitionKind::VenetianBlinds => {
-                (600, TransitionMode::VenetianBlinds(VenetianBlindsTransition::default()))
-            }
-            TransitionKind::CrossfadeZoom => {
-                (700, TransitionMode::CrossfadeZoom(CrossfadeZoomTransition::default()))
-            }
+            TransitionKind::RadialWipe => (
+                500,
+                TransitionMode::RadialWipe(RadialWipeTransition::default()),
+            ),
+            TransitionKind::VenetianBlinds => (
+                600,
+                TransitionMode::VenetianBlinds(VenetianBlindsTransition::default()),
+            ),
+            TransitionKind::CrossfadeZoom => (
+                700,
+                TransitionMode::CrossfadeZoom(CrossfadeZoomTransition::default()),
+            ),
         };
         Self {
             kind,
@@ -2837,24 +2845,15 @@ impl AnglePicker {
     fn normalize(&mut self, kind: TransitionKind) -> Result<()> {
         ensure!(
             self.base_deg.is_finite(),
-            format!(
-                "transition option {} has non-finite values in angles",
-                kind
-            )
+            format!("transition option {} has non-finite values in angles", kind)
         );
         ensure!(
             self.jitter_deg.is_finite(),
-            format!(
-                "transition option {} has non-finite angle-jitter",
-                kind
-            )
+            format!("transition option {} has non-finite angle-jitter", kind)
         );
         ensure!(
             self.jitter_deg >= 0.0,
-            format!(
-                "transition option {} requires angle-jitter >= 0",
-                kind
-            )
+            format!("transition option {} requires angle-jitter >= 0", kind)
         );
         Ok(())
     }
@@ -3158,17 +3157,11 @@ impl TransitionOptionBuilder {
         let jitter_value = jitter.unwrap_or(0.0);
         ensure!(
             jitter_value.is_finite(),
-            format!(
-                "transition option {} has non-finite angle-jitter",
-                kind
-            )
+            format!("transition option {} has non-finite angle-jitter", kind)
         );
         ensure!(
             jitter_value >= 0.0,
-            format!(
-                "transition option {} requires angle-jitter >= 0",
-                kind
-            )
+            format!("transition option {} requires angle-jitter >= 0", kind)
         );
         let base_angles = angles.unwrap_or_else(|| vec![0.0]);
         ensure!(
@@ -3183,10 +3176,7 @@ impl TransitionOptionBuilder {
         for base in base_angles {
             ensure!(
                 base.is_finite(),
-                format!(
-                    "transition option {} has non-finite values in angles",
-                    kind
-                )
+                format!("transition option {} has non-finite values in angles", kind)
             );
             let mut builder = builder_template.clone();
             apply_base(&mut builder, base);
@@ -3201,7 +3191,10 @@ fn parse_orientation<E: de::Error>(value: String) -> Result<bool, E> {
     match value.as_str() {
         "vertical" => Ok(true),
         "horizontal" => Ok(false),
-        other => Err(de::Error::unknown_variant(other, &["horizontal", "vertical"])),
+        other => Err(de::Error::unknown_variant(
+            other,
+            &["horizontal", "vertical"],
+        )),
     }
 }
 
@@ -3265,9 +3258,7 @@ fn apply_transition_inline_field<E: de::Error>(
         "reveal-portion" if matches!(kind, TransitionKind::EInk) => {
             builder.eink_reveal_portion = Some(inline_value_to::<f32, E>(value)?);
         }
-        "stripe-count"
-            if matches!(kind, TransitionKind::EInk | TransitionKind::VenetianBlinds) =>
-        {
+        "stripe-count" if matches!(kind, TransitionKind::EInk | TransitionKind::VenetianBlinds) => {
             match kind {
                 TransitionKind::EInk => {
                     builder.eink_stripe_count = Some(inline_value_to::<u32, E>(value)?)
@@ -3420,8 +3411,8 @@ impl Configuration {
         if matting_options.is_empty() {
             tracing::warn!("showcase mode produced zero matting options; keeping original config");
         } else {
-            let missing_fixed_image = fixed_image_path.is_none()
-                && MattingKind::ALL.contains(&MattingKind::FixedImage);
+            let missing_fixed_image =
+                fixed_image_path.is_none() && MattingKind::ALL.contains(&MattingKind::FixedImage);
             if missing_fixed_image {
                 tracing::info!(
                     "showcase: fixed-image mat omitted (set showcase.fixed-image-path to include it)"

@@ -169,7 +169,12 @@ impl PlaylistState {
         let weight = self.options.weight_for(created_at, self.now());
         let key = self.vclock + self.sample_gap(weight);
         let seq = self.next_seq();
-        self.heap.push(Entry { key, seq, generation, path });
+        self.heap.push(Entry {
+            key,
+            seq,
+            generation,
+            path,
+        });
     }
 
     /// Reschedule the photo that was just shown. Unlike `schedule`, this
@@ -220,7 +225,11 @@ impl PlaylistState {
         let weight = self.options.weight_for(created_at, self.now());
         self.known.insert(
             (*path_arc).clone(),
-            Meta { created_at, generation, shown: false },
+            Meta {
+                created_at,
+                generation,
+                shown: false,
+            },
         );
         debug!(path = %path_arc.display(), weight, "photo added to playlist");
         self.schedule(path_arc, created_at, generation);
@@ -293,7 +302,10 @@ impl PlaylistState {
             self.vclock = entry.key;
             let path = entry.path.clone();
             let (created_at, priority) = {
-                let meta = self.known.get_mut(entry.path.as_ref()).expect("validated above");
+                let meta = self
+                    .known
+                    .get_mut(entry.path.as_ref())
+                    .expect("validated above");
                 let p = !meta.shown;
                 meta.shown = true;
                 (meta.created_at, p)

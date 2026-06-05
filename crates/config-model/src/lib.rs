@@ -176,8 +176,8 @@ mod greeting {
 }
 
 mod showcase {
-    use std::path::PathBuf;
     use serde::Deserialize;
+    use std::path::PathBuf;
 
     #[derive(Debug, Clone, Deserialize, Default)]
     #[serde(rename_all = "kebab-case", default)]

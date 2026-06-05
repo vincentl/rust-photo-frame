@@ -168,7 +168,10 @@ fn simulate_playlist_respects_seed_and_weights() {
         now - Duration::from_secs(3_600),
     )];
     for p in &old_paths {
-        photos.push(photo_info(p.clone(), now - Duration::from_secs(86_400 * 30)));
+        photos.push(photo_info(
+            p.clone(),
+            now - Duration::from_secs(86_400 * 30),
+        ));
     }
 
     let plan = manager::simulate_playlist(photos.clone(), options.clone(), now, 60, Some(42));
