@@ -220,14 +220,21 @@ mod awake {
         }
 
         pub fn is_awake_at(&self, instant: DateTime<Tz>) -> bool {
-            self.intervals_for_date(instant.date_naive())
+            let date = instant.date_naive();
+            // Also consider the previous day so an overnight window that began
+            // yesterday (e.g. 21:00 -> 07:00) still counts this morning.
+            let previous = date - ChronoDuration::days(1);
+            self.intervals_for_date(previous)
                 .into_iter()
+                .chain(self.intervals_for_date(date))
                 .any(|interval| interval.contains(instant))
         }
 
         pub fn next_transition_after(&self, from: DateTime<Tz>) -> Option<(DateTime<Tz>, bool)> {
             let start_date = from.date_naive();
-            for offset in 0..=7 {
+            // Start one day earlier so an overnight window that began yesterday
+            // and is still active is found before today's transitions.
+            for offset in -1..=7 {
                 let offset_days = i64::from(offset);
                 let date = start_date + ChronoDuration::days(offset_days);
                 for interval in self.intervals_for_date(date) {
@@ -247,7 +254,16 @@ mod awake {
             for range in self.schedule.resolved_ranges_for(date.weekday()) {
                 let start =
                     resolve_local_datetime(self.timezone, date, range.start(), Boundary::Start);
-                let end = resolve_local_datetime(self.timezone, date, range.end(), Boundary::End);
+                // A range whose end is not strictly after its start wraps past
+                // midnight (e.g. 21:00 -> 07:00): resolve the end on the next
+                // day so the interval spans into the following morning.
+                let end_date = if range.end() > range.start() {
+                    date
+                } else {
+                    date + ChronoDuration::days(1)
+                };
+                let end =
+                    resolve_local_datetime(self.timezone, end_date, range.end(), Boundary::End);
                 if end > start {
                     intervals.push(ResolvedAwakeInterval { start, end });
                 }
@@ -374,9 +390,10 @@ mod awake {
             };
             let start = parse_time(&start_raw)?;
             let end = parse_time(&end_raw)?;
-            if start >= end {
+            if start == end {
                 return Err(de::Error::custom(format!(
-                    "awake interval must have start < end (start={start_raw}, end={end_raw})"
+                    "awake interval start and end must differ (start={start_raw}, end={end_raw}); \
+                     use start > end for a window that wraps past midnight"
                 )));
             }
             Ok(Self { start, end })
@@ -468,6 +485,87 @@ awake-scheduled:
             end,
             tz.with_ymd_and_hms(2024, 1, 1, 9, 30, 0).single().unwrap()
         );
+    }
+
+    #[test]
+    fn overnight_window_wraps_past_midnight() {
+        let schedule = schedule_from_yaml(
+            r#"
+timezone: "UTC"
+awake-scheduled:
+  daily:
+    - ["21:00", "07:00"]
+"#,
+        );
+        let tz = schedule.timezone();
+        let at = |h, m| tz.with_ymd_and_hms(2024, 1, 1, h, m, 0).single().unwrap();
+        let next = |h, m| tz.with_ymd_and_hms(2024, 1, 2, h, m, 0).single().unwrap();
+
+        // Awake from 21:00 through 07:00 the following morning.
+        assert!(!schedule.is_awake_at(at(20, 59)));
+        assert!(schedule.is_awake_at(at(21, 0)));
+        assert!(schedule.is_awake_at(at(23, 30)));
+        assert!(schedule.is_awake_at(next(3, 0)));
+        assert!(schedule.is_awake_at(next(6, 59)));
+        // End is exclusive.
+        assert!(!schedule.is_awake_at(next(7, 0)));
+        // Midday is asleep.
+        assert!(!schedule.is_awake_at(at(12, 0)));
+    }
+
+    #[test]
+    fn overnight_next_transitions() {
+        let schedule = schedule_from_yaml(
+            r#"
+timezone: "UTC"
+awake-scheduled:
+  daily:
+    - ["21:00", "07:00"]
+"#,
+        );
+        let tz = schedule.timezone();
+
+        // Before the window opens: next transition is the 21:00 wake.
+        let midday = tz.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).single().unwrap();
+        let (t, awake) = schedule.next_transition_after(midday).expect("transition");
+        assert!(awake);
+        assert_eq!(
+            t,
+            tz.with_ymd_and_hms(2024, 1, 1, 21, 0, 0).single().unwrap()
+        );
+
+        // Late evening, inside the window: next transition is the 07:00 sleep
+        // on the following day.
+        let evening = tz.with_ymd_and_hms(2024, 1, 1, 22, 0, 0).single().unwrap();
+        let (t, awake) = schedule.next_transition_after(evening).expect("transition");
+        assert!(!awake);
+        assert_eq!(
+            t,
+            tz.with_ymd_and_hms(2024, 1, 2, 7, 0, 0).single().unwrap()
+        );
+
+        // Early morning, still inside the window that began the previous night.
+        let morning = tz.with_ymd_and_hms(2024, 1, 2, 3, 0, 0).single().unwrap();
+        assert!(schedule.is_awake_at(morning));
+        let (t, awake) = schedule.next_transition_after(morning).expect("transition");
+        assert!(!awake);
+        assert_eq!(
+            t,
+            tz.with_ymd_and_hms(2024, 1, 2, 7, 0, 0).single().unwrap()
+        );
+    }
+
+    #[test]
+    fn equal_start_and_end_is_rejected() {
+        let result: std::result::Result<AwakeScheduleConfig, _> = serde_yaml::from_str(
+            r#"
+timezone: "UTC"
+awake-scheduled:
+  daily:
+    - ["08:00", "08:00"]
+"#,
+        );
+        assert!(result.is_err(), "zero-length interval must be rejected");
     }
 
     #[test]

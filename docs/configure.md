@@ -194,7 +194,7 @@ awake-schedule:
       - ["09:00", "23:00"]
 ```
 
-`awake-schedule` supports wrap-past-midnight windows, weekday/weekend overrides, and per-day exceptions. Times use `HH:MM` or `HH:MM:SS`. An empty list for a day key (e.g. `friday: []`) means **sleep all day on that day** — remove the key to fall back to the `daily` window.
+`awake-schedule` supports wrap-past-midnight windows, weekday/weekend overrides, and per-day exceptions. Times use `HH:MM` or `HH:MM:SS`. To wrap past midnight, give a range whose start is **later** than its end — e.g. `["21:00", "07:00"]` keeps the frame awake from 9 PM until 7 AM the next morning. An empty list for a day key (e.g. `friday: []`) means **sleep all day on that day** — remove the key to fall back to the `daily` window.
 
 ### `buttond` (power button daemon)
 
