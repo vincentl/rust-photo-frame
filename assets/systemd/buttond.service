@@ -10,8 +10,9 @@ User=kiosk
 Group=kiosk
 WorkingDirectory=/var/lib/photoframe
 ExecStart=/opt/photoframe/bin/buttond --config /etc/photoframe/config.yaml
-Environment=WAYLAND_DISPLAY=wayland-1
-Environment=XDG_RUNTIME_DIR=/run/user/1001
+# buttond derives /run/user/<uid> from its own (kiosk) UID at runtime; do NOT
+# hardcode XDG_RUNTIME_DIR here. The kiosk account is created without a fixed
+# UID, so a literal /run/user/1001 breaks on any host where kiosk != 1001.
 Restart=always
 RestartSec=1s
 CapabilityBoundingSet=CAP_KILL CAP_SYS_BOOT
