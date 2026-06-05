@@ -157,30 +157,80 @@ fn simulate_playlist_respects_seed_and_weights() {
     };
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
     let fresh_path = PathBuf::from("fresh.jpg");
-    let old_path = PathBuf::from("old.jpg");
-    let photos = vec![
-        photo_info(fresh_path.clone(), now - Duration::from_secs(3_600)),
-        photo_info(old_path.clone(), now - Duration::from_secs(86_400 * 30)),
-    ];
+    // Use several old photos so weighting is observable: with only two photos
+    // the no-immediate-repeat guarantee forces strict alternation, which would
+    // mask the weight difference.
+    let old_paths: Vec<PathBuf> = (0..3)
+        .map(|i| PathBuf::from(format!("old_{i}.jpg")))
+        .collect();
+    let mut photos = vec![photo_info(
+        fresh_path.clone(),
+        now - Duration::from_secs(3_600),
+    )];
+    for p in &old_paths {
+        photos.push(photo_info(p.clone(), now - Duration::from_secs(86_400 * 30)));
+    }
 
-    let plan = manager::simulate_playlist(photos.clone(), options.clone(), now, 8, Some(42));
+    let plan = manager::simulate_playlist(photos.clone(), options.clone(), now, 60, Some(42));
 
-    assert!(plan.len() >= 4, "expected several scheduled items");
-    // Fresh photo should surface early (probabilistic, but within the first few entries)
-    assert!(
-        plan[..4].contains(&fresh_path),
-        "fresh photo should appear within the first 4 entries"
-    );
-
+    assert!(plan.len() >= 30, "expected a full plan");
+    // Fresh photo (weight 3) should be shown more often than any single old
+    // photo (weight 1), even though the no-repeat rule caps its share.
     let fresh_count = plan.iter().filter(|p| *p == &fresh_path).count();
-    let old_count = plan.iter().filter(|p| *p == &old_path).count();
-    assert!(
-        fresh_count > old_count,
-        "fresh photo should repeat more often than old ones"
-    );
+    for p in &old_paths {
+        let old_count = plan.iter().filter(|q| *q == p).count();
+        assert!(
+            fresh_count > old_count,
+            "fresh photo should repeat more often than each old one ({fresh_count} vs {old_count})"
+        );
+    }
 
-    let plan_again = manager::simulate_playlist(photos, options, now, 8, Some(42));
+    let plan_again = manager::simulate_playlist(photos, options, now, 60, Some(42));
     assert_eq!(plan, plan_again, "seeded runs should be deterministic");
+}
+
+#[test]
+fn simulate_playlist_has_no_back_to_back_repeats() {
+    let options = PlaylistOptions {
+        new_multiplicity: 3,
+        half_life: Duration::from_secs(86_400),
+    };
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    // A small library is the worst case for back-to-back repeats.
+    let photos: Vec<PhotoInfo> = (0..3)
+        .map(|i| photo_info(PathBuf::from(format!("p_{i}.jpg")), now))
+        .collect();
+
+    // Several seeds, to make sure the guarantee is not seed-specific.
+    for seed in [1u64, 7, 42, 1000] {
+        let plan = manager::simulate_playlist(photos.clone(), options.clone(), now, 60, Some(seed));
+        for pair in plan.windows(2) {
+            assert_ne!(
+                pair[0], pair[1],
+                "no photo should appear twice in a row (seed {seed})"
+            );
+        }
+    }
+}
+
+#[test]
+fn simulate_playlist_single_photo_repeats() {
+    // With only one photo there is nothing else to show, so it must keep
+    // repeating — the no-repeat guard must not stall an empty rotation.
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let only = PathBuf::from("only.jpg");
+    let plan = manager::simulate_playlist(
+        vec![photo_info(only.clone(), now)],
+        PlaylistOptions::default(),
+        now,
+        5,
+        Some(1),
+    );
+    assert_eq!(plan.len(), 5);
+    assert!(
+        plan.iter().all(|p| *p == only),
+        "the sole photo must keep showing"
+    );
 }
 
 /// Bulk import: 50 brand-new photos plus 10 older ones. Old photos must not be starved

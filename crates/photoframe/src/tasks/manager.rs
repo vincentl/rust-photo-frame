@@ -172,6 +172,39 @@ impl PlaylistState {
         self.heap.push(Entry { key, seq, generation, path });
     }
 
+    /// Reschedule the photo that was just shown. Unlike `schedule`, this
+    /// guarantees the photo will not immediately reappear at the front of the
+    /// queue while other photos are waiting: if its freshly sampled key would
+    /// still be the smallest in the heap, it is pushed to just past the next
+    /// photo with a fresh weighted gap. In the common case the sampled gap is
+    /// already large enough and no adjustment is made, so the weighted cadence
+    /// is preserved; only genuine back-to-back repeats are bumped. With a single
+    /// photo the heap is empty here, so it is allowed to repeat — there is
+    /// nothing else to show.
+    fn reschedule_after_show(
+        &mut self,
+        path: Arc<PathBuf>,
+        created_at: SystemTime,
+        generation: u32,
+    ) {
+        let weight = self.options.weight_for(created_at, self.now());
+        let mut key = self.vclock + self.sample_gap(weight);
+        // Copy the next key out so the immutable heap borrow ends before we draw
+        // another gap.
+        if let Some(next_key) = self.heap.peek().map(|entry| entry.key)
+            && key <= next_key
+        {
+            key = next_key + self.sample_gap(weight);
+        }
+        let seq = self.next_seq();
+        self.heap.push(Entry {
+            key,
+            seq,
+            generation,
+            path,
+        });
+    }
+
     fn record_add(&mut self, info: PhotoInfo) {
         // Already live (e.g. a metadata refresh): update created_at but keep the existing
         // schedule and generation — do not push another heap entry.
@@ -243,7 +276,7 @@ impl PlaylistState {
             (meta.created_at, meta.generation)
         };
         self.vclock = entry.key;
-        self.schedule(entry.path, created_at, generation);
+        self.reschedule_after_show(entry.path, created_at, generation);
     }
 
     /// Pop the earliest still-valid entry, advance vclock, mark shown, and reschedule.
@@ -265,7 +298,7 @@ impl PlaylistState {
                 meta.shown = true;
                 (meta.created_at, p)
             };
-            self.schedule(Arc::clone(&path), created_at, entry.generation);
+            self.reschedule_after_show(Arc::clone(&path), created_at, entry.generation);
             return Some((path, priority));
         }
         None
