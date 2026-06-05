@@ -196,7 +196,11 @@ impl GreetingScreen {
     }
 
     pub fn after_submit(&mut self) {
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        // Non-blocking: process any ready GPU callbacks without stalling the
+        // event loop on full GPU completion (matches the showcase caption
+        // overlay). The greeting/sleep screens redraw while shown, so a Poll is
+        // sufficient and avoids a per-frame block on the boot/sleep path.
+        let _ = self.device.poll(wgpu::PollType::Poll);
     }
 
     pub fn update_layout(&mut self) -> bool {

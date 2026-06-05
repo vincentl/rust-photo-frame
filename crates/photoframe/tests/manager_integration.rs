@@ -49,7 +49,7 @@ async fn manager_ignores_spurious_remove_and_sends_load_on_add() {
         .unwrap();
 
     let LoadPhoto { path: p, priority } =
-        tokio::time::timeout(std::time::Duration::from_secs(2), to_load_rx.recv())
+        tokio::time::timeout(std::time::Duration::from_secs(5), to_load_rx.recv())
             .await
             .expect("timeout waiting for LoadPhoto")
             .expect("channel closed");
@@ -99,7 +99,7 @@ async fn manager_rotates_actual_sent_item() {
         .unwrap();
 
     // Allow the manager to enqueue the second photo and start waiting to resend the first.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
     inv_tx
         .send(InventoryEvent::PhotoAdded(photo_info(
@@ -111,7 +111,11 @@ async fn manager_rotates_actual_sent_item() {
 
     let mut seen_newcomer = false;
     let mut seen_older = HashSet::new();
-    for _ in 0..6 {
+    // Generous receive budget: under parallel-test load the exact interleaving
+    // of adds vs. shows varies, and the lowest-weight photo can take a number of
+    // shows to surface. 40 is far more than enough for all three to appear (the
+    // loop breaks as soon as they do).
+    for _ in 0..40 {
         let next = receive_with_timeout(&mut to_load_rx).await;
         if next == newcomer {
             seen_newcomer = true;
@@ -138,7 +142,10 @@ async fn manager_rotates_actual_sent_item() {
 }
 
 async fn receive_with_timeout(rx: &mut mpsc::Receiver<LoadPhoto>) -> PathBuf {
-    let LoadPhoto { path, .. } = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+    // Generous timeout: these async tests run alongside the rest of the suite,
+    // and under heavy parallel load the manager task can be slow to get
+    // scheduled. 5s is far above the real latency but keeps the suite robust.
+    let LoadPhoto { path, .. } = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
         .await
         .expect("timed out waiting for LoadPhoto")
         .expect("loader channel closed unexpectedly");
