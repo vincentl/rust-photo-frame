@@ -291,7 +291,11 @@ impl CaptionOverlay {
     }
 
     pub(super) fn after_submit(&mut self) {
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        // Non-blocking: process any ready GPU callbacks without stalling the
+        // winit event loop on full GPU completion. This runs on every showcase
+        // slideshow frame, so blocking here (wait_indefinitely) serialized the
+        // event loop on the GPU and defeated AutoVsync pacing.
+        let _ = self.device.poll(wgpu::PollType::Poll);
     }
 }
 
