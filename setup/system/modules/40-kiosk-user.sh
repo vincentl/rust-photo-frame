@@ -274,8 +274,10 @@ ensure_kiosk_user() {
         fi
     fi
 
+    # 'seat' is required so the kiosk session can access /run/seatd.sock — the
+    # photoframe-session wrapper hard-fails the greetd session without it.
     local group
-    for group in render video input; do
+    for group in render video input seat; do
         if ! getent group "${group}" >/dev/null 2>&1; then
             log "Creating group ${group}"
             groupadd "${group}"
@@ -296,22 +298,21 @@ ensure_kiosk_user() {
 ensure_runtime_dirs() {
     local runtime_dir="/run/photoframe"
     local tmpfiles_conf="/etc/tmpfiles.d/photoframe.conf"
-    local kiosk_uid
-
-    kiosk_uid="$(id -u kiosk)"
 
     log "Ensuring runtime control socket directory ${runtime_dir}"
     install -d -m 0770 -o kiosk -g kiosk "${runtime_dir}"
 
+    # NOTE: /run/user/<uid> is owned and lifecycle-managed exclusively by
+    # systemd-logind for the kiosk login session. We must NOT recreate it here
+    # or via tmpfiles or we race with logind's per-session runtime dir. buttond
+    # is ordered After=graphical.target so the session (and its runtime dir)
+    # already exists by the time it starts.
     log "Writing tmpfiles.d entry ${tmpfiles_conf}"
     install -d -m 0755 "$(dirname "${tmpfiles_conf}")"
     cat <<TMPFILES >"${tmpfiles_conf}"
 # photoframe runtime directories
 d /run/photoframe 0770 kiosk kiosk -
-d /run/user/${kiosk_uid} 0700 kiosk kiosk -
 TMPFILES
-
-    install -d -m 0700 -o kiosk -g kiosk "/run/user/${kiosk_uid}"
 }
 
 install_polkit_rules() {
@@ -382,18 +383,11 @@ enable_systemd_units() {
         systemd_mask_unit getty@tty1.service >/dev/null 2>&1 || true
     fi
 
-    log "Setting greetd as the system display manager"
-    systemd_enable_now_unit greetd.service >/dev/null 2>&1 || true
-
-    log "Verifying display-manager alias"
-    systemd_status display-manager.service || true
-
-    local unit
-    for unit in photoframe-wifi-manager.service buttond.service; do
-        if systemd_unit_exists "${unit}"; then
-            systemd_enable_now_unit "${unit}" || true
-        fi
-    done
+    # greetd, photoframe-wifi-manager, and buttond are enabled/started by
+    # 60-systemd.sh *after* their configs (50-greetd.sh) and the application
+    # binaries are installed. Starting greetd here would launch it against a
+    # not-yet-written session config (leaving it failed until a later restart),
+    # and the photoframe unit files don't exist yet at this point.
 
     configure_sync_timer
 }

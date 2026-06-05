@@ -1,8 +1,8 @@
 # Managed by setup/system/modules/60-systemd.sh
 [Unit]
 Description=Photo Frame Power Button Monitor
-After=multi-user.target
-Wants=multi-user.target
+After=graphical.target
+Wants=graphical.target
 
 [Service]
 Type=simple
@@ -20,4 +20,4 @@ AmbientCapabilities=CAP_KILL CAP_SYS_BOOT
 NoNewPrivileges=true
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target

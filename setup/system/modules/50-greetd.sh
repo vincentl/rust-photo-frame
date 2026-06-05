@@ -55,7 +55,7 @@ esac
 owner_uid="$(stat -c '%u' "$XDG_RUNTIME_DIR")"
 [[ "$owner_uid" -eq "$(id -u)" ]] || die "XDG_RUNTIME_DIR owner uid=$owner_uid does not match current uid=$(id -u)"
 perm="$(stat -c '%a' "$XDG_RUNTIME_DIR")"
-[[ "$perm" == "700" || "$perm" == "700" ]] || echo "[photoframe-session] WARN: XDG_RUNTIME_DIR perms are $perm (expected 700)"
+[[ "$perm" == "700" || "$perm" == "0700" ]] || echo "[photoframe-session] WARN: XDG_RUNTIME_DIR perms are $perm (expected 700)"
 
 # 3) seatd must be running and its socket accessible by this user.
 [[ -S /run/seatd.sock ]] || die "seatd socket missing at /run/seatd.sock. Is seatd.service active?"
