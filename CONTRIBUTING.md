@@ -165,7 +165,7 @@ tests/collect_logs.sh        # baseline log capture
 - **Kiosk autostart** — `systemctl status greetd photoframe-wifi-manager photoframe-sync.timer`; reboot; confirm greetd claims tty1 and the app launches full-screen.
 - **Display & frame rate** — `wlr-randr` shows target mode (4K@60 preferred); short phone video documents smoothness; note tearing/flicker.
 - **Button & power** — `sudo evtest` to identify input device; short press toggles sleep; double-click clean shutdown; long press hard-off documented (don't actually do it if there's risk of corruption).
-- **Sleep schedule** — set a near-future window, restart kiosk, observe transitions; manual `set-state`/`ToggleState` over the control socket works.
+- **Sleep schedule** — set a near-future window, restart kiosk, observe transitions; manual `set-state`/`toggle-state` over the control socket works.
 - **Wi-Fi provisioning** — `make -f tests/Makefile wifi-recovery`; phone joins `PhotoFrame-Setup`, submits credentials, frame reconnects. Also exercise LAN-up/Internet-down (slideshow keeps advancing) and full Wi-Fi outage with later restoration (auto-reconnect).
 - **Library ingest** — tiny library validates EXIF/mat/transitions; medium library run for 10–15 min with `top -H -p $(pidof photoframe)` and `vcgencmd measure_temp`.
 - **Updates & rollback** — `git checkout <release-tag>`, rebuild, restart greetd; rollback to previous tag; confirm unit files unchanged via `systemctl cat greetd.service`.
@@ -177,7 +177,7 @@ tests/collect_logs.sh        # baseline log capture
 - Cold boot to slideshow ready in ≤ 45 s after greetd starts.
 - Display locked to desired mode with no sustained tearing.
 - Button behaviors reliable (short-press sleep toggle, double-click shutdown).
-- Sleep schedule respects configured windows; reacts to manual `ToggleState` immediately.
+- Sleep schedule respects configured windows; reacts to manual `toggle-state` immediately.
 - Wi-Fi provisioning, outage resilience, and watcher recovery all succeed without slideshow halt.
 - Medium-library playback smooth (CPU spikes <150% overall, no OOM or IO errors).
 - Update deploys cleanly; rollback path verified.
@@ -186,7 +186,7 @@ tests/collect_logs.sh        # baseline log capture
 
 ### Recovery & rollback notes
 
-- **Bad config.yaml:** restore from `/etc/photoframe/config.yaml.bak`; validate YAML (`python3 -c "import yaml,sys; yaml.safe_load(open('/etc/photoframe/config.yaml'))"`); restart kiosk.
+- **Bad config.yaml:** restore from a known-good backup (keep one before editing); validate YAML (`python3 -c "import yaml,sys; yaml.safe_load(open('/etc/photoframe/config.yaml'))"`); restart kiosk.
 - **Service won't start:** `journalctl -u greetd.service -b` and `journalctl -u photoframe-wifi-manager.service -b`; rebuild binary; `sudo systemctl daemon-reload`.
 - **Failed update:** `git checkout <previous-good>`; rebuild + restart; if binary corrupted, `rm -rf target/` and rebuild.
 - **Network stuck offline:** `nmcli connection show`; `sudo systemctl restart NetworkManager`; collect logs.

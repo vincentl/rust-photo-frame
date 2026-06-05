@@ -284,7 +284,7 @@ Pipe JSON to the control socket to override the schedule temporarily:
 ```bash
 echo '{"command":"set-state","state":"awake"}'  | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock
 echo '{"command":"set-state","state":"asleep"}' | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock
-echo '{"command":"ToggleState"}'                | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock
+echo '{"command":"toggle-state"}'               | sudo -u kiosk socat - UNIX-CONNECT:/run/photoframe/control.sock
 ```
 
 Manual overrides persist until the next schedule boundary — the override clears the moment the schedule's own desired state matches it, at which point the frame resumes following the schedule. Pressing again toward the opposite state agrees with the schedule and clears the override immediately (a natural "undo"). Overrides are in-memory, so a `buttond` restart resets to schedule-following.
@@ -386,7 +386,7 @@ The frame boots straight into the Wayland app via greetd on Debian 13 (Trixie). 
 - Verifies `/etc/os-release` reports `VERSION_CODENAME=trixie`.
 - Applies Pi 5 boot tweaks (set `ENABLE_4K_BOOT=0` to skip the 4K60 profile).
 - Installs Wayland/kiosk dependencies: `greetd`, `sway`, `swaybg`, `swayidle`, `swaylock`, `wayland-protocols`, `dbus`, `dbus-user-session`.
-- Creates the locked `kiosk` user with `video`, `render`, and `input` group membership.
+- Creates the locked `kiosk` user with `video`, `render`, `input`, and `seat` group membership (`seat` is required to access `/run/seatd.sock`).
 - Provisions `/run/photoframe` as `kiosk:kiosk` mode `0770` plus a tmpfiles entry for boot-time creation.
 - Installs `/usr/local/bin/photoframe-session`.
 - Writes `/etc/greetd/config.toml` so tty1 runs `photoframe-session` as `kiosk`.
@@ -406,10 +406,10 @@ command = "/usr/local/bin/photoframe-session"
 user = "kiosk"
 ```
 
-- The wrapper launches Sway via `dbus-run-session`/`seatd-launch`.
+- The wrapper launches Sway via `dbus-run-session`; `seatd.service` provides seat management (Sway connects to `/run/seatd.sock`).
 - Sway config: `/usr/local/share/photoframe/sway/config`.
 - `greetd` owns tty1; no autologin hacks.
-- Launch chain: `greetd → photoframe-session → dbus-run-session → seatd-launch → sway`.
+- Launch chain: `greetd → photoframe-session → dbus-run-session → sway` (with `seatd.service` providing seat access via `/run/seatd.sock`).
 
 ### Verification
 
