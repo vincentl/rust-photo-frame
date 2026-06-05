@@ -1614,12 +1614,28 @@ pub fn run_windowed(
                     }
                 };
             let caps = surface.get_capabilities(&adapter);
-            let format = caps
+            let Some(format) = caps
                 .formats
                 .iter()
                 .copied()
                 .find(|f| f.is_srgb())
-                .unwrap_or(caps.formats[0]);
+                .or_else(|| caps.formats.first().copied())
+            else {
+                warn!(
+                    context = reason,
+                    "surface reported no supported texture formats; exiting viewer"
+                );
+                event_loop.exit();
+                return false;
+            };
+            let Some(alpha_mode) = caps.alpha_modes.first().copied() else {
+                warn!(
+                    context = reason,
+                    "surface reported no alpha modes; exiting viewer"
+                );
+                event_loop.exit();
+                return false;
+            };
             let size = window.inner_size();
             debug!(
                 context = reason,
@@ -1635,7 +1651,7 @@ pub fn run_windowed(
                 width: size.width.max(1),
                 height: size.height.max(1),
                 present_mode: wgpu::PresentMode::AutoVsync,
-                alpha_mode: caps.alpha_modes[0],
+                alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
             };

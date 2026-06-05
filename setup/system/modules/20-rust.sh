@@ -20,7 +20,7 @@ else
     trap 'rm -rf "${temp_dir}"' EXIT
 
     log "Downloading rustup-init"
-    curl -fsSL https://sh.rustup.rs -o "${temp_dir}/rustup-init.sh"
+    curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused https://sh.rustup.rs -o "${temp_dir}/rustup-init.sh"
     chmod +x "${temp_dir}/rustup-init.sh"
 
     log "Installing Rust toolchain to ${CARGO_HOME}"

@@ -28,7 +28,7 @@ install_font() {
     trap cleanup EXIT
 
     log INFO "Downloading ${FONT_NAME} font"
-    curl -fL -o "${tmpfile}" "${FONT_URL}"
+    curl -fL --retry 3 --retry-delay 2 --retry-connrefused -o "${tmpfile}" "${FONT_URL}"
 
     run_sudo install -m 644 "${tmpfile}" "${FONT_PATH}"
     trap - EXIT
