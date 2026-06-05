@@ -142,6 +142,25 @@ impl FillWhenFits {
         }
         rng.random_bool(prob as f64)
     }
+
+    /// Reject NaN / out-of-range values that serde cannot express as defaults.
+    /// `should_fill` feeds `skip_matting_probability` straight into
+    /// `rng.random_bool`, which panics for any value outside `[0.0, 1.0]`
+    /// (NaN included), so this must run before any photo is rendered.
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.maximum_crop_percentage.is_finite()
+                && (0.0..=100.0).contains(&self.maximum_crop_percentage),
+            "matting.fill-when-fits.maximum-crop-percentage must be between 0 and 100"
+        );
+        ensure!(
+            self.skip_matting_probability.is_finite()
+                && (0.0..=1.0).contains(&self.skip_matting_probability),
+            "matting.fill-when-fits.skip-matting-probability must be between 0.0 and 1.0 \
+             (a 0-1 fraction, not a 0-100 percentage)"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -3467,6 +3486,10 @@ impl Configuration {
         self.matting
             .prepare_runtime()
             .context("invalid matting configuration")?;
+        if let Some(fill) = self.matting.fill_when_fits() {
+            fill.validate()
+                .context("invalid matting fill-when-fits configuration")?;
+        }
         self.playlist.validate()?;
         self.greeting_screen
             .validate()

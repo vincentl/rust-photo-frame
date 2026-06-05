@@ -1151,6 +1151,48 @@ fn fill_when_fits_probability_bounds() {
 }
 
 #[test]
+fn validated_rejects_fill_when_fits_out_of_range() {
+    let config_with = |crop: &str, prob: &str| -> Configuration {
+        let yaml = format!(
+            r#"
+photo-library-path: "/p"
+matting:
+  fill-when-fits:
+    maximum-crop-percentage: {crop}
+    skip-matting-probability: {prob}
+  selection: random
+  active:
+    - kind: fixed-color
+      colors:
+        - [0, 0, 0]
+    - kind: blur
+"#
+        );
+        serde_yaml::from_str(&yaml).expect("fill-when-fits config should parse")
+    };
+
+    // A sane block validates cleanly.
+    config_with("5.0", "0.5")
+        .validated()
+        .expect("sane fill-when-fits should validate");
+
+    // Regression: a NaN probability parses fine but slips past the `>= 1.0`
+    // and `<= 0.0` guards in FillWhenFits::should_fill, where it would reach
+    // rng.random_bool(NaN) and panic at render. It must be rejected at
+    // config-validation time instead.
+    assert!(config_with("5.0", ".nan").validated().is_err());
+
+    // The 0-1 vs 0-100 scale footgun: a probability of 50 (written as if it
+    // were a percentage) must be rejected, not silently treated as "always
+    // fill".
+    assert!(config_with("5.0", "50").validated().is_err());
+
+    // maximum-crop-percentage outside 0..=100 is likewise rejected.
+    assert!(config_with("150", "0.5").validated().is_err());
+    assert!(config_with(".nan", "0.5").validated().is_err());
+}
+
+#[test]
 fn parse_gradient_matting_defaults() {
     let yaml = r#"
 photo-library-path: "/photos"
