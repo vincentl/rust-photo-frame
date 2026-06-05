@@ -512,6 +512,13 @@ async fn finalize_recovery(
     reason: &str,
     attempt_id: Option<&str>,
 ) {
+    // Clear any pending provisioning request so a stale wifi-request.json can't
+    // be re-applied on the next recovery cycle. Every exit-to-Online path (link
+    // restored, provision success, probe success, backoff online) finalizes here.
+    if let Err(err) = remove_request(config) {
+        warn!(error = ?err, "failed to clear provisioning request during finalize");
+    }
+
     if let Some(mut active) = recovery.take()
         && let Err(err) = active.stop(config).await
     {
