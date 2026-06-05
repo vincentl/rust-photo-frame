@@ -1,5 +1,7 @@
 # Photo Frame
 
+![photo frame on grey wall with cream colored wooden frame displaying black matted image of a string instrument](docs/images/photoframe.jpeg)
+
 Build a wall-mounted digital photo frame from a Raspberry Pi 5 and a 4K monitor. It runs a self-managing slideshow from a local photo library: GPU-accelerated transitions, customizable matting, a smart playlist that surfaces newer photos first, and a built-in Wi-Fi recovery portal — all on-device, no cloud dependency after setup.
 
 **Built for makers and hobbyists** who want a bespoke display they fully control, not a subscription appliance.
@@ -19,15 +21,15 @@ A kiosk-mode Raspberry Pi 5 that:
 
 ## What you'll need
 
-| Component               | Notes                                                                         |
-| ----------------------- | ----------------------------------------------------------------------------- |
-| Raspberry Pi 5 (4 GiB+) | 8 GiB recommended for 4K with effects                                         |
-| 4K monitor              | Tested with Dell S2725QC 27" 4K. HDMI-CEC is not used.                        |
-| USB-C power supply      | Pi 5 needs a 27W USB-C PD supply (official Pi 5 adapter or equivalent)        |
-| HDMI cable              | Short, high-quality run; the display won't tolerate a marginal cable          |
-| High-endurance microSD  | 32 GiB+ recommended for always-on use                                         |
-| Momentary pushbutton    | Optional — wires to Pi 5 power pads for hardware wake/sleep                   |
-| Mounting + enclosure    | French-cleat + shadow-box reference build with CAD files in `maker/`         |
+| Component               | Notes                                                                                       |
+| ----------------------- | ------------------------------------------------------------------------------------------- |
+| Raspberry Pi 5 (4 GiB+) | 8 GiB recommended for 4K with effects                                                       |
+| 4K monitor              | Tested with Dell S2725QC 27" 4K. HDMI-CEC is not used.                                      |
+| Power                   | Pi 5 runs off the monitor's USB-C PD port; a 27W USB-C supply only if your monitor lacks PD |
+| HDMI cable              | Short, high-quality run; the display won't tolerate a marginal cable                        |
+| High-endurance microSD  | 32 GiB+ recommended for always-on use                                                       |
+| Momentary pushbutton    | Optional — wires to Pi 5 power pads for hardware wake/sleep                                 |
+| Mounting + enclosure    | French-cleat + shadow-box reference build with CAD files in `maker/`                        |
 
 Full BOM and physical assembly: **[docs/build.md](docs/build.md)**.
 
@@ -51,28 +53,28 @@ If you want to modify the code, see **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 The frame ships eight GPU **transitions** (how one photo gives way to the next) and nine **mats** (the border/background framing each photo).
 
-| Transitions | |
-| --- | --- |
-| `fade` | cross-fade (optionally through black) |
-| `wipe` | directional linear wipe with a feathered edge |
-| `push` | incoming photo slides in, pushing the old one out |
-| `e-ink` | e-paper-style flash + stripe reveal |
-| `dissolve` | film-style value-noise threshold dissolve |
-| `radial-wipe` | circle or diamond reveal growing from a center point |
-| `venetian-blinds` | horizontal/vertical slat reveal |
-| `crossfade-zoom` | cross-fade with a gentle Ken-Burns zoom |
+| Transitions       |                                                      |
+| ----------------- | ---------------------------------------------------- |
+| `fade`            | cross-fade (optionally through black)                |
+| `wipe`            | directional linear wipe with a feathered edge        |
+| `push`            | incoming photo slides in, pushing the old one out    |
+| `e-ink`           | e-paper-style flash + stripe reveal                  |
+| `dissolve`        | film-style value-noise threshold dissolve            |
+| `radial-wipe`     | circle or diamond reveal growing from a center point |
+| `venetian-blinds` | horizontal/vertical slat reveal                      |
+| `crossfade-zoom`  | cross-fade with a gentle Ken-Burns zoom              |
 
-| Mats | |
-| --- | --- |
-| `fixed-color` | solid color border (one or more swatches) |
-| `blur` | blurred copy of the photo as the backdrop |
-| `studio` | museum mat board with a 45° bevel and linen-weave texture |
-| `fixed-image` | your own image as the backdrop |
-| `gradient` | linear or radial gradient between two colors |
-| `vignette` | solid color with darkened edges |
+| Mats             |                                                                |
+| ---------------- | -------------------------------------------------------------- |
+| `fixed-color`    | solid color border (one or more swatches)                      |
+| `blur`           | blurred copy of the photo as the backdrop                      |
+| `studio`         | museum mat board with a 45° bevel and linen-weave texture      |
+| `fixed-image`    | your own image as the backdrop                                 |
+| `gradient`       | linear or radial gradient between two colors                   |
+| `vignette`       | solid color with darkened edges                                |
 | `cinematic-blur` | blurred backdrop with darken + vignette (Apple-TV-aerial look) |
-| `passe-partout` | clean 45° bevel mat board, no weave (a crisper `studio`) |
-| `drop-shadow` | photo floated above a solid mat with a soft drop shadow |
+| `passe-partout`  | clean 45° bevel mat board, no weave (a crisper `studio`)       |
+| `drop-shadow`    | photo floated above a solid mat with a soft drop shadow        |
 
 Preview them live with the [showcase](showcase/README.md) tour. For commented examples of every option see [`config.yaml`](config.yaml); for the complete reference (every key, default, and behavior) see the Transition and Matting sections of [docs/configure.md](docs/configure.md).
 
