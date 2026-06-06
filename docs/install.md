@@ -62,7 +62,7 @@ Host photoframe
 2. Wait ~1 minute for Wi-Fi association, then SSH:
 
    ```bash
-   ssh frame@photoframe.local
+   ssh -i ~/.ssh/photoframe frame@photoframe.local
    ```
 
 3. Confirm the OS — the setup scripts require Trixie:
@@ -89,6 +89,7 @@ cd photoframe
 ```
 
 The script uses `sudo` internally for system-level steps (your credential is still cached from Step 2 — no extra prompt). It:
+
 - Installs system packages (graphics stack, NetworkManager, Sway, greetd, build tools) and a system-wide Rust toolchain.
 - Builds the four crates (`photoframe`, `buttond`, `wifi-manager`, `config-model`).
 - Provisions the `kiosk` user, polkit rules, runtime directories, zram swap, and Pi 5 boot tweaks.
@@ -101,7 +102,7 @@ When the script returns, **log out and SSH back in** so your shell picks up the 
 
 ```bash
 exit
-ssh frame@photoframe.local
+ssh -i ~/.ssh/photoframe frame@photoframe.local
 cd photoframe
 ./setup/tools/verify.sh
 ```
@@ -110,7 +111,7 @@ You should see all checks green. Warnings appear yellow; errors red.
 
 ### What got installed where
 
-```
+```txt
 /opt/photoframe/       Read-only runtime: binaries, unit files, config templates
 /var/lib/photoframe/   Writable state: photos, hotspot artifacts, runtime files
 /etc/photoframe/       Active configuration (edit this with sudo)
