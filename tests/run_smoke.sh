@@ -48,11 +48,15 @@ main() {
     warn "No DRM connector modes found"
   fi
 
-  section "Button short press"
-  info "Prepare to short-press the physical power button. Watch the screen for sleep toggle and confirm below."
-  if confirm_or_skip "Did the short press toggle slideshow sleep?"; then
-    info "Capture recent journal entries for evidence"
-    journalctl -u "${photo_service}" -n 40 --no-pager || warn "Unable to read journal"
+  section "Button: sleep and wake (round trip)"
+  info "Confirm the frame is awake (slideshow showing), then test BOTH directions of the power button."
+  info "Step 1: short-press the power button once — the screen should go to SLEEP (the panel powers off after the configured delay)."
+  if confirm_or_skip "Did the short press put the frame to SLEEP?"; then
+    info "Step 2: short-press the power button again — the screen should WAKE and the slideshow should resume."
+    confirm_or_skip "Did the next short press WAKE the frame?" || true
+    info "Capture recent button + photo journal for evidence"
+    journalctl -u buttond.service -n 30 --no-pager || warn "Unable to read buttond journal"
+    journalctl -t photoframe -n 20 --no-pager || warn "Unable to read photoframe journal"
   fi
 
   section "Sleep toggle via control socket"
@@ -70,7 +74,7 @@ finally:
 PY
   sleep 2
   info "Check journal for sleep toggle acknowledgement"
-  journalctl -u "${photo_service}" -n 40 --no-pager || warn "Unable to read journal"
+  journalctl -t photoframe -n 20 --no-pager || warn "Unable to read photoframe journal"
 
   section "Collect log bundle"
   run_cmd "Run log collector" "$REPO_ROOT/tests/collect_logs.sh"
