@@ -30,16 +30,22 @@ main() {
   journalctl -u "${photo_service}" -n 20 --no-pager || warn "Unable to read journal"
 
   section "Display mode"
-  if command -v wlr-randr >/dev/null 2>&1; then
-    run_cmd "Query Wayland outputs" wlr-randr
+  # wlr-randr needs the kiosk session's Wayland socket, and this suite runs as
+  # the operator account (no Wayland display of its own). Query DRM sysfs
+  # instead — always readable, no compositor connection required. Confirm the
+  # live compositor mode separately with `sudo -u kiosk wlr-randr` if needed.
+  local mode found_modes=0
+  for mode in /sys/class/drm/card*-*/modes; do
+    { [ -e "$mode" ] && [ -s "$mode" ]; } || continue
+    info "Modes for ${mode%/modes}"
+    log_cmd cat "$mode"
+    cat "$mode"
+    found_modes=1
+  done
+  if [ "$found_modes" -eq 1 ]; then
+    pass "DRM connector reports modes (confirm 4K@60 on screen)"
   else
-    warn "wlr-randr not found; falling back to DRM sysfs"
-    for mode in /sys/class/drm/card*-*/modes; do
-      [ -e "$mode" ] || continue
-      info "Modes for ${mode%/modes}"
-      log_cmd cat "$mode"
-      cat "$mode"
-    done
+    warn "No DRM connector modes found"
   fi
 
   section "Button short press"
@@ -50,11 +56,11 @@ main() {
   fi
 
   section "Sleep toggle via control socket"
-  info "Sending ToggleState command via /run/photoframe/control.sock"
-  run_cmd "Send ToggleState" python3 - <<'PY'
+  info "Sending toggle-state command via /run/photoframe/control.sock"
+  run_cmd "Send toggle-state" python3 - <<'PY'
 import socket
 
-payload = b'{"command":"ToggleState"}'
+payload = b'{"command":"toggle-state"}'
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 try:
     sock.connect("/run/photoframe/control.sock")
