@@ -37,6 +37,8 @@ make -f tests/Makefile wifi-recovery   # captive-portal recovery
 make -f tests/Makefile collect         # bundle logs for a report
 ```
 
+> **Wi-Fi recovery over SSH:** `wifi-recovery` disconnects Wi-Fi mid-test. If your SSH session runs over `wlan0`, start it inside `tmux` and set `ALLOW_WIFI_SSH_DROP=1` so it survives the drop, then `tmux attach` once the frame reconnects. Full procedure in [docs/operate.md](../docs/operate.md).
+
 Plus the post-install health checks:
 
 ```bash

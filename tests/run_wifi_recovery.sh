@@ -192,6 +192,16 @@ main() {
   require_cmd nmcli
   require_cmd sudo
 
+  # Keep sudo credentials fresh for the whole test. The recovery window (SSH
+  # drops, the operator submits creds on a phone, then reconnects) easily
+  # outlasts sudo's timeout, and the journal/file reads below run 'sudo … 2>
+  # /dev/null' — so an expired cache would hide the password prompt and block
+  # the script silently (an apparent hang at the acknowledgement step).
+  sudo -v || fail "This test needs sudo access; cache your credentials and rerun."
+  ( while true; do sudo -n true 2>/dev/null || true; sleep 45; kill -0 "$$" 2>/dev/null || exit 0; done ) &
+  SUDO_KEEPALIVE_PID=$!
+  trap 'kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null || true' EXIT
+
   run_cmd "${photo_service} is active" systemctl is-active --quiet "${photo_service}"
   run_cmd "${wifi_service} is active" systemctl is-active --quiet "${wifi_service}"
 
@@ -318,6 +328,7 @@ main() {
   confirm "Did the portal accept credentials submission?"
 
   section "Wait for submission acknowledgement"
+  info "Polling the wifi-manager journal for the provisioning markers (recovery may already be complete — returns as soon as they appear, up to 75s)…"
   if wait_for_submission_ack "$wifi_service" "$start_iso" 75; then
     pass "Provisioning request observed by watcher"
   else
