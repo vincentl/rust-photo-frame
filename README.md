@@ -138,8 +138,8 @@ flowchart LR
 
 This project was developed with significant assistance from multiple AI tools:
 
-- **Anthropic**: Claude Code with Sonnet was used for design discussions, code generation, debugging, and drafting documentation.
-- **OpenAI**: Codex with GPT was used for design discussions, code generation, debugging, and drafting documentation.
+- **Anthropic**: Claude Code with Sonnet & Opus models was used for design discussions, code generation, debugging, and drafting documentation.
+- **OpenAI**: Codex with various GPT models was used for design discussions, code generation, debugging, and drafting documentation.
 
 ---
 
