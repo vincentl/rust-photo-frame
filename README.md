@@ -45,7 +45,7 @@ Full BOM and physical assembly: **[docs/build.md](docs/build.md)**.
 
 Optional deeper dives (cloud sync, Wi-Fi internals, power model, memory tuning, kiosk stack) live in **[docs/advanced.md](docs/advanced.md)**.
 
-If you want to modify the code, see **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+If you want to modify the code, see **[CONTRIBUTING.md](CONTRIBUTING.md)** and the contributor guides under **[developer/](developer/)**.
 
 ---
 
@@ -91,7 +91,7 @@ setup/                 Provisioning scripts for Raspberry Pi OS
 docs/                  build, install, configure, operate, advanced
 showcase/              showcase.yaml, activate/deactivate scripts — labeled tour of every effect
 maker/                 Physical build files (STL, SVG, SCAD)
-developer/             Debug helpers and Wi-Fi fault-injection scripts
+developer/             Contributor guides (testing, architecture) + debug scripts
 tests/                 Manual smoke tests and diagnostics scripts
 config.yaml            Annotated example configuration
 ```

@@ -426,4 +426,4 @@ Expected: `greetd` reports `active (running)`; the unit command line includes `/
 
 Re-running provisioning after OS or app updates is supported. Idempotent status lines like `getty@tty1.service already masked; skipping disable/mask` are normal.
 
-For deeper debug workflows (manual Sway launch, overlay tests, kiosk-shell environment export), see [CONTRIBUTING.md › Debugging the kiosk stack](../CONTRIBUTING.md#debugging-the-kiosk-stack).
+For deeper debug workflows (manual Sway launch, overlay tests, kiosk-shell environment export), see [developer/architecture.md › Debugging the kiosk stack](../developer/architecture.md#debugging-the-kiosk-stack).
