@@ -3,6 +3,8 @@
 Description=Photo Frame Wi-Fi Manager
 After=network-online.target
 Wants=network-online.target
+# Skip (don't crash-loop) until the application stage installs the binary.
+ConditionPathExists=/opt/photoframe/bin/wifi-manager
 
 [Service]
 Type=simple

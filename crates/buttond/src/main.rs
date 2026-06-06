@@ -284,11 +284,21 @@ impl ButtondSettings {
             detector,
         );
 
-        let initial_state = screen
-            .detect_state()
-            .context("failed to detect initial screen state")?
-            .state
-            .into();
+        // Detecting the initial screen state needs sway's IPC socket, which may
+        // not exist yet when buttond starts right after graphical.target. Don't
+        // treat that as fatal — the state is re-detected on every toggle and
+        // reconciled by the scheduler — so default to Awake and carry on rather
+        // than crash-looping until sway is ready.
+        let initial_state = match screen.detect_state() {
+            Ok(detected) => detected.state.into(),
+            Err(err) => {
+                warn!(
+                    ?err,
+                    "could not detect initial screen state at startup (sway not ready yet?); defaulting to awake"
+                );
+                ViewerMode::Awake
+            }
+        };
 
         let control_socket: Arc<dyn ControlSocket> =
             Arc::new(UnixControlSocket::new(self.control_socket_path.clone()));

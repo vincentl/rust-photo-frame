@@ -151,9 +151,16 @@ if systemd_available; then
             return 0
         fi
 
-        if systemd_is_active "${service}"; then
-            return 0
-        fi
+        # Services started at the very end of provisioning can still be in their
+        # Restart= settling window (e.g. buttond waiting for the sway socket).
+        # Retry briefly before judging.
+        local attempt
+        for attempt in 1 2 3 4 5; do
+            if systemd_is_active "${service}"; then
+                return 0
+            fi
+            sleep 2
+        done
 
         systemd_status "${service}" || true
 

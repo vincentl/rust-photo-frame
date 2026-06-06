@@ -3,6 +3,8 @@
 Description=Photo Frame Power Button Monitor
 After=graphical.target
 Wants=graphical.target
+# Skip (don't crash-loop) until the application stage installs the binary.
+ConditionPathExists=/opt/photoframe/bin/buttond
 
 [Service]
 Type=simple
