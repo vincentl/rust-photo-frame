@@ -52,23 +52,34 @@ sudo ./setup/system/tools/diagnostics.sh
 ```bash
 vcgencmd measure_temp
 grep -H . /sys/class/hwmon/hwmon*/fan1_input 2>/dev/null   # fan RPM (non-zero under load)
-sudo -u kiosk wlr-randr
+sudo -u kiosk env XDG_RUNTIME_DIR=/run/user/$(id -u kiosk) WAYLAND_DISPLAY=wayland-1 wlr-randr
 tests/collect_logs.sh        # baseline log capture
 ```
 
 ---
 
-## Pre-merge test matrix
+## Test scenarios
 
-Exercise each row at least once per release cycle.
+Conditions worth exercising across a release — each surfaces bugs that only show
+in a specific combination (Wi-Fi vs Ethernet, internet down, large libraries, the
+overnight sleep loop). Run the [phase checklist](#manual-phase-checklist) — or the
+relevant `make` target — under each. For a solo build the **core three** cover
+most releases; the rest are worth doing before a big change.
 
-| ID | Display | Network | Library | Internet | Notes |
-|----|---------|---------|---------|----------|-------|
-| M1 | 3840×2160 @60 Hz | Ethernet | Tiny (≤50) | Available | Baseline sanity after clean install |
-| M2 | 3840×2160 @30 Hz | Wi-Fi | Medium (1–3k) | Available | Stress decode/render pipeline |
-| M3 | 3840×2160 @60 Hz | Wi-Fi | Tiny | ISP outage (LAN up) | Watcher without WAN |
-| M4 | 3840×2160 @60 Hz | Wi-Fi | Medium | Available | Overnight burn-in with sleep schedule |
-| M5 | 3840×2160 @60 Hz | Ethernet | Medium | Available | Update + rollback rehearsal |
+**Core — every release:**
+
+| Scenario | Why it matters |
+|----------|----------------|
+| Clean install → slideshow on your normal network | Baseline: the happy path works end to end |
+| Wi-Fi up but **internet down** (pull the router's WAN/uplink) | The watcher must **not** false-trigger recovery |
+| **Overnight burn-in** with a sleep schedule | Catches memory leaks and wake/sleep-loop drift |
+
+**Before a big change:**
+
+| Scenario | Why it matters |
+|----------|----------------|
+| **Large library** (1–3k photos) over Wi-Fi | Decode/render/memory pressure (see [Advanced › Memory tuning](../docs/advanced.md#memory-tuning)) |
+| **Update + rollback** — `git checkout <tag>`, redeploy, restart greetd | A redeploy doesn't break a running unit |
 
 ---
 
@@ -77,7 +88,7 @@ Exercise each row at least once per release cycle.
 - **Blank-Pi install** — Flash latest Trixie 64-bit, boot, network up, `XDG_SESSION_TYPE=wayland` after first graphical login.
 - **Project setup** — clone repo; `sudo ./setup/system/install.sh`; `./setup/application/deploy.sh`; customize `/etc/photoframe/config.yaml`; populate library.
 - **Kiosk autostart** — `systemctl status greetd photoframe-wifi-manager photoframe-sync.timer`; reboot; confirm greetd claims tty1 and the app launches full-screen. Confirm the `kiosk` user can reach seatd: `id -nG kiosk` must include the group that owns `/run/seatd.sock` (`stat -c '%G' /run/seatd.sock`, normally `seat`). A missing membership fails every session at the wrapper's seatd check.
-- **Display & frame rate** — `wlr-randr` shows target mode (4K@60 preferred); short phone video documents smoothness; note tearing/flicker.
+- **Display & frame rate** — the kiosk `wlr-randr` (pre-flight command above) shows the target mode (4K@60 preferred); short phone video documents smoothness; note tearing/flicker.
 - **Button & power** — `sudo evtest` to identify input device; single press toggles **both** directions — test the round trip (awake → sleep, then sleep → wake); double press clean shutdown; long hold is bypassed for the Pi 5 firmware force-off (don't actually trigger it if there's risk of corruption).
 - **Sleep schedule** — set a near-future window, restart kiosk, observe transitions; manual `set-state`/`toggle-state` over the control socket works. Exercise a wrap-past-midnight window (start later than end, e.g. `["21:00","07:00"]`).
 - **Wi-Fi provisioning** — `make -f tests/Makefile wifi-recovery`; phone joins `PhotoFrame-Setup`, submits credentials, frame reconnects. Also exercise LAN-up/Internet-down (slideshow keeps advancing) and full Wi-Fi outage with later restoration (auto-reconnect).

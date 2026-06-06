@@ -226,7 +226,8 @@ Pair the block with a top-level `awake-schedule` to describe the desired wake wi
 **`buttond.screen.display-name` discovery.** The connector name must be queried inside the kiosk Wayland session:
 
 ```bash
-sudo -u kiosk wlr-randr | grep connected
+# display is usually wayland-1; find it with: sudo ls /run/user/$(id -u kiosk)/wayland-*
+sudo -u kiosk env XDG_RUNTIME_DIR=/run/user/$(id -u kiosk) WAYLAND_DISPLAY=wayland-1 wlr-randr
 ```
 
 Common values: `HDMI-A-1`, `HDMI-A-2`. Setting `display-name` explicitly avoids auto-detect ambiguity on systems with multiple connectors.

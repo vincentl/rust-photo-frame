@@ -30,7 +30,7 @@ Day-to-day commands, status checks, and troubleshooting for a frame you own and 
 | Button daemon logs | `sudo journalctl -u buttond.service -f` |
 | All service status | `sudo systemctl status greetd photoframe-wifi-manager buttond` |
 | Count photos in library | `find /var/lib/photoframe/photos -type f \| wc -l` |
-| List connected outputs | `sudo -u kiosk wlr-randr \| grep connected` |
+| List display outputs | `sudo -u kiosk env XDG_RUNTIME_DIR=/run/user/$(id -u kiosk) WAYLAND_DISPLAY=wayland-1 wlr-randr` |
 | Check control socket | `sudo ls -l /run/photoframe/control.sock` |
 
 ### Manage
@@ -322,7 +322,9 @@ Restart the kiosk after editing. See [Advanced › Memory tuning](advanced.md#me
 Output name mismatch. Find the connector:
 
 ```bash
-sudo -u kiosk wlr-randr | grep connected
+# wlr-randr must run in the kiosk Wayland session (display is usually wayland-1;
+# find it with: sudo ls /run/user/$(id -u kiosk)/wayland-*)
+sudo -u kiosk env XDG_RUNTIME_DIR=/run/user/$(id -u kiosk) WAYLAND_DISPLAY=wayland-1 wlr-randr
 ```
 
 Update `buttond.screen.display-name` in `/etc/photoframe/config.yaml` to match (e.g. `HDMI-A-2`), then `sudo systemctl restart buttond.service`. See [Advanced › Power and sleep](advanced.md#power-and-sleep).
