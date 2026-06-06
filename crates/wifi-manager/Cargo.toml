@@ -24,7 +24,7 @@ tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "signal", "
 tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-users = "0.11"
+libc = "0.2"
 winit = { version = "0.30", features = ["wayland"] }
 
 [dev-dependencies]

@@ -87,7 +87,7 @@ async fn try_main() -> Result<()> {
 }
 
 fn guard_root_usage() -> Result<()> {
-    let uid = users::get_current_uid();
+    let uid = unsafe { libc::getuid() };
     if uid == 0 {
         let args: Vec<String> = std::env::args().collect();
         let is_help = args

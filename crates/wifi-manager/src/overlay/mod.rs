@@ -15,7 +15,6 @@ use swayipc::{Connection, Error as SwayError, Node};
 use tokio::process::{Child, Command};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
-use users::get_current_uid;
 
 #[derive(Clone, Debug)]
 pub struct OverlayRequest {
@@ -345,7 +344,7 @@ impl OverlayController {
         if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
             dirs.push(PathBuf::from(dir));
         }
-        let uid = get_current_uid();
+        let uid = unsafe { libc::getuid() };
         dirs.push(PathBuf::from(format!("/run/user/{uid}")));
         dirs
     }
