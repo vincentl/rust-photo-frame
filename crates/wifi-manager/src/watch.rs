@@ -637,6 +637,9 @@ async fn apply_provision_request(
             "Failed to activate Wi-Fi connection.",
             err.to_string(),
         );
+        if let Err(err) = nm::delete_connection(&connection_id).await {
+            warn!(error = ?err, connection = %connection_id, "failed to remove unsuccessful Wi-Fi profile");
+        }
         restore_hotspot_or_reset(config, recovery, overlay, "activation error").await;
         return ProvisionOutcome::Failed;
     }
@@ -674,6 +677,9 @@ async fn apply_provision_request(
             "Unable to confirm connection. Double-check the password and try again.",
             "connection timeout".to_string(),
         );
+        if let Err(err) = nm::delete_connection(&connection_id).await {
+            warn!(error = ?err, connection = %connection_id, "failed to remove unsuccessful Wi-Fi profile");
+        }
         restore_hotspot_or_reset(config, recovery, overlay, "connection timeout").await;
         ProvisionOutcome::Failed
     }

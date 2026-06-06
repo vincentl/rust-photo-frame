@@ -456,6 +456,14 @@ pub async fn activate_connection(connection_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Delete a saved connection profile (best-effort). Used to remove a
+/// `pf-wifi-*` profile whose provisioning attempt failed, so wrong-credential
+/// profiles don't accumulate in NetworkManager across repeated attempts.
+pub async fn delete_connection(connection_id: &str) -> Result<()> {
+    nmcli(&["connection", "delete", connection_id]).await?;
+    Ok(())
+}
+
 async fn list_connection_names() -> Result<HashSet<String>> {
     let output = nmcli(&["-t", "-f", "NAME", "connection", "show"]).await?;
     Ok(output
