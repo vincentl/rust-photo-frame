@@ -7,7 +7,7 @@ use crate::status::{
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::extract::{Form, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use rand::Rng;
@@ -103,7 +103,35 @@ async fn render_form(State(state): State<UiState>) -> Html<String> {
     Html(body)
 }
 
-async fn handle_submit(State(state): State<UiState>, Form(form): Form<WifiForm>) -> Response {
+/// Reject cross-origin POSTs (CSRF defense). Browsers send `Origin` on a
+/// cross-origin form post; when present, its authority must match the request's
+/// `Host`. We fall back to `Referer`, and allow requests carrying neither header
+/// (non-browser clients such as curl on the isolated recovery AP).
+fn is_same_origin(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        return origin.split_once("://").map(|(_, auth)| auth) == Some(host);
+    }
+    if let Some(referer) = headers.get(header::REFERER).and_then(|v| v.to_str().ok()) {
+        return referer
+            .split_once("://")
+            .and_then(|(_, rest)| rest.split('/').next())
+            == Some(host);
+    }
+    true
+}
+
+async fn handle_submit(
+    State(state): State<UiState>,
+    headers: HeaderMap,
+    Form(form): Form<WifiForm>,
+) -> Response {
+    if !is_same_origin(&headers) {
+        warn!("rejected cross-origin /submit request (possible CSRF)");
+        return (StatusCode::FORBIDDEN, "Cross-origin request rejected.").into_response();
+    }
     let ssid = form.ssid.clone();
     info!(ssid = %redact_ssid(&ssid), "received provisioning form submission");
     match prepare_submission(&state.config, &form).await {
@@ -324,5 +352,45 @@ mod tests {
         let id = generate_attempt_id();
         assert!(id.starts_with("attempt-"));
         assert_eq!(id.len(), "attempt-".len() + 8);
+    }
+
+    #[test]
+    fn csrf_same_origin_check() {
+        use super::is_same_origin;
+        use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
+
+        fn headers(items: &[(HeaderName, &str)]) -> HeaderMap {
+            let mut h = HeaderMap::new();
+            for (name, val) in items {
+                h.insert(name.clone(), HeaderValue::from_str(val).unwrap());
+            }
+            h
+        }
+
+        // Same-origin: Origin authority matches Host.
+        assert!(is_same_origin(&headers(&[
+            (header::HOST, "192.168.4.1:8080"),
+            (header::ORIGIN, "http://192.168.4.1:8080"),
+        ])));
+        // Cross-origin Origin is rejected.
+        assert!(!is_same_origin(&headers(&[
+            (header::HOST, "192.168.4.1:8080"),
+            (header::ORIGIN, "http://evil.example"),
+        ])));
+        // No Origin, Referer matches Host.
+        assert!(is_same_origin(&headers(&[
+            (header::HOST, "192.168.4.1:8080"),
+            (header::REFERER, "http://192.168.4.1:8080/"),
+        ])));
+        // No Origin, mismatched Referer is rejected.
+        assert!(!is_same_origin(&headers(&[
+            (header::HOST, "192.168.4.1:8080"),
+            (header::REFERER, "http://evil.example/x"),
+        ])));
+        // Neither Origin nor Referer (non-browser client): allowed.
+        assert!(is_same_origin(&headers(&[(
+            header::HOST,
+            "192.168.4.1:8080"
+        )])));
     }
 }
