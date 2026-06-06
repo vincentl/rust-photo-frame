@@ -49,6 +49,7 @@ sudo ./setup/system/tools/diagnostics.sh
 
 ```bash
 vcgencmd measure_temp
+grep -H . /sys/class/hwmon/hwmon*/fan1_input 2>/dev/null   # fan RPM (non-zero under load)
 sudo -u kiosk wlr-randr
 tests/collect_logs.sh        # baseline log capture
 ```
@@ -78,7 +79,7 @@ Exercise each row at least once per release cycle.
 - **Button & power** — `sudo evtest` to identify input device; single press toggles sleep; double press clean shutdown; long hold is bypassed for the Pi 5 firmware force-off (don't actually trigger it if there's risk of corruption).
 - **Sleep schedule** — set a near-future window, restart kiosk, observe transitions; manual `set-state`/`toggle-state` over the control socket works. Exercise a wrap-past-midnight window (start later than end, e.g. `["21:00","07:00"]`).
 - **Wi-Fi provisioning** — `make -f tests/Makefile wifi-recovery`; phone joins `PhotoFrame-Setup`, submits credentials, frame reconnects. Also exercise LAN-up/Internet-down (slideshow keeps advancing) and full Wi-Fi outage with later restoration (auto-reconnect).
-- **Library ingest** — tiny library validates EXIF/mat/transitions; medium library run for 10–15 min with `top -H -p $(pidof photoframe)` and `vcgencmd measure_temp`.
+- **Library ingest** — tiny library validates EXIF/mat/transitions; medium library run for 10–15 min with `top -H -p $(pidof photoframe)` and `vcgencmd measure_temp`. During the burn-in confirm the fan ramps under load (`grep -H . /sys/class/hwmon/hwmon*/fan1_input`) and the temperature holds under ~80 °C.
 - **Updates & rollback** — `git checkout <release-tag>`, rebuild, restart greetd; rollback to previous tag; confirm unit files unchanged via `systemctl cat greetd.service`.
 - **Power loss** — momentarily cut power; confirm auto-boot, kiosk service startup, slideshow resume; check `journalctl -b | grep -i fsck` and `dmesg | grep -i error`.
 - **Diagnostics bundle** — `tests/collect_logs.sh`; verify artifact at `artifacts/FRAME-logs-*.tar.gz`.

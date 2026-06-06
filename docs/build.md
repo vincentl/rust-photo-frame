@@ -134,6 +134,20 @@ For the wall-side receiver, span at least one stud. In the reference build the w
 
 Stack the power hat over the fan on the standoffs, and — if you're adding the button — solder the 2-pin header to the J2 power pads now (see [Power button wiring](#power-button-wiring)).
 
+**Verify cooling (after first boot).** The Pi 5 drives the fan from the kernel, so confirm it once the Pi is running — ideally under load (the software build is a good moment). Read the live RPM, the cooling level, and the temperature:
+
+```bash
+# Live fan RPM (Pi 5 fan header / official Active Cooler):
+grep -H . /sys/class/hwmon/hwmon*/fan1_input 2>/dev/null
+# Cooling level the kernel is driving (0 = off … up to max):
+for d in /sys/class/thermal/cooling_device*; do
+  echo "$(cat "$d/type"): $(cat "$d/cur_state")/$(cat "$d/max_state")"
+done
+vcgencmd measure_temp
+```
+
+Under load the RPM should be clearly non-zero and the temperature should stay well under 80 °C (the Pi 5 throttles around 80–85 °C). If `fan1_input` doesn't exist, your fan isn't on the Pi's managed header — some HATs power it directly — so verify it the analog way: feel for airflow.
+
 ![Raspberry Pi 5 with power hat, a short hat-to-Pi USB cable, and a 2-pin header soldered to the J2 power pads](images/pi-hat-j2-pins.jpeg)
 
 ![side view of the Raspberry Pi assembly with the power hat and fan stacked](images/pi-hat-fan.jpeg)
@@ -226,4 +240,4 @@ With the software running, the frame shows a brief greeting while the first phot
 - [ ] Button wire routed (if using)
 - [ ] Shadow box built; ½″ wall gap for airflow
 - [ ] Software fully installed and tested
-- [ ] Thermal check passed
+- [ ] Thermal check passed (fan spins under load; temp stays < ~80 °C)
