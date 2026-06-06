@@ -15,11 +15,14 @@ main() {
   require_cmd tar
   mkdir -p "$REPO_ROOT/artifacts"
 
-  local timestamp bundle tmpdir
+  local timestamp bundle
   timestamp="$(date -u +"%Y%m%dT%H%M%SZ")"
   bundle="$REPO_ROOT/artifacts/FRAME-logs-$timestamp.tar.gz"
+  # tmpdir is global (not declared local) so the EXIT trap can still reference
+  # it after main() returns; with 'set -u' a local reads as unbound when the
+  # trap fires during cleanup.
   tmpdir="$(mktemp -d)"
-  trap 'rm -rf "$tmpdir"' EXIT
+  trap 'rm -rf "${tmpdir:-}"' EXIT
 
   mkdir -p "$tmpdir/system" "$tmpdir/journal" "$tmpdir/services" "$tmpdir/network" "$tmpdir/display" "$tmpdir/runtime"
 
@@ -72,9 +75,14 @@ main() {
   fi
 
   info "Saving display modes"
+  local mode conn
   for mode in /sys/class/drm/card*-*/modes; do
     [ -e "$mode" ] || continue
-    cp "$mode" "$tmpdir/display/${mode##*/}.txt"
+    # Name the file after the connector so multiple outputs don't collide on
+    # "modes.txt", and keep going if one can't be read.
+    conn="$(basename "$(dirname "$mode")")"
+    cp "$mode" "$tmpdir/display/${conn}-modes.txt" 2>/dev/null \
+      || warn "Could not save modes for ${conn}"
   done
   if command -v edid-decode >/dev/null 2>&1; then
     for edid in /sys/class/drm/card*-*/edid; do
@@ -84,7 +92,7 @@ main() {
   else
     for edid in /sys/class/drm/card*-*/edid; do
       [ -e "$edid" ] || continue
-      hexdump -C "$edid" >"$tmpdir/display/$(basename "${edid%/edid}")-edid.hex"
+      hexdump -C "$edid" >"$tmpdir/display/$(basename "${edid%/edid}")-edid.hex" 2>/dev/null || warn "Could not read $edid"
     done
   fi
 
