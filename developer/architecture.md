@@ -154,12 +154,15 @@ Troubleshooting:
 
 Open an interactive shell as `kiosk` with compositor environment exported:
 
+Stale `sway-ipc.*.sock` files from earlier sessions can linger in the runtime dir, so sort by mtime
+(`-t`) and take the newest — not the lowest PID:
+
 ```bash
 sudo sh -lc '
   uid=$(id -u kiosk)
   RUNDIR="/run/user/$uid"
-  SWAYSOCK="$(ls "$RUNDIR"/sway-ipc.*.sock | head -1)"
-  WAYLAND_DISPLAY="$(basename "$(ls "$RUNDIR"/wayland-* | head -1)")"
+  SWAYSOCK="$(ls -t "$RUNDIR"/sway-ipc.*.sock | head -1)"
+  WAYLAND_DISPLAY="$(basename "$(ls -t "$RUNDIR"/wayland-* | head -1)")"
   exec sudo --preserve-env=RUNDIR,SWAYSOCK,WAYLAND_DISPLAY \
     -u kiosk env XDG_RUNTIME_DIR="$RUNDIR" SWAYSOCK="$SWAYSOCK" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" bash -l
 '
