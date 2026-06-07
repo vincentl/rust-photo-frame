@@ -48,8 +48,13 @@ fi
 log "Installing showcase config to ${CONFIG}"
 sudo install -m 0644 "${SHOWCASE_YAML}" "${CONFIG}"
 
-log "Restarting greetd to launch the showcase"
-sudo systemctl restart greetd
+log "Restarting greetd to launch the showcase (stop/sleep/start; see docs/operate.md)"
+# Use stop/sleep/start, not `systemctl restart greetd`: a plain restart can race
+# the logind seat handoff on tty1 and leave the old kiosk session (old binary)
+# running — which masks freshly deployed builds.
+sudo systemctl stop greetd
+sleep 1
+sudo systemctl start greetd
 
 log "Showcase active. Watch it with:  journalctl -t photoframe -f"
 log "Restore your normal config with: ${SCRIPT_DIR}/deactivate.sh"
