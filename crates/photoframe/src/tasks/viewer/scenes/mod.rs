@@ -1231,4 +1231,95 @@ mod tests {
             .count();
         assert!(cyan > 100, "expected many cyan glyph pixels, found {cyan}");
     }
+
+    /// Render one caption through `overlay` and return the count of bright-cyan
+    /// glyph pixels in the resulting cache.
+    fn render_caption_cyan(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        overlay: &mut CaptionOverlay,
+        format: wgpu::TextureFormat,
+        text: &str,
+    ) -> usize {
+        overlay.set_text(text.to_string());
+        overlay.resize(PhysicalSize::new(1920, 1080));
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("caption-churn-target"),
+            size: wgpu::Extent3d {
+                width: 1920,
+                height: 1080,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("caption-churn"),
+        });
+        assert!(overlay.render(&mut encoder, &view), "render '{text}'");
+        queue.submit(Some(encoder.finish()));
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        let (cw, ch) = overlay.cache_dims;
+        let pixels = read_texture_rgba(
+            device,
+            queue,
+            overlay.cache_texture.as_ref().expect("cache texture"),
+            cw,
+            ch,
+        );
+        pixels
+            .chunks_exact(4)
+            .filter(|p| p[1] > 180 && p[2] > 180 && p[0] < p[1])
+            .count()
+    }
+
+    /// Regression guard for the live failure mode: the same caption text must
+    /// render identically no matter how much the shared glyph atlas has churned
+    /// (the live app renders every transition/mat through one long-lived atlas).
+    #[test]
+    fn caption_glyphs_survive_atlas_churn() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("skipping caption churn test: no GPU adapter available");
+            return;
+        };
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut overlay = CaptionOverlay::new(&device, &queue, format);
+
+        let reference = "transition: e-ink    mat: studio";
+        let fresh = render_caption_cyan(&device, &queue, &mut overlay, format, reference);
+        assert!(
+            fresh > 100,
+            "reference caption should render ({fresh} cyan px)"
+        );
+
+        // Churn the shared atlas with many other captions (introduce + evict glyphs).
+        for caption in [
+            "transition: fade    mat: fixed-color",
+            "transition: wipe    mat: cinematic-blur",
+            "transition: push    mat: drop-shadow",
+            "transition: dissolve    mat: blur",
+            "transition: radial-wipe    mat: fixed-image",
+            "transition: venetian-blinds    mat: gradient",
+            "transition: crossfade-zoom    mat: passe-partout",
+            "transition: push    mat: vignette",
+        ] {
+            let _ = render_caption_cyan(&device, &queue, &mut overlay, format, caption);
+        }
+
+        // Identical text + size must yield identical glyph coverage. A drop here is
+        // the bug: a glyph evicted by atlas.trim() failed to re-add correctly.
+        let after = render_caption_cyan(&device, &queue, &mut overlay, format, reference);
+        assert_eq!(
+            after, fresh,
+            "'{reference}' lost glyph pixels after atlas churn ({fresh} -> {after})"
+        );
+    }
 }
