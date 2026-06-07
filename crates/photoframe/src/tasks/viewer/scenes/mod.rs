@@ -23,14 +23,13 @@ use super::{ImgTex, TransitionState};
 
 // ── Caption overlay ───────────────────────────────────────────────────────────
 
-/// Uniform for the caption backing panel (must match caption_panel.wgsl).
+/// Uniform for compositing the cached caption texture (must match caption_composite.wgsl).
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
-struct PanelUniforms {
+struct CompositeUniforms {
     resolution: [f32; 2],
     _pad0: [f32; 2],
     rect: [f32; 4],
-    color: [f32; 4],
 }
 
 /// Lightweight text overlay rendered on top of the live photo via `LoadOp::Load`.
@@ -39,15 +38,25 @@ struct PanelUniforms {
 pub(super) struct CaptionOverlay {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    format: wgpu::TextureFormat,
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     text_buffer: Buffer,
     font_system: FontSystem,
     swash_cache: SwashCache,
-    panel_pipeline: wgpu::RenderPipeline,
-    panel_bind_group: wgpu::BindGroup,
-    panel_uniform_buffer: wgpu::Buffer,
+    // Caption is rendered to this offscreen texture once per text/size change,
+    // then composited as a single quad every frame. This removes the per-frame
+    // text shaping and glyph-atlas churn that dropped and mis-spaced glyphs when
+    // the overlay rendered before its glyphs were resident.
+    cache_texture: Option<wgpu::Texture>,
+    cache_view: Option<wgpu::TextureView>,
+    cache_dims: (u32, u32),
+    composite_pipeline: wgpu::RenderPipeline,
+    composite_layout: wgpu::BindGroupLayout,
+    composite_sampler: wgpu::Sampler,
+    composite_uniform_buffer: wgpu::Buffer,
+    composite_bind_group: Option<wgpu::BindGroup>,
     text: String,
     size: PhysicalSize<u32>,
     dirty: bool,
@@ -70,61 +79,80 @@ impl CaptionOverlay {
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         let swash_cache = SwashCache::new();
 
-        // Backing-panel pipeline: one alpha-blended quad positioned in pixel space.
-        let panel_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("caption-panel-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("caption_panel.wgsl").into()),
+        // Composite pipeline: samples the cached caption texture and draws it as a
+        // single premultiplied-alpha quad positioned in pixel space.
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("caption-composite-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("caption_composite.wgsl").into()),
         });
-        let panel_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("caption-panel-uniforms"),
-            size: std::mem::size_of::<PanelUniforms>() as u64,
+        let composite_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("caption-composite-uniforms"),
+            size: std::mem::size_of::<CompositeUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let panel_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("caption-panel-bind-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<PanelUniforms>() as u64
-                    ),
+        let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("caption-composite-sampler"),
+            // 1:1 blit (cache rendered at exact panel pixel size) keeps text crisp.
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("caption-composite-bind-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<CompositeUniforms>() as u64,
+                        ),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
-        let panel_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("caption-panel-bind-group"),
-            layout: &panel_bind_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: panel_uniform_buffer.as_entire_binding(),
-            }],
-        });
-        let panel_pipeline_layout =
+        let composite_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("caption-panel-pipeline-layout"),
-                bind_group_layouts: &[&panel_bind_layout],
+                label: Some("caption-composite-pipeline-layout"),
+                bind_group_layouts: &[&composite_layout],
                 push_constant_ranges: &[],
             });
-        let panel_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("caption-panel-pipeline"),
-            layout: Some(&panel_pipeline_layout),
+        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("caption-composite-pipeline"),
+            layout: Some(&composite_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &panel_shader,
+                module: &composite_shader,
                 entry_point: Some("vs_main"),
                 buffers: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &panel_shader,
+                module: &composite_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // Cache holds premultiplied alpha: src + dst * (1 - src.a).
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -139,15 +167,21 @@ impl CaptionOverlay {
         Self {
             device: device.clone(),
             queue: queue.clone(),
+            format,
             viewport,
             atlas,
             text_renderer,
             text_buffer,
             font_system,
             swash_cache,
-            panel_pipeline,
-            panel_bind_group,
-            panel_uniform_buffer,
+            cache_texture: None,
+            cache_view: None,
+            cache_dims: (0, 0),
+            composite_pipeline,
+            composite_layout,
+            composite_sampler,
+            composite_uniform_buffer,
+            composite_bind_group: None,
             text: String::new(),
             size: PhysicalSize::new(0, 0),
             dirty: false,
@@ -177,37 +211,86 @@ impl CaptionOverlay {
         if self.size.width == 0 || self.size.height == 0 || self.text.is_empty() {
             return false;
         }
-        self.viewport.update(
-            &self.queue,
-            Resolution {
-                width: self.size.width,
-                height: self.size.height,
-            },
-        );
-        if self.dirty {
-            self.text_buffer.set_metrics_and_size(
-                &mut self.font_system,
-                Metrics::new(28.0, 34.0),
-                Some(self.size.width as f32),
-                Some(self.size.height as f32),
-            );
-            let attrs = Attrs::new().family(FamilyOwned::SansSerif.as_family());
-            self.text_buffer.set_text(
-                &mut self.font_system,
-                &self.text,
-                &attrs,
-                Shaping::Basic,
-                None,
-            );
+
+        // Re-render the cached caption only when the text or surface changed.
+        if self.dirty || self.cache_texture.is_none() {
+            if !self.rebuild_cache(encoder) {
+                return false;
+            }
             self.dirty = false;
         }
 
-        let margin = 20.0_f32;
-        let line_h = 34.0_f32;
-        // Position at bottom-left; offset up by one line height.
-        let top = (self.size.height as f32 - line_h - margin).max(0.0);
+        let Some(bind_group) = self.composite_bind_group.as_ref() else {
+            return false;
+        };
 
-        // Measure the laid-out text so the backing panel fits it.
+        // Place the cached panel at the bottom-left of the current surface.
+        let margin = 20.0_f32;
+        let pad_x = 14.0_f32;
+        let pad_y = 8.0_f32;
+        let line_h = 34.0_f32;
+        let top = (self.size.height as f32 - line_h - margin).max(0.0);
+        let rect_x = (margin - pad_x).max(0.0).floor();
+        let rect_y = (top - pad_y).max(0.0).floor();
+        let (cw, ch) = self.cache_dims;
+        let uniforms = CompositeUniforms {
+            resolution: [self.size.width as f32, self.size.height as f32],
+            _pad0: [0.0, 0.0],
+            rect: [rect_x, rect_y, cw as f32, ch as f32],
+        };
+        self.queue.write_buffer(
+            &self.composite_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&uniforms),
+        );
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("caption-composite"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.composite_pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.draw(0..6, 0..1);
+        true
+    }
+
+    /// Re-shape the caption and render it (dark backing + text) into the offscreen
+    /// cache texture. Returns false if the text can't be laid out yet.
+    fn rebuild_cache(&mut self, encoder: &mut wgpu::CommandEncoder) -> bool {
+        let pad_x = 14.0_f32;
+        let pad_y = 8.0_f32;
+        let line_h = 34.0_f32;
+
+        // Shape the line fully BEFORE measuring, so the backing width and the glyph
+        // set are complete (incomplete shaping produced truncated captions).
+        self.text_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            Metrics::new(28.0, 34.0),
+            Some(self.size.width as f32),
+            Some(self.size.height as f32),
+        );
+        let attrs = Attrs::new().family(FamilyOwned::SansSerif.as_family());
+        self.text_buffer.set_text(
+            &mut self.font_system,
+            &self.text,
+            &attrs,
+            Shaping::Basic,
+            None,
+        );
+        self.text_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+
         let mut text_w = 0.0_f32;
         for run in self.text_buffer.layout_runs() {
             text_w = text_w.max(run.line_w);
@@ -216,63 +299,109 @@ impl CaptionOverlay {
             return false;
         }
 
-        // Backing panel: a near-opaque dark rectangle so the caption is legible
-        // over ANY mat. Drawn first (under the text) in the same pass.
-        let pad_x = 14.0_f32;
-        let pad_y = 8.0_f32;
-        let rect_x = (margin - pad_x).max(0.0);
-        let rect_y = (top - pad_y).max(0.0);
-        let rect_w = text_w + 2.0 * pad_x;
-        let rect_h = line_h + 2.0 * pad_y;
-        let panel = PanelUniforms {
-            resolution: [self.size.width as f32, self.size.height as f32],
-            _pad0: [0.0, 0.0],
-            rect: [rect_x, rect_y, rect_w, rect_h],
-            color: [0.0, 0.04, 0.06, 0.72], // dark, ~72% opaque
-        };
-        self.queue
-            .write_buffer(&self.panel_uniform_buffer, 0, bytemuck::bytes_of(&panel));
+        let cw = (text_w + 2.0 * pad_x).ceil().max(1.0) as u32;
+        let ch = (line_h + 2.0 * pad_y).ceil().max(1.0) as u32;
 
+        // (Re)allocate the cache texture and its composite bind group on size change.
+        if self.cache_texture.is_none() || self.cache_dims != (cw, ch) {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("caption-cache-texture"),
+                size: wgpu::Extent3d {
+                    width: cw,
+                    height: ch,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("caption-composite-bind-group"),
+                layout: &self.composite_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.composite_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
+                    },
+                ],
+            });
+            self.cache_texture = Some(texture);
+            self.cache_view = Some(view);
+            self.composite_bind_group = Some(bind_group);
+            self.cache_dims = (cw, ch);
+        }
+
+        // Glyphon renders into the cache: viewport = cache size, text at the
+        // padding origin.
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: cw,
+                height: ch,
+            },
+        );
         let fill_color = GlyphonColor::rgb(170, 244, 244); // light cyan
         let bounds = TextBounds {
             left: 0,
             top: 0,
-            right: self.size.width as i32,
-            bottom: self.size.height as i32,
+            right: cw as i32,
+            bottom: ch as i32,
         };
-        let main = TextArea {
+        let area = TextArea {
             buffer: &self.text_buffer,
-            left: margin,
-            top,
+            left: pad_x,
+            top: pad_y,
             scale: 1.0,
             bounds,
             default_color: fill_color,
             custom_glyphs: &[],
         };
-
         if let Err(err) = self.text_renderer.prepare(
             &self.device,
             &self.queue,
             &mut self.font_system,
             &mut self.atlas,
             &self.viewport,
-            [main],
+            [area],
             &mut self.swash_cache,
         ) {
             tracing::warn!(error = %err, "caption_overlay_prepare_failed");
             return false;
         }
 
+        // Dark, ~72%-opaque backing written as PREMULTIPLIED alpha so the cache
+        // composites correctly. The clear fills the panel; glyphs draw on top.
+        let panel_a = 0.72_f64;
+        let clear = wgpu::Color {
+            r: 0.0 * panel_a,
+            g: 0.04 * panel_a,
+            b: 0.06 * panel_a,
+            a: panel_a,
+        };
         let mut render_error = None;
         {
+            let cache_view = self.cache_view.as_ref().expect("cache view created above");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("caption-overlay"),
+                label: Some("caption-cache"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target_view,
+                    view: cache_view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
+                        load: wgpu::LoadOp::Clear(clear),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -280,10 +409,6 @@ impl CaptionOverlay {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            // Panel first (under the text), then the glyphs on top.
-            pass.set_pipeline(&self.panel_pipeline);
-            pass.set_bind_group(0, &self.panel_bind_group, &[]);
-            pass.draw(0..6, 0..1);
             if let Err(err) = self
                 .text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
@@ -293,6 +418,7 @@ impl CaptionOverlay {
         }
         if let Some(err) = render_error {
             tracing::warn!(error = %err, "caption_overlay_render_failed");
+            return false;
         }
         self.atlas.trim();
         true
