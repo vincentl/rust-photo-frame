@@ -100,7 +100,7 @@ config.yaml            Annotated example configuration
 
 ## How it works (optional deep dive)
 
-The runtime is five async tasks that communicate over bounded channels. This keeps memory predictable and decouples CPU decode from GPU rendering.
+The runtime is five async pipeline tasks — plus a Unix control-socket task — communicating over bounded channels. This keeps memory predictable and decouples CPU decode from GPU rendering.
 
 ```mermaid
 flowchart LR
@@ -109,6 +109,7 @@ flowchart LR
   MAIN --> LOAD[PhotoLoader]
   MAIN --> AFFECT[PhotoEffect]
   MAIN --> VIEW[PhotoViewer]
+  MAIN --> CTRL[Control socket]
 
   FILES -->|inventory updates| MAN
   MAN -->|invalid photo| FILES
@@ -117,6 +118,9 @@ flowchart LR
   AFFECT -->|processed image| VIEW
   LOAD -->|invalid photo| FILES
   VIEW -->|displayed event| MAN
+
+  BUTTOND[buttond / CLI] -->|set-state, toggle| CTRL
+  CTRL -->|viewer commands| VIEW
 ```
 
 - **PhotoFiles** — watches the library and maintains an inventory of available images
@@ -124,6 +128,7 @@ flowchart LR
 - **PhotoLoader** — decodes JPEG/PNG in parallel (configurable concurrency) to RGBA pixel buffers
 - **PhotoEffect** — optionally applies print-simulation effects (paper texture, gallery lighting)
 - **PhotoViewer** — GPU-accelerated rendering with configurable matting and transitions via WGPU/Wayland
+- **Control socket** (Unix) — accepts `set-state` / `toggle-state` commands from `buttond` (hardware button and wake/sleep schedule) or the CLI, and forwards them to the viewer
 
 ---
 
