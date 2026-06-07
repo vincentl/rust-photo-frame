@@ -315,8 +315,10 @@ impl CaptionOverlay {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: self.format,
+                // COPY_SRC lets the cache be read back for capture / regression tests.
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1075,5 +1077,158 @@ impl Scene for WakeScene {
             self.mark_redraw_needed();
             ctx.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CaptionOverlay;
+    use winit::dpi::PhysicalSize;
+
+    fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .ok()?;
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("caption-test-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: adapter.limits(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::default(),
+        }))
+        .ok()
+    }
+
+    fn read_texture_rgba(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        let bpp = 4u32;
+        let unpadded = width * bpp;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = unpadded.div_ceil(align) * align;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("caption-readback"),
+            size: (padded * height) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("caption-readback-enc"),
+        });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(enc.finish()));
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        let data = slice.get_mapped_range();
+        let mut out = Vec::with_capacity((width * height * bpp) as usize);
+        for row in 0..height {
+            let start = (row * padded) as usize;
+            out.extend_from_slice(&data[start..start + unpadded as usize]);
+        }
+        drop(data);
+        buffer.unmap();
+        out
+    }
+
+    /// Regression guard for the showcase caption: the cached panel must hold the
+    /// full text (no truncation) and the glyphs must actually render (no dropped or
+    /// blanked letters). Skips when no GPU adapter is available.
+    #[test]
+    fn caption_caches_full_text_without_dropping_glyphs() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("skipping caption test: no GPU adapter available");
+            return;
+        };
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut overlay = CaptionOverlay::new(&device, &queue, format);
+        overlay.set_text("transition: crossfade-zoom    mat: passe-partout");
+        overlay.resize(PhysicalSize::new(1920, 1080));
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("caption-test-target"),
+            size: wgpu::Extent3d {
+                width: 1920,
+                height: 1080,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("caption-test"),
+        });
+        assert!(
+            overlay.render(&mut encoder, &target_view),
+            "overlay.render should succeed"
+        );
+        queue.submit(Some(encoder.finish()));
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+
+        let (cw, ch) = overlay.cache_dims;
+        assert!(
+            cw > 300 && ch > 0,
+            "cache should size to the full caption (got {cw}x{ch})"
+        );
+
+        let cache = overlay
+            .cache_texture
+            .as_ref()
+            .expect("cache texture should exist after render");
+        let pixels = read_texture_rgba(&device, &queue, cache, cw, ch);
+
+        // Backing panel covers the whole cache: every texel has substantial alpha.
+        let min_alpha = pixels.chunks_exact(4).map(|p| p[3]).min().unwrap_or(0);
+        assert!(
+            min_alpha >= 120,
+            "backing panel should fill the cache (min alpha {min_alpha})"
+        );
+
+        // Glyphs rendered: many bright cyan text texels.
+        let cyan = pixels
+            .chunks_exact(4)
+            .filter(|p| p[1] > 180 && p[2] > 180 && p[0] < p[1])
+            .count();
+        assert!(cyan > 100, "expected many cyan glyph pixels, found {cyan}");
     }
 }
