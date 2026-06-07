@@ -422,7 +422,10 @@ impl CaptionOverlay {
             tracing::warn!(error = %err, "caption_overlay_render_failed");
             return false;
         }
-        self.atlas.trim();
+        // Intentionally NOT calling atlas.trim(): the caption uses a tiny, fixed
+        // glyph set, so the atlas reaches a small steady state and never needs
+        // trimming. Trimming evicts glyphs between scenes, and re-adding them was
+        // dropping/garbling glyphs on the Pi's V3D driver (the live bug).
         true
     }
 
