@@ -636,12 +636,8 @@ struct PendingPowerOff {
     source: TransitionSource,
 }
 
-/// Delay before retrying a deferred power-off that failed (e.g. the compositor
-/// was momentarily unreachable).
-const POWER_OFF_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-/// Stop retrying a failing power-off after this many attempts (~30s); a later
-/// press or schedule change re-enforces it via the self-heal path.
-const MAX_POWER_OFF_ATTEMPTS: u32 = 30;
+// Power-off retries reuse `retry_backoff` and never give up: a single-purpose
+// frame must always reach the requested power state (a wake/toggle cancels it).
 
 struct Runtime {
     control_socket: Arc<dyn ControlSocket>,
@@ -818,7 +814,20 @@ impl Runtime {
                 self.record_state(ViewerMode::Asleep, source);
             }
             Err(err) => {
-                error!(reason = source.as_str(), ?err, "failed to power screen off");
+                // Never give up: defer a retry with backoff (see
+                // poll_pending_power_off). A wake/toggle clears it.
+                let backoff = retry_backoff(1);
+                warn!(
+                    reason = source.as_str(),
+                    ?err,
+                    backoff = %format_duration(backoff),
+                    "failed to power screen off; will retry"
+                );
+                self.pending_power_off = Some(PendingPowerOff {
+                    deadline: Instant::now() + backoff,
+                    attempts: 1,
+                    source,
+                });
             }
         }
     }
@@ -832,8 +841,9 @@ impl Runtime {
 
     /// Fire a deferred power-off whose deadline has arrived. Called every event
     /// loop iteration so the panel powers down without blocking button input.
-    /// On failure it retries a bounded number of times, then gives up (a later
-    /// press or schedule change re-enforces via the self-heal path).
+    /// On failure it re-arms with exponential backoff and retries indefinitely —
+    /// a single-purpose frame must always reach the requested power state. A wake
+    /// or toggle clears the pending power-off, so this never fights the user.
     fn poll_pending_power_off(&mut self, now: Instant) {
         let Some(pending) = self.pending_power_off.as_ref() else {
             return;
@@ -852,21 +862,21 @@ impl Runtime {
                 self.record_state(ViewerMode::Asleep, source);
             }
             Err(err) => {
+                // Never give up: re-arm with exponential backoff and keep trying
+                // until the compositor accepts the power-off.
                 let attempts = attempts.saturating_add(1);
-                if attempts >= MAX_POWER_OFF_ATTEMPTS {
-                    error!(
-                        ?err,
-                        attempts,
-                        "failed to power screen off; giving up (a later press or schedule change will re-enforce)"
-                    );
-                } else {
-                    warn!(?err, attempts, "failed to power screen off; will retry");
-                    self.pending_power_off = Some(PendingPowerOff {
-                        deadline: now + POWER_OFF_RETRY_INTERVAL,
-                        attempts,
-                        source,
-                    });
-                }
+                let backoff = retry_backoff(attempts);
+                warn!(
+                    ?err,
+                    attempts,
+                    backoff = %format_duration(backoff),
+                    "failed to power screen off; will retry"
+                );
+                self.pending_power_off = Some(PendingPowerOff {
+                    deadline: now + backoff,
+                    attempts,
+                    source,
+                });
             }
         }
     }
@@ -2166,6 +2176,100 @@ awake-scheduled: {}
                 state: self.state,
             })
         }
+    }
+
+    /// Executor whose `screen-off` command fails the first `n` times, then succeeds —
+    /// models a compositor that isn't ready yet at boot.
+    #[derive(Clone)]
+    struct FlakyExecutor {
+        fails_left: Arc<Mutex<u32>>,
+        screen_off_calls: Arc<Mutex<u32>>,
+    }
+
+    impl FlakyExecutor {
+        fn failing_first(n: u32) -> Self {
+            Self {
+                fails_left: Arc::new(Mutex::new(n)),
+                screen_off_calls: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        fn screen_off_calls(&self) -> u32 {
+            *self
+                .screen_off_calls
+                .lock()
+                .expect("flaky executor poisoned")
+        }
+    }
+
+    impl CommandExecutor for FlakyExecutor {
+        fn execute(&self, command: &CommandSpec) -> super::Result<()> {
+            if command.label == "screen-off" {
+                *self
+                    .screen_off_calls
+                    .lock()
+                    .expect("flaky executor poisoned") += 1;
+                let mut left = self.fails_left.lock().expect("flaky executor poisoned");
+                if *left > 0 {
+                    *left -= 1;
+                    return Err(anyhow::anyhow!("compositor not ready"));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn power_off_never_gives_up_and_retries_with_backoff() {
+        // Fail far more times than the old 30-attempt cap would have tolerated.
+        let executor = FlakyExecutor::failing_first(40);
+        let detector = StaticDetector::new(ScreenState::On);
+        let off_delay = Duration::from_millis(10);
+        let screen = ScreenRuntime::new(
+            command("screen-on"),
+            command("screen-off"),
+            off_delay,
+            Some("HDMI-A-1".into()),
+            Arc::new(executor.clone()),
+            Arc::new(detector),
+        );
+        let control: Arc<dyn ControlSocket> = Arc::new(RecordingControlSocket::new());
+        let mut runtime = Runtime::new(
+            control,
+            command("shutdown"),
+            screen,
+            Arc::new(executor.clone()),
+            ViewerMode::Awake,
+        );
+
+        runtime
+            .go_to_sleep(TransitionSource::Scheduled)
+            .expect("sleep arms a deferred power-off");
+
+        // Drive the deferred power-off through 40 consecutive failures, jumping the
+        // clock past each backoff (<=60s). It must stay armed the whole time.
+        let mut now = Instant::now() + off_delay + Duration::from_millis(1);
+        for _ in 0..40 {
+            assert!(
+                runtime.time_until_power_off(now).is_some(),
+                "power-off must keep retrying, never give up"
+            );
+            runtime.poll_pending_power_off(now);
+            now += Duration::from_secs(120);
+        }
+        assert!(
+            runtime.time_until_power_off(now).is_some(),
+            "still retrying after 40 failures (old code gave up at 30)"
+        );
+        assert_eq!(executor.screen_off_calls(), 40);
+
+        // Compositor becomes ready: the next poll powers off and clears the state.
+        runtime.poll_pending_power_off(now);
+        assert!(
+            runtime.time_until_power_off(now).is_none(),
+            "power-off completes once the command finally succeeds"
+        );
+        assert_eq!(executor.screen_off_calls(), 41);
     }
 
     #[test]

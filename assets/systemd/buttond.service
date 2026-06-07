@@ -11,6 +11,12 @@ Type=simple
 User=kiosk
 Group=kiosk
 WorkingDirectory=/var/lib/photoframe
+# Best-effort boot gate: wait (up to 60s) for the kiosk Wayland session to exist
+# before issuing display commands. Reaching graphical.target only means greetd is
+# active, not that the compositor socket is up yet. buttond also retries forever at
+# runtime, so this just avoids churn on a cold boot (exit 0 so the service always
+# starts even if the wait times out).
+ExecStartPre=/bin/sh -c 'uid=$(id -u); for i in $(seq 1 60); do [ -n "$(ls /run/user/$uid/wayland-* 2>/dev/null)" ] && exit 0; sleep 1; done; exit 0'
 ExecStart=/opt/photoframe/bin/buttond --config /etc/photoframe/config.yaml
 # buttond derives /run/user/<uid> from its own (kiosk) UID at runtime; do NOT
 # hardcode XDG_RUNTIME_DIR here. The kiosk account is created without a fixed
