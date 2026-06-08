@@ -1277,7 +1277,7 @@ matting:
             radius,
             softness,
         } => {
-            assert_eq!(colors.as_slice(), &[StudioMatColor::Rgb([24, 24, 28])]);
+            assert_eq!(colors.as_slice(), &[StudioMatColor::Rgb([241, 233, 210])]);
             assert!((strength - 0.6).abs() < 1e-5);
             assert!((radius - 0.75).abs() < 1e-5);
             assert!((softness - 0.5).abs() < 1e-5);

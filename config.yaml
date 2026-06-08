@@ -216,7 +216,7 @@ matting:
       minimum-mat-percentage: 6.0
       # `color` accepts an [r,g,b] triple or photo-average; use `colors: [...]`
       # to rotate several base colors (each expands into its own slot).
-      color: [24, 24, 28] # base mat color
+      color: [241, 233, 210] # base mat color (parchment)
       strength: 0.6 # 0 = no darkening, 1 = edges go black
       radius: 0.75 # fraction of half-diagonal where darkening starts
       softness: 0.5 # how gradual the falloff is

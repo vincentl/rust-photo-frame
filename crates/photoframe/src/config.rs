@@ -1862,7 +1862,7 @@ impl MattingMode {
     }
 
     fn default_vignette_colors() -> Vec<StudioMatColor> {
-        vec![StudioMatColor::Rgb([24, 24, 28])]
+        vec![StudioMatColor::Rgb([241, 233, 210])]
     }
 
     const fn default_vignette_strength() -> f32 {

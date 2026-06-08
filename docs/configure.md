@@ -439,7 +439,7 @@ The remaining controls depend on `kind`:
   - **`direction`** (`vertical`, `horizontal`, or `radial`; default `vertical`).
   - **`angle-degrees`** (float, default `0.0`): optional rotation for linear gradients; ignored for `radial`.
 - **`vignette`** — solid color with darkened edges.
-  - **`colors`** (array of `[r, g, b]` triples and/or `photo-average`; default `[[24, 24, 28]]`): base mat color(s). Multiple entries expand to multiple slots. **`color`** is a convenience alias for a single value (also accepts `photo-average`).
+  - **`colors`** (array of `[r, g, b]` triples and/or `photo-average`; default `[[241, 233, 210]]` (parchment)): base mat color(s). Multiple entries expand to multiple slots. **`color`** is a convenience alias for a single value (also accepts `photo-average`).
   - **`strength`** (float 0–1, default `0.6`): how dark the corners get.
   - **`radius`** (float 0–1, default `0.75`): where the falloff begins, as a fraction of the half-diagonal.
   - **`softness`** (float 0–1, default `0.5`): width of the falloff band.
