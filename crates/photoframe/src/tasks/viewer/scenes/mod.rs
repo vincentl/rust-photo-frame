@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use glyphon::{
-    Attrs, Buffer, Cache, Color as GlyphonColor, FamilyOwned, FontSystem, Metrics, Resolution,
-    Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
+    Attrs, Buffer, Color as GlyphonColor, FamilyOwned, FontSystem, Metrics, Shaping, SwashCache,
+    Wrap,
 };
 use rand::Rng;
 use wgpu::{CommandEncoder, TextureView};
@@ -38,17 +38,14 @@ struct CompositeUniforms {
 pub(super) struct CaptionOverlay {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    format: wgpu::TextureFormat,
-    viewport: Viewport,
-    atlas: TextAtlas,
-    text_renderer: TextRenderer,
+    // Text is shaped (cosmic-text) and rasterized to a CPU buffer (swash), then
+    // uploaded as one plain texture. We deliberately do NOT use glyphon's GPU
+    // glyph atlas: its eviction/growth corrupts glyphs on the Pi's V3D driver.
     text_buffer: Buffer,
     font_system: FontSystem,
     swash_cache: SwashCache,
-    // Caption is rendered to this offscreen texture once per text/size change,
-    // then composited as a single quad every frame. This removes the per-frame
-    // text shaping and glyph-atlas churn that dropped and mis-spaced glyphs when
-    // the overlay rendered before its glyphs were resident.
+    // The finished caption (backing + text), rebuilt only on text/size change and
+    // composited as a single quad every frame.
     cache_texture: Option<wgpu::Texture>,
     cache_view: Option<wgpu::TextureView>,
     cache_dims: (u32, u32),
@@ -71,12 +68,6 @@ impl CaptionOverlay {
         let mut font_system = FontSystem::new();
         let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(28.0, 34.0));
         text_buffer.set_wrap(&mut font_system, Wrap::None);
-
-        let cache = Cache::new(device);
-        let viewport = Viewport::new(device, &cache);
-        let mut atlas = TextAtlas::new(device, queue, &cache, format);
-        let text_renderer =
-            TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         let swash_cache = SwashCache::new();
 
         // Composite pipeline: samples the cached caption texture and draws it as a
@@ -167,10 +158,6 @@ impl CaptionOverlay {
         Self {
             device: device.clone(),
             queue: queue.clone(),
-            format,
-            viewport,
-            atlas,
-            text_renderer,
             text_buffer,
             font_system,
             swash_cache,
@@ -212,9 +199,9 @@ impl CaptionOverlay {
             return false;
         }
 
-        // Re-render the cached caption only when the text or surface changed.
+        // Rebuild the cached caption only when the text or surface changed.
         if self.dirty || self.cache_texture.is_none() {
-            if !self.rebuild_cache(encoder) {
+            if !self.rebuild_cache() {
                 return false;
             }
             self.dirty = false;
@@ -265,15 +252,23 @@ impl CaptionOverlay {
         true
     }
 
-    /// Re-shape the caption and render it (dark backing + text) into the offscreen
-    /// cache texture. Returns false if the text can't be laid out yet.
-    fn rebuild_cache(&mut self, encoder: &mut wgpu::CommandEncoder) -> bool {
+    /// Shape the caption and rasterize it (dark backing + text) to a CPU buffer,
+    /// then upload it as one plain texture. No GPU glyph atlas is involved, so the
+    /// result can't be corrupted by atlas eviction/growth on any driver.
+    fn rebuild_cache(&mut self) -> bool {
+        fn srgb_to_linear(c: f32) -> f32 {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+
         let pad_x = 14.0_f32;
         let pad_y = 8.0_f32;
         let line_h = 34.0_f32;
 
-        // Shape the line fully BEFORE measuring, so the backing width and the glyph
-        // set are complete (incomplete shaping produced truncated captions).
+        // Shape the full line before measuring.
         self.text_buffer.set_metrics_and_size(
             &mut self.font_system,
             Metrics::new(28.0, 34.0),
@@ -285,7 +280,7 @@ impl CaptionOverlay {
             &mut self.font_system,
             &self.text,
             &attrs,
-            Shaping::Basic,
+            Shaping::Advanced,
             None,
         );
         self.text_buffer
@@ -302,7 +297,7 @@ impl CaptionOverlay {
         let cw = (text_w + 2.0 * pad_x).ceil().max(1.0) as u32;
         let ch = (line_h + 2.0 * pad_y).ceil().max(1.0) as u32;
 
-        // (Re)allocate the cache texture and its composite bind group on size change.
+        // (Re)allocate the cache texture + composite bind group on size change.
         if self.cache_texture.is_none() || self.cache_dims != (cw, ch) {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("caption-cache-texture"),
@@ -314,10 +309,11 @@ impl CaptionOverlay {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: self.format,
-                // COPY_SRC lets the cache be read back for capture / regression tests.
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
+                // Linear (non-sRGB): the premultiplied bytes we upload are sampled
+                // and blended as-is. COPY_DST for the upload; COPY_SRC for tests.
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
                     | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
@@ -346,86 +342,86 @@ impl CaptionOverlay {
             self.cache_dims = (cw, ch);
         }
 
-        // Glyphon renders into the cache: viewport = cache size, text at the
-        // padding origin.
-        self.viewport.update(
-            &self.queue,
-            Resolution {
-                width: cw,
-                height: ch,
-            },
-        );
-        let fill_color = GlyphonColor::rgb(170, 244, 244); // light cyan
-        let bounds = TextBounds {
-            left: 0,
-            top: 0,
-            right: cw as i32,
-            bottom: ch as i32,
-        };
-        let area = TextArea {
-            buffer: &self.text_buffer,
-            left: pad_x,
-            top: pad_y,
-            scale: 1.0,
-            bounds,
-            default_color: fill_color,
-            custom_glyphs: &[],
-        };
-        if let Err(err) = self.text_renderer.prepare(
-            &self.device,
-            &self.queue,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            [area],
-            &mut self.swash_cache,
-        ) {
-            tracing::warn!(error = %err, "caption_overlay_prepare_failed");
-            return false;
+        // CPU pixel buffer in premultiplied-linear RGBA. Fill with the dark, ~72%
+        // backing panel, then blend the glyphs on top.
+        let panel_a = 0.72_f32;
+        let panel = [
+            0u8,
+            (0.04 * panel_a * 255.0).round() as u8,
+            (0.06 * panel_a * 255.0).round() as u8,
+            (panel_a * 255.0).round() as u8,
+        ];
+        let mut buf = vec![0u8; (cw * ch * 4) as usize];
+        for px in buf.chunks_exact_mut(4) {
+            px.copy_from_slice(&panel);
         }
 
-        // Dark, ~72%-opaque backing written as PREMULTIPLIED alpha so the cache
-        // composites correctly. The clear fills the panel; glyphs draw on top.
-        let panel_a = 0.72_f64;
-        let clear = wgpu::Color {
-            r: 0.0 * panel_a,
-            g: 0.04 * panel_a,
-            b: 0.06 * panel_a,
-            a: panel_a,
-        };
-        let mut render_error = None;
-        {
-            let cache_view = self.cache_view.as_ref().expect("cache view created above");
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("caption-cache"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: cache_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-            if let Err(err) = self
-                .text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)
-            {
-                render_error = Some(err);
-            }
-        }
-        if let Some(err) = render_error {
-            tracing::warn!(error = %err, "caption_overlay_render_failed");
-            return false;
-        }
-        // Intentionally NOT calling atlas.trim(): the caption uses a tiny, fixed
-        // glyph set, so the atlas reaches a small steady state and never needs
-        // trimming. Trimming evicts glyphs between scenes, and re-adding them was
-        // dropping/garbling glyphs on the Pi's V3D driver (the live bug).
+        let base_x = pad_x as i32;
+        let base_y = pad_y as i32;
+        let cw_i = cw as i32;
+        let ch_i = ch as i32;
+        let text_color = GlyphonColor::rgb(170, 244, 244);
+        self.text_buffer.draw(
+            &mut self.font_system,
+            &mut self.swash_cache,
+            text_color,
+            |gx, gy, gw, gh, color| {
+                let a = color.a() as f32 / 255.0;
+                if a <= 0.0 {
+                    return;
+                }
+                // Premultiplied-linear source.
+                let sr = srgb_to_linear(color.r() as f32 / 255.0) * a;
+                let sg = srgb_to_linear(color.g() as f32 / 255.0) * a;
+                let sb = srgb_to_linear(color.b() as f32 / 255.0) * a;
+                let inv = 1.0 - a;
+                for row in 0..gh as i32 {
+                    let py = base_y + gy + row;
+                    if py < 0 || py >= ch_i {
+                        continue;
+                    }
+                    for col in 0..gw as i32 {
+                        let pxx = base_x + gx + col;
+                        if pxx < 0 || pxx >= cw_i {
+                            continue;
+                        }
+                        let idx = ((py * cw_i + pxx) * 4) as usize;
+                        let dr = buf[idx] as f32 / 255.0;
+                        let dg = buf[idx + 1] as f32 / 255.0;
+                        let db = buf[idx + 2] as f32 / 255.0;
+                        let da = buf[idx + 3] as f32 / 255.0;
+                        buf[idx] = ((sr + dr * inv) * 255.0).round().clamp(0.0, 255.0) as u8;
+                        buf[idx + 1] = ((sg + dg * inv) * 255.0).round().clamp(0.0, 255.0) as u8;
+                        buf[idx + 2] = ((sb + db * inv) * 255.0).round().clamp(0.0, 255.0) as u8;
+                        buf[idx + 3] = ((a + da * inv) * 255.0).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+            },
+        );
+
+        let texture = self
+            .cache_texture
+            .as_ref()
+            .expect("cache texture created above");
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &buf,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(cw * 4),
+                rows_per_image: Some(ch),
+            },
+            wgpu::Extent3d {
+                width: cw,
+                height: ch,
+                depth_or_array_layers: 1,
+            },
+        );
         true
     }
 
