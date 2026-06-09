@@ -342,9 +342,13 @@ impl CaptionOverlay {
             self.cache_dims = (cw, ch);
         }
 
-        // CPU pixel buffer in premultiplied-linear RGBA. Fill with the dark, ~72%
-        // backing panel, then blend the glyphs on top.
-        let panel_a = 0.72_f32;
+        // CPU pixel buffer in premultiplied-linear RGBA. Fill with the dark,
+        // OPAQUE backing panel, then blend the glyphs on top. The panel is
+        // composited over the live photo; at <100% alpha the un-antialiased scene
+        // behind it bleeds through, and a stepped photo edge then reads as a
+        // staircase *inside* the caption (the panel's own geometry is pixel-exact).
+        // Keeping the backing opaque is what removes that bleed-through.
+        let panel_a = 1.0_f32;
         let panel = [
             0u8,
             (0.04 * panel_a * 255.0).round() as u8,
