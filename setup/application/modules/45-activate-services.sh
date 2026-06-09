@@ -19,6 +19,33 @@ run_sudo() {
     sudo "$@"
 }
 
+# Re-create a unit's enable symlinks from a clean slate. `systemctl enable` only
+# *adds* the symlink for the unit's current [Install] WantedBy=; it never removes a
+# stale want left behind when a unit changes target between releases. A leftover
+# want in a now-wrong target (e.g. buttond's old multi-user.target.wants/ after it
+# moved to graphical.target) tangles boot-time ordering and can make systemd
+# silently drop the unit's start job — so it never starts at boot, with no error in
+# its own journal. Strip every existing *.wants symlink for the unit, then enable
+# fresh so only the current target wants it.
+reenable_clean() {
+    local unit="$1"
+    run_sudo find /etc/systemd/system -type l -name "${unit}" -path '*/*.wants/*' -delete 2>/dev/null || true
+    if ! run_sudo systemctl enable "${unit}" >/dev/null 2>&1; then
+        log WARN "Failed to enable ${unit}"
+    fi
+}
+
+# Restart a unit, surfacing failures instead of swallowing them. The old
+# `restart ... || true` hid a failed (re)start during deploy — exactly how buttond
+# could end up stopped after a deploy with nobody noticing.
+restart_unit() {
+    local unit="$1"
+    log INFO "Restarting ${unit}"
+    if ! run_sudo systemctl restart "${unit}" >/dev/null 2>&1; then
+        log WARN "Failed to restart ${unit}; check 'systemctl status ${unit}' and 'journalctl -u ${unit} -b'"
+    fi
+}
+
 configure_sync_timer() {
     if ! run_sudo systemctl list-unit-files "${SYNC_TIMER}" >/dev/null 2>&1; then
         log INFO "${SYNC_TIMER} not installed; skipping sync timer activation"
@@ -72,22 +99,27 @@ done
 # and recreates the control socket without requiring a reboot.
 if run_sudo systemctl list-unit-files greetd.service >/dev/null 2>&1; then
     log INFO "Enabling greetd.service"
-    run_sudo systemctl enable greetd.service >/dev/null 2>&1 || true
+    reenable_clean greetd.service
     log INFO "Restarting greetd.service with stop/sleep/start sequence"
     run_sudo systemctl stop greetd.service >/dev/null 2>&1 || true
     sleep 1
-    run_sudo systemctl start greetd.service >/dev/null 2>&1 || true
+    if ! run_sudo systemctl start greetd.service >/dev/null 2>&1; then
+        log WARN "Failed to start greetd.service; check 'systemctl status greetd.service'"
+    fi
 fi
 
 # Enable and start app-specific services if present
 for unit in photoframe-wifi-manager.service buttond.service; do
     if run_sudo systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
         log INFO "Enabling ${unit}"
-        run_sudo systemctl enable "${unit}" >/dev/null 2>&1 || true
-        log INFO "Restarting ${unit}"
-        run_sudo systemctl restart "${unit}" >/dev/null 2>&1 || true
+        reenable_clean "${unit}"
+        restart_unit "${unit}"
     fi
 done
+
+# Re-assert the daemon's view after stripping stale enable symlinks above, so the
+# next boot evaluates target dependencies against the corrected wants.
+run_sudo systemctl daemon-reload
 
 configure_sync_timer
 
