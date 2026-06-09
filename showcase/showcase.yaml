@@ -43,7 +43,10 @@ startup-shuffle-seed: 1
 
 global-photo-settings:
   dwell-ms: 4000          # hold each photo 4 s so you can read the caption
-  oversample: 1.0
+  oversample: 2.0         # 2x supersample -> anti-aliased photo edges in the capture.
+                          # The renderer has no MSAA, so at 1.0 a hard diagonal edge
+                          # in a photo stair-steps. ~4x GPU fill; fine for a 1080p
+                          # recording, dial back if running the tour live at 4K.
   max-upscale-factor: 2.0
 
 greeting-screen:
