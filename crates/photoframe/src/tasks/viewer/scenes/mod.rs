@@ -45,7 +45,7 @@ pub(super) struct CaptionOverlay {
     font_system: FontSystem,
     swash_cache: SwashCache,
     // The finished caption (backing + text), rebuilt only on text/size change and
-    // composited as a single quad every frame.
+    // composited as a single scissored triangle every frame.
     cache_texture: Option<wgpu::Texture>,
     cache_view: Option<wgpu::TextureView>,
     cache_dims: (u32, u32),
@@ -70,8 +70,9 @@ impl CaptionOverlay {
         text_buffer.set_wrap(&mut font_system, Wrap::None);
         let swash_cache = SwashCache::new();
 
-        // Composite pipeline: samples the cached caption texture and draws it as a
-        // single premultiplied-alpha quad positioned in pixel space.
+        // Composite pipeline: samples the cached caption texture and draws it as
+        // one premultiplied-alpha triangle, scissored to the panel rect in pixel
+        // space (caption_composite.wgsl explains why it must not be a quad).
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("caption-composite-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("caption_composite.wgsl").into()),
@@ -220,6 +221,20 @@ impl CaptionOverlay {
         let rect_x = (margin - pad_x).max(0.0).floor();
         let rect_y = (top - pad_y).max(0.0).floor();
         let (cw, ch) = self.cache_dims;
+
+        // The scissor, not the geometry, bounds the panel (the shader emits one
+        // oversized triangle — see caption_composite.wgsl for the V3D tile-binner
+        // bug this works around). Clamp to the surface: wgpu rejects a scissor
+        // that hangs past the attachment, and a caption wider than a small
+        // surface would otherwise panic instead of rendering partially.
+        let scissor_x = rect_x as u32;
+        let scissor_y = rect_y as u32;
+        let scissor_w = cw.min(self.size.width.saturating_sub(scissor_x));
+        let scissor_h = ch.min(self.size.height.saturating_sub(scissor_y));
+        if scissor_w == 0 || scissor_h == 0 {
+            return false;
+        }
+
         let uniforms = CompositeUniforms {
             resolution: [self.size.width as f32, self.size.height as f32],
             _pad0: [0.0, 0.0],
@@ -248,7 +263,8 @@ impl CaptionOverlay {
         });
         pass.set_pipeline(&self.composite_pipeline);
         pass.set_bind_group(0, bind_group, &[]);
-        pass.draw(0..6, 0..1);
+        pass.set_scissor_rect(scissor_x, scissor_y, scissor_w, scissor_h);
+        pass.draw(0..3, 0..1);
         true
     }
 
@@ -1323,6 +1339,128 @@ mod tests {
         assert_eq!(
             after, fresh,
             "'{reference}' lost glyph pixels after atlas churn ({fresh} -> {after})"
+        );
+    }
+
+    /// Render `overlay` into a fresh zero-initialized target of the given size
+    /// and return the target pixels (RGBA8).
+    fn composite_to_target(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        overlay: &mut CaptionOverlay,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("caption-composite-target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("caption-composite-test"),
+        });
+        assert!(
+            overlay.render(&mut encoder, &view),
+            "overlay.render should succeed"
+        );
+        queue.submit(Some(encoder.finish()));
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        read_texture_rgba(device, queue, &target, width, height)
+    }
+
+    /// The composite must paint the panel rect exactly — every pixel inside the
+    /// rect opaque, every pixel outside untouched. This pins the scissor +
+    /// single-triangle workaround for the Pi's V3D tile binner, which dropped
+    /// tile-aligned pieces of the old two-triangle quad (stair-step wedges in
+    /// the panel, or the panel truncated mid-text at a multiple of 64).
+    #[test]
+    fn caption_composite_covers_exact_panel_rect() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("skipping caption composite test: no GPU adapter available");
+            return;
+        };
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut overlay = CaptionOverlay::new(&device, &queue, format);
+        overlay.set_text("transition: e-ink    mat: blur");
+        let (width, height) = (1920u32, 1080u32);
+        overlay.resize(PhysicalSize::new(width, height));
+        let pixels = composite_to_target(&device, &queue, &mut overlay, format, width, height);
+
+        // Mirror render()'s placement: margin 20, pad 14/8, line height 34.
+        let rect_x = 6u32;
+        let rect_y = height - 34 - 20 - 8;
+        let (cw, ch) = overlay.cache_dims;
+        let mut holes = 0usize;
+        let mut spills = 0usize;
+        for y in 0..height {
+            for x in 0..width {
+                let a = pixels[((y * width + x) * 4 + 3) as usize];
+                let inside =
+                    (rect_x..rect_x + cw).contains(&x) && (rect_y..rect_y + ch).contains(&y);
+                if inside && a != 255 {
+                    holes += 1;
+                } else if !inside && a != 0 {
+                    spills += 1;
+                }
+            }
+        }
+        assert_eq!(holes, 0, "panel rect has {holes} non-opaque pixels");
+        assert_eq!(spills, 0, "{spills} pixels painted outside the panel rect");
+    }
+
+    /// A caption wider than the surface must clamp its scissor and render the
+    /// visible part instead of tripping wgpu's scissor validation.
+    #[test]
+    fn caption_composite_clamps_to_narrow_surface() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("skipping caption clamp test: no GPU adapter available");
+            return;
+        };
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut overlay = CaptionOverlay::new(&device, &queue, format);
+        overlay.set_text("transition: venetian-blinds    mat: passe-partout");
+        let (width, height) = (160u32, 600u32);
+        overlay.resize(PhysicalSize::new(width, height));
+        let pixels = composite_to_target(&device, &queue, &mut overlay, format, width, height);
+
+        let (cw, ch) = overlay.cache_dims;
+        assert!(cw > width, "test premise: caption wider than the surface");
+        let rect_x = 6u32;
+        let rect_y = height - 34 - 20 - 8;
+        let mut holes = 0usize;
+        let mut spills = 0usize;
+        for y in 0..height {
+            for x in 0..width {
+                let a = pixels[((y * width + x) * 4 + 3) as usize];
+                let inside = x >= rect_x && (rect_y..rect_y + ch).contains(&y);
+                if inside && a != 255 {
+                    holes += 1;
+                } else if !inside && a != 0 {
+                    spills += 1;
+                }
+            }
+        }
+        assert_eq!(
+            holes, 0,
+            "visible panel strip has {holes} non-opaque pixels"
+        );
+        assert_eq!(
+            spills, 0,
+            "{spills} pixels painted outside the clipped panel"
         );
     }
 }
