@@ -1731,7 +1731,12 @@ pub fn run_windowed(
                 return true;
             }
 
-            let instance = wgpu::Instance::default();
+            // Honor wgpu's env overrides (notably WGPU_BACKEND=gl|vulkan) so
+            // the rendering backend can be switched per deployment without a
+            // rebuild. On the Pi the GL/EGL window-buffer path is the one the
+            // desktop stack exercises daily and may be eligible for compositor
+            // direct scanout where the v3dv Vulkan swapchain path is not.
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
             debug!(context = reason, "viewer_gpu_instance_ready");
             let surface = match instance.create_surface(window.clone()) {
                 Ok(surface) => {

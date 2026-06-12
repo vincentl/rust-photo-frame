@@ -103,6 +103,10 @@ export WINIT_APP_ID="${WINIT_APP_ID:-photoframe}"
 # 4K. Linear buffers let the fullscreen frame go straight to scanout.
 # Harmlessly ignored by Mesa versions without this debug flag.
 export MESA_VK_WSI_DEBUG="${MESA_VK_WSI_DEBUG:-linear}"
+# Uncomment to render via the GL/EGL backend instead of Vulkan. The EGL
+# window-buffer path is the one the Pi desktop exercises daily and may be
+# eligible for direct scanout where the v3dv Vulkan swapchain path is not.
+# export WGPU_BACKEND=gl
 # Control where logs go via PHOTOFRAME_LOG (journal|stdout|file:/path)
 # Defaults to journald for kiosk stability.
 case "${PHOTOFRAME_LOG:-journal}" in
