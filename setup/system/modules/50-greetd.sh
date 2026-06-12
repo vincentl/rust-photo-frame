@@ -97,15 +97,12 @@ fi
 # Keep WINIT_APP_ID for compatibility with older builds.
 # Current binaries set Wayland app_id via winit window attributes.
 export WINIT_APP_ID="${WINIT_APP_ID:-photoframe}"
-# Allocate linear (scanout-capable) Vulkan swapchain buffers. V3D's default
-# tiled layout cannot be imported by the display controller, so sway logs
-# "Failed to import buffer for scan-out" and re-composites every frame at
-# 4K. Linear buffers let the fullscreen frame go straight to scanout.
-# Harmlessly ignored by Mesa versions without this debug flag.
-export MESA_VK_WSI_DEBUG="${MESA_VK_WSI_DEBUG:-linear}"
-# Uncomment to render via the GL/EGL backend instead of Vulkan. The EGL
-# window-buffer path is the one the Pi desktop exercises daily and may be
-# eligible for direct scanout where the v3dv Vulkan swapchain path is not.
+# Direct scanout is currently blocked because v3dv allocates UIF-tiled
+# swapchain buffers ("Buffer format ... modifier 0x0700000000000006 cannot
+# be scanned out" in sway -d logs). MESA_VK_WSI_DEBUG=linear was tested and
+# does NOT change the negotiated modifier on Mesa 25.0. With sway compositing
+# on the GPU this costs only a few ms per frame; revisit with newer Mesa.
+# Uncomment to render via the GL/EGL backend instead of Vulkan:
 # export WGPU_BACKEND=gl
 # Control where logs go via PHOTOFRAME_LOG (journal|stdout|file:/path)
 # Defaults to journald for kiosk stability.

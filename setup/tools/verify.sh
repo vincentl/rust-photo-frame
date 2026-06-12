@@ -68,6 +68,26 @@ else
   warnings=$((warnings+1))
 fi
 
+# GPU stack: without the Mesa GL drivers sway cannot create a GPU renderer
+# and silently composites every frame on the CPU (pixman).
+if dpkg -s libgl1-mesa-dri >/dev/null 2>&1; then
+  ok "libgl1-mesa-dri installed (sway composites on the GPU)"
+else
+  err "libgl1-mesa-dri missing: sway will composite frames on the CPU"
+  failures=$((failures+1))
+fi
+
+# Bootloader EEPROM: Pi 5 bootloaders v2025.01.22..v2025.10.x cut GPU memory
+# bandwidth by ~35%, which directly lowers the 4K render ceiling.
+if have rpi-eeprom-update; then
+  if rpi-eeprom-update 2>/dev/null | grep -q "UPDATE AVAILABLE"; then
+    warn "bootloader EEPROM update available (older bootloaders reduce GPU memory bandwidth); run: sudo rpi-eeprom-update -a && reboot"
+    warnings=$((warnings+1))
+  else
+    ok "bootloader EEPROM up to date"
+  fi
+fi
+
 if [[ -f "${CONF_TEMPLATE}" ]]; then
   ok "config template present: ${CONF_TEMPLATE}"
 else

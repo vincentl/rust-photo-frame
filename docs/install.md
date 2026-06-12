@@ -91,6 +91,7 @@ cd photoframe
 The script uses `sudo` internally for system-level steps (your credential is still cached from Step 2 — no extra prompt). It:
 
 - Installs system packages (graphics stack, NetworkManager, Sway, greetd, build tools) and a system-wide Rust toolchain.
+- Stages a bootloader EEPROM update if one is available (older Pi 5 bootloaders reduce GPU memory bandwidth by ~35%; the staged update applies on the next reboot).
 - Builds the four crates (`photoframe`, `buttond`, `wifi-manager`, `config-model`).
 - Provisions the `kiosk` user, polkit rules, runtime directories, zram swap, and Pi 5 boot tweaks.
 - Installs binaries, unit files, and a starter config to `/opt/photoframe`.
@@ -98,7 +99,7 @@ The script uses `sudo` internally for system-level steps (your credential is sti
 
 > **Build killed with `signal: 9`?** The Rust build ran out of memory. Cap parallelism: `CARGO_BUILD_JOBS=2 ./setup/install-all.sh`.
 
-When the script returns, **log out and SSH back in** so your shell picks up the `kiosk` group membership added during setup. Then verify:
+When the script returns, **reboot once** (`sudo reboot`) so any staged bootloader update takes effect, then SSH back in — this also picks up the `kiosk` group membership added during setup. Then verify:
 
 ```bash
 exit
