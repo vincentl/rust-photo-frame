@@ -36,14 +36,44 @@ const IRIS_EXTRA_WIDTH_RAD: f32 = 1.308_997;
 /// Linear downscale factor of the iris petal layer relative to the surface.
 /// 4 → 1/16 of the petal-shading cost; at 4K the layer is 960x540, and the
 /// petal edge feather widens to ~4 native pixels, which reads as natural
-/// blade softness.
+/// blade softness. Override with PHOTOFRAME_IRIS_LAYER_SCALE for tuning.
 const IRIS_LAYER_SCALE: u32 = 4;
 
 /// Linear downscale factor for the intermediate that transition frames
 /// render into (resting photos always render at native resolution). 2 →
 /// roughly a quarter of the per-pixel transition cost; motion hides the
 /// brief softness, and the first dwell frame restores full sharpness.
+/// Override with PHOTOFRAME_TRANSITION_SCALE for tuning; 1 bypasses the
+/// intermediate entirely and renders transitions at native resolution.
 const TRANSITION_HALF_SCALE: u32 = 2;
+
+fn scale_from_env(var: &str, default: u32, max: u32) -> u32 {
+    match std::env::var(var) {
+        Ok(raw) => match raw.parse::<u32>() {
+            Ok(value) if (1..=max).contains(&value) => {
+                info!(var, value, "viewer_scale_override");
+                value
+            }
+            _ => {
+                warn!(var, raw, "invalid scale override; using default");
+                default
+            }
+        },
+        Err(_) => default,
+    }
+}
+
+/// Effective transition-intermediate scale (env-overridable, read once).
+fn transition_scale() -> u32 {
+    static SCALE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| scale_from_env("PHOTOFRAME_TRANSITION_SCALE", TRANSITION_HALF_SCALE, 4))
+}
+
+/// Effective iris petal-layer scale (env-overridable, read once).
+fn iris_layer_scale() -> u32 {
+    static SCALE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| scale_from_env("PHOTOFRAME_IRIS_LAYER_SCALE", IRIS_LAYER_SCALE, 8))
+}
 
 /// Past this (eased) progress the transition renders at native resolution
 /// again, so the incoming photo settles into full sharpness instead of
@@ -1260,8 +1290,9 @@ pub fn run_windowed(
         /// Create (or re-create after a resize) the iris petal layer so it
         /// tracks the current surface size.
         fn ensure_iris_layer(&mut self) {
-            let w = (self.config.width / IRIS_LAYER_SCALE).max(1);
-            let h = (self.config.height / IRIS_LAYER_SCALE).max(1);
+            let scale = iris_layer_scale();
+            let w = (self.config.width / scale).max(1);
+            let h = (self.config.height / scale).max(1);
             if let Some(layer) = self.iris_layer.as_ref()
                 && layer.w == w
                 && layer.h == h
@@ -1279,8 +1310,9 @@ pub fn run_windowed(
         /// Create (or re-create after a resize) the reduced-resolution
         /// intermediate that transition frames render into.
         fn ensure_half_target(&mut self) {
-            let w = (self.config.width / TRANSITION_HALF_SCALE).max(1);
-            let h = (self.config.height / TRANSITION_HALF_SCALE).max(1);
+            let scale = transition_scale();
+            let w = (self.config.width / scale).max(1);
+            let h = (self.config.height / scale).max(1);
             if let Some(target) = self.half_target.as_ref()
                 && target.w == w
                 && target.h == h
@@ -2946,7 +2978,9 @@ pub fn run_windowed(
                             // Created up front: later code holds immutable
                             // borrows of gpu for the bind groups.
                             if let Some(kind) = wake.transition_state().map(|s| s.kind()) {
-                                gpu.ensure_half_target();
+                                if transition_scale() > 1 {
+                                    gpu.ensure_half_target();
+                                }
                                 if kind == TransitionKind::Iris {
                                     gpu.ensure_iris_layer();
                                 }
@@ -3134,7 +3168,7 @@ pub fn run_windowed(
                                         uniforms.params1 = [r_in - e, color[0], color[1], color[2]];
                                         // Petal-layer upscale factor: keeps the edge
                                         // feather at least one layer texel wide.
-                                        uniforms.params3[0] = IRIS_LAYER_SCALE as f32;
+                                        uniforms.params3[0] = iris_layer_scale() as f32;
                                         let (s_psi, c_psi) = psi.sin_cos();
                                         for i in 0..n {
                                             let ai =
@@ -3177,6 +3211,7 @@ pub fn run_windowed(
                                 let half_target = if active_transition.is_some()
                                     && !debug_bezier
                                     && uniforms.progress < TRANSITION_FULL_RES_TAIL
+                                    && transition_scale() > 1
                                 {
                                     gpu.half_target.as_ref()
                                 } else {

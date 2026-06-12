@@ -43,7 +43,7 @@ Full BOM and physical assembly: **[docs/build.md](docs/build.md)**.
 4. **Tune the experience** — [docs/configure.md](docs/configure.md): transitions, mats, schedule
 5. **Run it day-to-day** — [docs/operate.md](docs/operate.md): commands and troubleshooting
 
-Optional deeper dives (cloud sync, Wi-Fi internals, power model, memory tuning, kiosk stack) live in **[docs/advanced.md](docs/advanced.md)**.
+Optional deeper dives (cloud sync, Wi-Fi internals, power model, memory tuning, kiosk stack) live in **[docs/advanced.md](docs/advanced.md)**; rendering performance, measurement tools, and 4K60 tuning live in **[docs/performance.md](docs/performance.md)**.
 
 If you want to modify the code, see **[CONTRIBUTING.md](CONTRIBUTING.md)** and the contributor guides under **[developer/](developer/)**.
 
