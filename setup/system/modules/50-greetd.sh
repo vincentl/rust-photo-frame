@@ -104,9 +104,10 @@ export WINIT_APP_ID="${WINIT_APP_ID:-photoframe}"
 # on the GPU this costs only a few ms per frame; revisit with newer Mesa.
 # Uncomment to render via the GL/EGL backend instead of Vulkan:
 # export WGPU_BACKEND=gl
-# Uncomment to let the app render ahead instead of serializing on the
-# compositor's frame callbacks (frame-pacing experiment):
-# export PHOTOFRAME_PRESENT_MODE=mailbox
+# The app defaults to mailbox presentation when available (FIFO costs two
+# vsyncs per frame under sway 1.10; see docs/performance.md). Uncomment only
+# to force a different mode, e.g. to retest fifo on a newer sway:
+# export PHOTOFRAME_PRESENT_MODE=fifo
 # Control where logs go via PHOTOFRAME_LOG (journal|stdout|file:/path)
 # Defaults to journald for kiosk stability.
 case "${PHOTOFRAME_LOG:-journal}" in
