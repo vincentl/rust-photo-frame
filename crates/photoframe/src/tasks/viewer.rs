@@ -28,6 +28,11 @@ use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{Level, debug, info, warn};
 
+/// Iris petal angular width beyond the petal spacing (75°). Validated
+/// numerically to keep the aperture boundary on the petals' inner arcs (no
+/// end-cap "teeth") for 5..=14 blades at any minimum aperture.
+const IRIS_EXTRA_WIDTH_RAD: f32 = 1.308_997;
+
 pub(super) enum ActiveTransition {
     Fade {
         through_black: bool,
@@ -1107,6 +1112,12 @@ pub fn run_windowed(
         params0: [f32; 4],
         params1: [f32; 4],
         params3: [f32; 4],
+        // Per-petal constants for the iris transition, solved on the CPU each
+        // frame so the fragment loop needs no transcendentals:
+        // petals_a[i] = (annulus_center.xy, tip_dir.xy)
+        // petals_b[i] = (trail_dir.xy, petal_tone, unused)
+        petals_a: [[f32; 4]; 16],
+        petals_b: [[f32; 4]; 16],
     }
 
     struct GpuCtx {
@@ -2593,6 +2604,8 @@ pub fn run_windowed(
                                 params0: [0.0; 4],
                                 params1: [0.0; 4],
                                 params3: [0.0; 4],
+                                petals_a: [[0.0; 4]; 16],
+                                petals_b: [[0.0; 4]; 16],
                             };
                             let mut current_bind = &gpu.blank_plane.bind;
                             let mut next_bind = &gpu.blank_plane.bind;
@@ -2726,14 +2739,60 @@ pub fn run_windowed(
                                         min_aperture,
                                         swirl,
                                     } => {
-                                        uniforms.params0[0] = *blades as f32;
-                                        uniforms.params0[1] = *petal_contrast;
-                                        uniforms.params0[2] = *overlap_shadow;
-                                        uniforms.params0[3] = *swirl;
-                                        uniforms.params1[0] = *min_aperture;
-                                        uniforms.params1[1] = color[0];
-                                        uniforms.params1[2] = color[1];
-                                        uniforms.params1[3] = color[2];
+                                        // Solve the petal kinematics here so the
+                                        // per-pixel shader loop is transcendental-free.
+                                        // Geometry derivation: r_in circumscribes the
+                                        // screen, petals are annular arcs (band r_in..
+                                        // 2*r_in) with semicircular end caps, pivoting
+                                        // by `psi` about the center of the trailing cap.
+                                        let n = (*blades).clamp(1, 16) as usize;
+                                        let t = uniforms.progress;
+                                        let x = if t < 0.5 { t * 2.0 } else { 2.0 - t * 2.0 };
+                                        let f = x * x * (3.0 - 2.0 * x);
+                                        let r_in = 1.02
+                                            * 0.5
+                                            * (screen_w * screen_w + screen_h * screen_h).sqrt();
+                                        let r_mid = 1.5 * r_in;
+                                        let e = f * r_in * (1.0 - min_aperture);
+                                        let psi = 2.0 * (e / (2.0 * r_mid)).clamp(0.0, 1.0).asin();
+                                        let spin = swirl * psi;
+                                        let sigma =
+                                            std::f32::consts::TAU / n as f32 + IRIS_EXTRA_WIDTH_RAD;
+                                        // Photos crossfade behind the petals around full close.
+                                        let swap = ((t - 0.42) / 0.16).clamp(0.0, 1.0);
+                                        let swap = swap * swap * (3.0 - 2.0 * swap);
+                                        uniforms.params0 =
+                                            [n as f32, *petal_contrast, *overlap_shadow, swap];
+                                        // Inscribed aperture radius: pixels closer to
+                                        // center than this are provably petal-free.
+                                        uniforms.params1 = [r_in - e, color[0], color[1], color[2]];
+                                        let (s_psi, c_psi) = psi.sin_cos();
+                                        for i in 0..n {
+                                            let ai =
+                                                std::f32::consts::TAU * i as f32 / n as f32 + spin;
+                                            let (s_ai, c_ai) = ai.sin_cos();
+                                            let piv = [r_mid * c_ai, r_mid * s_ai];
+                                            // Annulus center after swinging about the pivot.
+                                            let center = [
+                                                piv[0] - (c_psi * piv[0] - s_psi * piv[1]),
+                                                piv[1] - (s_psi * piv[0] + c_psi * piv[1]),
+                                            ];
+                                            let trail = ai + psi;
+                                            let tip = trail + sigma;
+                                            // Directional sheen + per-petal variation are
+                                            // constant across a petal, so bake them here.
+                                            let facing = (ai + 0.5 * sigma + psi - 2.3).cos();
+                                            let h = ((i as f32 + 3.0) * 12.9898).sin() * 43_758.547;
+                                            let hash = h - h.floor();
+                                            let tone = (1.0
+                                                + petal_contrast
+                                                    * (0.35 * facing + 0.12 * (hash - 0.5)))
+                                                .max(0.0);
+                                            uniforms.petals_a[i] =
+                                                [center[0], center[1], tip.cos(), tip.sin()];
+                                            uniforms.petals_b[i] =
+                                                [trail.cos(), trail.sin(), tone, 0.0];
+                                        }
                                     }
                                 }
                             } else if have_current {
