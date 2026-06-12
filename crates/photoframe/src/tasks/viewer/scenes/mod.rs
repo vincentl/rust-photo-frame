@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use glyphon::{
     Attrs, Buffer, Color as GlyphonColor, FamilyOwned, FontSystem, Metrics, Shaping, SwashCache,
@@ -716,6 +716,14 @@ impl Scene for SleepScene {
     }
 }
 
+/// Minimum spacing between transition frame submissions. Mailbox
+/// presentation never blocks, so an unpaced render loop can submit frames
+/// faster than the compositor latches them; mailbox then discards the older
+/// ones unseen while the animation clock keeps advancing, making displayed
+/// motion uneven (and inflating frame stats with frames nobody saw). Held
+/// just under one 60 Hz refresh so a healthy loop still reaches 60 fps.
+const MIN_TRANSITION_FRAME_INTERVAL: Duration = Duration::from_millis(15);
+
 /// State container for the wake (slideshow) scene.
 pub(super) struct WakeScene {
     current: Option<ImgTex>,
@@ -727,6 +735,8 @@ pub(super) struct WakeScene {
     displayed_at: Option<Instant>,
     pending: VecDeque<ImgTex>,
     pending_redraw: bool,
+    /// When the most recent frame was presented; paces transition redraws.
+    last_present: Option<Instant>,
     dwell_ms: u64,
     transition_cfg: TransitionConfig,
 }
@@ -751,6 +761,7 @@ impl WakeScene {
             displayed_at: None,
             pending: VecDeque::new(),
             pending_redraw: false,
+            last_present: None,
             dwell_ms,
             transition_cfg,
         }
@@ -765,6 +776,7 @@ impl WakeScene {
         self.displayed_at = None;
         self.pending.clear();
         self.pending_redraw = false;
+        self.last_present = None;
     }
 
     /// Returns the currently displayed image, if present.
@@ -820,6 +832,7 @@ impl WakeScene {
     /// Clears any serviced redraw request after the frame has been presented.
     pub(super) fn after_present(&mut self) {
         let _ = self.take_redraw_needed();
+        self.last_present = Some(Instant::now());
     }
 
     /// Returns the timestamp when the current image started displaying.
@@ -949,7 +962,14 @@ impl WakeScene {
         if pending_redraw {
             self.take_redraw_needed();
         }
-        if pending_redraw || has_transition {
+        // Pace transition frames to the display refresh: the next redraw is
+        // held until MIN_TRANSITION_FRAME_INTERVAL has elapsed since the
+        // last present. The 4ms control tick re-runs this check, so the
+        // redraw fires promptly once the gate opens.
+        let pace_open = self
+            .last_present
+            .is_none_or(|t| t.elapsed() >= MIN_TRANSITION_FRAME_INTERVAL);
+        if pending_redraw || (has_transition && pace_open) {
             tracing::debug!(pending_redraw, has_transition, "viewer_request_redraw_wake");
             ctx.request_redraw();
         }
