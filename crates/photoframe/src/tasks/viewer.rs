@@ -194,6 +194,48 @@ impl TransitionState {
     }
 }
 
+/// Frame cadence accumulator for one transition playback, logged when the
+/// transition ends so on-device performance is visible in the journal.
+pub(super) struct TransitionFrameStats {
+    kind: TransitionKind,
+    started: Instant,
+    last_frame: Instant,
+    frames: u32,
+    worst_frame_ms: f32,
+}
+
+impl TransitionFrameStats {
+    fn begin(kind: TransitionKind, now: Instant) -> Self {
+        Self {
+            kind,
+            started: now,
+            last_frame: now,
+            frames: 1,
+            worst_frame_ms: 0.0,
+        }
+    }
+
+    fn log(&self) {
+        if self.frames < 2 {
+            return;
+        }
+        let span = self
+            .last_frame
+            .duration_since(self.started)
+            .as_secs_f32()
+            .max(f32::EPSILON);
+        let intervals = (self.frames - 1) as f32;
+        info!(
+            transition = %self.kind,
+            frames = self.frames,
+            avg_fps = format_args!("{:.1}", intervals / span),
+            avg_frame_ms = format_args!("{:.1}", 1000.0 * span / intervals),
+            worst_frame_ms = format_args!("{:.1}", self.worst_frame_ms),
+            "transition_frame_stats"
+        );
+    }
+}
+
 fn jittered_angle(picker: &crate::config::AnglePicker, rng: &mut impl Rng) -> f32 {
     let base = picker.base_deg;
     let jitter = picker.jitter_deg;
@@ -1348,6 +1390,8 @@ pub fn run_windowed(
         configured_surface_size: Option<(u32, u32)>,
         /// Caption overlay for showcase mode; `None` when showcase is disabled.
         caption_overlay: Option<scenes::CaptionOverlay>,
+        /// Frame cadence of the transition currently being presented.
+        transition_frame_stats: Option<TransitionFrameStats>,
     }
 
     impl App {
@@ -2196,6 +2240,30 @@ pub fn run_windowed(
         fn record_frame_presented(&mut self) {
             self.surface_timeout_streak = 0;
         }
+
+        /// Track per-frame cadence while a transition plays; log a summary
+        /// once it ends (or hands over to a different transition kind).
+        fn note_transition_frame(&mut self, active: Option<TransitionKind>) {
+            let now = Instant::now();
+            match (self.transition_frame_stats.take(), active) {
+                (None, Some(kind)) => {
+                    self.transition_frame_stats = Some(TransitionFrameStats::begin(kind, now));
+                }
+                (Some(mut stats), Some(kind)) if stats.kind == kind => {
+                    let dt_ms = now.duration_since(stats.last_frame).as_secs_f32() * 1000.0;
+                    stats.worst_frame_ms = stats.worst_frame_ms.max(dt_ms);
+                    stats.frames += 1;
+                    stats.last_frame = now;
+                    self.transition_frame_stats = Some(stats);
+                }
+                (Some(stats), Some(kind)) => {
+                    stats.log();
+                    self.transition_frame_stats = Some(TransitionFrameStats::begin(kind, now));
+                }
+                (Some(stats), None) => stats.log(),
+                (None, None) => {}
+            }
+        }
     }
 
     impl ApplicationHandler<ViewerEvent> for App {
@@ -2635,6 +2703,8 @@ pub fn run_windowed(
                                 have_next = true;
                             }
 
+                            let active_transition =
+                                wake.transition_state().map(|state| state.kind());
                             let mut should_draw_quad = false;
                             let debug_bezier = std::env::var("PHOTOFRAME_DEBUG_BEZIER")
                                 .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
@@ -2853,6 +2923,7 @@ pub fn run_windowed(
                             }
                             wake.after_present();
                             self.record_frame_presented();
+                            self.note_transition_frame(active_transition);
                         }
                     }
                 }
@@ -2969,6 +3040,7 @@ pub fn run_windowed(
         surface_timeout_streak: 0,
         configured_surface_size: None,
         caption_overlay: None,
+        transition_frame_stats: None,
     };
     app.enter_greeting();
     event_loop.run_app(&mut app)?;
