@@ -7,6 +7,9 @@ struct TransitionUniforms {
   params0: vec4<f32>,
   params1: vec4<f32>,
   params3: vec4<f32>,
+  // Viewer background (linear RGB, alpha unused); letterbox regions are
+  // composited over this in-shader so the pipeline can render opaquely.
+  background: vec4<f32>,
   // Per-petal constants for the iris transition, solved on the CPU each
   // frame (see the Iris arm in viewer.rs):
   // petals_a[i] = (annulus_center.xy, tip_dir.xy)
@@ -371,5 +374,9 @@ switch (U.kind) {
   if ((U.kind == 1u && U.params0.x > 0.5) || U.kind == 4u) {
     alpha = 1.0;
   }
-  return vec4<f32>(color.rgb, clamp(alpha, 0.0, 1.0));
+  // Composite over the background here (previously done by alpha blending
+  // against the clear color): same result, no per-pixel destination read,
+  // and the output stays fully opaque for compositor direct scanout.
+  let a = clamp(alpha, 0.0, 1.0);
+  return vec4<f32>(color.rgb * a + U.background.rgb * (1.0 - a), 1.0);
 }

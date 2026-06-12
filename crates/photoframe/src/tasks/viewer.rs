@@ -1163,6 +1163,10 @@ pub fn run_windowed(
         params0: [f32; 4],
         params1: [f32; 4],
         params3: [f32; 4],
+        // Viewer background (linear RGB, alpha unused). The shader composites
+        // letterbox regions over this itself so the pipeline can render
+        // opaquely without a per-pixel destination read for blending.
+        background: [f32; 4],
         // Per-petal constants for the iris transition, solved on the CPU each
         // frame so the fragment loop needs no transcendentals:
         // petals_a[i] = (annulus_center.xy, tip_dir.xy)
@@ -1767,7 +1771,17 @@ pub fn run_windowed(
                 event_loop.exit();
                 return false;
             };
-            let Some(alpha_mode) = caps.alpha_modes.first().copied() else {
+            // Prefer an opaque surface: the viewer always fills every pixel,
+            // and an opaque fullscreen surface is what lets the compositor
+            // skip blending — and, with matching formats, hand the buffer
+            // straight to the display (direct scanout, no composite copy).
+            let Some(alpha_mode) = caps
+                .alpha_modes
+                .iter()
+                .copied()
+                .find(|m| *m == wgpu::CompositeAlphaMode::Opaque)
+                .or_else(|| caps.alpha_modes.first().copied())
+            else {
                 warn!(
                     context = reason,
                     "surface reported no alpha modes; exiting viewer"
@@ -1920,7 +1934,11 @@ pub fn run_windowed(
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        // Opaque: the shader composites letterbox regions over
+                        // U.background itself. Skipping blending avoids a
+                        // destination read on every pixel (significant at 4K)
+                        // and keeps the surface scanout-friendly.
+                        blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -2788,6 +2806,12 @@ pub fn run_windowed(
                                 params0: [0.0; 4],
                                 params1: [0.0; 4],
                                 params3: [0.0; 4],
+                                background: [
+                                    self.clear_color.r as f32,
+                                    self.clear_color.g as f32,
+                                    self.clear_color.b as f32,
+                                    1.0,
+                                ],
                                 petals_a: [[0.0; 4]; 16],
                                 petals_b: [[0.0; 4]; 16],
                             };
