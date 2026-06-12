@@ -175,6 +175,15 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(blade_col * cov, cov);
 }
 
+// Upscales the half-resolution transition intermediate (bound at group 1)
+// to the swapchain. Transitions render at reduced resolution because the
+// 4K frame cost on the Pi is dominated by per-pixel fill; resting photos
+// are still drawn at native resolution by the direct fs_main path.
+@fragment
+fn fs_blit(in: VSOut) -> @location(0) vec4<f32> {
+  return vec4<f32>(textureSample(cur_tex, cur_samp, in.screen_uv).rgb, 1.0);
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let screen_pos = in.screen_uv * U.screen_size;

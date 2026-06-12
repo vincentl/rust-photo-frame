@@ -39,6 +39,17 @@ const IRIS_EXTRA_WIDTH_RAD: f32 = 1.308_997;
 /// blade softness.
 const IRIS_LAYER_SCALE: u32 = 4;
 
+/// Linear downscale factor for the intermediate that transition frames
+/// render into (resting photos always render at native resolution). 2 →
+/// roughly a quarter of the per-pixel transition cost; motion hides the
+/// brief softness, and the first dwell frame restores full sharpness.
+const TRANSITION_HALF_SCALE: u32 = 2;
+
+/// Past this (eased) progress the transition renders at native resolution
+/// again, so the incoming photo settles into full sharpness instead of
+/// popping when the first dwell frame lands.
+const TRANSITION_FULL_RES_TAIL: f32 = 0.99;
+
 pub(super) enum ActiveTransition {
     Fade {
         through_black: bool,
@@ -1188,15 +1199,17 @@ pub fn run_windowed(
         pipeline: wgpu::RenderPipeline,
         blank_plane: TexturePlane,
         iris_layer_pipeline: wgpu::RenderPipeline,
-        iris_layer: Option<IrisLayer>,
+        iris_layer: Option<OffscreenTarget>,
+        blit_pipeline: wgpu::RenderPipeline,
+        half_target: Option<OffscreenTarget>,
     }
 
-    /// Reduced-resolution offscreen target for the iris transition's petal
-    /// layer. The petal arithmetic is far too heavy to run per native pixel
-    /// at 4K on the Pi; the petals are large smooth shapes, so rendering them
-    /// at 1/IRIS_LAYER_SCALE of the surface size and upsampling is visually
-    /// equivalent at a fraction of the cost.
-    struct IrisLayer {
+    /// Reduced-resolution offscreen render target that can also be sampled.
+    /// At 4K the Pi's frame cost is dominated by per-pixel fill, so heavy
+    /// passes render at a fraction of the surface size and get upsampled:
+    /// the iris petal layer at 1/IRIS_LAYER_SCALE, and every transition
+    /// frame at 1/TRANSITION_HALF_SCALE.
+    struct OffscreenTarget {
         view: wgpu::TextureView,
         bind: wgpu::BindGroup,
         w: u32,
@@ -1204,19 +1217,15 @@ pub fn run_windowed(
     }
 
     impl GpuCtx {
-        /// Create (or re-create after a resize) the iris petal layer so it
-        /// tracks the current surface size.
-        fn ensure_iris_layer(&mut self) {
-            let w = (self.config.width / IRIS_LAYER_SCALE).max(1);
-            let h = (self.config.height / IRIS_LAYER_SCALE).max(1);
-            if let Some(layer) = self.iris_layer.as_ref()
-                && layer.w == w
-                && layer.h == h
-            {
-                return;
-            }
+        fn make_offscreen(
+            &self,
+            label: &str,
+            w: u32,
+            h: u32,
+            format: wgpu::TextureFormat,
+        ) -> OffscreenTarget {
             let tex = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("iris-petal-layer"),
+                label: Some(label),
                 size: wgpu::Extent3d {
                     width: w,
                     height: h,
@@ -1225,14 +1234,14 @@ pub fn run_windowed(
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
+                format,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
             let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("iris-petal-layer-bind"),
+                label: Some(label),
                 layout: &self.img_bind_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
@@ -1245,7 +1254,41 @@ pub fn run_windowed(
                     },
                 ],
             });
-            self.iris_layer = Some(IrisLayer { view, bind, w, h });
+            OffscreenTarget { view, bind, w, h }
+        }
+
+        /// Create (or re-create after a resize) the iris petal layer so it
+        /// tracks the current surface size.
+        fn ensure_iris_layer(&mut self) {
+            let w = (self.config.width / IRIS_LAYER_SCALE).max(1);
+            let h = (self.config.height / IRIS_LAYER_SCALE).max(1);
+            if let Some(layer) = self.iris_layer.as_ref()
+                && layer.w == w
+                && layer.h == h
+            {
+                return;
+            }
+            self.iris_layer = Some(self.make_offscreen(
+                "iris-petal-layer",
+                w,
+                h,
+                wgpu::TextureFormat::Rgba8Unorm,
+            ));
+        }
+
+        /// Create (or re-create after a resize) the reduced-resolution
+        /// intermediate that transition frames render into.
+        fn ensure_half_target(&mut self) {
+            let w = (self.config.width / TRANSITION_HALF_SCALE).max(1);
+            let h = (self.config.height / TRANSITION_HALF_SCALE).max(1);
+            if let Some(target) = self.half_target.as_ref()
+                && target.w == w
+                && target.h == h
+            {
+                return;
+            }
+            let format = self.config.format;
+            self.half_target = Some(self.make_offscreen("transition-half-target", w, h, format));
         }
     }
 
@@ -1917,6 +1960,37 @@ pub fn run_windowed(
                     multiview: None,
                     cache: None,
                 });
+            let blit_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("blit-pipeline-layout"),
+                    bind_group_layouts: &[&uniform_layout, &img_bind_layout],
+                    push_constant_ranges: &[],
+                });
+            let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("blit-pipeline"),
+                layout: Some(&blit_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_blit"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview: None,
+                cache: None,
+            });
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("quad-pipeline"),
                 layout: Some(&pipeline_layout),
@@ -2034,6 +2108,8 @@ pub fn run_windowed(
                 blank_plane,
                 iris_layer_pipeline,
                 iris_layer: None,
+                blit_pipeline,
+                half_target: None,
             };
             if let Some(mode) = self.mode.as_mut() {
                 mode.set_overlays(Some(greeting), Some(sleep));
@@ -2790,10 +2866,11 @@ pub fn run_windowed(
                             encoder.push_debug_group("wake-draw");
                             // Created up front: later code holds immutable
                             // borrows of gpu for the bind groups.
-                            if wake.transition_state().map(|s| s.kind())
-                                == Some(TransitionKind::Iris)
-                            {
-                                gpu.ensure_iris_layer();
+                            if let Some(kind) = wake.transition_state().map(|s| s.kind()) {
+                                gpu.ensure_half_target();
+                                if kind == TransitionKind::Iris {
+                                    gpu.ensure_iris_layer();
+                                }
                             }
                             let screen_w = gpu.config.width as f32;
                             let screen_h = gpu.config.height as f32;
@@ -3014,6 +3091,18 @@ pub fn run_windowed(
 
                             if should_draw_quad {
                                 let iris_active = uniforms.kind == TransitionKind::Iris.as_index();
+                                // Transitions render into the reduced-resolution
+                                // intermediate and get upsampled; resting photos
+                                // and the tail of a transition render natively so
+                                // the incoming photo settles into full sharpness.
+                                let half_target = if active_transition.is_some()
+                                    && !debug_bezier
+                                    && uniforms.progress < TRANSITION_FULL_RES_TAIL
+                                {
+                                    gpu.half_target.as_ref()
+                                } else {
+                                    None
+                                };
                                 gpu.queue.write_buffer(
                                     &gpu.uniform_buf,
                                     0,
@@ -3050,30 +3139,57 @@ pub fn run_windowed(
                                     Some(layer) if iris_active => &layer.bind,
                                     _ => &gpu.blank_plane.bind,
                                 };
-                                let mut rpass =
-                                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                        label: Some("draw-pass"),
-                                        color_attachments: &[Some(
-                                            wgpu::RenderPassColorAttachment {
-                                                view: &view,
-                                                depth_slice: None,
-                                                resolve_target: None,
-                                                ops: wgpu::Operations {
-                                                    load: wgpu::LoadOp::Clear(self.clear_color),
-                                                    store: wgpu::StoreOp::Store,
+                                {
+                                    let target_view = half_target.map(|t| &t.view).unwrap_or(&view);
+                                    let mut rpass =
+                                        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                            label: Some("draw-pass"),
+                                            color_attachments: &[Some(
+                                                wgpu::RenderPassColorAttachment {
+                                                    view: target_view,
+                                                    depth_slice: None,
+                                                    resolve_target: None,
+                                                    ops: wgpu::Operations {
+                                                        load: wgpu::LoadOp::Clear(self.clear_color),
+                                                        store: wgpu::StoreOp::Store,
+                                                    },
                                                 },
-                                            },
-                                        )],
-                                        depth_stencil_attachment: None,
-                                        occlusion_query_set: None,
-                                        timestamp_writes: None,
-                                    });
-                                rpass.set_pipeline(&gpu.pipeline);
-                                rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                                rpass.set_bind_group(1, current_bind, &[]);
-                                rpass.set_bind_group(2, next_bind, &[]);
-                                rpass.set_bind_group(3, petal_bind, &[]);
-                                rpass.draw(0..6, 0..1);
+                                            )],
+                                            depth_stencil_attachment: None,
+                                            occlusion_query_set: None,
+                                            timestamp_writes: None,
+                                        });
+                                    rpass.set_pipeline(&gpu.pipeline);
+                                    rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                                    rpass.set_bind_group(1, current_bind, &[]);
+                                    rpass.set_bind_group(2, next_bind, &[]);
+                                    rpass.set_bind_group(3, petal_bind, &[]);
+                                    rpass.draw(0..6, 0..1);
+                                }
+                                if let Some(target) = half_target {
+                                    let mut bpass =
+                                        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                            label: Some("upscale-pass"),
+                                            color_attachments: &[Some(
+                                                wgpu::RenderPassColorAttachment {
+                                                    view: &view,
+                                                    depth_slice: None,
+                                                    resolve_target: None,
+                                                    ops: wgpu::Operations {
+                                                        load: wgpu::LoadOp::Clear(self.clear_color),
+                                                        store: wgpu::StoreOp::Store,
+                                                    },
+                                                },
+                                            )],
+                                            depth_stencil_attachment: None,
+                                            occlusion_query_set: None,
+                                            timestamp_writes: None,
+                                        });
+                                    bpass.set_pipeline(&gpu.blit_pipeline);
+                                    bpass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                                    bpass.set_bind_group(1, &target.bind, &[]);
+                                    bpass.draw(0..6, 0..1);
+                                }
                             }
                             encoder.pop_debug_group();
 
