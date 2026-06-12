@@ -97,6 +97,12 @@ fi
 # Keep WINIT_APP_ID for compatibility with older builds.
 # Current binaries set Wayland app_id via winit window attributes.
 export WINIT_APP_ID="${WINIT_APP_ID:-photoframe}"
+# Allocate linear (scanout-capable) Vulkan swapchain buffers. V3D's default
+# tiled layout cannot be imported by the display controller, so sway logs
+# "Failed to import buffer for scan-out" and re-composites every frame at
+# 4K. Linear buffers let the fullscreen frame go straight to scanout.
+# Harmlessly ignored by Mesa versions without this debug flag.
+export MESA_VK_WSI_DEBUG="${MESA_VK_WSI_DEBUG:-linear}"
 # Control where logs go via PHOTOFRAME_LOG (journal|stdout|file:/path)
 # Defaults to journald for kiosk stability.
 case "${PHOTOFRAME_LOG:-journal}" in
@@ -142,10 +148,14 @@ floating_modifier Mod4
 seat seat0 hide_cursor 2000
 
 output * bg #000000 solid_color
+# The panel may be on either HDMI port; configure both.
 output HDMI-A-1 mode 3840x2160@60Hz
 output HDMI-A-1 scale 1.0
+output HDMI-A-2 mode 3840x2160@60Hz
+output HDMI-A-2 scale 1.0
 
 workspace number 1 output HDMI-A-1
+workspace number 1 output HDMI-A-2
 assign [app_id="$photo_app_id"] workspace number 1
 
 for_window [app_id="$photo_app_id"] floating enable, fullscreen enable, move position 0 0, inhibit_idle fullscreen
