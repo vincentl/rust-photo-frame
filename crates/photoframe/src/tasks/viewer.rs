@@ -511,6 +511,17 @@ fn surface_state_for_queue(
 
 impl<'a> MattingBridge<'a> {
     fn queue_for_wake(&mut self, wake: &mut scenes::WakeScene) {
+        // Don't kick off new decode/matting work while a transition is
+        // animating. The work itself runs on worker threads, but its JPEG
+        // decode and NEON blur bursts compete for the same unified memory
+        // bandwidth the GPU is using, which shows up as dropped frames.
+        // A transition consumes the staged photo and immediately drops the
+        // preload depth below target, so without this gate the refill always
+        // lands exactly during the animation. Dwell time (seconds) dwarfs
+        // prep time; deferring the kickoff costs nothing.
+        if wake.transition_state().is_some() {
+            return;
+        }
         while wake.pending().len() + *self.mat_inflight < self.preload_count {
             let next_img = if let Some(img) = self.deferred_images.pop_front() {
                 Some(img)
