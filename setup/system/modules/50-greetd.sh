@@ -104,6 +104,9 @@ export WINIT_APP_ID="${WINIT_APP_ID:-photoframe}"
 # on the GPU this costs only a few ms per frame; revisit with newer Mesa.
 # Uncomment to render via the GL/EGL backend instead of Vulkan:
 # export WGPU_BACKEND=gl
+# Uncomment to let the app render ahead instead of serializing on the
+# compositor's frame callbacks (frame-pacing experiment):
+# export PHOTOFRAME_PRESENT_MODE=mailbox
 # Control where logs go via PHOTOFRAME_LOG (journal|stdout|file:/path)
 # Defaults to journald for kiosk stability.
 case "${PHOTOFRAME_LOG:-journal}" in

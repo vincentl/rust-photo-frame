@@ -1846,12 +1846,45 @@ pub fn run_windowed(
                 present_modes = ?caps.present_modes,
                 "viewer_gpu_surface_caps"
             );
+            // PHOTOFRAME_PRESENT_MODE=fifo|mailbox|immediate overrides the
+            // presentation mode for frame-pacing experiments: fifo serializes
+            // on the compositor's vsync cadence, mailbox lets the app render
+            // ahead and the compositor latch the newest complete frame.
+            let requested_present = std::env::var("PHOTOFRAME_PRESENT_MODE").ok();
+            let present_mode = match requested_present.as_deref() {
+                Some("fifo") => Some(wgpu::PresentMode::Fifo),
+                Some("mailbox") => Some(wgpu::PresentMode::Mailbox),
+                Some("immediate") => Some(wgpu::PresentMode::Immediate),
+                Some(other) => {
+                    warn!(
+                        requested = other,
+                        "unknown PHOTOFRAME_PRESENT_MODE; using auto-vsync"
+                    );
+                    None
+                }
+                None => None,
+            };
+            let present_mode = match present_mode {
+                Some(mode) if caps.present_modes.contains(&mode) => {
+                    info!(present_mode = ?mode, "viewer_present_mode_override");
+                    mode
+                }
+                Some(mode) => {
+                    warn!(
+                        requested = ?mode,
+                        supported = ?caps.present_modes,
+                        "requested present mode unsupported; using auto-vsync"
+                    );
+                    wgpu::PresentMode::AutoVsync
+                }
+                None => wgpu::PresentMode::AutoVsync,
+            };
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format,
                 width: size.width.max(1),
                 height: size.height.max(1),
-                present_mode: wgpu::PresentMode::AutoVsync,
+                present_mode,
                 alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,

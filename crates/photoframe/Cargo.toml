@@ -9,6 +9,11 @@ default-run = "photoframe"
 name = "photoframe"
 path = "src/main.rs"
 
+# Minimal fullscreen frame-pacing probe; see src/bin/frametest.rs.
+[[bin]]
+name = "frametest"
+path = "src/bin/frametest.rs"
+
 [dependencies]
 anyhow = "1.0.100"
 bytemuck = { version = "1.23.2", features = ["derive"] }

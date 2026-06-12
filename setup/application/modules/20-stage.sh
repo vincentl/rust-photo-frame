@@ -62,6 +62,9 @@ TARGET_DIR="$(get_target_dir)"
 
 stage_binary "${TARGET_DIR}/photoframe" "${STAGE_DIR}/bin/photoframe" "photoframe"
 stage_binary "${TARGET_DIR}/wifi-manager" "${STAGE_DIR}/bin/wifi-manager" "wifi-manager"
+if [[ -f "${TARGET_DIR}/frametest" ]]; then
+    stage_binary "${TARGET_DIR}/frametest" "${STAGE_DIR}/bin/frametest" "frametest"
+fi
 if [[ -f "${TARGET_DIR}/buttond" ]]; then
     stage_binary "${TARGET_DIR}/buttond" "${STAGE_DIR}/bin/buttond" "buttond"
 else
