@@ -68,6 +68,30 @@ fn sample_plane(
   return vec4<f32>(c.rgb, 1.0);
 }
 
+// Signed distance to iris petal `i` using the CPU-precomputed constants in
+// U.petals_a / U.petals_b. Returns (distance, radius about the petal's
+// annulus center). On-screen the only petal boundaries are the inner arc and
+// the two end caps, so this band+cap distance is exact for visible pixels.
+fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> vec2<f32> {
+  let a = U.petals_a[i];
+  let b = U.petals_b[i];
+  let v = p - a.xy;
+  let r = length(v);
+  var d: f32;
+  if (a.z * v.y - a.w * v.x > 0.0) {
+    // Past the tip: distance to the tip cap.
+    d = length(v - r_mid * a.zw) - w;
+  } else if (b.x * v.y - b.y * v.x < 0.0) {
+    // Behind the pivot: distance to the trailing cap (always off-screen, so
+    // this only needs to be a positive lower bound here).
+    d = length(v - r_mid * b.xy) - w;
+  } else {
+    // Within the petal's angular span: the annular band.
+    d = abs(r - r_mid) - w;
+  }
+  return vec2<f32>(d, r);
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let screen_pos = in.screen_uv * U.screen_size;
@@ -229,49 +253,43 @@ switch (U.kind) {
         let r_in = 1.02 * 0.5 * length(U.screen_size);
         let r_mid = 1.5 * r_in;
         let w = 0.5 * r_in;
-        var d_arr: array<f32, 16>;
-        var r_arr: array<f32, 16>;
+        // No local arrays: dynamically indexed function-scope arrays get
+        // demoted to per-pixel scratch memory on V3D, which costs far more
+        // than recomputing the few distances needed after the loop.
+        // Petals shingle cyclically (each rests on the next); the covering
+        // petals always form one contiguous run, so the topmost is the
+        // covered petal whose successor is uncovered.
         var d_min = 1e9;
+        var d_first = 0.0;
+        var d_prev = 0.0;
+        var top: i32 = 0;
         for (var i: i32 = 0; i < 16; i++) {
           if (i >= n) { break; }
-          let a = U.petals_a[i];
-          let b = U.petals_b[i];
-          let v = p - a.xy;
-          let r = length(v);
-          var d: f32;
-          if (a.z * v.y - a.w * v.x > 0.0) {
-            // Past the tip: distance to the tip cap.
-            d = length(v - r_mid * a.zw) - w;
-          } else if (b.x * v.y - b.y * v.x < 0.0) {
-            // Behind the pivot: distance to the trailing cap (always off-screen,
-            // so this only needs to be a positive lower bound here).
-            d = length(v - r_mid * b.xy) - w;
-          } else {
-            // Within the petal's angular span: the annular band.
-            d = abs(r - r_mid) - w;
-          }
-          d_arr[i] = d;
-          r_arr[i] = r;
+          let d = iris_petal(i, p, r_mid, w).x;
           d_min = min(d_min, d);
+          if (i == 0) {
+            d_first = d;
+          } else if (d_prev < 0.0 && d >= 0.0) {
+            top = i - 1;
+          }
+          d_prev = d;
         }
+        if (d_prev < 0.0 && d_first >= 0.0) { top = n - 1; }
         // The SDF is exact, so a constant 1px feather equals the old fwidth AA.
         let cov = 1.0 - smoothstep(-1.0, 1.0, d_min);
         if (cov > 0.0) {
-          // Petals shingle cyclically (each rests on the next); the covering
-          // petals always form one contiguous run, so the topmost is the
-          // covered petal whose successor is uncovered.
-          var top: i32 = 0;
-          for (var i: i32 = 0; i < 16; i++) {
-            if (i >= n) { break; }
-            if (d_arr[i] < 0.0 && d_arr[(i + 1) % n] >= 0.0) { top = i; }
-          }
+          var j1 = top + 1;
+          if (j1 >= n) { j1 -= n; }
+          var j2 = top + 2;
+          if (j2 >= n) { j2 -= n; }
           // Across-the-petal gradient on top of the CPU-baked sheen tone.
-          let g = clamp((r_arr[top] - r_mid) / w, -1.0, 1.0);
+          let r_top = iris_petal(top, p, r_mid, w).y;
+          let g = clamp((r_top - r_mid) / w, -1.0, 1.0);
           let tone = max(U.petals_b[top].z - contrast * 0.30 * g, 0.0);
           // Soft shadow cast by the petals stacked above the top one.
           let shadow_w = max(0.012 * r_in, 4.0);
-          let dn1 = max(d_arr[(top + 1) % n], 0.0);
-          let dn2 = max(d_arr[(top + 2) % n], 0.0);
+          let dn1 = max(iris_petal(j1, p, r_mid, w).x, 0.0);
+          let dn2 = max(iris_petal(j2, p, r_mid, w).x, 0.0);
           let occ = 0.5 * (1.0 - smoothstep(0.0, shadow_w, dn1))
             + 0.22 * (1.0 - smoothstep(0.0, shadow_w * 0.6, dn2));
           let vign = 1.0 - 0.25 * length(p) / (0.5 * length(U.screen_size));
