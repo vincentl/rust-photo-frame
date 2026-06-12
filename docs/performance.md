@@ -20,6 +20,14 @@ journalctl -t photoframe -f | grep transition_frame_stats
 Use `-t photoframe` (syslog identifier), not `-u` — the app runs inside the
 greetd session, not as its own systemd unit.
 
+The stats measure *submission* cadence (when `present()` returns), which
+matches what the panel displays only because transition redraws are paced
+to the refresh interval. If `best_frame_ms` ever drops well below a vsync
+(e.g. 0.4ms), frames are being submitted back-to-back and mailbox is
+discarding some unseen — the displayed motion is then worse than the
+numbers suggest. Trust your eyes (or a phone slow-mo recording of the
+panel) over the log when they disagree.
+
 **`frametest`** is a minimal fullscreen probe staged to
 `/opt/photoframe/bin/frametest`. It renders selectable workloads — `solid`
 (a clear, zero memory traffic), `tex` (one full-screen texture), `fade`
