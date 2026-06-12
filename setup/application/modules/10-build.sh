@@ -42,6 +42,16 @@ if [[ "${CARGO_PROFILE}" == "release" ]]; then
     profile_flag=(--release)
 fi
 
+# Tune codegen for the CPU we are building on (Cortex-A76 on a Pi 5). The
+# deploy always builds on the target device, so target-cpu=native can never
+# produce a binary the host cannot run. Mainly speeds the CPU-side photo
+# pipeline (decode, matting, blur); the GPU render path is unaffected.
+# Operators can override by exporting RUSTFLAGS themselves.
+if [[ -z "${RUSTFLAGS:-}" ]]; then
+    export RUSTFLAGS="-C target-cpu=native"
+    log INFO "RUSTFLAGS not set; defaulting to '-C target-cpu=native'"
+fi
+
 log INFO "Building workspace binaries with cargo ${profile_flag[*]}"
 cd "${REPO_ROOT}"
 # Constrain parallelism on lower-memory devices to reduce OOM risk.
