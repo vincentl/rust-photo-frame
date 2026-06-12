@@ -340,7 +340,7 @@ The optional `photo-effect` task sits between the loader and the viewer. When en
 
 ## Transition configuration
 
-The `transition` block controls how the viewer blends between photos. Supply one or more entries under `transition.active`; each begins with a required `kind` (`fade`, `wipe`, `push`, `e-ink`, `dissolve`, `radial-wipe`, `venetian-blinds`, or `crossfade-zoom`) followed by family-specific fields.
+The `transition` block controls how the viewer blends between photos. Supply one or more entries under `transition.active`; each begins with a required `kind` (`fade`, `wipe`, `push`, `e-ink`, `dissolve`, `radial-wipe`, `venetian-blinds`, `crossfade-zoom`, or `iris`) followed by family-specific fields.
 
 | Key         | Required? | Default                                                       | Accepted values                           | Effect |
 | ----------- | --------- | ------------------------------------------------------------- | ----------------------------------------- | ------ |
@@ -384,6 +384,13 @@ The remaining knobs depend on the family:
   - **`zoom`** (float 0–0.5, default `0.06`): maximum fractional scale change.
   - **`current-zooms-in`** (boolean, default `true`): if true the outgoing photo scales up while fading.
   - **`next-zooms-in`** (boolean, default `true`): if true the incoming photo starts slightly zoomed and settles.
+- **`iris`** — mechanical camera-iris diaphragm (default `duration-ms` `2600`): annular petals with rounded ends pivot closed over the current photo, then reopen on the next. Petal geometry (radii, width, pivots, swing) is derived from the screen size and blade count, so only look-related knobs are exposed.
+  - **`blades`** (integer, default `9`, clamped `5–14`): petal count.
+  - **`color`** (`[r, g, b]` array, default `[42, 42, 49]`): base petal color. Mid-dark colors show the petal shading best; near-black flattens it.
+  - **`petal-contrast`** (float 0–1, default `0.45`): strength of the directional sheen, across-the-petal gradient, and per-petal tone variation that make individual petals visible.
+  - **`overlap-shadow`** (float 0–1, default `0.6`): darkness of the soft shadow each petal casts on the one beneath it along the overlap seam.
+  - **`min-aperture`** (float 0–0.4, default `0.05`): fraction of the screen circumradius left open at full close; the photos crossfade behind the petals while the aperture is at its smallest.
+  - **`swirl`** (float −1–1, default `-0.45`): signed twist of the whole petal rosette while closing, as if both iris rings counter-rotate. `0` keeps the rosette orientation fixed; the sign sets the twist direction.
 
 Examples are in [Transition examples](#transition-examples).
 

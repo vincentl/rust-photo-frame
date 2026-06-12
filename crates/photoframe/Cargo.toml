@@ -42,5 +42,6 @@ palette = "0.7.6"
 config-model = { path = "../config-model" }
 
 [dev-dependencies]
+naga = { version = "27", features = ["wgsl-in"] }
 tempfile = "3.23.0"
 base64 = "0.22.1"

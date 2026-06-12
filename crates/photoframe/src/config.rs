@@ -2318,6 +2318,7 @@ pub enum TransitionKind {
     RadialWipe,
     VenetianBlinds,
     CrossfadeZoom,
+    Iris,
 }
 
 impl TransitionKind {
@@ -2330,6 +2331,7 @@ impl TransitionKind {
         Self::RadialWipe,
         Self::VenetianBlinds,
         Self::CrossfadeZoom,
+        Self::Iris,
     ];
     const NAMES: &'static [&'static str] = &[
         "fade",
@@ -2340,6 +2342,7 @@ impl TransitionKind {
         "radial-wipe",
         "venetian-blinds",
         "crossfade-zoom",
+        "iris",
     ];
 
     fn as_str(&self) -> &'static str {
@@ -2352,6 +2355,7 @@ impl TransitionKind {
             Self::RadialWipe => "radial-wipe",
             Self::VenetianBlinds => "venetian-blinds",
             Self::CrossfadeZoom => "crossfade-zoom",
+            Self::Iris => "iris",
         }
     }
 
@@ -2362,11 +2366,13 @@ impl TransitionKind {
             Self::Push => 3,
             Self::EInk => 4,
             Self::Dissolve => 5,
-            // 7 was iris (removed); leaving the gap is fine — indices only need
-            // to match the shader `case` integers, which need not be contiguous.
+            // 7 was the old SVG-path iris (removed); leaving the gap is fine —
+            // indices only need to match the shader `case` integers, which need
+            // not be contiguous.
             Self::RadialWipe => 8,
             Self::VenetianBlinds => 9,
             Self::CrossfadeZoom => 10,
+            Self::Iris => 11,
         }
     }
 }
@@ -2561,6 +2567,7 @@ impl TransitionOptions {
                 700,
                 TransitionMode::CrossfadeZoom(CrossfadeZoomTransition::default()),
             ),
+            TransitionKind::Iris => (2600, TransitionMode::Iris(IrisTransition::default())),
         };
         Self {
             kind,
@@ -2637,6 +2644,9 @@ impl TransitionOptions {
                     cz.zoom = 0.06;
                 }
                 cz.zoom = cz.zoom.clamp(0.0, 0.5);
+            }
+            TransitionMode::Iris(iris) => {
+                iris.sanitize();
             }
         }
         Ok(())
@@ -2769,6 +2779,23 @@ impl TransitionOptions {
                 cz.zoom = cz.zoom.clamp(0.0, 0.5);
                 TransitionMode::CrossfadeZoom(cz)
             }
+            TransitionKind::Iris => {
+                let defaults = IrisTransition::default();
+                let mut iris = IrisTransition {
+                    blades: builder.iris_blades.unwrap_or(defaults.blades),
+                    color: builder.iris_color.unwrap_or(defaults.color),
+                    petal_contrast: builder
+                        .iris_petal_contrast
+                        .unwrap_or(defaults.petal_contrast),
+                    overlap_shadow: builder
+                        .iris_overlap_shadow
+                        .unwrap_or(defaults.overlap_shadow),
+                    min_aperture: builder.iris_min_aperture.unwrap_or(defaults.min_aperture),
+                    swirl: builder.iris_swirl.unwrap_or(defaults.swirl),
+                };
+                iris.sanitize();
+                TransitionMode::Iris(iris)
+            }
         };
         let mut option = Self {
             kind,
@@ -2800,7 +2827,8 @@ impl TransitionOptions {
             TransitionMode::Dissolve(_)
             | TransitionMode::RadialWipe(_)
             | TransitionMode::VenetianBlinds(_)
-            | TransitionMode::CrossfadeZoom(_) => {}
+            | TransitionMode::CrossfadeZoom(_)
+            | TransitionMode::Iris(_) => {}
         }
 
         Ok(option)
@@ -2817,6 +2845,7 @@ pub enum TransitionMode {
     RadialWipe(RadialWipeTransition),
     VenetianBlinds(VenetianBlindsTransition),
     CrossfadeZoom(CrossfadeZoomTransition),
+    Iris(IrisTransition),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2982,6 +3011,58 @@ impl Default for CrossfadeZoomTransition {
     }
 }
 
+/// Mechanical camera-iris transition: N annular petals (rounded ends, pivoting
+/// at one end cap like a paper iris diaphragm) close over the current photo and
+/// reopen on the next. Petal geometry (radii, width, swing) is derived from the
+/// screen size and blade count; only look-related knobs are exposed.
+#[derive(Debug, Clone, Copy)]
+pub struct IrisTransition {
+    pub blades: u32,
+    pub color: [u8; 3],
+    pub petal_contrast: f32,
+    pub overlap_shadow: f32,
+    pub min_aperture: f32,
+    pub swirl: f32,
+}
+
+impl Default for IrisTransition {
+    fn default() -> Self {
+        Self {
+            blades: 9,
+            color: [42, 42, 49],
+            petal_contrast: 0.45,
+            overlap_shadow: 0.6,
+            min_aperture: 0.05,
+            swirl: -0.45,
+        }
+    }
+}
+
+impl IrisTransition {
+    fn sanitize(&mut self) {
+        let defaults = Self::default();
+        // The auto-derived blade width (spacing + 75°) is validated for 5..=14
+        // petals; outside that range full closure is not guaranteed.
+        self.blades = self.blades.clamp(5, 14);
+        if !self.petal_contrast.is_finite() {
+            self.petal_contrast = defaults.petal_contrast;
+        }
+        self.petal_contrast = self.petal_contrast.clamp(0.0, 1.0);
+        if !self.overlap_shadow.is_finite() {
+            self.overlap_shadow = defaults.overlap_shadow;
+        }
+        self.overlap_shadow = self.overlap_shadow.clamp(0.0, 1.0);
+        if !self.min_aperture.is_finite() {
+            self.min_aperture = defaults.min_aperture;
+        }
+        self.min_aperture = self.min_aperture.clamp(0.0, 0.4);
+        if !self.swirl.is_finite() {
+            self.swirl = defaults.swirl;
+        }
+        self.swirl = self.swirl.clamp(-1.0, 1.0);
+    }
+}
+
 impl<'de> Deserialize<'de> for TransitionConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -3093,6 +3174,12 @@ struct TransitionOptionBuilder {
     crossfade_zoom: Option<f32>,
     crossfade_current_zooms_in: Option<bool>,
     crossfade_next_zooms_in: Option<bool>,
+    iris_blades: Option<u32>,
+    iris_color: Option<[u8; 3]>,
+    iris_petal_contrast: Option<f32>,
+    iris_overlap_shadow: Option<f32>,
+    iris_min_aperture: Option<f32>,
+    iris_swirl: Option<f32>,
 }
 
 impl TransitionOptionBuilder {
@@ -3298,6 +3385,24 @@ fn apply_transition_inline_field<E: de::Error>(
         "next-zooms-in" if matches!(kind, TransitionKind::CrossfadeZoom) => {
             builder.crossfade_next_zooms_in = Some(inline_value_to::<bool, E>(value)?);
         }
+        "blades" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_blades = Some(inline_value_to::<u32, E>(value)?);
+        }
+        "color" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_color = Some(inline_value_to::<[u8; 3], E>(value)?);
+        }
+        "petal-contrast" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_petal_contrast = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "overlap-shadow" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_overlap_shadow = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "min-aperture" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_min_aperture = Some(inline_value_to::<f32, E>(value)?);
+        }
+        "swirl" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_swirl = Some(inline_value_to::<f32, E>(value)?);
+        }
         _ => {
             return Err(de::Error::unknown_field(
                 field,
@@ -3319,6 +3424,12 @@ fn apply_transition_inline_field<E: de::Error>(
                     "zoom",
                     "current-zooms-in",
                     "next-zooms-in",
+                    "blades",
+                    "color",
+                    "petal-contrast",
+                    "overlap-shadow",
+                    "min-aperture",
+                    "swirl",
                 ],
             ));
         }

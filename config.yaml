@@ -81,6 +81,14 @@ transition:
       zoom: 0.06
       current-zooms-in: true
       next-zooms-in: true
+    - kind: iris # mechanical camera-iris: petals close over the photo, reopen on the next
+      duration-ms: 2600
+      blades: 9 # petal count (5-14); geometry is derived automatically
+      color: [42, 42, 49] # base petal RGB; mid-dark shows the shading best
+      petal-contrast: 0.45 # 0-1: directional sheen + per-petal tone variation
+      overlap-shadow: 0.6 # 0-1: soft shadow each petal casts on its neighbor
+      min-aperture: 0.05 # fraction of screen circumradius left open at the swap
+      swirl: -0.45 # signed twist of the whole rosette while closing (0 = none)
 # Global photo settings
 global-photo-settings:
   # Dwell time (ms) the current image remains fully displayed before the next transition

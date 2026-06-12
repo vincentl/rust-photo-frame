@@ -1537,11 +1537,11 @@ showcase:
         8,
         "showcase should have 8 mat options (all 9 kinds minus fixed-image which needs a path)"
     );
-    // 8 transition kinds
+    // 9 transition kinds
     assert_eq!(
         validated.transition.options().len(),
-        8,
-        "showcase should have 8 transition options (all TransitionKind::ALL)"
+        9,
+        "showcase should have 9 transition options (all TransitionKind::ALL)"
     );
     // Selection should be sequential.
     assert!(matches!(
@@ -1597,6 +1597,63 @@ transition:
         })
         .collect();
     assert_eq!(verticals, vec![false, true]);
+}
+
+#[test]
+fn iris_parses_fields_and_clamps_ranges() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  active:
+    - kind: iris
+      duration-ms: 3000
+      blades: 30
+      color: [10, 20, 30]
+      petal-contrast: 2.0
+      overlap-shadow: -1.0
+      min-aperture: 0.9
+      swirl: -5.0
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let opts: Vec<_> = cfg.transition.iter_selected().collect();
+    assert_eq!(opts.len(), 1);
+    assert_eq!(opts[0].option.duration().as_millis(), 3000);
+    match opts[0].option.mode() {
+        TransitionMode::Iris(iris) => {
+            assert_eq!(iris.blades, 14, "blade count should clamp to 5..=14");
+            assert_eq!(iris.color, [10, 20, 30]);
+            assert_eq!(iris.petal_contrast, 1.0);
+            assert_eq!(iris.overlap_shadow, 0.0);
+            assert_eq!(iris.min_aperture, 0.4);
+            assert_eq!(iris.swirl, -1.0);
+        }
+        other => panic!("expected iris, got {other:?}"),
+    }
+}
+
+#[test]
+fn iris_defaults_apply_when_fields_omitted() {
+    let yaml = r#"
+photo-library-path: "/photos"
+transition:
+  active:
+    - kind: iris
+"#;
+    let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
+    let opts: Vec<_> = cfg.transition.iter_selected().collect();
+    assert_eq!(opts.len(), 1);
+    assert_eq!(opts[0].option.duration().as_millis(), 2600);
+    match opts[0].option.mode() {
+        TransitionMode::Iris(iris) => {
+            assert_eq!(iris.blades, 9);
+            assert_eq!(iris.color, [42, 42, 49]);
+            assert_eq!(iris.petal_contrast, 0.45);
+            assert_eq!(iris.overlap_shadow, 0.6);
+            assert_eq!(iris.min_aperture, 0.05);
+            assert_eq!(iris.swirl, -0.45);
+        }
+        other => panic!("expected iris, got {other:?}"),
+    }
 }
 
 #[test]

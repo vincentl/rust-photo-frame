@@ -62,6 +62,42 @@ fn sample_plane(
   return vec4<f32>(c.rgb, 1.0);
 }
 
+const IRIS_TWO_PI: f32 = 6.2831853;
+// Blade angular width = petal spacing + 75 deg. Validated numerically to keep
+// the aperture boundary on the petals' inner arcs (no end-cap "teeth") for
+// 5..=14 blades at any minimum aperture.
+const IRIS_EXTRA_WIDTH: f32 = 1.3089969;
+
+fn iris_rot(a: f32) -> mat2x2<f32> {
+  let c = cos(a);
+  let s = sin(a);
+  return mat2x2<f32>(vec2<f32>(c, s), vec2<f32>(-s, c));
+}
+
+fn iris_hash(n: f32) -> f32 {
+  return fract(sin(n * 12.9898) * 43758.5453);
+}
+
+// Signed distance to petal `i` (annular arc with semicircular end caps,
+// rotated by `psi` about the pivot at the center of its trailing cap).
+// Returns (distance, radius in the petal's rest frame) — the radius drives
+// the across-the-petal shading gradient.
+fn iris_blade(i: i32, n: i32, p: vec2<f32>, psi: f32, r_mid: f32, w: f32, sigma: f32) -> vec2<f32> {
+  let ai = IRIS_TWO_PI * f32(i) / f32(n);
+  let pivot = r_mid * vec2<f32>(cos(ai), sin(ai));
+  let q = pivot + iris_rot(-psi) * (p - pivot);
+  var u = iris_rot(-(ai + 0.5 * sigma)) * q;
+  u.y = abs(u.y);
+  let r = length(u);
+  var d: f32;
+  if (atan2(u.y, u.x) <= 0.5 * sigma) {
+    d = abs(r - r_mid) - w;
+  } else {
+    d = length(u - r_mid * vec2<f32>(cos(0.5 * sigma), sin(0.5 * sigma))) - w;
+  }
+  return vec2<f32>(d, r);
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
   let screen_pos = in.screen_uv * U.screen_size;
@@ -200,6 +236,80 @@ switch (U.kind) {
       let c = sample_plane(cur_tex, cur_samp, U.current_dest, cur_pos);
       let nxt = sample_plane(next_tex, next_samp, U.next_dest, next_pos);
       color = mix(c, nxt, progress);
+    }
+    case 11u: {
+      // iris: mechanical camera-iris diaphragm. N annular petals with rounded
+      // ends pivot closed over the current photo (first half), then reopen on
+      // the next. Petal geometry derives from the screen: the inner radius
+      // circumscribes the screen so the open iris is invisible, and the outer
+      // radius is large enough that petal backs never swing on-screen.
+      // params0 = (blades, petal_contrast, overlap_shadow, swirl)
+      // params1 = (min_aperture, color.r, color.g, color.b)
+      let n = max(i32(U.params0.x), 1);
+      let contrast = clamp(U.params0.y, 0.0, 1.0);
+      let shadow_amt = clamp(U.params0.z, 0.0, 1.0);
+      let swirl = U.params0.w;
+      let min_ap = clamp(U.params1.x, 0.0, 0.5);
+      let blade_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
+
+      let r_in = 1.02 * 0.5 * length(U.screen_size);
+      let r_mid = 1.5 * r_in;
+      let w = 0.5 * r_in;
+      let sigma = IRIS_TWO_PI / f32(n) + IRIS_EXTRA_WIDTH;
+
+      // Close over 0..0.5, reopen over 0.5..1; aperture eased per phase. The
+      // petal swing follows from the closed-form aperture(psi).
+      var x = progress * 2.0;
+      if (progress >= 0.5) { x = 2.0 - progress * 2.0; }
+      let f = x * x * (3.0 - 2.0 * x);
+      let e = f * r_in * (1.0 - min_ap);
+      let psi = 2.0 * asin(clamp(e / (2.0 * r_mid), 0.0, 1.0));
+      let spin = swirl * psi;
+
+      // Swap photos behind the petals while the aperture is at its smallest.
+      let photo = mix(current, next, smoothstep(0.42, 0.58, progress));
+
+      let p = iris_rot(-spin) * (screen_pos - 0.5 * U.screen_size);
+      var d_arr: array<f32, 16>;
+      var d_min = 1e9;
+      for (var i: i32 = 0; i < 16; i++) {
+        if (i >= n) { break; }
+        d_arr[i] = iris_blade(i, n, p, psi, r_mid, w, sigma).x;
+        d_min = min(d_min, d_arr[i]);
+      }
+      let aa = max(fwidth(d_min), 1.0);
+      let cov = 1.0 - smoothstep(-aa, aa, d_min);
+
+      color = photo;
+      if (cov > 0.0) {
+        // Petals shingle cyclically (each rests on the next); the covering
+        // petals always form one contiguous run, so the topmost is the
+        // covered petal whose successor is uncovered.
+        var top: i32 = 0;
+        for (var i: i32 = 0; i < 16; i++) {
+          if (i >= n) { break; }
+          if (d_arr[i] < 0.0 && d_arr[(i + 1) % n] >= 0.0) { top = i; }
+        }
+        let dr_top = iris_blade(top, n, p, psi, r_mid, w, sigma);
+        let a_top = IRIS_TWO_PI * f32(top) / f32(n);
+        // Directional sheen + across-the-petal gradient + per-petal variation.
+        let facing = cos(a_top + 0.5 * sigma + psi + spin - 2.3);
+        let g = clamp((dr_top.y - r_mid) / w, -1.0, 1.0);
+        let tone = max(
+          1.0 + contrast * (0.35 * facing - 0.30 * g + 0.12 * (iris_hash(f32(top) + 3.0) - 0.5)),
+          0.0
+        );
+        // Soft shadow cast by the petals stacked above the top one.
+        let shadow_w = max(0.012 * r_in, 4.0);
+        let dn1 = max(d_arr[(top + 1) % n], 0.0);
+        let dn2 = max(d_arr[(top + 2) % n], 0.0);
+        let occ = 0.5 * (1.0 - smoothstep(0.0, shadow_w, dn1))
+          + 0.22 * (1.0 - smoothstep(0.0, shadow_w * 0.6, dn2));
+        let vign = 1.0 - 0.25 * length(p) / (0.5 * length(U.screen_size));
+        let rim = smoothstep(3.5, 0.5, abs(d_min)) * (0.05 + 0.10 * contrast);
+        let blade_col = blade_rgb * tone * vign * (1.0 - shadow_amt * occ) + vec3<f32>(rim);
+        color = vec4<f32>(mix(photo.rgb, blade_col, cov), max(photo.a, cov));
+      }
     }
     case 6u: {
       // Debug: stroke a single quadratic Bezier over the current image

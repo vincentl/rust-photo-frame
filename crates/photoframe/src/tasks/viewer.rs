@@ -65,6 +65,14 @@ pub(super) enum ActiveTransition {
         current_zooms_in: bool,
         next_zooms_in: bool,
     },
+    Iris {
+        blades: u32,
+        color: [f32; 3],
+        petal_contrast: f32,
+        overlap_shadow: f32,
+        min_aperture: f32,
+        swirl: f32,
+    },
 }
 
 pub(super) struct TexturePlane {
@@ -141,6 +149,16 @@ impl TransitionState {
                 zoom: cfg.zoom,
                 current_zooms_in: cfg.current_zooms_in,
                 next_zooms_in: cfg.next_zooms_in,
+            },
+            TransitionMode::Iris(cfg) => ActiveTransition::Iris {
+                blades: cfg.blades,
+                color: cfg
+                    .color
+                    .map(|channel| (channel as f32 / 255.0).clamp(0.0, 1.0)),
+                petal_contrast: cfg.petal_contrast,
+                overlap_shadow: cfg.overlap_shadow,
+                min_aperture: cfg.min_aperture,
+                swirl: cfg.swirl,
             },
         };
 
@@ -2699,6 +2717,23 @@ pub fn run_windowed(
                                             if *current_zooms_in { 1.0 } else { 0.0 };
                                         uniforms.params0[2] =
                                             if *next_zooms_in { 1.0 } else { 0.0 };
+                                    }
+                                    ActiveTransition::Iris {
+                                        blades,
+                                        color,
+                                        petal_contrast,
+                                        overlap_shadow,
+                                        min_aperture,
+                                        swirl,
+                                    } => {
+                                        uniforms.params0[0] = *blades as f32;
+                                        uniforms.params0[1] = *petal_contrast;
+                                        uniforms.params0[2] = *overlap_shadow;
+                                        uniforms.params0[3] = *swirl;
+                                        uniforms.params1[0] = *min_aperture;
+                                        uniforms.params1[1] = color[0];
+                                        uniforms.params1[2] = color[1];
+                                        uniforms.params1[3] = color[2];
                                     }
                                 }
                             } else if have_current {
