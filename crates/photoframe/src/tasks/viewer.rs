@@ -33,6 +33,12 @@ use tracing::{Level, debug, info, warn};
 /// end-cap "teeth") for 5..=14 blades at any minimum aperture.
 const IRIS_EXTRA_WIDTH_RAD: f32 = 1.308_997;
 
+/// Linear downscale factor of the iris petal layer relative to the surface.
+/// 4 → 1/16 of the petal-shading cost; at 4K the layer is 960x540, and the
+/// petal edge feather widens to ~4 native pixels, which reads as natural
+/// blade softness.
+const IRIS_LAYER_SCALE: u32 = 4;
+
 pub(super) enum ActiveTransition {
     Fade {
         through_black: bool,
@@ -202,6 +208,7 @@ pub(super) struct TransitionFrameStats {
     last_frame: Instant,
     frames: u32,
     worst_frame_ms: f32,
+    best_frame_ms: f32,
 }
 
 impl TransitionFrameStats {
@@ -212,6 +219,7 @@ impl TransitionFrameStats {
             last_frame: now,
             frames: 1,
             worst_frame_ms: 0.0,
+            best_frame_ms: f32::INFINITY,
         }
     }
 
@@ -230,6 +238,7 @@ impl TransitionFrameStats {
             frames = self.frames,
             avg_fps = format_args!("{:.1}", intervals / span),
             avg_frame_ms = format_args!("{:.1}", 1000.0 * span / intervals),
+            best_frame_ms = format_args!("{:.1}", self.best_frame_ms),
             worst_frame_ms = format_args!("{:.1}", self.worst_frame_ms),
             "transition_frame_stats"
         );
@@ -1174,6 +1183,66 @@ pub fn run_windowed(
         sampler: wgpu::Sampler,
         pipeline: wgpu::RenderPipeline,
         blank_plane: TexturePlane,
+        iris_layer_pipeline: wgpu::RenderPipeline,
+        iris_layer: Option<IrisLayer>,
+    }
+
+    /// Reduced-resolution offscreen target for the iris transition's petal
+    /// layer. The petal arithmetic is far too heavy to run per native pixel
+    /// at 4K on the Pi; the petals are large smooth shapes, so rendering them
+    /// at 1/IRIS_LAYER_SCALE of the surface size and upsampling is visually
+    /// equivalent at a fraction of the cost.
+    struct IrisLayer {
+        view: wgpu::TextureView,
+        bind: wgpu::BindGroup,
+        w: u32,
+        h: u32,
+    }
+
+    impl GpuCtx {
+        /// Create (or re-create after a resize) the iris petal layer so it
+        /// tracks the current surface size.
+        fn ensure_iris_layer(&mut self) {
+            let w = (self.config.width / IRIS_LAYER_SCALE).max(1);
+            let h = (self.config.height / IRIS_LAYER_SCALE).max(1);
+            if let Some(layer) = self.iris_layer.as_ref()
+                && layer.w == w
+                && layer.h == h
+            {
+                return;
+            }
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("iris-petal-layer"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("iris-petal-layer-bind"),
+                layout: &self.img_bind_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+            self.iris_layer = Some(IrisLayer { view, bind, w, h });
+        }
     }
 
     fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
@@ -1794,9 +1863,46 @@ pub fn run_windowed(
             });
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("pipeline-layout"),
-                bind_group_layouts: &[&uniform_layout, &img_bind_layout, &img_bind_layout],
+                bind_group_layouts: &[
+                    &uniform_layout,
+                    &img_bind_layout,
+                    &img_bind_layout,
+                    &img_bind_layout,
+                ],
                 push_constant_ranges: &[],
             });
+            let iris_layer_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("iris-layer-pipeline-layout"),
+                    bind_group_layouts: &[&uniform_layout],
+                    push_constant_ranges: &[],
+                });
+            let iris_layer_pipeline =
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("iris-layer-pipeline"),
+                    layout: Some(&iris_layer_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    },
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_iris_layer"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    }),
+                    multiview: None,
+                    cache: None,
+                });
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("quad-pipeline"),
                 layout: Some(&pipeline_layout),
@@ -1908,6 +2014,8 @@ pub fn run_windowed(
                 sampler,
                 pipeline,
                 blank_plane,
+                iris_layer_pipeline,
+                iris_layer: None,
             };
             if let Some(mode) = self.mode.as_mut() {
                 mode.set_overlays(Some(greeting), Some(sleep));
@@ -2252,6 +2360,7 @@ pub fn run_windowed(
                 (Some(mut stats), Some(kind)) if stats.kind == kind => {
                     let dt_ms = now.duration_since(stats.last_frame).as_secs_f32() * 1000.0;
                     stats.worst_frame_ms = stats.worst_frame_ms.max(dt_ms);
+                    stats.best_frame_ms = stats.best_frame_ms.min(dt_ms);
                     stats.frames += 1;
                     stats.last_frame = now;
                     self.transition_frame_stats = Some(stats);
@@ -2661,6 +2770,13 @@ pub fn run_windowed(
                         ViewerModeKind::Wake => {
                             let wake = mode.wake_mut();
                             encoder.push_debug_group("wake-draw");
+                            // Created up front: later code holds immutable
+                            // borrows of gpu for the bind groups.
+                            if wake.transition_state().map(|s| s.kind())
+                                == Some(TransitionKind::Iris)
+                            {
+                                gpu.ensure_iris_layer();
+                            }
                             let screen_w = gpu.config.width as f32;
                             let screen_h = gpu.config.height as f32;
                             let mut uniforms = TransitionUniforms {
@@ -2836,6 +2952,9 @@ pub fn run_windowed(
                                         // Inscribed aperture radius: pixels closer to
                                         // center than this are provably petal-free.
                                         uniforms.params1 = [r_in - e, color[0], color[1], color[2]];
+                                        // Petal-layer upscale factor: keeps the edge
+                                        // feather at least one layer texel wide.
+                                        uniforms.params3[0] = IRIS_LAYER_SCALE as f32;
                                         let (s_psi, c_psi) = psi.sin_cos();
                                         for i in 0..n {
                                             let ai =
@@ -2870,11 +2989,43 @@ pub fn run_windowed(
                             }
 
                             if should_draw_quad {
+                                let iris_active = uniforms.kind == TransitionKind::Iris.as_index();
                                 gpu.queue.write_buffer(
                                     &gpu.uniform_buf,
                                     0,
                                     bytemuck::bytes_of(&uniforms),
                                 );
+                                // Render the petals into the reduced-resolution
+                                // layer first; the main pass composites it.
+                                if iris_active && let Some(layer) = gpu.iris_layer.as_ref() {
+                                    let mut lpass =
+                                        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                            label: Some("iris-layer-pass"),
+                                            color_attachments: &[Some(
+                                                wgpu::RenderPassColorAttachment {
+                                                    view: &layer.view,
+                                                    depth_slice: None,
+                                                    resolve_target: None,
+                                                    ops: wgpu::Operations {
+                                                        load: wgpu::LoadOp::Clear(
+                                                            wgpu::Color::TRANSPARENT,
+                                                        ),
+                                                        store: wgpu::StoreOp::Store,
+                                                    },
+                                                },
+                                            )],
+                                            depth_stencil_attachment: None,
+                                            occlusion_query_set: None,
+                                            timestamp_writes: None,
+                                        });
+                                    lpass.set_pipeline(&gpu.iris_layer_pipeline);
+                                    lpass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                                    lpass.draw(0..6, 0..1);
+                                }
+                                let petal_bind = match gpu.iris_layer.as_ref() {
+                                    Some(layer) if iris_active => &layer.bind,
+                                    _ => &gpu.blank_plane.bind,
+                                };
                                 let mut rpass =
                                     encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                         label: Some("draw-pass"),
@@ -2897,6 +3048,7 @@ pub fn run_windowed(
                                 rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
                                 rpass.set_bind_group(1, current_bind, &[]);
                                 rpass.set_bind_group(2, next_bind, &[]);
+                                rpass.set_bind_group(3, petal_bind, &[]);
                                 rpass.draw(0..6, 0..1);
                             }
                             encoder.pop_debug_group();

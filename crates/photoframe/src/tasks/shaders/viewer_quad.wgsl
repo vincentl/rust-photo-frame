@@ -28,6 +28,13 @@ var next_tex: texture_2d<f32>;
 @group(2) @binding(1)
 var next_samp: sampler;
 
+// Reduced-resolution iris petal layer rendered by fs_iris_layer (premultiplied
+// alpha). Bound to the blank texture when no iris transition is active.
+@group(3) @binding(0)
+var petal_tex: texture_2d<f32>;
+@group(3) @binding(1)
+var petal_samp: sampler;
+
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) screen_uv: vec2<f32>,
@@ -90,6 +97,79 @@ fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> vec2<f32> {
     d = abs(r - r_mid) - w;
   }
   return vec2<f32>(d, r);
+}
+
+// Renders the iris petals (shape + shading, premultiplied alpha) into a
+// reduced-resolution offscreen layer. Coordinates derive from screen_uv and
+// U.screen_size, so the same math works at any target resolution; the main
+// pass upsamples the result. At 4K the petal arithmetic is far too heavy to
+// run per native pixel on the Pi, and the petals are large smooth shapes that
+// survive upscaling — params3.x carries the upscale factor so edge feathering
+// stays at least one layer texel wide.
+// params0 = (blades, petal_contrast, overlap_shadow, photo_swap_mix)
+// params1 = (open_radius_px, color.r, color.g, color.b)
+// params3 = (layer_scale, unused, unused, unused)
+@fragment
+fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
+  let screen_pos = in.screen_uv * U.screen_size;
+  let n = max(i32(U.params0.x), 1);
+  let contrast = clamp(U.params0.y, 0.0, 1.0);
+  let shadow_amt = clamp(U.params0.z, 0.0, 1.0);
+  let aa = max(U.params3.x, 1.0);
+  let p = screen_pos - 0.5 * U.screen_size;
+  // Pixels inside the inscribed aperture circle are provably petal-free;
+  // at the ends of the transition that is the entire screen.
+  if (length(p) < U.params1.x - aa) {
+    return vec4<f32>(0.0);
+  }
+  let r_in = 1.02 * 0.5 * length(U.screen_size);
+  let r_mid = 1.5 * r_in;
+  let w = 0.5 * r_in;
+  // No local arrays: dynamically indexed function-scope arrays get demoted
+  // to per-pixel scratch memory on V3D, which costs far more than
+  // recomputing the few distances needed after the loop.
+  // Petals shingle cyclically (each rests on the next); the covering petals
+  // always form one contiguous run, so the topmost is the covered petal
+  // whose successor is uncovered.
+  var d_min = 1e9;
+  var d_first = 0.0;
+  var d_prev = 0.0;
+  var top: i32 = 0;
+  for (var i: i32 = 0; i < 16; i++) {
+    if (i >= n) { break; }
+    let d = iris_petal(i, p, r_mid, w).x;
+    d_min = min(d_min, d);
+    if (i == 0) {
+      d_first = d;
+    } else if (d_prev < 0.0 && d >= 0.0) {
+      top = i - 1;
+    }
+    d_prev = d;
+  }
+  if (d_prev < 0.0 && d_first >= 0.0) { top = n - 1; }
+  let cov = 1.0 - smoothstep(-aa, aa, d_min);
+  if (cov <= 0.0) {
+    return vec4<f32>(0.0);
+  }
+  var j1 = top + 1;
+  if (j1 >= n) { j1 -= n; }
+  var j2 = top + 2;
+  if (j2 >= n) { j2 -= n; }
+  // Across-the-petal gradient on top of the CPU-baked sheen tone.
+  let r_top = iris_petal(top, p, r_mid, w).y;
+  let g = clamp((r_top - r_mid) / w, -1.0, 1.0);
+  let tone = max(U.petals_b[top].z - contrast * 0.30 * g, 0.0);
+  // Soft shadow cast by the petals stacked above the top one.
+  let shadow_w = max(0.012 * r_in, 4.0);
+  let dn1 = max(iris_petal(j1, p, r_mid, w).x, 0.0);
+  let dn2 = max(iris_petal(j2, p, r_mid, w).x, 0.0);
+  let occ = 0.5 * (1.0 - smoothstep(0.0, shadow_w, dn1))
+    + 0.22 * (1.0 - smoothstep(0.0, shadow_w * 0.6, dn2));
+  let vign = 1.0 - 0.25 * length(p) / (0.5 * length(U.screen_size));
+  let rim = smoothstep(3.5 * aa, 0.5 * aa, abs(d_min)) * (0.05 + 0.10 * contrast);
+  let blade_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
+  let blade_col = blade_rgb * tone * vign * (1.0 - shadow_amt * occ) + vec3<f32>(rim);
+  return vec4<f32>(blade_col * cov, cov);
 }
 
 @fragment
@@ -232,73 +312,14 @@ switch (U.kind) {
       color = mix(c, nxt, progress);
     }
     case 11u: {
-      // iris: mechanical camera-iris diaphragm. N annular petals with rounded
-      // ends pivot closed over the current photo (first half), then reopen on
-      // the next. All kinematics are solved on the CPU per frame (see the
-      // Iris arm in viewer.rs); here each petal costs one cheap exact SDF.
-      // On-screen the only petal boundaries are the inner arc and the two end
-      // caps (the outer arc and pivot cap stay off-screen by construction),
-      // so the band+cap distance below is exact for every visible pixel.
-      // params0 = (blades, petal_contrast, overlap_shadow, photo_swap_mix)
-      // params1 = (open_radius_px, color.r, color.g, color.b)
-      let n = max(i32(U.params0.x), 1);
-      let contrast = clamp(U.params0.y, 0.0, 1.0);
-      let shadow_amt = clamp(U.params0.z, 0.0, 1.0);
+      // iris: mechanical camera-iris diaphragm. The petals (shape + shading)
+      // were rendered into the reduced-resolution petal layer by
+      // fs_iris_layer this frame; here we just composite it (premultiplied
+      // alpha) over the crossfading photos.
+      // params0.w = photo_swap_mix
       let photo = mix(current, next, clamp(U.params0.w, 0.0, 1.0));
-      color = photo;
-      let p = screen_pos - 0.5 * U.screen_size;
-      // Pixels inside the inscribed aperture circle are provably petal-free;
-      // at the ends of the transition that is the entire screen.
-      if (length(p) >= U.params1.x - 1.5) {
-        let r_in = 1.02 * 0.5 * length(U.screen_size);
-        let r_mid = 1.5 * r_in;
-        let w = 0.5 * r_in;
-        // No local arrays: dynamically indexed function-scope arrays get
-        // demoted to per-pixel scratch memory on V3D, which costs far more
-        // than recomputing the few distances needed after the loop.
-        // Petals shingle cyclically (each rests on the next); the covering
-        // petals always form one contiguous run, so the topmost is the
-        // covered petal whose successor is uncovered.
-        var d_min = 1e9;
-        var d_first = 0.0;
-        var d_prev = 0.0;
-        var top: i32 = 0;
-        for (var i: i32 = 0; i < 16; i++) {
-          if (i >= n) { break; }
-          let d = iris_petal(i, p, r_mid, w).x;
-          d_min = min(d_min, d);
-          if (i == 0) {
-            d_first = d;
-          } else if (d_prev < 0.0 && d >= 0.0) {
-            top = i - 1;
-          }
-          d_prev = d;
-        }
-        if (d_prev < 0.0 && d_first >= 0.0) { top = n - 1; }
-        // The SDF is exact, so a constant 1px feather equals the old fwidth AA.
-        let cov = 1.0 - smoothstep(-1.0, 1.0, d_min);
-        if (cov > 0.0) {
-          var j1 = top + 1;
-          if (j1 >= n) { j1 -= n; }
-          var j2 = top + 2;
-          if (j2 >= n) { j2 -= n; }
-          // Across-the-petal gradient on top of the CPU-baked sheen tone.
-          let r_top = iris_petal(top, p, r_mid, w).y;
-          let g = clamp((r_top - r_mid) / w, -1.0, 1.0);
-          let tone = max(U.petals_b[top].z - contrast * 0.30 * g, 0.0);
-          // Soft shadow cast by the petals stacked above the top one.
-          let shadow_w = max(0.012 * r_in, 4.0);
-          let dn1 = max(iris_petal(j1, p, r_mid, w).x, 0.0);
-          let dn2 = max(iris_petal(j2, p, r_mid, w).x, 0.0);
-          let occ = 0.5 * (1.0 - smoothstep(0.0, shadow_w, dn1))
-            + 0.22 * (1.0 - smoothstep(0.0, shadow_w * 0.6, dn2));
-          let vign = 1.0 - 0.25 * length(p) / (0.5 * length(U.screen_size));
-          let rim = smoothstep(3.5, 0.5, abs(d_min)) * (0.05 + 0.10 * contrast);
-          let blade_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
-          let blade_col = blade_rgb * tone * vign * (1.0 - shadow_amt * occ) + vec3<f32>(rim);
-          color = vec4<f32>(mix(photo.rgb, blade_col, cov), max(photo.a, cov));
-        }
-      }
+      let petal = textureSample(petal_tex, petal_samp, in.screen_uv);
+      color = vec4<f32>(photo.rgb * (1.0 - petal.a) + petal.rgb, max(photo.a, petal.a));
     }
     case 6u: {
       // Debug: stroke a single quadratic Bezier over the current image
