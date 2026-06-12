@@ -1877,7 +1877,20 @@ pub fn run_windowed(
                     );
                     wgpu::PresentMode::AutoVsync
                 }
-                None => wgpu::PresentMode::AutoVsync,
+                None => {
+                    // Default to mailbox when available: FIFO emulated over
+                    // Wayland frame callbacks costs two vsyncs per frame on
+                    // compositors without wp_fifo_v1 (measured: a bare clear
+                    // locks at 30fps on a 60Hz output under sway 1.10),
+                    // halving every transition. Mailbox latches the newest
+                    // complete frame each vsync and paces normally.
+                    if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+                        info!("viewer_present_mode_default_mailbox");
+                        wgpu::PresentMode::Mailbox
+                    } else {
+                        wgpu::PresentMode::AutoVsync
+                    }
+                }
             };
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -2364,6 +2377,34 @@ pub fn run_windowed(
             if self.gpu.is_none() {
                 return;
             }
+            // Defer non-priority uploads while a transition is animating:
+            // pushing a multi-megapixel canvas through the queue contends
+            // with transition rendering and shows up as multi-frame hitches.
+            // Dwell time is long, so deferred uploads resume on the first
+            // tick after the transition completes.
+            if wake.transition_state().is_some() {
+                let mut deferred = VecDeque::with_capacity(self.ready_results.len());
+                let mut priority_now = VecDeque::new();
+                for result in self.ready_results.drain(..) {
+                    if result.priority {
+                        priority_now.push_back(result);
+                    } else {
+                        deferred.push_back(result);
+                    }
+                }
+                // Priority results (operator-requested) still upload
+                // immediately; everything else waits out the animation.
+                self.ready_results = priority_now;
+                if !self.ready_results.is_empty() {
+                    self.upload_results_now(wake);
+                }
+                self.ready_results = deferred;
+                return;
+            }
+            self.upload_results_now(wake);
+        }
+
+        fn upload_results_now(&mut self, wake: &mut scenes::WakeScene) {
             let gpu = self.gpu.as_ref().unwrap();
             let expected = compute_canvas_size(
                 gpu.config.width,
