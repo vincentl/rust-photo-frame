@@ -26,6 +26,12 @@ PACKAGES=(
     libssl-dev
     libudev-dev
     libwayland-client0
+    # Mesa GL/GLES drivers (v3d gallium). Without these sway cannot create a
+    # GPU renderer and silently composites every 4K frame on the CPU with
+    # pixman, which also breaks direct scanout. --no-install-recommends below
+    # means nothing pulls this in implicitly; mesa-vulkan-drivers only covers
+    # the app's Vulkan path.
+    libgl1-mesa-dri
     logrotate
     mesa-vulkan-drivers
     network-manager
