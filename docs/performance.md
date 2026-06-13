@@ -28,6 +28,12 @@ discarding some unseen — the displayed motion is then worse than the
 numbers suggest. Trust your eyes (or a phone slow-mo recording of the
 panel) over the log when they disagree.
 
+For ground truth, film the panel with a phone's slo-mo camera and run
+`developer/display-cadence.sh <video> <capture_fps>` — it recovers the true
+displayed cadence from inter-frame differences: median update interval,
+longest static runs (hangs), and an update timeline. This is the instrument
+that separates pacing problems from animation-content problems.
+
 **`frametest`** is a minimal fullscreen probe staged to
 `/opt/photoframe/bin/frametest`. It renders selectable workloads — `solid`
 (a clear, zero memory traffic), `tex` (one full-screen texture), `fade`
