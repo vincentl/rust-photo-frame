@@ -138,10 +138,12 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   var d_first = 0.0;
   var d_prev = 0.0;
   var top: i32 = 0;
+  var covered_count = 0;
   for (var i: i32 = 0; i < 16; i++) {
     if (i >= n) { break; }
     let d = iris_petal(i, p, r_mid, w).x;
     d_min = min(d_min, d);
+    if (d < 0.0) { covered_count = covered_count + 1; }
     if (i == 0) {
       d_first = d;
     } else if (d_prev < 0.0 && d >= 0.0) {
@@ -165,7 +167,16 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   // then sRGB-encoded, so on a dark petal the encode steepens any radial
   // ramp into a much larger visible gradient than the raw value suggests.
   let g = clamp((r_top - r_mid) / w, -1.0, 1.0);
-  let tone = max(U.petals_b[top].z - contrast * U.params3.y * g, 0.0);
+  // As a region becomes fully enclosed (all petals overlapping, near full
+  // closure) the top-petal pick is a tie that falls back to petal 0, so
+  // per-petal brightness differences would pop when the winner flips. Fade
+  // the variation toward the uniform base color over the last two petals of
+  // enclosure: by full overlap every petal reads identically, so the pick no
+  // longer matters. A closed iris center is uniform anyway.
+  let enclosure = f32(covered_count) / f32(n);
+  let var_scale = 1.0 - smoothstep(1.0 - 2.0 / f32(n), 1.0, enclosure);
+  let raw_tone = U.petals_b[top].z - contrast * U.params3.y * g;
+  let tone = max(1.0 + (raw_tone - 1.0) * var_scale, 0.0);
   // Soft shadow cast by the petals stacked above the top one.
   let shadow_w = max(0.012 * r_in, 4.0);
   let dn1 = max(iris_petal(j1, p, r_mid, w).x, 0.0);
