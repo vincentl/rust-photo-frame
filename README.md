@@ -51,7 +51,7 @@ If you want to modify the code, see **[CONTRIBUTING.md](CONTRIBUTING.md)** and t
 
 ## Transitions & mats
 
-The frame ships eight GPU **transitions** (how one photo gives way to the next) and nine **mats** (the border/background framing each photo).
+The frame ships nine GPU **transitions** (how one photo gives way to the next) and nine **mats** (the border/background framing each photo).
 
 | Transitions       |                                                      |
 | ----------------- | ---------------------------------------------------- |
@@ -63,6 +63,7 @@ The frame ships eight GPU **transitions** (how one photo gives way to the next) 
 | `radial-wipe`     | circle or diamond reveal growing from a center point |
 | `venetian-blinds` | horizontal/vertical slat reveal                      |
 | `crossfade-zoom`  | cross-fade with a gentle Ken-Burns zoom              |
+| `iris`            | mechanical camera-iris: blades close over the photo and reopen on the next |
 
 | Mats             |                                                                |
 | ---------------- | -------------------------------------------------------------- |
