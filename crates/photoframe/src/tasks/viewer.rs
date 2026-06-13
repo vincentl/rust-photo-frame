@@ -180,7 +180,7 @@ impl TransitionState {
                 stripe_count: cfg.stripe_count.max(1),
                 flash_color: cfg
                     .flash_color
-                    .map(|channel| (channel as f32 / 255.0).clamp(0.0, 1.0)),
+                    .map(|channel| srgb_to_linear((channel as f32 / 255.0).clamp(0.0, 1.0))),
                 noise_seed: [rng.random_range(0.0..=1.0), rng.random_range(0.0..=1.0)],
             },
             TransitionMode::Dissolve(cfg) => ActiveTransition::Dissolve {
@@ -204,9 +204,13 @@ impl TransitionState {
             },
             TransitionMode::Iris(cfg) => ActiveTransition::Iris {
                 blades: cfg.blades,
+                // Config colors are sRGB; the shader works in linear light
+                // (its output is re-encoded by the sRGB render target).
+                // Without this conversion the petals display ~2.5x lighter
+                // than the configured color.
                 color: cfg
                     .color
-                    .map(|channel| (channel as f32 / 255.0).clamp(0.0, 1.0)),
+                    .map(|channel| srgb_to_linear((channel as f32 / 255.0).clamp(0.0, 1.0))),
                 petal_contrast: cfg.petal_contrast,
                 overlap_shadow: cfg.overlap_shadow,
                 min_aperture: cfg.min_aperture,
@@ -283,6 +287,17 @@ impl TransitionFrameStats {
             worst_frame_ms = format_args!("{:.1}", self.worst_frame_ms),
             "transition_frame_stats"
         );
+    }
+}
+
+/// Convert one sRGB channel (0..1) to linear light, the space the transition
+/// shader computes in. Constant colors fed to the shader must be linear or
+/// the sRGB render target's encode pass displays them too bright.
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
     }
 }
 
@@ -3411,9 +3426,11 @@ pub fn run_windowed(
         .primary_option()
         .and_then(MattingOptions::fixed_color)
         .map(|color| wgpu::Color {
-            r: (color[0] as f64) / 255.0,
-            g: (color[1] as f64) / 255.0,
-            b: (color[2] as f64) / 255.0,
+            // Config colors are sRGB; clear values for sRGB render targets
+            // (and the in-shader background composite) are linear.
+            r: srgb_to_linear((color[0] as f32) / 255.0) as f64,
+            g: srgb_to_linear((color[1] as f32) / 255.0) as f64,
+            b: srgb_to_linear((color[2] as f32) / 255.0) as f64,
             a: 1.0,
         })
         .unwrap_or(wgpu::Color::BLACK);
