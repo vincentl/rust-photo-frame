@@ -111,7 +111,7 @@ fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> vec2<f32> {
 // stays at least one layer texel wide.
 // params0 = (blades, petal_contrast, overlap_shadow, photo_swap_mix)
 // params1 = (open_radius_px, color.r, color.g, color.b)
-// params3 = (layer_scale, gradient_coeff, unused, unused)
+// params3 = (layer_scale, gradient_coeff, vignette, unused)
 @fragment
 fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   let screen_pos = in.screen_uv * U.screen_size;
@@ -172,7 +172,7 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   let dn2 = max(iris_petal(j2, p, r_mid, w).x, 0.0);
   let occ = 0.5 * (1.0 - smoothstep(0.0, shadow_w, dn1))
     + 0.22 * (1.0 - smoothstep(0.0, shadow_w * 0.6, dn2));
-  let vign = 1.0 - 0.25 * length(p) / (0.5 * length(U.screen_size));
+  let vign = 1.0 - U.params3.z * length(p) / (0.5 * length(U.screen_size));
   let rim = smoothstep(3.5 * aa, 0.5 * aa, abs(d_min)) * (0.05 + 0.10 * contrast);
   let blade_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
   let blade_col = blade_rgb * tone * vign * (1.0 - shadow_amt * occ) + vec3<f32>(rim);

@@ -113,6 +113,14 @@ fn iris_gradient() -> f32 {
     *V.get_or_init(|| coeff_from_env("PHOTOFRAME_IRIS_GRADIENT", 0.10))
 }
 
+/// Screen-radial vignette darkening petals toward the screen edges. Because
+/// a closing iris's visible petals sit near center, this reads as a bright
+/// center fading outward. Default 0.25; set 0 for perfectly flat petals.
+fn iris_vignette() -> f32 {
+    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| coeff_from_env("PHOTOFRAME_IRIS_VIGNETTE", 0.25))
+}
+
 /// Past this (eased) progress the transition renders at native resolution
 /// again, so the incoming photo settles into full sharpness instead of
 /// popping when the first dwell frame lands.
@@ -3234,6 +3242,7 @@ pub fn run_windowed(
                                         // feather at least one layer texel wide.
                                         uniforms.params3[0] = iris_layer_scale() as f32;
                                         uniforms.params3[1] = iris_gradient();
+                                        uniforms.params3[2] = iris_vignette();
                                         let (s_psi, c_psi) = psi.sin_cos();
                                         for i in 0..n {
                                             let ai =
