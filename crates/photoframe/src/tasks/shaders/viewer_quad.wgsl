@@ -160,8 +160,12 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   if (j2 >= n) { j2 -= n; }
   // Across-the-petal gradient on top of the CPU-baked sheen tone.
   let r_top = iris_petal(top, p, r_mid, w).y;
+  // Gentle inner-to-outer shading falloff. The coefficient is small on
+  // purpose: this term multiplies the petal color in linear light and is
+  // then sRGB-encoded, so on a dark petal the encode steepens any radial
+  // ramp into a much larger visible gradient than the raw value suggests.
   let g = clamp((r_top - r_mid) / w, -1.0, 1.0);
-  let tone = max(U.petals_b[top].z - contrast * 0.30 * g, 0.0);
+  let tone = max(U.petals_b[top].z - contrast * 0.10 * g, 0.0);
   // Soft shadow cast by the petals stacked above the top one.
   let shadow_w = max(0.012 * r_in, 4.0);
   let dn1 = max(iris_petal(j1, p, r_mid, w).x, 0.0);
