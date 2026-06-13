@@ -3,7 +3,9 @@
 How the viewer reaches smooth 4K60 transitions on a Raspberry Pi 5, how to
 measure it, and what to check when frame rates regress. Everything here was
 learned the hard way during a week of profiling in June 2026; the punchline
-is that **none of the four root causes were in the rendering code**.
+is that **not one of the root causes was a slow shader** — they were
+firmware, a missing driver package, the presentation mode, and CPU/GPU
+contention. Measure the whole pipeline before optimizing any pass.
 
 ## Measuring
 
@@ -51,7 +53,7 @@ problems (solid can't hit refresh rate) from throughput problems (solid
 can, fade can't). When in doubt, start here — it takes five minutes and
 rules out the entire application.
 
-## The four root causes (June 2026)
+## Root causes and fixes (June 2026)
 
 1. **Bootloader EEPROM memory regression.** Pi 5 bootloaders v2025.01.22
    through v2025.10.x shipped a memory configuration (fake NUMA +
@@ -75,8 +77,7 @@ rules out the entire application.
    solid fifo` locks at a metronomic 33.3 ms on a 60 Hz output. The viewer
    therefore defaults to **mailbox** presentation, which latches the newest
    complete frame each vsync — measured 62.9 fps average on a 4K radial
-   wipe. The render loop stays frame-callback paced, so mailbox overdraws
-   only ~5% during transitions and nothing during dwell.
+   wipe.
 
    *Worth retrying with newer sway:* wlroots 0.19+ speaks `wp_fifo_v1`, so
    under sway 1.11+ proper FIFO should pace at full rate. The check is one
@@ -84,11 +85,25 @@ rules out the entire application.
    switch is `PHOTOFRAME_PRESENT_MODE=fifo` in the launcher. There is no
    urgency — mailbox remains correct on both broken and fixed stacks.
 
-4. **Photo uploads hitching mid-transition.** Preparing the next photo ends
-   with a multi-megapixel `write_texture`; when it landed during an
-   animation it showed up as 50–140 ms worst frames. Non-priority uploads
-   are now deferred until the transition completes (dwell leaves ample
-   idle time).
+   **Mailbox must be paced.** Mailbox never blocks, so an unpaced redraw
+   loop submits frames faster than the compositor latches them; mailbox
+   then discards the older ones unseen while the animation clock keeps
+   advancing, so displayed motion is uneven (jerky) even though `avg_fps`
+   looks healthy — the tell is `best_frame_ms` far below a vsync (e.g.
+   0.4 ms). The viewer paces each transition redraw to ≥ one refresh
+   (≈15 ms) since the last present, so submission cadence tracks display
+   cadence: no discarded frames, even motion, honest stats.
+
+4. **CPU/GPU contention during transitions.** Preparing the next photo
+   runs a JPEG decode + NEON matting on worker threads and ends with a
+   multi-megapixel `write_texture`. On the Pi's unified memory those bursts
+   steal the same bandwidth the transition is rendering with, and a
+   transition starting is exactly what drops the preload below target and
+   kicks off the next prep — so the contention landed precisely during
+   animations, as 50–140 ms worst frames. Both halves are now gated while a
+   transition is animating: non-priority uploads are deferred, and new
+   decode/matting work is not started. The long dwell (seconds) absorbs the
+   deferral with room to spare.
 
 ## Render-cost design
 
@@ -106,7 +121,10 @@ full-screen passes are spent carefully:
   premultiplied layer (`PHOTOFRAME_IRIS_LAYER_SCALE` to override). The
   petal SDF math runs on CPU-precomputed per-frame constants and avoids
   dynamically indexed local arrays, which the V3D compiler demotes to slow
-  per-pixel scratch memory.
+  per-pixel scratch memory. The layer is `Rgba16Float`, not 8-bit: petals
+  are very dark in linear light, so a smooth shading gradient spans only a
+  few 8-bit levels and visibly bands — half-float has the dark-range
+  precision to keep it smooth, at negligible cost on a quarter-res layer.
 - **The main pass renders opaquely** (no blending) and composites letterbox
   regions over the background color in-shader, saving a destination read
   per pixel and keeping the surface eligible for direct scanout.
