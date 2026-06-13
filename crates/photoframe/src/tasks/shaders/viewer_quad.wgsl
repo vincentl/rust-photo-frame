@@ -263,8 +263,17 @@ switch (U.kind) {
         let stripe_phase = stripe_idx / stripes;
         let noise_vec = vec2<f32>(stripe_idx, floor(in.screen_uv.x * stripes)) + seed;
         let noise = fract(sin(dot(noise_vec, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-        let gate = clamp(reveal_ratio * 1.15 - stripe_phase * 0.85 + noise * 0.25, 0.0, 1.0);
-        let mask = smoothstep(0.25, 0.75, gate);
+        // Stagger-normalized so the LAST stripe's gate reaches 1.0 by
+        // reveal_ratio ~0.9: the old form (1.15r - 0.85*phase) left bottom
+        // stripes only ~30-60% revealed at the end of the transition, which
+        // then popped to the clean photo on the first dwell frame.
+        let stagger = 0.45;
+        let gate = clamp(
+          (reveal_ratio - stripe_phase * stagger) / (1.0 - stagger) + noise * 0.15,
+          0.0,
+          1.0
+        );
+        let mask = smoothstep(0.05, 0.85, gate);
         let ghost = mix(current, vec4<f32>(flash_rgb, 1.0), 0.55);
         color = mix(ghost, next, mask);
       }
