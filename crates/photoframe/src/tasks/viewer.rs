@@ -121,6 +121,16 @@ fn iris_vignette() -> f32 {
     *V.get_or_init(|| coeff_from_env("PHOTOFRAME_IRIS_VIGNETTE", 0.25))
 }
 
+/// Continuous (pixel-space) directional light strength. When > 0, petal
+/// brightness comes from the pixel's position in a fixed screen-space light
+/// gradient instead of the per-petal `sheen` cosine — so it is continuous
+/// across seams and cannot hop when top-petal ownership flips. Replaces the
+/// per-petal sheen/jitter/gradient terms while active. Default 0 (off).
+fn iris_continuous() -> f32 {
+    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| coeff_from_env("PHOTOFRAME_IRIS_CONTINUOUS", 0.0))
+}
+
 /// Past this (eased) progress the transition renders at native resolution
 /// again, so the incoming photo settles into full sharpness instead of
 /// popping when the first dwell frame lands.
@@ -3243,6 +3253,7 @@ pub fn run_windowed(
                                         uniforms.params3[0] = iris_layer_scale() as f32;
                                         uniforms.params3[1] = iris_gradient();
                                         uniforms.params3[2] = iris_vignette();
+                                        uniforms.params3[3] = iris_continuous();
                                         let (s_psi, c_psi) = psi.sin_cos();
                                         for i in 0..n {
                                             let ai =

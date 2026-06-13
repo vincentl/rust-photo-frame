@@ -111,7 +111,7 @@ fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> vec2<f32> {
 // stays at least one layer texel wide.
 // params0 = (blades, petal_contrast, overlap_shadow, photo_swap_mix)
 // params1 = (open_radius_px, color.r, color.g, color.b)
-// params3 = (layer_scale, gradient_coeff, vignette, unused)
+// params3 = (layer_scale, gradient_coeff, vignette, continuous_light)
 @fragment
 fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   let screen_pos = in.screen_uv * U.screen_size;
@@ -173,10 +173,23 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   // the variation toward the uniform base color over the last two petals of
   // enclosure: by full overlap every petal reads identically, so the pick no
   // longer matters. A closed iris center is uniform anyway.
-  let enclosure = f32(covered_count) / f32(n);
-  let var_scale = 1.0 - smoothstep(1.0 - 2.0 / f32(n), 1.0, enclosure);
-  let raw_tone = U.petals_b[top].z - contrast * U.params3.y * g;
-  let tone = max(1.0 + (raw_tone - 1.0) * var_scale, 0.0);
+  var tone: f32;
+  if (U.params3.w > 0.0) {
+    // Continuous (pixel-space) directional light: brightness is a smooth
+    // gradient fixed in screen space, so it is identical on both sides of
+    // every seam and never changes when top-petal ownership flips. Lit from
+    // the upper-left; the swirl rotates blades through it without hopping.
+    let dir = normalize(vec2<f32>(-1.0, -1.0));
+    let ramp = dot(p, dir) / (0.5 * length(U.screen_size));
+    tone = max(1.0 + U.params3.w * ramp, 0.0);
+  } else {
+    // Per-petal model: each petal one tone from its center angle, faded to
+    // uniform near full enclosure so the tie-break pick can't pop.
+    let enclosure = f32(covered_count) / f32(n);
+    let var_scale = 1.0 - smoothstep(1.0 - 2.0 / f32(n), 1.0, enclosure);
+    let raw_tone = U.petals_b[top].z - contrast * U.params3.y * g;
+    tone = max(1.0 + (raw_tone - 1.0) * var_scale, 0.0);
+  }
   // Soft shadow cast by the petals stacked above the top one.
   let shadow_w = max(0.012 * r_in, 4.0);
   let dn1 = max(iris_petal(j1, p, r_mid, w).x, 0.0);
