@@ -8,3 +8,7 @@ setup/app/build/
 local-markdown/
 logs/
 
+
+# Local capture/recording artifacts (perf + look debugging)
+*.mp4
+*.mov

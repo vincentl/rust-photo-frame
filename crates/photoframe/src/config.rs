@@ -2784,9 +2784,7 @@ impl TransitionOptions {
                 let mut iris = IrisTransition {
                     blades: builder.iris_blades.unwrap_or(defaults.blades),
                     color: builder.iris_color.unwrap_or(defaults.color),
-                    petal_contrast: builder
-                        .iris_petal_contrast
-                        .unwrap_or(defaults.petal_contrast),
+                    petal_sheen: builder.iris_petal_sheen.unwrap_or(defaults.petal_sheen),
                     overlap_shadow: builder
                         .iris_overlap_shadow
                         .unwrap_or(defaults.overlap_shadow),
@@ -3019,7 +3017,7 @@ impl Default for CrossfadeZoomTransition {
 pub struct IrisTransition {
     pub blades: u32,
     pub color: [u8; 3],
-    pub petal_contrast: f32,
+    pub petal_sheen: f32,
     pub overlap_shadow: f32,
     pub min_aperture: f32,
     pub swirl: f32,
@@ -3030,7 +3028,7 @@ impl Default for IrisTransition {
         Self {
             blades: 9,
             color: [42, 42, 49],
-            petal_contrast: 0.45,
+            petal_sheen: 0.45,
             overlap_shadow: 0.6,
             min_aperture: 0.05,
             swirl: -0.45,
@@ -3044,10 +3042,10 @@ impl IrisTransition {
         // The auto-derived blade width (spacing + 75°) is validated for 5..=14
         // petals; outside that range full closure is not guaranteed.
         self.blades = self.blades.clamp(5, 14);
-        if !self.petal_contrast.is_finite() {
-            self.petal_contrast = defaults.petal_contrast;
+        if !self.petal_sheen.is_finite() {
+            self.petal_sheen = defaults.petal_sheen;
         }
-        self.petal_contrast = self.petal_contrast.clamp(0.0, 1.0);
+        self.petal_sheen = self.petal_sheen.clamp(0.0, 1.0);
         if !self.overlap_shadow.is_finite() {
             self.overlap_shadow = defaults.overlap_shadow;
         }
@@ -3176,7 +3174,7 @@ struct TransitionOptionBuilder {
     crossfade_next_zooms_in: Option<bool>,
     iris_blades: Option<u32>,
     iris_color: Option<[u8; 3]>,
-    iris_petal_contrast: Option<f32>,
+    iris_petal_sheen: Option<f32>,
     iris_overlap_shadow: Option<f32>,
     iris_min_aperture: Option<f32>,
     iris_swirl: Option<f32>,
@@ -3391,8 +3389,8 @@ fn apply_transition_inline_field<E: de::Error>(
         "color" if matches!(kind, TransitionKind::Iris) => {
             builder.iris_color = Some(inline_value_to::<[u8; 3], E>(value)?);
         }
-        "petal-contrast" if matches!(kind, TransitionKind::Iris) => {
-            builder.iris_petal_contrast = Some(inline_value_to::<f32, E>(value)?);
+        "petal-sheen" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_petal_sheen = Some(inline_value_to::<f32, E>(value)?);
         }
         "overlap-shadow" if matches!(kind, TransitionKind::Iris) => {
             builder.iris_overlap_shadow = Some(inline_value_to::<f32, E>(value)?);
@@ -3426,7 +3424,7 @@ fn apply_transition_inline_field<E: de::Error>(
                     "next-zooms-in",
                     "blades",
                     "color",
-                    "petal-contrast",
+                    "petal-sheen",
                     "overlap-shadow",
                     "min-aperture",
                     "swirl",

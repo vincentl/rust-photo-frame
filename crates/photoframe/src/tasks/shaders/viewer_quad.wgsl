@@ -109,7 +109,7 @@ fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> vec2<f32> {
 // run per native pixel on the Pi, and the petals are large smooth shapes that
 // survive upscaling — params3.x carries the upscale factor so edge feathering
 // stays at least one layer texel wide.
-// params0 = (blades, petal_contrast, overlap_shadow, photo_swap_mix)
+// params0 = (blades, petal_sheen, overlap_shadow, photo_swap_mix)
 // params1 = (open_radius_px, color.r, color.g, color.b)
 // params3 = (layer_scale, unused, unused, unused)
 @fragment
@@ -161,7 +161,7 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   var j2 = top + 2;
   if (j2 >= n) { j2 -= n; }
   // Directional sheen: the per-petal facing cosine (baked in petals_b[*].z,
-  // -1..1) scaled by petal_contrast. petal_contrast 0 => flat; 1 => the
+  // -1..1) scaled by petal_sheen. petal_sheen 0 => flat; 1 => the
   // IRIS_SHEEN_MAX swing. As a region becomes fully enclosed near closure
   // the top-petal pick is a tie that falls back to petal 0, so fade the
   // variation to the uniform base color over the last two petals of
@@ -177,7 +177,7 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   let dn2 = max(iris_petal(j2, p, r_mid, w).x, 0.0);
   let occ = 0.5 * (1.0 - smoothstep(0.0, shadow_w, dn1))
     + 0.22 * (1.0 - smoothstep(0.0, shadow_w * 0.6, dn2));
-  // Thin edge highlight, also under petal_contrast so 0 is perfectly flat.
+  // Thin edge highlight, also under petal_sheen so 0 is perfectly flat.
   let rim = smoothstep(3.5 * aa, 0.5 * aa, abs(d_min)) * contrast * 0.2;
   let blade_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
   let blade_col = blade_rgb * tone * (1.0 - shadow_amt * occ) + vec3<f32>(rim);

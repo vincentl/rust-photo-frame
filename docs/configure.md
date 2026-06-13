@@ -387,7 +387,7 @@ The remaining knobs depend on the family:
 - **`iris`** — mechanical camera-iris diaphragm (default `duration-ms` `2600`): annular petals with rounded ends pivot closed over the current photo, then reopen on the next. Petal geometry (radii, width, pivots, swing) is derived from the screen size and blade count, so only look-related knobs are exposed.
   - **`blades`** (integer, default `9`, clamped `5–14`): petal count.
   - **`color`** (`[r, g, b]` array, default `[42, 42, 49]`): base petal color. Mid-dark colors show the petal shading best; near-black flattens it.
-  - **`petal-contrast`** (float 0–1, default `0.45`): strength of the directional sheen, across-the-petal gradient, and per-petal tone variation that make individual petals visible.
+  - **`petal-sheen`** (float 0–1, default `0.45`): strength of the directional sheen — a fixed virtual light that brightens blades facing it and darkens those opposite, making the individual petals read as distinct. `0` renders perfectly flat petals, distinguished only by the overlap-shadow seams (the look of a real anodized-metal iris); `1.0` is the maximum lighting swing.
   - **`overlap-shadow`** (float 0–1, default `0.6`): darkness of the soft shadow each petal casts on the one beneath it along the overlap seam.
   - **`min-aperture`** (float 0–0.4, default `0.05`): fraction of the screen circumradius left open at full close; the photos crossfade behind the petals while the aperture is at its smallest.
   - **`swirl`** (float −1–1, default `-0.45`): signed twist of the whole petal rosette while closing, as if both iris rings counter-rotate. `0` keeps the rosette orientation fixed; the sign sets the twist direction.

@@ -1609,7 +1609,7 @@ transition:
       duration-ms: 3000
       blades: 30
       color: [10, 20, 30]
-      petal-contrast: 2.0
+      petal-sheen: 2.0
       overlap-shadow: -1.0
       min-aperture: 0.9
       swirl: -5.0
@@ -1622,7 +1622,7 @@ transition:
         TransitionMode::Iris(iris) => {
             assert_eq!(iris.blades, 14, "blade count should clamp to 5..=14");
             assert_eq!(iris.color, [10, 20, 30]);
-            assert_eq!(iris.petal_contrast, 1.0);
+            assert_eq!(iris.petal_sheen, 1.0);
             assert_eq!(iris.overlap_shadow, 0.0);
             assert_eq!(iris.min_aperture, 0.4);
             assert_eq!(iris.swirl, -1.0);
@@ -1647,7 +1647,7 @@ transition:
         TransitionMode::Iris(iris) => {
             assert_eq!(iris.blades, 9);
             assert_eq!(iris.color, [42, 42, 49]);
-            assert_eq!(iris.petal_contrast, 0.45);
+            assert_eq!(iris.petal_sheen, 0.45);
             assert_eq!(iris.overlap_shadow, 0.6);
             assert_eq!(iris.min_aperture, 0.05);
             assert_eq!(iris.swirl, -0.45);

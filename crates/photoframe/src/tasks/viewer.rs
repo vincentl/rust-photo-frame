@@ -120,7 +120,7 @@ pub(super) enum ActiveTransition {
     Iris {
         blades: u32,
         color: [f32; 3],
-        petal_contrast: f32,
+        petal_sheen: f32,
         overlap_shadow: f32,
         min_aperture: f32,
         swirl: f32,
@@ -211,7 +211,7 @@ impl TransitionState {
                 color: cfg
                     .color
                     .map(|channel| srgb_to_linear((channel as f32 / 255.0).clamp(0.0, 1.0))),
-                petal_contrast: cfg.petal_contrast,
+                petal_sheen: cfg.petal_sheen,
                 overlap_shadow: cfg.overlap_shadow,
                 min_aperture: cfg.min_aperture,
                 swirl: cfg.swirl,
@@ -3167,7 +3167,7 @@ pub fn run_windowed(
                                     ActiveTransition::Iris {
                                         blades,
                                         color,
-                                        petal_contrast,
+                                        petal_sheen,
                                         overlap_shadow,
                                         min_aperture,
                                         swirl,
@@ -3195,7 +3195,7 @@ pub fn run_windowed(
                                         let swap = ((t - 0.42) / 0.16).clamp(0.0, 1.0);
                                         let swap = swap * swap * (3.0 - 2.0 * swap);
                                         uniforms.params0 =
-                                            [n as f32, *petal_contrast, *overlap_shadow, swap];
+                                            [n as f32, *petal_sheen, *overlap_shadow, swap];
                                         // Inscribed aperture radius: pixels closer to
                                         // center than this are provably petal-free.
                                         uniforms.params1 = [r_in - e, color[0], color[1], color[2]];
@@ -3218,7 +3218,7 @@ pub fn run_windowed(
                                             // Directional sheen: cos of the petal's facing
                                             // angle against a fixed light, constant across a
                                             // petal. Baked raw here; the shader scales it by
-                                            // petal_contrast and fades it near full closure.
+                                            // petal_sheen and fades it near full closure.
                                             let facing = (ai + 0.5 * sigma + psi - 2.3).cos();
                                             uniforms.petals_a[i] =
                                                 [center[0], center[1], tip.cos(), tip.sin()];
