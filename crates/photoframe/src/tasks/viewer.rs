@@ -75,62 +75,6 @@ fn iris_layer_scale() -> u32 {
     *SCALE.get_or_init(|| scale_from_env("PHOTOFRAME_IRIS_LAYER_SCALE", IRIS_LAYER_SCALE, 8))
 }
 
-/// Read a non-negative f32 coefficient from the environment, for live petal
-/// shading experiments. Defaults are the baked-in values; once a look is
-/// chosen the default constants are updated and the env read costs nothing.
-fn coeff_from_env(var: &str, default: f32) -> f32 {
-    match std::env::var(var) {
-        Ok(raw) => match raw.parse::<f32>() {
-            Ok(value) if value.is_finite() && value >= 0.0 => {
-                info!(var, value, "viewer_iris_coeff_override");
-                value
-            }
-            _ => {
-                warn!(var, raw, "invalid iris coeff override; using default");
-                default
-            }
-        },
-        Err(_) => default,
-    }
-}
-
-/// Petal-to-petal directional sheen strength (the "these are distinct blades"
-/// cue; constant within a petal). Default 0.35.
-fn iris_sheen() -> f32 {
-    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| coeff_from_env("PHOTOFRAME_IRIS_SHEEN", 0.35))
-}
-
-/// Per-petal random tone jitter. Default 0.12.
-fn iris_jitter() -> f32 {
-    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| coeff_from_env("PHOTOFRAME_IRIS_JITTER", 0.12))
-}
-
-/// Inner-to-outer radial shading falloff within each petal. Default 0.10.
-fn iris_gradient() -> f32 {
-    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| coeff_from_env("PHOTOFRAME_IRIS_GRADIENT", 0.10))
-}
-
-/// Screen-radial vignette darkening petals toward the screen edges. Because
-/// a closing iris's visible petals sit near center, this reads as a bright
-/// center fading outward. Default 0.25; set 0 for perfectly flat petals.
-fn iris_vignette() -> f32 {
-    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| coeff_from_env("PHOTOFRAME_IRIS_VIGNETTE", 0.25))
-}
-
-/// Continuous (pixel-space) directional light strength. When > 0, petal
-/// brightness comes from the pixel's position in a fixed screen-space light
-/// gradient instead of the per-petal `sheen` cosine — so it is continuous
-/// across seams and cannot hop when top-petal ownership flips. Replaces the
-/// per-petal sheen/jitter/gradient terms while active. Default 0 (off).
-fn iris_continuous() -> f32 {
-    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| coeff_from_env("PHOTOFRAME_IRIS_CONTINUOUS", 0.0))
-}
-
 /// Past this (eased) progress the transition renders at native resolution
 /// again, so the incoming photo settles into full sharpness instead of
 /// popping when the first dwell frame lands.
@@ -1293,7 +1237,7 @@ pub fn run_windowed(
         // Per-petal constants for the iris transition, solved on the CPU each
         // frame so the fragment loop needs no transcendentals:
         // petals_a[i] = (annulus_center.xy, tip_dir.xy)
-        // petals_b[i] = (trail_dir.xy, petal_tone, unused)
+        // petals_b[i] = (trail_dir.xy, facing_cosine, unused)
         petals_a: [[f32; 4]; 16],
         petals_b: [[f32; 4]; 16],
     }
@@ -3258,9 +3202,6 @@ pub fn run_windowed(
                                         // Petal-layer upscale factor: keeps the edge
                                         // feather at least one layer texel wide.
                                         uniforms.params3[0] = iris_layer_scale() as f32;
-                                        uniforms.params3[1] = iris_gradient();
-                                        uniforms.params3[2] = iris_vignette();
-                                        uniforms.params3[3] = iris_continuous();
                                         let (s_psi, c_psi) = psi.sin_cos();
                                         for i in 0..n {
                                             let ai =
@@ -3274,20 +3215,15 @@ pub fn run_windowed(
                                             ];
                                             let trail = ai + psi;
                                             let tip = trail + sigma;
-                                            // Directional sheen + per-petal variation are
-                                            // constant across a petal, so bake them here.
+                                            // Directional sheen: cos of the petal's facing
+                                            // angle against a fixed light, constant across a
+                                            // petal. Baked raw here; the shader scales it by
+                                            // petal_contrast and fades it near full closure.
                                             let facing = (ai + 0.5 * sigma + psi - 2.3).cos();
-                                            let h = ((i as f32 + 3.0) * 12.9898).sin() * 43_758.547;
-                                            let hash = h - h.floor();
-                                            let tone = (1.0
-                                                + petal_contrast
-                                                    * (iris_sheen() * facing
-                                                        + iris_jitter() * (hash - 0.5)))
-                                                .max(0.0);
                                             uniforms.petals_a[i] =
                                                 [center[0], center[1], tip.cos(), tip.sin()];
                                             uniforms.petals_b[i] =
-                                                [trail.cos(), trail.sin(), tone, 0.0];
+                                                [trail.cos(), trail.sin(), facing, 0.0];
                                         }
                                     }
                                 }

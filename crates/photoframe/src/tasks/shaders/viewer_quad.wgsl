@@ -13,7 +13,7 @@ struct TransitionUniforms {
   // Per-petal constants for the iris transition, solved on the CPU each
   // frame (see the Iris arm in viewer.rs):
   // petals_a[i] = (annulus_center.xy, tip_dir.xy)
-  // petals_b[i] = (trail_dir.xy, petal_tone, unused)
+  // petals_b[i] = (trail_dir.xy, facing_cosine, unused)
   petals_a: array<vec4<f32>, 16>,
   petals_b: array<vec4<f32>, 16>,
 };
@@ -111,7 +111,7 @@ fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> vec2<f32> {
 // stays at least one layer texel wide.
 // params0 = (blades, petal_contrast, overlap_shadow, photo_swap_mix)
 // params1 = (open_radius_px, color.r, color.g, color.b)
-// params3 = (layer_scale, gradient_coeff, vignette, continuous_light)
+// params3 = (layer_scale, unused, unused, unused)
 @fragment
 fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   let screen_pos = in.screen_uv * U.screen_size;
@@ -160,46 +160,27 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   if (j1 >= n) { j1 -= n; }
   var j2 = top + 2;
   if (j2 >= n) { j2 -= n; }
-  // Across-the-petal gradient on top of the CPU-baked sheen tone.
-  let r_top = iris_petal(top, p, r_mid, w).y;
-  // Gentle inner-to-outer shading falloff. The coefficient is small on
-  // purpose: this term multiplies the petal color in linear light and is
-  // then sRGB-encoded, so on a dark petal the encode steepens any radial
-  // ramp into a much larger visible gradient than the raw value suggests.
-  let g = clamp((r_top - r_mid) / w, -1.0, 1.0);
-  // As a region becomes fully enclosed (all petals overlapping, near full
-  // closure) the top-petal pick is a tie that falls back to petal 0, so
-  // per-petal brightness differences would pop when the winner flips. Fade
-  // the variation toward the uniform base color over the last two petals of
-  // enclosure: by full overlap every petal reads identically, so the pick no
-  // longer matters. A closed iris center is uniform anyway.
-  var tone: f32;
-  if (U.params3.w > 0.0) {
-    // Continuous (pixel-space) directional light: brightness is a smooth
-    // gradient fixed in screen space, so it is identical on both sides of
-    // every seam and never changes when top-petal ownership flips. Lit from
-    // the upper-left; the swirl rotates blades through it without hopping.
-    let dir = normalize(vec2<f32>(-1.0, -1.0));
-    let ramp = dot(p, dir) / (0.5 * length(U.screen_size));
-    tone = max(1.0 + U.params3.w * ramp, 0.0);
-  } else {
-    // Per-petal model: each petal one tone from its center angle, faded to
-    // uniform near full enclosure so the tie-break pick can't pop.
-    let enclosure = f32(covered_count) / f32(n);
-    let var_scale = 1.0 - smoothstep(1.0 - 2.0 / f32(n), 1.0, enclosure);
-    let raw_tone = U.petals_b[top].z - contrast * U.params3.y * g;
-    tone = max(1.0 + (raw_tone - 1.0) * var_scale, 0.0);
-  }
+  // Directional sheen: the per-petal facing cosine (baked in petals_b[*].z,
+  // -1..1) scaled by petal_contrast. petal_contrast 0 => flat; 1 => the
+  // IRIS_SHEEN_MAX swing. As a region becomes fully enclosed near closure
+  // the top-petal pick is a tie that falls back to petal 0, so fade the
+  // variation to the uniform base color over the last two petals of
+  // enclosure — by full overlap every petal reads identically and the pick
+  // can't pop. A closed iris center is uniform anyway.
+  let IRIS_SHEEN_MAX = 0.38;
+  let enclosure = f32(covered_count) / f32(n);
+  let var_scale = 1.0 - smoothstep(1.0 - 2.0 / f32(n), 1.0, enclosure);
+  let tone = max(1.0 + contrast * IRIS_SHEEN_MAX * U.petals_b[top].z * var_scale, 0.0);
   // Soft shadow cast by the petals stacked above the top one.
   let shadow_w = max(0.012 * r_in, 4.0);
   let dn1 = max(iris_petal(j1, p, r_mid, w).x, 0.0);
   let dn2 = max(iris_petal(j2, p, r_mid, w).x, 0.0);
   let occ = 0.5 * (1.0 - smoothstep(0.0, shadow_w, dn1))
     + 0.22 * (1.0 - smoothstep(0.0, shadow_w * 0.6, dn2));
-  let vign = 1.0 - U.params3.z * length(p) / (0.5 * length(U.screen_size));
-  let rim = smoothstep(3.5 * aa, 0.5 * aa, abs(d_min)) * (0.05 + 0.10 * contrast);
+  // Thin edge highlight, also under petal_contrast so 0 is perfectly flat.
+  let rim = smoothstep(3.5 * aa, 0.5 * aa, abs(d_min)) * contrast * 0.2;
   let blade_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
-  let blade_col = blade_rgb * tone * vign * (1.0 - shadow_amt * occ) + vec3<f32>(rim);
+  let blade_col = blade_rgb * tone * (1.0 - shadow_amt * occ) + vec3<f32>(rim);
   return vec4<f32>(blade_col * cov, cov);
 }
 
