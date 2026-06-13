@@ -316,7 +316,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "buttond"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "config-model"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2422,7 +2422,7 @@ dependencies = [
 
 [[package]]
 name = "photoframe"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -4069,7 +4069,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-manager"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "ab_glyph",
  "anyhow",

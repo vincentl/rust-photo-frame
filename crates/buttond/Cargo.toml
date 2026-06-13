@@ -1,6 +1,6 @@
 [package]
 name = "buttond"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2024"
 description = "Power button handler daemon for the Rust photo frame"
 authors = ["Rust Photo Frame Team"]
