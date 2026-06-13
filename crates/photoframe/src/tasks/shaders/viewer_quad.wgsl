@@ -111,7 +111,7 @@ fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> vec2<f32> {
 // stays at least one layer texel wide.
 // params0 = (blades, petal_contrast, overlap_shadow, photo_swap_mix)
 // params1 = (open_radius_px, color.r, color.g, color.b)
-// params3 = (layer_scale, unused, unused, unused)
+// params3 = (layer_scale, gradient_coeff, unused, unused)
 @fragment
 fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   let screen_pos = in.screen_uv * U.screen_size;
@@ -165,7 +165,7 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   // then sRGB-encoded, so on a dark petal the encode steepens any radial
   // ramp into a much larger visible gradient than the raw value suggests.
   let g = clamp((r_top - r_mid) / w, -1.0, 1.0);
-  let tone = max(U.petals_b[top].z - contrast * 0.10 * g, 0.0);
+  let tone = max(U.petals_b[top].z - contrast * U.params3.y * g, 0.0);
   // Soft shadow cast by the petals stacked above the top one.
   let shadow_w = max(0.012 * r_in, 4.0);
   let dn1 = max(iris_petal(j1, p, r_mid, w).x, 0.0);

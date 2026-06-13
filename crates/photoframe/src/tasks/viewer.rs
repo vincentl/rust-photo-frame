@@ -75,6 +75,44 @@ fn iris_layer_scale() -> u32 {
     *SCALE.get_or_init(|| scale_from_env("PHOTOFRAME_IRIS_LAYER_SCALE", IRIS_LAYER_SCALE, 8))
 }
 
+/// Read a non-negative f32 coefficient from the environment, for live petal
+/// shading experiments. Defaults are the baked-in values; once a look is
+/// chosen the default constants are updated and the env read costs nothing.
+fn coeff_from_env(var: &str, default: f32) -> f32 {
+    match std::env::var(var) {
+        Ok(raw) => match raw.parse::<f32>() {
+            Ok(value) if value.is_finite() && value >= 0.0 => {
+                info!(var, value, "viewer_iris_coeff_override");
+                value
+            }
+            _ => {
+                warn!(var, raw, "invalid iris coeff override; using default");
+                default
+            }
+        },
+        Err(_) => default,
+    }
+}
+
+/// Petal-to-petal directional sheen strength (the "these are distinct blades"
+/// cue; constant within a petal). Default 0.35.
+fn iris_sheen() -> f32 {
+    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| coeff_from_env("PHOTOFRAME_IRIS_SHEEN", 0.35))
+}
+
+/// Per-petal random tone jitter. Default 0.12.
+fn iris_jitter() -> f32 {
+    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| coeff_from_env("PHOTOFRAME_IRIS_JITTER", 0.12))
+}
+
+/// Inner-to-outer radial shading falloff within each petal. Default 0.10.
+fn iris_gradient() -> f32 {
+    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| coeff_from_env("PHOTOFRAME_IRIS_GRADIENT", 0.10))
+}
+
 /// Past this (eased) progress the transition renders at native resolution
 /// again, so the incoming photo settles into full sharpness instead of
 /// popping when the first dwell frame lands.
@@ -3195,6 +3233,7 @@ pub fn run_windowed(
                                         // Petal-layer upscale factor: keeps the edge
                                         // feather at least one layer texel wide.
                                         uniforms.params3[0] = iris_layer_scale() as f32;
+                                        uniforms.params3[1] = iris_gradient();
                                         let (s_psi, c_psi) = psi.sin_cos();
                                         for i in 0..n {
                                             let ai =
@@ -3215,7 +3254,8 @@ pub fn run_windowed(
                                             let hash = h - h.floor();
                                             let tone = (1.0
                                                 + petal_contrast
-                                                    * (0.35 * facing + 0.12 * (hash - 0.5)))
+                                                    * (iris_sheen() * facing
+                                                        + iris_jitter() * (hash - 0.5)))
                                                 .max(0.0);
                                             uniforms.petals_a[i] =
                                                 [center[0], center[1], tip.cos(), tip.sin()];
