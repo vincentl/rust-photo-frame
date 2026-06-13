@@ -1381,11 +1381,16 @@ pub fn run_windowed(
             {
                 return;
             }
+            // Half-float, not 8-bit: the petals are very dark in linear light,
+            // so a smooth shading gradient spans only a handful of 8-bit
+            // levels and visibly bands. Rgba16Float has ample dark-range
+            // precision; the layer is quarter-res so the extra bytes are
+            // negligible.
             self.iris_layer = Some(self.make_offscreen(
                 "iris-petal-layer",
                 w,
                 h,
-                wgpu::TextureFormat::Rgba8Unorm,
+                wgpu::TextureFormat::Rgba16Float,
             ));
         }
 
@@ -2116,7 +2121,9 @@ pub fn run_windowed(
                         module: &shader,
                         entry_point: Some("fs_iris_layer"),
                         targets: &[Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            // Must match the iris layer texture (Rgba16Float):
+                            // dark petals band in 8-bit, see ensure_iris_layer.
+                            format: wgpu::TextureFormat::Rgba16Float,
                             blend: None,
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
