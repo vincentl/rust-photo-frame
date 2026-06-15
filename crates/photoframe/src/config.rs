@@ -3485,6 +3485,13 @@ pub struct Configuration {
     /// Showcase mode: auto-enumerate all effects with on-screen caption labels.
     #[serde(default)]
     pub showcase: ShowcaseConfig,
+    /// Emit machine-greppable metric lines at info level (off by default).
+    /// When enabled the viewer logs `transition_frame_metric` per transition and
+    /// the manager logs `photo_display_metric` per displayed photo (full path plus
+    /// recurrence/coverage stats) so randomness and pacing can be audited from
+    /// `journalctl -t photoframe`.
+    #[serde(default)]
+    pub metrics: bool,
 }
 
 impl Configuration {
@@ -3631,6 +3638,7 @@ impl Default for Configuration {
             awake_schedule: None,
             buttond: None,
             showcase: ShowcaseConfig::default(),
+            metrics: false,
         }
     }
 }

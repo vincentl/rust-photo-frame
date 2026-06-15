@@ -11,7 +11,7 @@ use tokio::select;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Orchestrates the playlist via a virtual-time min-heap scheduler.
 ///
@@ -21,6 +21,7 @@ use tracing::{debug, warn};
 /// - The photo with the smallest key is always shown next.
 /// - On show, the photo is rescheduled at vclock + new gap (no rebuild needed).
 /// - `PhotoAdded` / `PhotoRemoved` are O(log n) heap ops; removed entries are lazily skipped.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut inv_rx: Receiver<InventoryEvent>,
     mut displayed_rx: Receiver<Displayed>,
@@ -29,12 +30,14 @@ pub async fn run(
     options: PlaylistOptions,
     now_override: Option<SystemTime>,
     seed_override: Option<u64>,
+    metrics: bool,
 ) -> Result<()> {
     let rng = match seed_override {
         Some(seed) => StdRng::seed_from_u64(seed),
         None => StdRng::from_os_rng(),
     };
     let mut playlist = PlaylistState::with_rng(options, rng, now_override);
+    let mut display_log = DisplayLog::default();
 
     loop {
         let next = playlist.peek_next();
@@ -76,7 +79,11 @@ pub async fn run(
             // Displayed notifications (informational only)
             maybe_disp = displayed_rx.recv() => {
                 if let Some(Displayed(p)) = maybe_disp {
-                    debug!("displayed: {}", p.display());
+                    if metrics {
+                        display_log.log_display(&p, &playlist);
+                    } else {
+                        debug!("displayed: {}", p.display());
+                    }
                 }
             }
 
@@ -151,6 +158,19 @@ impl PlaylistState {
 
     fn now(&self) -> SystemTime {
         self.now_override.unwrap_or_else(SystemTime::now)
+    }
+
+    /// Number of photos currently known (in inventory).
+    fn inventory_len(&self) -> usize {
+        self.known.len()
+    }
+
+    /// Current scheduling weight for a known path, or `None` if it has been
+    /// removed from inventory since it was displayed.
+    fn current_weight(&self, path: &Path) -> Option<f64> {
+        self.known
+            .get(path)
+            .map(|meta| self.options.weight_for(meta.created_at, self.now()))
     }
 
     /// Exponential gap with mean 1/weight (Poisson scheduling). u in (0,1] avoids ln(0).
@@ -314,6 +334,50 @@ impl PlaylistState {
             return Some((path, priority));
         }
         None
+    }
+}
+
+/// Per-photo display history used to emit `photo_display_metric` lines so the
+/// randomness of the scheduler can be audited offline. Grep the lines out of
+/// `journalctl -t photoframe`, list the photo directory recursively, and compare
+/// the two datasets to find starved photos (never shown) or photos repeating
+/// sooner than the inventory size would predict for uniform random.
+#[derive(Default)]
+struct DisplayLog {
+    /// Total photos displayed so far (1-based `seq` is `total` after increment).
+    total: u64,
+    /// Per-path running history: (times shown, `seq` of the most recent show).
+    history: HashMap<PathBuf, (u64, u64)>,
+}
+
+impl DisplayLog {
+    fn log_display(&mut self, path: &Path, playlist: &PlaylistState) {
+        self.total += 1;
+        let seq = self.total;
+        let entry = self.history.entry(path.to_path_buf()).or_insert((0, 0));
+        // Displays since this photo was last shown; -1 the first time it appears.
+        // Expected ≈ inventory size under uniform random selection.
+        let gap: i64 = if entry.0 == 0 {
+            -1
+        } else {
+            (seq - entry.1) as i64
+        };
+        entry.0 += 1;
+        entry.1 = seq;
+        let shown_count = entry.0;
+        let distinct = self.history.len();
+        let inventory = playlist.inventory_len();
+        let weight = playlist.current_weight(path).unwrap_or(0.0);
+        info!(
+            seq,
+            inventory,
+            distinct,
+            shown_count,
+            gap,
+            weight = format_args!("{weight:.2}"),
+            path = %path.display(),
+            "photo_display_metric"
+        );
     }
 }
 

@@ -22,6 +22,7 @@ async fn manager_ignores_spurious_remove_and_sends_load_on_add() {
         PlaylistOptions::default(),
         None,
         Some(42),
+        false,
     ));
 
     // Spurious remove for path never added
@@ -75,6 +76,7 @@ async fn manager_rotates_actual_sent_item() {
         PlaylistOptions::default(),
         None,
         Some(42),
+        false,
     ));
 
     let initial_a = PathBuf::from("/photos/a.jpg");
@@ -293,6 +295,7 @@ async fn manager_churn_tombstone_and_generation() {
         PlaylistOptions::default(),
         None,
         Some(42),
+        false,
     ));
 
     let path_a = PathBuf::from("/photos/a.jpg");

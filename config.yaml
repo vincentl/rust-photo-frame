@@ -153,6 +153,14 @@ loader-max-concurrent-decodes: 4
 # Optional deterministic seed for the initial shuffle (set to null for random)
 startup-shuffle-seed: null
 
+# Emit machine-greppable metric lines at info level (default false). When true:
+#   - the viewer logs `transition_frame_metric` once per transition (frame cadence)
+#   - the manager logs `photo_display_metric` once per displayed photo, carrying the
+#     full path plus seq/inventory/distinct/shown-count/gap/weight
+# Grep them from `journalctl -t photoframe`, list the photo library recursively, and
+# compare the two datasets to spot starved photos or photos repeating too soon.
+metrics: false
+
 photo-effect:
   # Choose how the viewer advances through the entries below when enabled.
   selection: random

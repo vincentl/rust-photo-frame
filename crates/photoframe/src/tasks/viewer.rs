@@ -246,8 +246,9 @@ impl TransitionState {
 }
 
 /// Frame cadence accumulator for one transition playback, logged when the
-/// transition ends so on-device performance is visible in the journal.
-pub(super) struct TransitionFrameStats {
+/// transition ends so on-device performance is visible in the journal. Only
+/// emitted when `metrics` is enabled in the config.
+pub(super) struct TransitionFrameMetric {
     kind: TransitionKind,
     started: Instant,
     last_frame: Instant,
@@ -256,7 +257,7 @@ pub(super) struct TransitionFrameStats {
     best_frame_ms: f32,
 }
 
-impl TransitionFrameStats {
+impl TransitionFrameMetric {
     fn begin(kind: TransitionKind, now: Instant) -> Self {
         Self {
             kind,
@@ -268,8 +269,8 @@ impl TransitionFrameStats {
         }
     }
 
-    fn log(&self) {
-        if self.frames < 2 {
+    fn log(&self, enabled: bool) {
+        if !enabled || self.frames < 2 {
             return;
         }
         let span = self
@@ -285,7 +286,7 @@ impl TransitionFrameStats {
             avg_frame_ms = format_args!("{:.1}", 1000.0 * span / intervals),
             best_frame_ms = format_args!("{:.1}", self.best_frame_ms),
             worst_frame_ms = format_args!("{:.1}", self.worst_frame_ms),
-            "transition_frame_stats"
+            "transition_frame_metric"
         );
     }
 }
@@ -1570,7 +1571,7 @@ pub fn run_windowed(
         /// Caption overlay for showcase mode; `None` when showcase is disabled.
         caption_overlay: Option<scenes::CaptionOverlay>,
         /// Frame cadence of the transition currently being presented.
-        transition_frame_stats: Option<TransitionFrameStats>,
+        transition_frame_metric: Option<TransitionFrameMetric>,
     }
 
     impl App {
@@ -2591,9 +2592,10 @@ pub fn run_windowed(
         /// once it ends (or hands over to a different transition kind).
         fn note_transition_frame(&mut self, active: Option<TransitionKind>) {
             let now = Instant::now();
-            match (self.transition_frame_stats.take(), active) {
+            let metrics = self.full_config.metrics;
+            match (self.transition_frame_metric.take(), active) {
                 (None, Some(kind)) => {
-                    self.transition_frame_stats = Some(TransitionFrameStats::begin(kind, now));
+                    self.transition_frame_metric = Some(TransitionFrameMetric::begin(kind, now));
                 }
                 (Some(mut stats), Some(kind)) if stats.kind == kind => {
                     let dt_ms = now.duration_since(stats.last_frame).as_secs_f32() * 1000.0;
@@ -2601,13 +2603,13 @@ pub fn run_windowed(
                     stats.best_frame_ms = stats.best_frame_ms.min(dt_ms);
                     stats.frames += 1;
                     stats.last_frame = now;
-                    self.transition_frame_stats = Some(stats);
+                    self.transition_frame_metric = Some(stats);
                 }
                 (Some(stats), Some(kind)) => {
-                    stats.log();
-                    self.transition_frame_stats = Some(TransitionFrameStats::begin(kind, now));
+                    stats.log(metrics);
+                    self.transition_frame_metric = Some(TransitionFrameMetric::begin(kind, now));
                 }
-                (Some(stats), None) => stats.log(),
+                (Some(stats), None) => stats.log(metrics),
                 (None, None) => {}
             }
         }
@@ -3477,7 +3479,7 @@ pub fn run_windowed(
         surface_timeout_streak: 0,
         configured_surface_size: None,
         caption_overlay: None,
-        transition_frame_stats: None,
+        transition_frame_metric: None,
     };
     app.enter_greeting();
     event_loop.run_app(&mut app)?;

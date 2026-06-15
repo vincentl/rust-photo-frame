@@ -187,6 +187,7 @@ async fn main() -> Result<()> {
         let cancel = cancel.clone();
         let playlist = cfg.playlist.clone();
         let seed_override = playlist_seed;
+        let metrics = cfg.metrics;
         async move {
             tasks::manager::run(
                 inv_rx,
@@ -196,6 +197,7 @@ async fn main() -> Result<()> {
                 playlist,
                 now_override,
                 seed_override,
+                metrics,
             )
             .await
             .context("manager task failed")

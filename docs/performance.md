@@ -11,13 +11,29 @@ contention. Measure the whole pipeline before optimizing any pass.
 
 Two built-in tools, no extra software required:
 
-**Per-transition stats** are logged automatically at info level when any
-transition finishes:
+**Per-transition stats** are logged at info level when any transition
+finishes, but only when `metrics: true` is set in `config.yaml` (off by
+default to keep the journal quiet):
 
 ```
-journalctl -t photoframe -f | grep transition_frame_stats
+journalctl -t photoframe -f | grep transition_frame_metric
 # transition=iris frames=73 avg_fps=28.1 avg_frame_ms=35.5 best_frame_ms=2.3 worst_frame_ms=77.8
 ```
+
+The same `metrics: true` flag also emits a `photo_display_metric` line each
+time a photo reaches the screen, for auditing the scheduler's randomness:
+
+```
+journalctl -t photoframe -f | grep photo_display_metric
+# seq=412 inventory=1873 distinct=389 shown_count=1 gap=-1 weight=1.00 path=/var/lib/photoframe/photos/cloud/2021/img_0420.jpg
+```
+
+`gap` is the number of displays since that photo was last shown (`-1` the
+first time it appears); under uniform random selection it averages the
+inventory size. To audit coverage, grep these lines over a long run, list
+the library recursively (`find <photo-library-path> -type f`), and diff the
+two sets: paths that never appear are starved, and a `gap` distribution that
+clusters well below `inventory` means photos repeat too soon.
 
 Use `-t photoframe` (syslog identifier), not `-u` — the app runs inside the
 greetd session, not as its own systemd unit.
