@@ -1,7 +1,7 @@
 use crate::config::Configuration;
 use crate::events::{CreatedSource, InvalidPhoto, InventoryEvent, PhotoInfo};
 use anyhow::Result;
-use notify::event::{CreateKind, ModifyKind, RemoveKind};
+use notify::event::{ModifyKind, RemoveKind};
 use notify::{Event, EventKind, RecursiveMode, Watcher, recommended_watcher};
 use rand::{SeedableRng, seq::SliceRandom};
 use std::ffi::OsStr;
@@ -79,12 +79,13 @@ pub async fn run(
                 Ok(event) => {
                     debug!(kind = ?event.kind, paths = ?event.paths, "notify event");
                     match &event.kind {
-                        EventKind::Create(CreateKind::File) => {
-                            for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
-                                debug!(path = %p.display(), "fs: add (create)");
-                                let (created_at, created_source) = photo_created_at(&p);
-                                let info = PhotoInfo { path: p.clone(), created_at, created_source };
-                                let _ = to_manager.send(InventoryEvent::PhotoAdded(info)).await;
+                        EventKind::Create(_) => {
+                            // A create may be a file or a whole directory (e.g. a
+                            // pushed album). `add_path` recurses into directories,
+                            // which also closes the race where files land before the
+                            // recursive watch attaches to the new subdir.
+                            for p in event.paths {
+                                add_path(&p, &to_manager).await;
                             }
                         }
                         EventKind::Remove(RemoveKind::File) => {
@@ -94,13 +95,12 @@ pub async fn run(
                             }
                         }
                         EventKind::Modify(ModifyKind::Name(_)) => {
-                            // macOS often reports moves as Name(Any). Decide per-path by existence.
-                            for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
+                            // macOS often reports moves as Name(Any); a directory may
+                            // also be renamed/moved into the library wholesale. Decide
+                            // per-path by existence, recursing into moved-in dirs.
+                            for p in event.paths {
                                 if p.exists() {
-                                    debug!(path = %p.display(), "fs: add (rename/name)");
-                                    let (created_at, created_source) = photo_created_at(&p);
-                                    let info = PhotoInfo { path: p.clone(), created_at, created_source };
-                                    let _ = to_manager.send(InventoryEvent::PhotoAdded(info)).await;
+                                    add_path(&p, &to_manager).await;
                                 } else {
                                     debug!(path = %p.display(), "fs: remove (rename/name)");
                                     let _ = to_manager.send(InventoryEvent::PhotoRemoved(p)).await;
@@ -125,6 +125,37 @@ fn is_image(p: &Path) -> bool {
         .and_then(OsStr::to_str)
         .map(|s| s.to_ascii_lowercase())
         .is_some_and(|ext| SUPPORTED_EXTENSIONS.contains(&ext.as_str()))
+}
+
+/// Emit `PhotoAdded` for `path` if it is a supported image, or for every image
+/// found by recursing if it is a directory (e.g. a whole album pushed or moved
+/// into the library at once — inotify reports only the top-level create, and the
+/// recursive watch does not replay files already inside it). Idempotent: the
+/// manager treats an already-known path as a metadata refresh, so overlap with
+/// later per-file watch events is harmless.
+async fn add_path(path: &Path, to_manager: &Sender<InventoryEvent>) {
+    if path.is_dir() {
+        debug!(path = %path.display(), "fs: add (dir, recursing)");
+        for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
+            let p = entry.path();
+            if p.is_file() && is_image(p) {
+                send_added(p, to_manager).await;
+            }
+        }
+    } else if is_image(path) {
+        debug!(path = %path.display(), "fs: add (file)");
+        send_added(path, to_manager).await;
+    }
+}
+
+async fn send_added(path: &Path, to_manager: &Sender<InventoryEvent>) {
+    let (created_at, created_source) = photo_created_at(path);
+    let info = PhotoInfo {
+        path: path.to_path_buf(),
+        created_at,
+        created_source,
+    };
+    let _ = to_manager.send(InventoryEvent::PhotoAdded(info)).await;
 }
 
 /// Age a photo by when its file was staged to the frame. Prefer the filesystem

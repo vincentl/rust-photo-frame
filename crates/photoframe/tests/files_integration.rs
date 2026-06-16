@@ -62,6 +62,78 @@ async fn startup_recursive_scan_emits_photo_added() {
     let _ = handle.await;
 }
 
+// Linux/inotify only: the frame runs on Linux, and this exercises the inotify
+// behavior the fix targets (a moved-in directory reports only a top-level event
+// and never replays files already inside it). macOS FSEvents delivers events
+// differently and unreliably under the async test harness, so we don't assert
+// it there — `add_path` handles both platforms identically once an event lands.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_directory_pushed_after_start_is_detected() {
+    // Regression: a whole album pushed/moved into the library at runtime must be
+    // detected live, without a restart. inotify reports only the top-level
+    // directory event and does not replay files already inside it, so the watcher
+    // must recurse into the new directory itself.
+    let tmp = tempdir().unwrap();
+    let lib = tmp.path().join("lib");
+    fs::create_dir_all(&lib).unwrap();
+
+    let cfg = Configuration {
+        photo_library_path: lib.clone(),
+        global_photo_settings: GlobalPhotoSettings {
+            oversample: 1.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let (inv_tx, mut inv_rx) = mpsc::channel::<InventoryEvent>(16);
+    let (_invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(16);
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(files::run(cfg.into(), inv_tx, invalid_rx, cancel.clone()));
+
+    // Let the recursive watcher attach to the (empty) library root.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // Build the album outside the library, then move it in as a unit — the case
+    // that arrives as a single top-level event with files already inside.
+    let staging = tmp.path().join("staging_2004");
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(staging.join("p1.jpg"), b"x").unwrap();
+    fs::write(staging.join("p2.jpeg"), b"x").unwrap();
+    fs::write(staging.join("note.txt"), b"x").unwrap();
+    fs::rename(&staging, lib.join("2004")).unwrap();
+
+    // Both images must surface from the live watcher (txt ignored). Adds are
+    // idempotent, so a path arriving twice is harmless — collect the distinct set.
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    while names.len() < 2 {
+        match tokio::time::timeout(std::time::Duration::from_secs(10), inv_rx.recv()).await {
+            Ok(Some(InventoryEvent::PhotoAdded(info))) => {
+                let rel = info
+                    .path
+                    .strip_prefix(&lib)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+                if rel.starts_with("2004/") {
+                    names.insert(rel);
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("inventory channel closed early"),
+            Err(_) => panic!("timeout waiting for pushed album to be detected"),
+        }
+    }
+    assert_eq!(
+        names.into_iter().collect::<Vec<_>>(),
+        vec!["2004/p1.jpg".to_string(), "2004/p2.jpeg".to_string()]
+    );
+
+    cancel.cancel();
+    let _ = handle.await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_photo_is_kept_and_emits_removed() {
     let tmp = tempdir().unwrap();
