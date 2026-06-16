@@ -1,5 +1,5 @@
 use photoframe::config::{PlaylistOptions, PlaylistOrder};
-use photoframe::events::{Displayed, InventoryEvent, LoadPhoto, PhotoInfo};
+use photoframe::events::{CreatedSource, Displayed, InventoryEvent, LoadPhoto, PhotoInfo};
 use photoframe::tasks::manager;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -155,7 +155,11 @@ async fn receive_with_timeout(rx: &mut mpsc::Receiver<LoadPhoto>) -> PathBuf {
 }
 
 fn photo_info(path: PathBuf, created_at: SystemTime) -> PhotoInfo {
-    PhotoInfo { path, created_at }
+    PhotoInfo {
+        path,
+        created_at,
+        created_source: CreatedSource::Birthtime,
+    }
 }
 
 #[test]

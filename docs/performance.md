@@ -25,12 +25,18 @@ time a photo reaches the screen, for auditing the scheduler's randomness:
 
 ```
 journalctl -t photoframe -f | grep photo_display_metric
-# seq=412 inventory=1873 distinct=389 shown_count=1 gap=-1 weight=1.00 path=/var/lib/photoframe/photos/cloud/2021/img_0420.jpg
+# seq=412 inventory=1873 distinct=389 shown_count=1 gap=-1 weight=1.00 age_days=4.2 created_source=birthtime path=/var/lib/photoframe/photos/cloud/2021/img_0420.jpg
 ```
 
 `gap` is the number of displays since that photo was last shown (`-1` the
 first time it appears); under uniform random selection it averages the
-inventory size. To audit coverage, grep these lines over a long run, list
+inventory size. `age_days` is the photo's age — `now − created_at` — which
+drives the weight, and `created_source` records where `created_at` came from:
+`birthtime` (the intended filesystem staging time), `mtime`, or `now` (a
+fallback when birth time is unavailable). If `created_source` is ever not
+`birthtime`, photos are being aged by something other than when they landed on
+the frame, so check the sync tooling and filesystem (see the note in
+[configure.md → Playlist weighting](configure.md#playlist-weighting)). To audit coverage, grep these lines over a long run, list
 the library recursively (`find <photo-library-path> -type f`), and diff the
 two sets: paths that never appear are starved, and a `gap` distribution that
 clusters well below `inventory` means photos repeat too soon.

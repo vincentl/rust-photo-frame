@@ -1,5 +1,5 @@
 use crate::config::Configuration;
-use crate::events::{InvalidPhoto, InventoryEvent, PhotoInfo};
+use crate::events::{CreatedSource, InvalidPhoto, InventoryEvent, PhotoInfo};
 use anyhow::Result;
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{Event, EventKind, RecursiveMode, Watcher, recommended_watcher};
@@ -82,8 +82,8 @@ pub async fn run(
                         EventKind::Create(CreateKind::File) => {
                             for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
                                 debug!(path = %p.display(), "fs: add (create)");
-                                let created_at = photo_created_at(&p);
-                                let info = PhotoInfo { path: p.clone(), created_at };
+                                let (created_at, created_source) = photo_created_at(&p);
+                                let info = PhotoInfo { path: p.clone(), created_at, created_source };
                                 let _ = to_manager.send(InventoryEvent::PhotoAdded(info)).await;
                             }
                         }
@@ -98,8 +98,8 @@ pub async fn run(
                             for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
                                 if p.exists() {
                                     debug!(path = %p.display(), "fs: add (rename/name)");
-                                    let created_at = photo_created_at(&p);
-                                    let info = PhotoInfo { path: p.clone(), created_at };
+                                    let (created_at, created_source) = photo_created_at(&p);
+                                    let info = PhotoInfo { path: p.clone(), created_at, created_source };
                                     let _ = to_manager.send(InventoryEvent::PhotoAdded(info)).await;
                                 } else {
                                     debug!(path = %p.display(), "fs: remove (rename/name)");
@@ -127,13 +127,24 @@ fn is_image(p: &Path) -> bool {
         .is_some_and(|ext| SUPPORTED_EXTENSIONS.contains(&ext.as_str()))
 }
 
-fn photo_created_at(path: &Path) -> SystemTime {
+/// Age a photo by when its file was staged to the frame. Prefer the filesystem
+/// birth time (`st_birthtime`); fall back to mtime if the filesystem has no
+/// birth time, then to now if metadata can't be read at all. EXIF capture dates
+/// are deliberately ignored — staging time is the intent. The chosen source is
+/// returned so `metrics` logging can confirm the frame is actually getting birth
+/// times rather than silently falling back.
+fn photo_created_at(path: &Path) -> (SystemTime, CreatedSource) {
     match fs::metadata(path) {
-        Ok(meta) => meta
-            .created()
-            .or_else(|_| meta.modified())
-            .unwrap_or_else(|_| SystemTime::now()),
-        Err(_) => SystemTime::now(),
+        Ok(meta) => {
+            if let Ok(t) = meta.created() {
+                (t, CreatedSource::Birthtime)
+            } else if let Ok(t) = meta.modified() {
+                (t, CreatedSource::Mtime)
+            } else {
+                (SystemTime::now(), CreatedSource::Now)
+            }
+        }
+        Err(_) => (SystemTime::now(), CreatedSource::Now),
     }
 }
 
@@ -162,8 +173,12 @@ pub fn discover_startup_photos(cfg: &Configuration) -> Result<Vec<PhotoInfo>> {
     Ok(initial
         .into_iter()
         .map(|path| {
-            let created_at = photo_created_at(&path);
-            PhotoInfo { path, created_at }
+            let (created_at, created_source) = photo_created_at(&path);
+            PhotoInfo {
+                path,
+                created_at,
+                created_source,
+            }
         })
         .collect())
 }

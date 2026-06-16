@@ -1,5 +1,5 @@
 use crate::config::PlaylistOptions;
-use crate::events::{Displayed, InventoryEvent, LoadPhoto, PhotoInfo};
+use crate::events::{CreatedSource, Displayed, InventoryEvent, LoadPhoto, PhotoInfo};
 use anyhow::Result;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::cmp::Ordering;
@@ -36,6 +36,10 @@ pub trait PlaylistScheduler {
     fn inventory_len(&self) -> usize;
     /// Current scheduling weight for a known path (for `photo_display_metric`).
     fn current_weight(&self, path: &Path) -> Option<f64>;
+    /// Age in seconds (now − `created_at`) for a known path (for `photo_display_metric`).
+    fn age_seconds(&self, path: &Path) -> Option<f64>;
+    /// Where a known path's `created_at` came from (for `photo_display_metric`).
+    fn created_source(&self, path: &Path) -> Option<CreatedSource>;
 }
 
 /// Build the scheduler selected by `playlist.order`.
@@ -154,6 +158,7 @@ struct PlaylistState {
 
 struct Meta {
     created_at: SystemTime,
+    created_source: CreatedSource,
     generation: u32,
     shown: bool,
 }
@@ -281,11 +286,13 @@ impl PlaylistScheduler for PlaylistState {
         // schedule and generation — do not push another heap entry.
         if let Some(meta) = self.known.get_mut(&info.path) {
             meta.created_at = info.created_at;
+            meta.created_source = info.created_source;
             return;
         }
         // New, or re-added after removal. Reading the bumped generation here ensures the
         // fresh heap entry has a strictly higher generation than any orphaned stale entries.
         let created_at = info.created_at;
+        let created_source = info.created_source;
         let path_arc = Arc::new(info.path);
         let generation = *self.generations.entry((*path_arc).clone()).or_insert(0);
         let weight = self.options.weight_for(created_at, self.now());
@@ -293,6 +300,7 @@ impl PlaylistScheduler for PlaylistState {
             (*path_arc).clone(),
             Meta {
                 created_at,
+                created_source,
                 generation,
                 shown: false,
             },
@@ -366,6 +374,19 @@ impl PlaylistScheduler for PlaylistState {
             .get(path)
             .map(|meta| self.options.weight_for(meta.created_at, self.now()))
     }
+
+    fn age_seconds(&self, path: &Path) -> Option<f64> {
+        let now = self.now();
+        self.known.get(path).map(|meta| {
+            now.duration_since(meta.created_at)
+                .unwrap_or_default()
+                .as_secs_f64()
+        })
+    }
+
+    fn created_source(&self, path: &Path) -> Option<CreatedSource> {
+        self.known.get(path).map(|meta| meta.created_source)
+    }
 }
 
 /// Per-photo display history used to emit `photo_display_metric` lines so the
@@ -399,6 +420,10 @@ impl DisplayLog {
         let distinct = self.history.len();
         let inventory = playlist.inventory_len();
         let weight = playlist.current_weight(path).unwrap_or(0.0);
+        let age_days = playlist.age_seconds(path).unwrap_or(0.0) / 86_400.0;
+        let created_source = playlist
+            .created_source(path)
+            .map_or("unknown", CreatedSource::as_str);
         info!(
             seq,
             inventory,
@@ -406,6 +431,8 @@ impl DisplayLog {
             shown_count,
             gap,
             weight = format_args!("{weight:.2}"),
+            age_days = format_args!("{age_days:.1}"),
+            created_source,
             path = %path.display(),
             "photo_display_metric"
         );

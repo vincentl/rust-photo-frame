@@ -13,10 +13,42 @@ pub enum InventoryEvent {
     PhotoRemoved(PathBuf),
 }
 
+/// Which filesystem timestamp `created_at` came from. The frame intentionally
+/// ages photos by when the file was *staged to the frame*, not by EXIF capture
+/// date, so this records whether we got the true birth time or a fallback.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CreatedSource {
+    /// Filesystem birth time (`st_birthtime`) — staging time. The intended source.
+    Birthtime,
+    /// Fallback: filesystem mtime (birth time unsupported/unavailable).
+    Mtime,
+    /// Fallback: wall-clock now (metadata unreadable) — photo treated as brand new.
+    Now,
+}
+
+impl CreatedSource {
+    /// Stable lowercase name for metric logging.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CreatedSource::Birthtime => "birthtime",
+            CreatedSource::Mtime => "mtime",
+            CreatedSource::Now => "now",
+        }
+    }
+}
+
+impl std::fmt::Display for CreatedSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PhotoInfo {
     pub path: PathBuf,
     pub created_at: SystemTime,
+    /// Where `created_at` came from (birth time vs. a fallback).
+    pub created_source: CreatedSource,
 }
 
 #[derive(Debug, Clone)]

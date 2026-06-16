@@ -321,7 +321,7 @@ displays between successive showings of a photo. Under `weighted-spread` it stay
 or above `min-spacing × inventory` (the floor is exact in the scheduler's virtual clock;
 display counts vary slightly), and its variance shrinks as `min-spacing` rises.
 
-`age` is the difference between the current time and the photo's filesystem creation timestamp. The clock defaults to `SystemTime::now()` but can be frozen via `--playlist-now <RFC3339>`.
+`age` is the difference between the current time and the photo's filesystem creation timestamp — i.e. **when the file was staged to the frame, not its EXIF capture date**. The frame prefers the filesystem birth time (`st_birthtime`), falling back to mtime and then to "now" only if birth time is unavailable; EXIF is never consulted. So copying photos onto the frame makes them "new" regardless of when they were taken. With `metrics: true`, each `photo_display_metric` line reports `age_days` and `created_source` (`birthtime`/`mtime`/`now`) so you can confirm photos are aged by birth time and not silently falling back to mtime — which a timestamp-preserving copy (`cp -p`, `rsync -t`/`-a`) could otherwise reintroduce. The clock defaults to `SystemTime::now()` but can be frozen via `--playlist-now <RFC3339>`.
 
 ### Testing the weighting
 
