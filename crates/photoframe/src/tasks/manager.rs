@@ -432,7 +432,7 @@ impl DisplayLog {
             gap,
             weight = format_args!("{weight:.2}"),
             age_days = format_args!("{age_days:.1}"),
-            created_source,
+            created_source = %created_source,
             path = %path.display(),
             "photo_display_metric"
         );
