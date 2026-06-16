@@ -1,4 +1,4 @@
-use photoframe::config::PlaylistOptions;
+use photoframe::config::{PlaylistOptions, PlaylistOrder};
 use photoframe::events::{Displayed, InventoryEvent, LoadPhoto, PhotoInfo};
 use photoframe::tasks::manager;
 use std::collections::HashSet;
@@ -163,6 +163,7 @@ fn simulate_playlist_respects_seed_and_weights() {
     let options = PlaylistOptions {
         new_multiplicity: 3,
         half_life: Duration::from_secs(86_400),
+        ..Default::default()
     };
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
     let fresh_path = PathBuf::from("fresh.jpg");
@@ -206,6 +207,7 @@ fn simulate_playlist_has_no_back_to_back_repeats() {
     let options = PlaylistOptions {
         new_multiplicity: 3,
         half_life: Duration::from_secs(86_400),
+        ..Default::default()
     };
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
     // A small library is the worst case for back-to-back repeats.
@@ -223,6 +225,112 @@ fn simulate_playlist_has_no_back_to_back_repeats() {
             );
         }
     }
+}
+
+/// Recurrence gaps: number of plan positions between successive showings of the
+/// same photo. The mean approximates the inventory size; the spread of these
+/// gaps is the knob `weighted-spread` tightens.
+fn recurrence_gaps(plan: &[PathBuf]) -> Vec<f64> {
+    let mut last: std::collections::HashMap<&PathBuf, usize> = std::collections::HashMap::new();
+    let mut gaps = Vec::new();
+    for (i, p) in plan.iter().enumerate() {
+        if let Some(prev) = last.insert(p, i) {
+            gaps.push((i - prev) as f64);
+        }
+    }
+    gaps
+}
+
+fn mean_std(xs: &[f64]) -> (f64, f64) {
+    let n = xs.len() as f64;
+    let mean = xs.iter().sum::<f64>() / n;
+    let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+    (mean, var.sqrt())
+}
+
+#[test]
+fn weighted_spread_with_zero_min_spacing_matches_weighted_random() {
+    // min-spacing 0.0 zeroes the refractory floor, leaving the plain exponential
+    // gap, so the scheduler must reproduce weighted-random bit-for-bit per seed.
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let old = now - Duration::from_secs(86_400 * 30);
+    let photos: Vec<PhotoInfo> = (0..20)
+        .map(|i| photo_info(PathBuf::from(format!("p_{i}.jpg")), old))
+        .collect();
+
+    let random = PlaylistOptions {
+        order: PlaylistOrder::WeightedRandom,
+        ..Default::default()
+    };
+    let spread0 = PlaylistOptions {
+        order: PlaylistOrder::WeightedSpread,
+        min_spacing: 0.0,
+        ..Default::default()
+    };
+
+    let a = manager::simulate_playlist(photos.clone(), random, now, 200, Some(99));
+    let b = manager::simulate_playlist(photos, spread0, now, 200, Some(99));
+    assert_eq!(a, b, "weighted-spread@0.0 must equal weighted-random");
+}
+
+#[test]
+fn weighted_spread_enforces_minimum_gap_and_tightens_spread() {
+    // Equal-weight library so the only difference is the gap distribution.
+    let n = 50usize;
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000);
+    let old = now - Duration::from_secs(86_400 * 30);
+    let photos: Vec<PhotoInfo> = (0..n)
+        .map(|i| photo_info(PathBuf::from(format!("p_{i}.jpg")), old))
+        .collect();
+
+    let f = 0.8;
+    let random = PlaylistOptions {
+        order: PlaylistOrder::WeightedRandom,
+        ..Default::default()
+    };
+    let spread = PlaylistOptions {
+        order: PlaylistOrder::WeightedSpread,
+        min_spacing: f,
+        ..Default::default()
+    };
+
+    let rgaps = recurrence_gaps(&manager::simulate_playlist(
+        photos.clone(),
+        random,
+        now,
+        3000,
+        Some(7),
+    ));
+    let splan = manager::simulate_playlist(photos, spread, now, 3000, Some(7));
+    let sgaps = recurrence_gaps(&splan);
+
+    let (rmean, rstd) = mean_std(&rgaps);
+    let (smean, sstd) = mean_std(&sgaps);
+
+    // Mean cadence is preserved (both ~ inventory size); only the spread shrinks.
+    assert!(
+        (rmean - smean).abs() < 0.15 * rmean,
+        "mean gap should be preserved: random {rmean:.1} vs spread {smean:.1}"
+    );
+    // CV ~ 1 for exponential, = 1 - f = 0.2 for the refractory law: clear drop.
+    assert!(
+        sstd < 0.7 * rstd,
+        "weighted-spread should tighten gap spread: random std {rstd:.1} vs spread std {sstd:.1}"
+    );
+
+    // The defining guarantee: a hard minimum gap of ~ f · N displays. Allow
+    // slack for the steady-state approximation and the no-back-to-back guard.
+    let floor = f * n as f64;
+    let min_gap = sgaps.iter().cloned().fold(f64::INFINITY, f64::min);
+    let random_min = rgaps.iter().cloned().fold(f64::INFINITY, f64::min);
+    assert!(
+        min_gap >= 0.6 * floor,
+        "weighted-spread must enforce a refractory floor: min gap {min_gap} vs expected ~{floor}"
+    );
+    assert!(
+        random_min < 0.6 * floor,
+        "sanity: weighted-random should produce short gaps (min {random_min})"
+    );
 }
 
 #[test]
@@ -253,6 +361,7 @@ fn bulk_import_does_not_starve_old_photos() {
     let options = PlaylistOptions {
         new_multiplicity: 3,
         half_life: Duration::from_secs(86_400),
+        ..Default::default()
     };
 
     let old_paths: Vec<PathBuf> = (0..10)

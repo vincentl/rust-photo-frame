@@ -35,6 +35,19 @@ the library recursively (`find <photo-library-path> -type f`), and diff the
 two sets: paths that never appear are starved, and a `gap` distribution that
 clusters well below `inventory` means photos repeat too soon.
 
+Each process also logs a one-time `playlist_scheduler` line at startup (before
+`seq=1`) recording the scheme and parameters that produced the series, so a
+journal spanning restarts or config changes can be segmented and interpreted:
+
+```
+journalctl -t photoframe | grep -E 'playlist_scheduler|photo_display_metric'
+# playlist_scheduler order=weighted-spread refractory=0.700 min_spacing=0.700 new_multiplicity=3 half_life_secs=259200
+```
+
+`refractory` is the effective minimum-gap fraction in play (`0.000` for
+`weighted-random`, which ignores `min_spacing`); `min_spacing` echoes the raw
+config value.
+
 Use `-t photoframe` (syslog identifier), not `-u` — the app runs inside the
 greetd session, not as its own systemd unit.
 

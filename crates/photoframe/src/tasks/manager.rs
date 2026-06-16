@@ -21,6 +21,38 @@ use tracing::{debug, info, warn};
 /// - The photo with the smallest key is always shown next.
 /// - On show, the photo is rescheduled at vclock + new gap (no rebuild needed).
 /// - `PhotoAdded` / `PhotoRemoved` are O(log n) heap ops; removed entries are lazily skipped.
+///
+/// The scheduling algorithm is pluggable via [`PlaylistScheduler`]; the concrete
+/// implementation is selected from `playlist.order`. New algorithms (e.g. a
+/// shuffle-bag) can be added without touching the manager loop.
+pub trait PlaylistScheduler {
+    fn record_add(&mut self, info: PhotoInfo);
+    fn record_remove(&mut self, path: &Path);
+    /// Front photo and its priority (`true` until first shown), without committing.
+    fn peek_next(&mut self) -> Option<(Arc<PathBuf>, bool)>;
+    /// Advance past the photo `peek_next` returned (mark shown, reschedule).
+    fn commit_shown(&mut self);
+    /// Photos currently in inventory (for `photo_display_metric`).
+    fn inventory_len(&self) -> usize;
+    /// Current scheduling weight for a known path (for `photo_display_metric`).
+    fn current_weight(&self, path: &Path) -> Option<f64>;
+}
+
+/// Build the scheduler selected by `playlist.order`.
+pub fn build_scheduler(
+    options: PlaylistOptions,
+    seed_override: Option<u64>,
+    now_override: Option<SystemTime>,
+) -> Box<dyn PlaylistScheduler + Send> {
+    let rng = match seed_override {
+        Some(seed) => StdRng::seed_from_u64(seed),
+        None => StdRng::from_os_rng(),
+    };
+    // weighted-random and weighted-spread share the virtual-timeline heap; they
+    // differ only in the refractory floor captured by `refractory_fraction`.
+    Box::new(PlaylistState::with_rng(options, rng, now_override))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut inv_rx: Receiver<InventoryEvent>,
@@ -32,11 +64,20 @@ pub async fn run(
     seed_override: Option<u64>,
     metrics: bool,
 ) -> Result<()> {
-    let rng = match seed_override {
-        Some(seed) => StdRng::seed_from_u64(seed),
-        None => StdRng::from_os_rng(),
-    };
-    let mut playlist = PlaylistState::with_rng(options, rng, now_override);
+    if metrics {
+        // Stamp the scheme + parameters once per process so a grepped
+        // photo_display_metric series can be interpreted (and segmented across
+        // sessions / config changes) without guessing what produced it.
+        info!(
+            order = %options.order,
+            refractory = format_args!("{:.3}", options.refractory_fraction()),
+            min_spacing = format_args!("{:.3}", options.min_spacing),
+            new_multiplicity = options.new_multiplicity,
+            half_life_secs = options.half_life.as_secs(),
+            "playlist_scheduler"
+        );
+    }
+    let mut playlist = build_scheduler(options, seed_override, now_override);
     let mut display_log = DisplayLog::default();
 
     loop {
@@ -80,7 +121,7 @@ pub async fn run(
             maybe_disp = displayed_rx.recv() => {
                 if let Some(Displayed(p)) = maybe_disp {
                     if metrics {
-                        display_log.log_display(&p, &playlist);
+                        display_log.log_display(&p, playlist.as_ref());
                     } else {
                         debug!("displayed: {}", p.display());
                     }
@@ -104,6 +145,10 @@ struct PlaylistState {
     seq: u64,
     rng: StdRng,
     options: PlaylistOptions,
+    /// Refractory floor `f` for the scheduling gap, as a fraction of the mean
+    /// interval (`0.0` = exponential/weighted-random; up to ~0.95 for
+    /// weighted-spread). Cached from `options`.
+    refractory: f64,
     now_override: Option<SystemTime>,
 }
 
@@ -144,6 +189,7 @@ impl Eq for Entry {}
 
 impl PlaylistState {
     fn with_rng(options: PlaylistOptions, rng: StdRng, now_override: Option<SystemTime>) -> Self {
+        let refractory = options.refractory_fraction();
         Self {
             heap: BinaryHeap::new(),
             known: HashMap::new(),
@@ -152,6 +198,7 @@ impl PlaylistState {
             seq: 0,
             rng,
             options,
+            refractory,
             now_override,
         }
     }
@@ -160,23 +207,19 @@ impl PlaylistState {
         self.now_override.unwrap_or_else(SystemTime::now)
     }
 
-    /// Number of photos currently known (in inventory).
-    fn inventory_len(&self) -> usize {
-        self.known.len()
-    }
-
-    /// Current scheduling weight for a known path, or `None` if it has been
-    /// removed from inventory since it was displayed.
-    fn current_weight(&self, path: &Path) -> Option<f64> {
-        self.known
-            .get(path)
-            .map(|meta| self.options.weight_for(meta.created_at, self.now()))
-    }
-
-    /// Exponential gap with mean 1/weight (Poisson scheduling). u in (0,1] avoids ln(0).
+    /// Scheduling gap with mean `1/weight`, drawn from a refractory (dead-time)
+    /// renewal law: a deterministic floor `f/weight` that no showing may fall
+    /// below, plus exponential jitter with mean `(1-f)/weight` above it. The
+    /// total mean is `1/weight` for every `f`, so the weighting (long-run show
+    /// frequency) is unaffected; `f` only controls spacing, with coefficient of
+    /// variation `1 - f`. `f == 0` is the original memoryless exponential gap
+    /// (weighted-random); larger `f` guarantees a minimum gap before a photo
+    /// can recur (weighted-spread).
     fn sample_gap(&mut self, weight: f64) -> f64 {
+        let mean = 1.0 / weight.max(1.0);
+        let f = self.refractory;
         let u = 1.0 - self.rng.random::<f64>(); // random::<f64>() ∈ [0,1), so u ∈ (0,1]
-        -u.ln() / weight.max(1.0)
+        f * mean + (1.0 - f) * mean * (-u.ln())
     }
 
     fn next_seq(&mut self) -> u64 {
@@ -230,6 +273,9 @@ impl PlaylistState {
         });
     }
 
+}
+
+impl PlaylistScheduler for PlaylistState {
     fn record_add(&mut self, info: PhotoInfo) {
         // Already live (e.g. a metadata refresh): update created_at but keep the existing
         // schedule and generation — do not push another heap entry.
@@ -308,32 +354,17 @@ impl PlaylistState {
         self.reschedule_after_show(entry.path, created_at, generation);
     }
 
-    /// Pop the earliest still-valid entry, advance vclock, mark shown, and reschedule.
-    /// Used by `simulate_playlist` where peek+commit can be a single call.
-    fn pop_next(&mut self) -> Option<(Arc<PathBuf>, bool)> {
-        while let Some(entry) = self.heap.pop() {
-            let valid = self
-                .known
-                .get(entry.path.as_ref())
-                .is_some_and(|m| m.generation == entry.generation);
-            if !valid {
-                continue;
-            }
-            self.vclock = entry.key;
-            let path = entry.path.clone();
-            let (created_at, priority) = {
-                let meta = self
-                    .known
-                    .get_mut(entry.path.as_ref())
-                    .expect("validated above");
-                let p = !meta.shown;
-                meta.shown = true;
-                (meta.created_at, p)
-            };
-            self.reschedule_after_show(Arc::clone(&path), created_at, entry.generation);
-            return Some((path, priority));
-        }
-        None
+    /// Number of photos currently known (in inventory).
+    fn inventory_len(&self) -> usize {
+        self.known.len()
+    }
+
+    /// Current scheduling weight for a known path, or `None` if it has been
+    /// removed from inventory since it was displayed.
+    fn current_weight(&self, path: &Path) -> Option<f64> {
+        self.known
+            .get(path)
+            .map(|meta| self.options.weight_for(meta.created_at, self.now()))
     }
 }
 
@@ -351,7 +382,7 @@ struct DisplayLog {
 }
 
 impl DisplayLog {
-    fn log_display(&mut self, path: &Path, playlist: &PlaylistState) {
+    fn log_display(&mut self, path: &Path, playlist: &dyn PlaylistScheduler) {
         self.total += 1;
         let seq = self.total;
         let entry = self.history.entry(path.to_path_buf()).or_insert((0, 0));
@@ -391,18 +422,17 @@ pub fn simulate_playlist<I>(
 where
     I: IntoIterator<Item = PhotoInfo>,
 {
-    let rng = match seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_os_rng(),
-    };
-    let mut pl = PlaylistState::with_rng(options, rng, Some(now));
+    let mut pl = build_scheduler(options, seed, Some(now));
     for info in photos {
         pl.record_add(info);
     }
     let mut plan = Vec::new();
     for _ in 0..iterations {
-        match pl.pop_next() {
-            Some((path, _priority)) => plan.push((*path).clone()),
+        match pl.peek_next() {
+            Some((path, _priority)) => {
+                plan.push((*path).clone());
+                pl.commit_shown();
+            }
             None => break,
         }
     }

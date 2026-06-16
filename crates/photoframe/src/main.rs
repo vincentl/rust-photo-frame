@@ -271,11 +271,13 @@ fn run_playlist_dry_run(
     let photos = tasks::files::discover_startup_photos(cfg)?;
 
     println!(
-        "# playlist dry run\n# photos: {}\n# now: {}\n# iterations: {}\n# seed: {}\n",
+        "# playlist dry run\n# photos: {}\n# now: {}\n# iterations: {}\n# seed: {}\n# order: {} (min-spacing {:.3})\n",
         photos.len(),
         format_rfc3339(now),
         iterations,
-        seed.map_or_else(|| "(random)".to_string(), |s| s.to_string())
+        seed.map_or_else(|| "(random)".to_string(), |s| s.to_string()),
+        cfg.playlist.order,
+        cfg.playlist.refractory_fraction(),
     );
 
     if photos.is_empty() {

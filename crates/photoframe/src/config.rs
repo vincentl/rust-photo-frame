@@ -3649,6 +3649,43 @@ impl Configuration {
     }
 }
 
+/// Which scheduling algorithm orders the playlist. All variants honor the same
+/// half-life `weight` (so "new photos more often" behaves identically); they
+/// differ only in how evenly each photo's showings are spread around that rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlaylistOrder {
+    /// Exponential-gap virtual timeline (memoryless). Statistically i.i.d.
+    /// uniform-with-replacement: smooth weights and trivial churn, but high
+    /// gap variance — some photos clump, others starve. This is the original
+    /// behavior and the default.
+    #[default]
+    WeightedRandom,
+    /// Same virtual timeline with a refractory (dead-time) gap: each photo
+    /// waits a guaranteed minimum fraction of its mean interval before it can
+    /// recur, then draws exponential jitter above that floor. `min_spacing`
+    /// dials the floor from `0.0` (identical to `weighted-random`) toward a
+    /// near-deterministic cadence, eliminating soon-repeats and improving
+    /// coverage while keeping the weighting (the mean interval is unchanged).
+    WeightedSpread,
+}
+
+impl PlaylistOrder {
+    /// Stable kebab-case name (matches the config value), for metric logging.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PlaylistOrder::WeightedRandom => "weighted-random",
+            PlaylistOrder::WeightedSpread => "weighted-spread",
+        }
+    }
+}
+
+impl std::fmt::Display for PlaylistOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct PlaylistOptions {
@@ -3657,6 +3694,16 @@ pub struct PlaylistOptions {
     /// Half-life duration controlling the exponential decay of multiplicity.
     #[serde(with = "humantime_serde")]
     pub half_life: Duration,
+    /// Scheduling algorithm used to order the playlist.
+    pub order: PlaylistOrder,
+    /// Refractory floor for `weighted-spread`, in `[0.0, 1.0)`: the minimum
+    /// wait before a photo can recur, as a fraction of one library "lap" (its
+    /// mean recurrence interval). `0.0` reproduces `weighted-random`; `0.5`
+    /// means a photo cannot return until at least half the library has played.
+    /// Ignored by `weighted-random`. The mean interval is unchanged, so this
+    /// never alters a photo's long-run show frequency — only its spacing
+    /// (coefficient of variation `= 1 - min_spacing`).
+    pub min_spacing: f64,
 }
 
 impl PlaylistOptions {
@@ -3666,6 +3713,28 @@ impl PlaylistOptions {
 
     const fn default_half_life() -> Duration {
         Duration::from_secs(60 * 60 * 24)
+    }
+
+    const fn default_min_spacing() -> f64 {
+        0.7
+    }
+
+    /// Largest refractory fraction we apply, capping how deterministic
+    /// `weighted-spread` gets as `min_spacing` approaches 1.0 (a fraction of
+    /// 1.0 would zero out the jitter and risk exact key ties).
+    const MAX_REFRACTORY: f64 = 0.95;
+
+    /// Refractory floor `f` used by [`PlaylistOrder::WeightedSpread`], as a
+    /// fraction of a photo's mean recurrence interval. `weighted-random` has no
+    /// floor (`f = 0`, pure exponential gap). The gap is then
+    /// `f/weight + (1 - f)/weight · Exp(1)`, whose mean is `1/weight` for any
+    /// `f`, so the weighting is unaffected and `f = 0` reproduces the original
+    /// memoryless schedule exactly.
+    pub fn refractory_fraction(&self) -> f64 {
+        match self.order {
+            PlaylistOrder::WeightedRandom => 0.0,
+            PlaylistOrder::WeightedSpread => self.min_spacing.clamp(0.0, Self::MAX_REFRACTORY),
+        }
     }
 
     /// Continuous scheduling weight for a photo of the given age.
@@ -3688,6 +3757,10 @@ impl PlaylistOptions {
             self.half_life > Duration::from_secs(0),
             "playlist.half-life must be positive"
         );
+        ensure!(
+            (0.0..1.0).contains(&self.min_spacing),
+            "playlist.min-spacing must be in [0.0, 1.0)"
+        );
         Ok(())
     }
 }
@@ -3697,6 +3770,8 @@ impl Default for PlaylistOptions {
         Self {
             new_multiplicity: Self::default_new_multiplicity(),
             half_life: Self::default_half_life(),
+            order: PlaylistOrder::default(),
+            min_spacing: Self::default_min_spacing(),
         }
     }
 }
