@@ -54,6 +54,21 @@ journalctl -t photoframe | grep -E 'playlist_scheduler|photo_display_metric'
 `weighted-random`, which ignores `min_spacing`); `min_spacing` echoes the raw
 config value.
 
+Finally, the first time each photo reaches the screen it logs a one-shot
+`photo_first_shown` line carrying `latency_secs` — the precise gap between the
+file's birth time and its first appearance (`age_days` on the display line is too
+coarse to see a minutes-scale lag):
+
+```
+journalctl -t photoframe | grep photo_first_shown
+# seq=4104 inventory=822 weight=2.99 latency_secs=1624 created_source=birthtime path=/var/lib/photoframe/photos/local/2004/IMG_2875.jpeg
+```
+
+`latency_secs` is a true staging latency only for photos added at runtime; for
+the startup-scanned library it is just the photo's age at first show, so filter
+to photos whose birth time is later than the `playlist_scheduler` line when
+measuring how quickly a fresh upload appears.
+
 Use `-t photoframe` (syslog identifier), not `-u` — the app runs inside the
 greetd session, not as its own systemd unit.
 

@@ -407,20 +407,18 @@ impl DisplayLog {
         self.total += 1;
         let seq = self.total;
         let entry = self.history.entry(path.to_path_buf()).or_insert((0, 0));
+        let first_show = entry.0 == 0;
         // Displays since this photo was last shown; -1 the first time it appears.
         // Expected ≈ inventory size under uniform random selection.
-        let gap: i64 = if entry.0 == 0 {
-            -1
-        } else {
-            (seq - entry.1) as i64
-        };
+        let gap: i64 = if first_show { -1 } else { (seq - entry.1) as i64 };
         entry.0 += 1;
         entry.1 = seq;
         let shown_count = entry.0;
         let distinct = self.history.len();
         let inventory = playlist.inventory_len();
         let weight = playlist.current_weight(path).unwrap_or(0.0);
-        let age_days = playlist.age_seconds(path).unwrap_or(0.0) / 86_400.0;
+        let age_seconds = playlist.age_seconds(path).unwrap_or(0.0);
+        let age_days = age_seconds / 86_400.0;
         let created_source = playlist
             .created_source(path)
             .map_or("unknown", CreatedSource::as_str);
@@ -436,6 +434,22 @@ impl DisplayLog {
             path = %path.display(),
             "photo_display_metric"
         );
+        if first_show {
+            // Precise birthtime → first-appearance latency, logged once per photo
+            // (age_days is too coarse to see a minutes-scale staging lag). This is
+            // a true staging latency only for photos added at runtime; for the
+            // startup-scanned library it is just the photo's age, so filter on a
+            // birthtime later than the `playlist_scheduler` line when analyzing.
+            info!(
+                seq,
+                inventory,
+                weight = format_args!("{weight:.2}"),
+                latency_secs = format_args!("{age_seconds:.0}"),
+                created_source = %created_source,
+                path = %path.display(),
+                "photo_first_shown"
+            );
+        }
     }
 }
 
