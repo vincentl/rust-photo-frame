@@ -154,6 +154,8 @@ async fn send_added(path: &Path, to_manager: &Sender<InventoryEvent>) {
         path: path.to_path_buf(),
         created_at,
         created_source,
+        // Discovered at runtime → eligible for the priority FIFO.
+        runtime_added: true,
     };
     let _ = to_manager.send(InventoryEvent::PhotoAdded(info)).await;
 }
@@ -209,6 +211,8 @@ pub fn discover_startup_photos(cfg: &Configuration) -> Result<Vec<PhotoInfo>> {
                 path,
                 created_at,
                 created_source,
+                // Startup scan → schedule straight onto the timeline, not the FIFO.
+                runtime_added: false,
             }
         })
         .collect())

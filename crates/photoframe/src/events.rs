@@ -49,6 +49,10 @@ pub struct PhotoInfo {
     pub created_at: SystemTime,
     /// Where `created_at` came from (birth time vs. a fallback).
     pub created_source: CreatedSource,
+    /// True when the photo was discovered by the watcher while the slideshow is
+    /// running (eligible for the priority FIFO so it debuts promptly); false for
+    /// the initial startup scan, which schedules straight onto the timeline.
+    pub runtime_added: bool,
 }
 
 #[derive(Debug, Clone)]

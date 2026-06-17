@@ -316,6 +316,17 @@ mean is `1/weight` for every `f`, so **a photo's long-run show frequency never
 changes** — only its spacing does (coefficient of variation `= 1 − f`). The floor also
 auto-scales with weight, so a high-weight new photo is still allowed back sooner.
 
+**Prompt debut for new photos.** The minimum-spacing floor would otherwise delay a
+freshly copied-in photo's *first* appearance by a full `min-spacing` lap (tens of
+minutes on a large library). To avoid that, photos discovered while the frame is
+running enter a small priority queue and debut ahead of the timeline, chosen by a
+biased coin: the new photo wins against the normal rotation at odds equal to its weight
+(`w : 1`). So a fresh photo (weight ≈ `new-multiplicity`) appears within a few slides,
+while the rest of the rotation still shows ~`1/(w+1)` of the time — no stall. After its
+debut the photo joins the spaced timeline normally. This applies only to runtime
+additions; the startup scan and `--playlist-dry-run` schedule straight onto the
+timeline, so simulation stays deterministic.
+
 Turn on `metrics: true` (see [Performance → Measuring](performance.md#measuring)) and
 grep `photo_display_metric` to measure the effect — the `gap` column is the number of
 displays between successive showings of a photo. Under `weighted-spread` it stays around

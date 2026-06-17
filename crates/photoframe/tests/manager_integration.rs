@@ -159,6 +159,9 @@ fn photo_info(path: PathBuf, created_at: SystemTime) -> PhotoInfo {
         path,
         created_at,
         created_source: CreatedSource::Birthtime,
+        // Default to startup-scan semantics so existing tests exercise the heap;
+        // FIFO-specific tests set this true explicitly.
+        runtime_added: false,
     }
 }
 
@@ -334,6 +337,57 @@ fn weighted_spread_enforces_minimum_gap_and_tightens_spread() {
     assert!(
         random_min < 0.6 * floor,
         "sanity: weighted-random should produce short gaps (min {random_min})"
+    );
+}
+
+#[test]
+fn runtime_added_photo_debuts_promptly_via_priority_fifo() {
+    // A photo discovered at runtime (runtime_added = true) should appear within a
+    // few displays via the priority FIFO, not wait out a full refractory lap.
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000);
+    let old = now - Duration::from_secs(86_400 * 30);
+    let options = PlaylistOptions {
+        new_multiplicity: 3,
+        half_life: Duration::from_secs(86_400),
+        ..Default::default()
+    };
+    let mut sched = manager::build_scheduler(options, Some(42), Some(now));
+
+    // Seed a sizeable library via the startup path (goes straight to the heap).
+    for i in 0..60 {
+        sched.record_add(photo_info(PathBuf::from(format!("old_{i}.jpg")), old));
+    }
+    // Walk the rotation so the heap timeline is moving.
+    for _ in 0..30 {
+        if sched.peek_next().is_some() {
+            sched.commit_shown();
+        }
+    }
+
+    // A fresh photo arrives at runtime.
+    let fresh = PathBuf::from("fresh.jpg");
+    sched.record_add(PhotoInfo {
+        path: fresh.clone(),
+        created_at: now,
+        created_source: CreatedSource::Birthtime,
+        runtime_added: true,
+    });
+
+    // It must debut quickly. With weight ~3 the FIFO wins at odds 3:1, so the
+    // expected debut is ~1.3 displays; P(not shown within 8) ≈ 0.25^8 ≈ 1.5e-5.
+    let mut first_at = None;
+    for step in 0..8 {
+        if let Some((path, priority)) = sched.peek_next() {
+            if *path == fresh && first_at.is_none() {
+                first_at = Some(step);
+                assert!(priority, "a first show must carry priority");
+            }
+            sched.commit_shown();
+        }
+    }
+    assert!(
+        first_at.is_some(),
+        "runtime-added photo should debut within a few displays, not after a refractory lap"
     );
 }
 

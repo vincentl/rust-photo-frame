@@ -3,7 +3,7 @@ use crate::events::{CreatedSource, Displayed, InventoryEvent, LoadPhoto, PhotoIn
 use anyhow::Result;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -153,6 +153,13 @@ struct PlaylistState {
     /// interval (`0.0` = exponential/weighted-random; up to ~0.95 for
     /// weighted-spread). Cached from `options`.
     refractory: f64,
+    /// Photos discovered at runtime, awaiting their prompt first show. Drained
+    /// ahead of the heap by a biased coin (see `peek_next`) so a freshly added
+    /// album debuts within seconds instead of waiting out the refractory floor.
+    priority_fifo: VecDeque<Arc<PathBuf>>,
+    /// Whether the most recent `peek_next` chose the FIFO front (so `commit_shown`
+    /// pops the matching source).
+    next_from_fifo: bool,
     now_override: Option<SystemTime>,
 }
 
@@ -204,6 +211,8 @@ impl PlaylistState {
             rng,
             options,
             refractory,
+            priority_fifo: VecDeque::new(),
+            next_from_fifo: false,
             now_override,
         }
     }
@@ -278,6 +287,24 @@ impl PlaylistState {
         });
     }
 
+    /// Drain leading tombstoned/stale entries off the heap and return the valid
+    /// front path (without popping), or `None` if the heap holds nothing valid.
+    fn valid_heap_front(&mut self) -> Option<Arc<PathBuf>> {
+        loop {
+            let (path, generation) = match self.heap.peek() {
+                None => return None,
+                Some(entry) => (entry.path.clone(), entry.generation),
+            };
+            if self
+                .known
+                .get(path.as_ref())
+                .is_some_and(|m| m.generation == generation)
+            {
+                return Some(path);
+            }
+            self.heap.pop(); // tombstone / stale → drop
+        }
+    }
 }
 
 impl PlaylistScheduler for PlaylistState {
@@ -293,6 +320,7 @@ impl PlaylistScheduler for PlaylistState {
         // fresh heap entry has a strictly higher generation than any orphaned stale entries.
         let created_at = info.created_at;
         let created_source = info.created_source;
+        let runtime_added = info.runtime_added;
         let path_arc = Arc::new(info.path);
         let generation = *self.generations.entry((*path_arc).clone()).or_insert(0);
         let weight = self.options.weight_for(created_at, self.now());
@@ -306,7 +334,13 @@ impl PlaylistScheduler for PlaylistState {
             },
         );
         debug!(path = %path_arc.display(), weight, "photo added to playlist");
-        self.schedule(path_arc, created_at, generation);
+        if runtime_added {
+            // Debut promptly via the priority FIFO; it joins the heap timeline at
+            // its first show (see `commit_shown`), so it isn't scheduled here.
+            self.priority_fifo.push_back(path_arc);
+        } else {
+            self.schedule(path_arc, created_at, generation);
+        }
     }
 
     fn record_remove(&mut self, path: &Path) {
@@ -320,30 +354,62 @@ impl PlaylistScheduler for PlaylistState {
         }
     }
 
-    /// Drain leading tombstoned/stale entries off the heap, then return the front entry's
-    /// path and priority (`!shown`) without popping or marking it shown. Returns `None` when
-    /// the heap is empty or all entries are invalid.
+    /// Return the next photo to show and its priority (`!shown`), without
+    /// committing. Newly added photos waiting in the priority FIFO are served
+    /// ahead of the heap by a biased coin: the FIFO front wins with odds equal
+    /// to its weight (`w : 1`), so a fresh photo debuts promptly while the rest
+    /// of the rotation still shows ~`1/(w+1)` of the time. When only one source
+    /// has a valid entry, that one is served. Returns `None` when both are empty.
     fn peek_next(&mut self) -> Option<(Arc<PathBuf>, bool)> {
-        loop {
-            let (path, generation) = match self.heap.peek() {
-                None => return None,
-                Some(entry) => (entry.path.clone(), entry.generation),
-            };
-            let valid = self
-                .known
-                .get(path.as_ref())
-                .is_some_and(|m| m.generation == generation);
-            if valid {
-                let priority = !self.known[path.as_ref()].shown;
-                return Some((path, priority));
+        // Drop stale / already-shown entries from the front of the FIFO.
+        while let Some(front) = self.priority_fifo.front() {
+            if self.known.get(front.as_ref()).is_some_and(|m| !m.shown) {
+                break;
             }
-            self.heap.pop(); // tombstone / stale → drop
+            self.priority_fifo.pop_front();
         }
+        let heap_front = self.valid_heap_front();
+        if let Some(fifo_front) = self.priority_fifo.front().cloned() {
+            let serve_fifo = if heap_front.is_some() {
+                let w = self.current_weight(fifo_front.as_ref()).unwrap_or(1.0);
+                self.rng.random::<f64>() < w / (w + 1.0)
+            } else {
+                true
+            };
+            if serve_fifo {
+                self.next_from_fifo = true;
+                return Some((fifo_front, true));
+            }
+        }
+        self.next_from_fifo = false;
+        heap_front.map(|path| {
+            let priority = !self.known[path.as_ref()].shown;
+            (path, priority)
+        })
     }
 
-    /// Pop the front entry (the one `peek_next` just returned), advance vclock, mark it
-    /// shown, and reschedule it. Defensively re-validates before committing.
+    /// Commit the photo `peek_next` just returned. A FIFO debut is popped, marked
+    /// shown, and scheduled onto the heap for future (spaced) repeats *without*
+    /// advancing vclock — the priority show is "extra" and must not disturb the
+    /// heap timeline. A heap show advances vclock and reschedules as usual.
     fn commit_shown(&mut self) {
+        if self.next_from_fifo {
+            let Some(path) = self.priority_fifo.pop_front() else {
+                return;
+            };
+            let (created_at, generation) = {
+                let Some(meta) = self.known.get_mut(path.as_ref()) else {
+                    return;
+                };
+                if meta.shown {
+                    return; // already debuted (e.g. a duplicate FIFO entry)
+                }
+                meta.shown = true;
+                (meta.created_at, meta.generation)
+            };
+            self.schedule(path, created_at, generation);
+            return;
+        }
         let entry = match self.heap.pop() {
             None => return,
             Some(e) => e,
