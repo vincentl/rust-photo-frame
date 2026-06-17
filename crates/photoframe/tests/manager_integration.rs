@@ -361,34 +361,42 @@ fn simulate_playlist_single_photo_repeats() {
 /// behind a wall of newcomers — they should appear within the first 50 entries.
 #[test]
 fn bulk_import_does_not_starve_old_photos() {
+    // 50 brand-new photos (weight ~3) plus 10 old ones (weight 1). Old photos must
+    // still surface, not stay buried behind the wall of newcomers. weighted-random
+    // can interleave them within the first library-worth; weighted-spread's
+    // refractory floor on low-weight photos delays their first appearance by about
+    // one lap, but they still appear well within a bounded window (not starved).
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000);
-    let options = PlaylistOptions {
-        new_multiplicity: 3,
-        half_life: Duration::from_secs(86_400),
-        ..Default::default()
-    };
-
     let old_paths: Vec<PathBuf> = (0..10)
         .map(|i| PathBuf::from(format!("old_{i}.jpg")))
         .collect();
-    let mut photos: Vec<PhotoInfo> = (0..50)
-        .map(|i| photo_info(PathBuf::from(format!("new_{i}.jpg")), now))
-        .collect();
-    for p in &old_paths {
-        photos.push(photo_info(
-            p.clone(),
-            now - Duration::from_secs(86_400 * 30),
-        ));
+    let make_photos = || {
+        let mut photos: Vec<PhotoInfo> = (0..50)
+            .map(|i| photo_info(PathBuf::from(format!("new_{i}.jpg")), now))
+            .collect();
+        for p in &old_paths {
+            photos.push(photo_info(p.clone(), now - Duration::from_secs(86_400 * 30)));
+        }
+        photos
+    };
+
+    for (order, window) in [
+        (PlaylistOrder::WeightedRandom, 50usize),
+        (PlaylistOrder::WeightedSpread, 200usize),
+    ] {
+        let options = PlaylistOptions {
+            new_multiplicity: 3,
+            half_life: Duration::from_secs(86_400),
+            order,
+            ..Default::default()
+        };
+        let plan = manager::simulate_playlist(make_photos(), options, now, 300, Some(7));
+        let first_old = plan.iter().position(|p| old_paths.contains(p));
+        assert!(
+            first_old.is_some_and(|i| i < window),
+            "order {order:?}: an old photo should appear within the first {window} entries despite 50 newcomers (first at {first_old:?})"
+        );
     }
-
-    let plan = manager::simulate_playlist(photos, options, now, 100, Some(7));
-
-    // Within the first 50 entries at least one old photo must appear.
-    let has_old_early = plan[..50].iter().any(|p| old_paths.contains(p));
-    assert!(
-        has_old_early,
-        "old photos should appear within the first 50 entries despite 50 newcomers"
-    );
 }
 
 /// Tombstone and generation: remove a photo mid-run, verify it eventually disappears;

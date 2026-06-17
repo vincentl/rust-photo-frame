@@ -3657,9 +3657,8 @@ impl Configuration {
 pub enum PlaylistOrder {
     /// Exponential-gap virtual timeline (memoryless). Statistically i.i.d.
     /// uniform-with-replacement: smooth weights and trivial churn, but high
-    /// gap variance — some photos clump, others starve. This is the original
-    /// behavior and the default.
-    #[default]
+    /// gap variance — some photos clump, others starve. The original behavior;
+    /// kept as an opt-in for plain independent sampling.
     WeightedRandom,
     /// Same virtual timeline with a refractory (dead-time) gap: each photo
     /// waits a guaranteed minimum fraction of its mean interval before it can
@@ -3667,6 +3666,8 @@ pub enum PlaylistOrder {
     /// dials the floor from `0.0` (identical to `weighted-random`) toward a
     /// near-deterministic cadence, eliminating soon-repeats and improving
     /// coverage while keeping the weighting (the mean interval is unchanged).
+    /// The default: evener, less clumpy rotation at no cost to weighting.
+    #[default]
     WeightedSpread,
 }
 

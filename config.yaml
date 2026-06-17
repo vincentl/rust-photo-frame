@@ -182,14 +182,15 @@ playlist:
   new-multiplicity: 3
   half-life: 3 days
   # Scheduling algorithm:
-  #   weighted-random — exponential-gap virtual timeline (default). Smooth weights
-  #                     and trivial churn, but statistically i.i.d. random: some
-  #                     photos clump, others go unseen for long stretches.
-  #   weighted-spread — same timeline with a refractory (minimum-wait) gap, so a
+  #   weighted-spread — virtual timeline with a refractory (minimum-wait) gap, so a
   #                     photo cannot recur until at least `min-spacing` of the
-  #                     library has played. Eliminates soon-repeats and improves
-  #                     coverage; the average frequency (weighting) is unchanged.
-  order: weighted-random
+  #                     library has played (default). Eliminates soon-repeats and
+  #                     improves coverage; the average frequency (weighting) is
+  #                     unchanged.
+  #   weighted-random — same timeline with a plain exponential gap. Statistically
+  #                     i.i.d. random: simple, but photos clump and some go unseen
+  #                     for long stretches. Opt in only if you want raw randomness.
+  order: weighted-spread
   # Minimum wait before a photo can repeat, as a fraction of one library "lap"
   # (its mean recurrence interval), in [0.0, 1.0). 0.0 == weighted-random; 0.5
   # means "wait until at least half the library has played"; 0.7 is a good start.

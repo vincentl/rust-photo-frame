@@ -146,7 +146,7 @@ If the frame launches to a black screen, check that `photo-library-path` points 
 
 - **Purpose:** Tunes how the weighting system surfaces new photos and how evenly the slideshow spreads them.
 - **Required?** Optional.
-- **Defaults:** three copies for new images, one-day half-life, `weighted-random` order.
+- **Defaults:** three copies for new images, one-day half-life, `weighted-spread` order at `min-spacing` 0.7.
 
 See [Playlist weighting](#playlist-weighting) for the algorithm.
 
@@ -299,16 +299,17 @@ updates the schedule incrementally without resetting progress.
 `1 / weight` average, without changing the average itself (so weighting is identical
 across orders):
 
-- `weighted-random` (default) draws an **exponential** gap — memoryless, which makes it
-  statistically equivalent to i.i.d. uniform-with-replacement. Smooth weights and cheap
-  churn, but high gap variance: some photos clump together while others go unseen for a
-  long time.
-- `weighted-spread` draws a **refractory (minimum-wait) gap**: a deterministic floor
-  that no showing may fall below, plus exponential jitter above it. The `min-spacing`
-  knob (`[0.0, 1.0)`) sets the floor as a fraction of one library "lap" — a photo's mean
-  recurrence interval, which equals the library size in displays. So `min-spacing = 0.5`
-  means *"a photo cannot return until at least half the library has played."* `0.0`
-  reproduces `weighted-random` exactly; `0.7` is a good starting point.
+- `weighted-spread` (default) draws a **refractory (minimum-wait) gap**: a deterministic
+  floor that no showing may fall below, plus exponential jitter above it. The
+  `min-spacing` knob (`[0.0, 1.0)`) sets the floor as a fraction of one library "lap" — a
+  photo's mean recurrence interval, which equals the library size in displays. So
+  `min-spacing = 0.5` means *"a photo cannot return until at least half the library has
+  played."* `0.7` (the shipped value) is a good balance of even coverage and
+  unpredictability.
+- `weighted-random` draws a plain **exponential** gap — memoryless, which makes it
+  statistically equivalent to i.i.d. uniform-with-replacement. Simple, but high gap
+  variance: some photos clump together while others go unseen for a long time. Identical
+  to `weighted-spread` with `min-spacing: 0.0`; opt in only if you want raw randomness.
 
 The gap law is `gap = f/weight + (1 − f)/weight · Exp(1)` with `f = min-spacing`. Its
 mean is `1/weight` for every `f`, so **a photo's long-run show frequency never
@@ -341,7 +342,7 @@ Prints the **weight** (relative show frequency; equilibrium = 1.0) for each disc
 | ------------------ | --------- | ------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
 | `new-multiplicity` | Optional  | `3`               | Integer ≥ 1                                                                 | Sets the peak weight for a brand-new photo; higher values surface newcomers more often before they decay.   |
 | `half-life`        | Optional  | `1 day`           | Positive duration string parsed by [`humantime`](https://docs.rs/humantime) | Controls how quickly the weight decays back to equilibrium; shorter half-lives return to normal faster.     |
-| `order`            | Optional  | `weighted-random` | `weighted-random`, `weighted-spread`                                        | Scheduling algorithm. `weighted-random` is exponential-gap (i.i.d. random); `weighted-spread` adds a minimum-wait floor before a photo can recur. Weighting (average frequency) is identical for both. |
+| `order`            | Optional  | `weighted-spread` | `weighted-spread`, `weighted-random`                                        | Scheduling algorithm. `weighted-spread` (default) adds a minimum-wait floor before a photo can recur; `weighted-random` is plain exponential-gap (i.i.d. random). Weighting (average frequency) is identical for both. |
 | `min-spacing`      | Optional  | `0.7`             | Float in `[0.0, 1.0)`                                                       | For `weighted-spread` only: minimum wait before a photo repeats, as a fraction of one library lap. `0.0` equals `weighted-random`; `0.5` waits half the library. Preserves show frequency; only spacing changes. Ignored by `weighted-random`. |
 
 ## Photo-effect configuration
