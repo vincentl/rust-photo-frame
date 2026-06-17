@@ -2,7 +2,7 @@
 
 ![photo frame on grey wall with cream colored wooden frame displaying black matted image of a string instrument](docs/images/photoframe.jpeg)
 
-Build a wall-mounted digital photo frame from a Raspberry Pi 5 and a 4K monitor. It runs a self-managing slideshow from a local photo library: GPU-accelerated transitions, customizable matting, a smart playlist that surfaces newer photos first while keeping the rotation evenly spread, and a built-in Wi-Fi recovery portal — all on-device, no cloud dependency after setup.
+Build a wall-mounted digital photo frame from a Raspberry Pi 5 and a 4K monitor. It runs a self-managing slideshow from a local photo library: GPU-accelerated transitions, customizable matting, a smart playlist that favors newer photos while keeping the rotation evenly spread, and a built-in Wi-Fi recovery portal — all on-device, no cloud dependency after setup.
 
 **Built for makers and hobbyists** who want a bespoke display they fully control, not a subscription appliance.
 
@@ -13,7 +13,7 @@ Build a wall-mounted digital photo frame from a Raspberry Pi 5 and a 4K monitor.
 A kiosk-mode Raspberry Pi 5 that:
 
 - Cycles through photos in `/var/lib/photoframe/photos` with smooth GPU transitions and matting
-- Surfaces freshly added photos more often and spreads the rotation so it never feels repetitive
+- Favors freshly added photos and spreads the rotation so it never feels repetitive
 - Wakes and sleeps on a configurable schedule (or stays on always — your choice)
 - Recovers from Wi-Fi drops by raising a hotspot with a QR-code-guided web UI for re-provisioning credentials
 - Accepts control commands over a Unix socket for scripting and hardware button integration
@@ -126,7 +126,7 @@ flowchart LR
 ```
 
 - **PhotoFiles** — watches the library and maintains an inventory of available images
-- **PhotoManager** — schedules photos on a virtual timeline. A half-life _weight_ surfaces newly added photos more often and fades them toward parity over a configurable period, so a fresh album shows up promptly without taking over. By default a refractory _minimum-spacing_ rule then keeps the rotation even — a photo can't return until a configurable fraction of the library has played — which avoids clumps and starvation _without changing how often each photo appears_ (set `playlist.order: weighted-random` for plain independent sampling). Weighting-preserving and offline-simulatable via `--playlist-dry-run`
+- **PhotoManager** — schedules photos on a virtual timeline. A half-life _weight_ favors newly added photos and fades them toward parity over a configurable period, so a fresh album shows up promptly without taking over. By default a refractory _minimum-spacing_ rule then keeps the rotation even — a photo can't return until a configurable fraction of the library has played — which avoids clumps and starvation _without changing how often each photo appears_ (set `playlist.order: weighted-random` for plain independent sampling). Weighting-preserving and offline-simulatable via `--playlist-dry-run`
 - **PhotoLoader** — decodes JPEG/PNG in parallel (configurable concurrency) to RGBA pixel buffers
 - **PhotoEffect** — optionally applies print-simulation effects (paper texture, gallery lighting)
 - **PhotoViewer** — GPU-accelerated rendering with configurable matting and transitions via WGPU/Wayland
