@@ -41,7 +41,7 @@ Full BOM and physical assembly: **[docs/build.md](docs/build.md)**.
 1. **Build the frame** — [docs/build.md](docs/build.md): BOM, button wiring, fabrication
 2. **Install the software** — [docs/install.md](docs/install.md): SD card → first wake
 3. **Preview effects** — a labeled tour of every transition and mat so you can choose which to configure: stage photos, run `showcase/activate.sh` on the Pi (see [showcase/README.md](showcase/README.md))
-4. **Tune the experience** — [docs/configure.md](docs/configure.md): transitions, mats, schedule
+4. **Tune the experience** — [docs/configure.md](docs/configure.md): transitions, mats, schedule. Start from a ready-made config in [examples/](examples/README.md) (minimal, showcase tour, or the everything kitchen-sink)
 5. **Run it day-to-day** — [docs/operate.md](docs/operate.md): commands and troubleshooting
 
 Optional deeper dives (cloud sync, Wi-Fi internals, power model, memory tuning, kiosk stack) live in **[docs/advanced.md](docs/advanced.md)**; rendering performance, measurement tools, and 4K60 tuning live in **[docs/performance.md](docs/performance.md)**.

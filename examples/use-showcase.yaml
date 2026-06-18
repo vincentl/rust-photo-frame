@@ -1,0 +1,27 @@
+# Showcase mode: a self-maintaining tour of EVERY transition and mat, one at a
+# time, with an on-screen caption naming each effect. Use it to preview what the
+# frame can do and decide which effects to put in your real config.
+#
+# When `showcase.enabled` is true the viewer ignores the `transition` and
+# `matting` lists above and synthesizes one entry per kind automatically, so you
+# don't list them here. This previews every *kind* at default settings — it does
+# NOT exercise palettes, multi-angle, or the print effect (see examples/everything.yaml
+# for that). Set `caption: false` for a clean, label-free loop (e.g. screen recording).
+#
+# The repo also ships ready-to-run tooling for this: showcase/activate.sh swaps a
+# showcase config in and restarts the kiosk; showcase/deactivate.sh restores yours.
+# See showcase/README.md.
+
+config-version: 1
+photo-library-path: /var/lib/photoframe/photos
+
+global-photo-settings:
+  dwell-ms: 4000 # hold each photo long enough to read the caption
+  oversample: 1.0
+  max-upscale-factor: 1.0
+
+showcase:
+  enabled: true
+  caption: true # false = clean loop with no labels
+  # Optional: include the fixed-image mat in the tour by pointing at a real file.
+  # fixed-image-path: /var/lib/photoframe/backgrounds/my-background.jpg

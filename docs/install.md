@@ -120,6 +120,8 @@ You should see all checks green. Warnings appear yellow; errors red.
 
 Re-running the installer updates `/opt/photoframe` without touching `/etc/photoframe/config.yaml` or your photo library.
 
+The first install seeds `/etc/photoframe/config.yaml` from the repo's rich default `config.yaml`. To start from a different baseline (a minimal file, the showcase tour, or the everything kitchen-sink), copy one from [`examples/`](../examples/README.md) over it and restart the kiosk.
+
 ---
 
 ## Step 4 — Add your photos

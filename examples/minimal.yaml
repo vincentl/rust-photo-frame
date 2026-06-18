@@ -1,0 +1,8 @@
+# Minimal photoframe config: the smallest file that runs. Every field not set
+# here falls back to a built-in default (weighted-spread playlist, a default set
+# of transitions and mats, always-awake, etc.). Start here and add only the
+# blocks you want to customize — see docs/configure.md for the full reference,
+# or copy the repo's config.yaml for a richer, fully-commented starting point.
+
+config-version: 1
+photo-library-path: /var/lib/photoframe/photos

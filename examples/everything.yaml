@@ -1,0 +1,216 @@
+# "Everything" config: exercises every transition and mat kind AND the parameter
+# variants within each — palettes and photo-average, multi-angle and jitter, both
+# radial shapes and an off-center reveal, both blind orientations, fade with and
+# without through-black, e-ink flashes, zoom-in and zoom-out crossfades, gradients
+# in all three directions, fixed-image in all three fit modes, and the
+# print-simulation effect stage. It is the kitchen sink: not meant to run as-is so
+# much as to be trimmed down. Delete what you don't want.
+#
+# NOTE: the fixed-image mats below point at placeholder files. Supply your own
+# images at those paths (or delete those entries) — missing files are skipped at
+# load time.
+
+config-version: 1
+photo-library-path: /var/lib/photoframe/photos
+control-socket-path: /run/photoframe/control.sock
+
+global-photo-settings:
+  dwell-ms: 6000
+  oversample: 1.0
+  max-upscale-factor: 1.0
+
+greeting-screen:
+  message: "Warming up your photo memories…"
+  font: "Macondo"
+  stroke-width: 16
+  duration-seconds: 6
+  colors:
+    background: "#f0e8d5"
+    font: "#2d3748"
+    accent: "#7da8a5"
+
+sleep-screen:
+  message: "Tucking in for a nap…"
+  font: "Macondo"
+  stroke-width: 16
+  colors:
+    background: "#1e293b"
+    font: "#f0e8d5"
+    accent: "#375978"
+
+viewer-preload-count: 3
+loader-max-concurrent-decodes: 4
+startup-shuffle-seed: null
+metrics: false
+
+# Every transition kind, plus parameter variants worth seeing.
+transition:
+  selection: random
+  active:
+    - kind: fade
+      duration-ms: 450
+      through-black: false
+    - kind: fade # variant: dip through black between photos
+      duration-ms: 700
+      through-black: true
+    - kind: wipe
+      duration-ms: 600
+      angles: [0.0, 90.0, 180.0, 270.0]
+      angle-jitter: 12.0
+      softness: 0.08
+    - kind: push
+      duration-ms: 520
+      angles: [0.0, 90.0, 180.0, 270.0]
+      angle-jitter: 8.0
+    - kind: e-ink # variant: with flashes
+      duration-ms: 1600
+      flash-count: 2
+      reveal-portion: 0.55
+      stripe-count: 24
+      flash-color: [255, 255, 255]
+    - kind: dissolve
+      duration-ms: 600
+      softness: 0.1
+      scale: 64.0
+    - kind: radial-wipe
+      duration-ms: 500
+      softness: 0.1
+      shapes: [circle, diamond]
+      center: [0.3, 0.4] # off-center reveal
+    - kind: venetian-blinds
+      duration-ms: 600
+      stripe-count: 16
+      softness: 0.1
+      orientations: [horizontal, vertical]
+    - kind: crossfade-zoom # both zoom in
+      duration-ms: 700
+      zoom: 0.06
+      current-zooms-in: true
+      next-zooms-in: true
+    - kind: crossfade-zoom # variant: both zoom out
+      duration-ms: 700
+      zoom: 0.06
+      current-zooms-in: false
+      next-zooms-in: false
+    - kind: iris
+      duration-ms: 2600
+      blades: 12
+      color: [42, 42, 49]
+      petal-sheen: 0.5
+      overlap-shadow: 0.6
+      min-aperture: 0.01
+      swirl: -0.45
+
+# Optional print-simulation effect stage (gallery lighting + paper texture).
+photo-effect:
+  selection: random
+  active:
+    - kind: print-simulation
+      light-angle-degrees: 135.0
+      relief-strength: 0.30
+      ink-spread: 0.15
+      sheen-strength: 0.18
+      paper-color: [245, 244, 240]
+      debug: false
+
+playlist:
+  new-multiplicity: 3
+  half-life: 3 days
+  order: weighted-spread
+  min-spacing: 0.7
+
+# Every mat kind, plus palettes/photo-average and parameter variants.
+matting:
+  fill-when-fits:
+    maximum-crop-percentage: 5.0
+    skip-matting-probability: 0.875
+  selection: random
+  active:
+    - kind: fixed-color # literal RGB only (no photo-average here)
+      minimum-mat-percentage: 2.0
+      colors:
+        - [0, 0, 0]
+        - [32, 32, 32]
+        - [0, 51, 102]
+    - kind: blur # neon backend
+      minimum-mat-percentage: 3.5
+      sigma: 32.0
+      sample-scale: 0.125
+      backend: neon
+    - kind: blur # variant: cpu backend
+      minimum-mat-percentage: 3.5
+      sigma: 24.0
+      sample-scale: 0.125
+      backend: cpu
+    - kind: studio # woven texture
+      minimum-mat-percentage: 6.0
+      colors: [[24, 24, 24], photo-average, [210, 210, 210]]
+      bevel-width-px: 4.0
+      bevel-color: [255, 255, 255]
+      texture-strength: 1.0
+      warp-period-px: 5.6
+      weft-period-px: 5.2
+    - kind: studio # variant: smooth paper
+      minimum-mat-percentage: 6.0
+      colors: [photo-average]
+      bevel-width-px: 3.0
+      bevel-color: [255, 255, 255]
+      texture-strength: 0.0
+    - kind: fixed-image # fit: cover
+      minimum-mat-percentage: 6.0
+      path:
+        - /var/lib/photoframe/backgrounds/example-cover.jpg
+      fit: cover
+    - kind: fixed-image # fit: contain
+      minimum-mat-percentage: 6.0
+      path:
+        - /var/lib/photoframe/backgrounds/example-contain.jpg
+      fit: contain
+    - kind: fixed-image # fit: stretch
+      minimum-mat-percentage: 6.0
+      path:
+        - /var/lib/photoframe/backgrounds/example-stretch.jpg
+      fit: stretch
+    - kind: gradient # vertical
+      minimum-mat-percentage: 6.0
+      start-color: [20, 20, 28]
+      end-color: [70, 70, 90]
+      direction: vertical
+      angle-degrees: 0.0
+    - kind: gradient # horizontal
+      minimum-mat-percentage: 6.0
+      start-color: [28, 20, 20]
+      end-color: [90, 70, 70]
+      direction: horizontal
+      angle-degrees: 0.0
+    - kind: gradient # radial
+      minimum-mat-percentage: 6.0
+      start-color: [20, 28, 20]
+      end-color: [70, 90, 70]
+      direction: radial
+      angle-degrees: 0.0
+    - kind: vignette
+      minimum-mat-percentage: 6.0
+      colors: [[24, 24, 28], photo-average]
+      strength: 0.6
+      radius: 0.75
+      softness: 0.5
+    - kind: cinematic-blur
+      minimum-mat-percentage: 6.0
+      sigma: 32.0
+      sample-scale: 0.125
+      backend: neon
+      darken: 0.35
+      vignette-strength: 0.5
+    - kind: passe-partout
+      minimum-mat-percentage: 6.0
+      colors: [[245, 245, 245], photo-average]
+      bevel-width-px: 3.0
+      bevel-color: [255, 255, 255]
+    - kind: drop-shadow
+      minimum-mat-percentage: 6.0
+      colors: [[235, 235, 235], photo-average]
+      shadow-color: [0, 0, 0]
+      shadow-opacity: 0.4
+      shadow-blur-px: 24.0
+      shadow-offset-px: [0, 12]

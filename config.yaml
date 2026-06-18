@@ -1,5 +1,11 @@
-# Example configuration for photoframe
-# Adjust values to match your hardware, library layout, and visual preferences.
+# Recommended configuration for photoframe — a rich, tasteful default that shows
+# off the frame's variety out of the box. This is the file the installer seeds to
+# /etc/photoframe/config.yaml on first install. Adjust to taste.
+#
+# Other starting points live in examples/ (see examples/README.md):
+#   examples/minimal.yaml      — the smallest valid config; build up from defaults
+#   examples/use-showcase.yaml — enable the labeled tour of every transition and mat
+#   examples/everything.yaml   — every kind AND every parameter variant, to trim down
 
 # Config schema version. Leave at 1 unless a release note tells you to change it;
 # the binary rejects a version it doesn't understand with a clear message.
@@ -21,13 +27,13 @@ buttond:
   debounce-ms: 20
   single-window-ms: 250
   double-window-ms: 400
-  force-shutdown: true # For systemctl: add -i and --no-ask-password
+  force-shutdown: true # true means -i --no-ask-password added to the systemctl poweroff call
   shutdown-command:
     program: /usr/bin/systemctl
     args: [poweroff]
   screen:
     off-delay-ms: 3500
-    display-name: null # Optional wlr-randr output name
+    display-name: null # Optional wlr-randr output name, such as HDMI-A-1
     on-command:
       program: /opt/photoframe/bin/powerctl
       args: [wake]
@@ -39,23 +45,23 @@ buttond:
 transition:
   # Choose how the viewer advances through the entries below: fixed, random, or sequential.
   selection: random
-  # Declare one or more transition entries. Repeat a kind to weight it more heavily.
-  # These entries mirror the showcase tour's defaults, so keeping this file as-is
-  # reproduces what `showcase.yaml` previews (minus the on-screen labels). Tweak
-  # any value to taste, or delete entries you don't want.
+  # One entry per transition kind, tuned for variety (multi-angle wipes/pushes,
+  # both radial shapes, both blind orientations). Repeat a kind to weight it more
+  # heavily, tweak any value, or delete entries you don't want. `showcase` mode
+  # previews each kind individually with on-screen labels (see showcase/README.md).
   active:
     - kind: fade
-      duration-ms: 400
+      duration-ms: 450
       through-black: false # true: fade to black before revealing the next photo
     - kind: wipe
-      duration-ms: 400
-      angles: [0.0] # add angles (e.g. [0.0, 90.0, 180.0, 270.0]) for variety
-      angle-jitter: 0.0 # randomize direction by ±this many degrees
-      softness: 0.05
+      duration-ms: 600
+      angles: [0.0, 90.0, 180.0, 270.0] # directions to rotate through
+      angle-jitter: 12.0 # randomize direction by ±this many degrees
+      softness: 0.08
     - kind: push
-      duration-ms: 400
-      angles: [0.0]
-      angle-jitter: 0.0
+      duration-ms: 520
+      angles: [0.0, 90.0, 180.0, 270.0]
+      angle-jitter: 8.0
     - kind: e-ink
       duration-ms: 1600
       flash-count: 0
@@ -69,13 +75,13 @@ transition:
     - kind: radial-wipe # circle or diamond reveal from center
       duration-ms: 500
       softness: 0.1
-      shapes: [circle] # circle | diamond; list several for variety, e.g. [circle, diamond]
+      shapes: [circle, diamond] # circle | diamond; list several for variety
       center: [0.5, 0.5]
     - kind: venetian-blinds # horizontal/vertical stripe reveal
       duration-ms: 600
       stripe-count: 16
       softness: 0.1
-      orientations: [horizontal] # list several, e.g. [horizontal, vertical]
+      orientations: [horizontal, vertical]
     - kind: crossfade-zoom # fade combined with subtle scale
       duration-ms: 700
       zoom: 0.06
@@ -83,16 +89,18 @@ transition:
       next-zooms-in: true
     - kind: iris # mechanical camera-iris: petals close over the photo, reopen on the next
       duration-ms: 2600
-      blades: 9 # petal count (5-14); geometry is derived automatically
+      blades: 12 # petal count (5-14); geometry is derived automatically
       color: [42, 42, 49] # base petal RGB; mid-dark shows the shading best
-      petal-sheen: 0.45 # 0-1: directional sheen on the blades; 0 = flat petals
+      petal-sheen: 0.5 # 0-1: directional sheen on the blades; 0 = flat petals
       overlap-shadow: 0.6 # 0-1: soft shadow each petal casts on its neighbor
-      min-aperture: 0.05 # fraction of screen circumradius left open at the swap
+      min-aperture: 0.01 # fraction of screen circumradius left open at the swap
       swirl: -0.45 # signed twist of the whole rosette while closing (0 = none)
+
 # Global photo settings
 global-photo-settings:
-  # Dwell time (ms) the current image remains fully displayed before the next transition
-  dwell-ms: 16000
+  # Dwell time (ms) the current image remains fully displayed before the next
+  # transition. ~8-16 s is typical; lower is brisker, higher is calmer.
+  dwell-ms: 10000
   # GPU render oversample factor (1.0 = native to screen)
   oversample: 1.0
   # Maximum enlargement applied when fitting small photos
@@ -156,7 +164,7 @@ startup-shuffle-seed: null
 # Emit machine-greppable metric lines at info level (default false). When true:
 #   - the viewer logs `transition_frame_metric` once per transition (frame cadence)
 #   - the manager logs `photo_display_metric` once per displayed photo, carrying the
-#     full path plus seq/inventory/distinct/shown-count/gap/weight
+#     full path plus seq/inventory/distinct/shown-count/gap/weight/age/source
 # Grep them from `journalctl -t photoframe`, list the photo library recursively, and
 # compare the two datasets to spot starved photos or photos repeating too soon.
 metrics: false
@@ -201,32 +209,36 @@ playlist:
 
 # Matting settings
 matting:
-  # Optional: render photos that are already close to the screen's aspect ratio
-  # full-bleed (cover-cropped, no mat) to fully use a large display. Evaluated
-  # per photo before mat selection; omit this block to disable.
-  # fill-when-fits:
-  #   maximum-crop-percentage: 5.0   # eligible if filling crops < 5% off one axis
-  #   skip-matting-probability: 1.0  # 1.0 always fills eligible photos, 0.0 never, in between mixes
+  # Render photos that are already close to the screen's aspect ratio full-bleed
+  # (cover-cropped, no mat) so a large display isn't letterboxed. Evaluated per
+  # photo before mat selection; delete this block to always mat.
+  fill-when-fits:
+    maximum-crop-percentage: 5.0   # eligible if filling crops < 5% off one axis
+    skip-matting-probability: 0.875 # 1.0 always fills eligible photos, 0.0 never
   # Choose how the viewer advances through the mats below: fixed, random, or sequential.
   selection: random
-  # These entries mirror the showcase tour's defaults (every mat at
-  # minimum-mat-percentage 6.0), so keeping this file as-is reproduces what
-  # `showcase.yaml` previews. Tweak any value to taste, or delete mats you don't
-  # want. Duplicate an entry (or list multiple colors/paths) to weight it more.
+  # A varied set of mats. Duplicate an entry, or list multiple colors/paths, to
+  # weight it more heavily. `photo-average` derives the mat color from each photo.
   active:
     - kind: fixed-color
-      minimum-mat-percentage: 6.0
-      colors:
-        - [0, 0, 0] # add more swatches (e.g. - [32, 32, 32]) to rotate through them
+      minimum-mat-percentage: 2.0
+      colors: # each swatch becomes its own rotation slot
+        - [0, 0, 0]
+        - [32, 32, 32]
+        - [0, 51, 102]
+        - [48, 65, 75]
+        - [114, 133, 140]
+        - [69, 66, 57]
+        - [120, 157, 147]
     - kind: blur
-      minimum-mat-percentage: 6.0
+      minimum-mat-percentage: 3.5
       sigma: 32.0
       sample-scale: 0.125 # raise toward 1.0 for sharper mats at higher cost
       backend: neon # options: cpu, neon (auto-falls back to cpu if unsupported)
     - kind: studio
       minimum-mat-percentage: 6.0
-      colors: [photo-average] # [r,g,b] swatches and/or photo-average
-      bevel-width-px: 3.0
+      colors: [[24, 24, 24], photo-average, [210, 210, 210]] # [r,g,b] and/or photo-average
+      bevel-width-px: 4.0
       bevel-color: [255, 255, 255]
       texture-strength: 1.0 # 0.0 for smooth paper, 1.0 default weave
       warp-period-px: 5.6 # spacing between vertical warp threads in px
@@ -249,7 +261,7 @@ matting:
       minimum-mat-percentage: 6.0
       # `color` accepts an [r,g,b] triple or photo-average; use `colors: [...]`
       # to rotate several base colors (each expands into its own slot).
-      color: [241, 233, 210] # base mat color (parchment)
+      colors: [[24, 24, 28], photo-average]
       strength: 0.6 # 0 = no darkening, 1 = edges go black
       radius: 0.75 # fraction of half-diagonal where darkening starts
       softness: 0.5 # how gradual the falloff is
@@ -269,7 +281,7 @@ matting:
       minimum-mat-percentage: 6.0
       # `color` accepts an [r,g,b] triple or photo-average; use `colors: [...]`
       # to rotate several mat colors (each expands into its own slot).
-      color: [235, 235, 235] # mat background color
+      colors: [[235, 235, 235], photo-average]
       shadow-color: [0, 0, 0]
       shadow-opacity: 0.4
       shadow-blur-px: 24.0

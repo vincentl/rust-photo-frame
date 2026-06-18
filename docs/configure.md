@@ -26,6 +26,22 @@ For most edits, this is the sequence:
    cargo run -p photoframe -- --playlist-dry-run 1
    ```
 
+## Choosing a starting config
+
+You don't have to start from scratch. The repo ships several starting points
+(details and a comparison table in [examples/README.md](../examples/README.md)):
+
+- [`config.yaml`](../config.yaml) — the rich, fully-commented default the installer
+  seeds; every transition and mat with varied colors and angles. Most people start here.
+- [`examples/minimal.yaml`](../examples/minimal.yaml) — the smallest valid file; build up
+  from defaults.
+- [`examples/use-showcase.yaml`](../examples/use-showcase.yaml) — a labeled tour of every
+  transition and mat (see [showcase/README.md](../showcase/README.md)).
+- [`examples/everything.yaml`](../examples/everything.yaml) — every kind *and* every
+  parameter variant, to trim down.
+
+Copy one over `/etc/photoframe/config.yaml` (or crib blocks from it) and restart the kiosk.
+
 ## Starter configuration
 
 ```yaml

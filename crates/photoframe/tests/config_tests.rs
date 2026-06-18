@@ -1853,3 +1853,17 @@ fn shipped_showcase_yaml_validates() {
     let cfg: Configuration = serde_yaml::from_str(raw).expect("showcase.yaml should parse");
     cfg.validated().expect("showcase.yaml should validate");
 }
+
+#[test]
+fn example_configs_validate() {
+    for (name, raw) in [
+        ("minimal", include_str!("../../../examples/minimal.yaml")),
+        ("use-showcase", include_str!("../../../examples/use-showcase.yaml")),
+        ("everything", include_str!("../../../examples/everything.yaml")),
+    ] {
+        let cfg: Configuration = serde_yaml::from_str(raw)
+            .unwrap_or_else(|e| panic!("examples/{name}.yaml should parse: {e}"));
+        cfg.validated()
+            .unwrap_or_else(|e| panic!("examples/{name}.yaml should validate: {e}"));
+    }
+}
