@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use glyphon::{
     Attrs, Buffer, Color as GlyphonColor, FamilyOwned, FontSystem, Metrics, Shaping, SwashCache,
@@ -716,14 +716,6 @@ impl Scene for SleepScene {
     }
 }
 
-/// Minimum spacing between transition frame submissions. Mailbox
-/// presentation never blocks, so an unpaced render loop can submit frames
-/// faster than the compositor latches them; mailbox then discards the older
-/// ones unseen while the animation clock keeps advancing, making displayed
-/// motion uneven (and inflating frame stats with frames nobody saw). Held
-/// just under one 60 Hz refresh so a healthy loop still reaches 60 fps.
-const MIN_TRANSITION_FRAME_INTERVAL: Duration = Duration::from_millis(15);
-
 /// State container for the wake (slideshow) scene.
 pub(super) struct WakeScene {
     current: Option<ImgTex>,
@@ -735,8 +727,6 @@ pub(super) struct WakeScene {
     displayed_at: Option<Instant>,
     pending: VecDeque<ImgTex>,
     pending_redraw: bool,
-    /// When the most recent frame was presented; paces transition redraws.
-    last_present: Option<Instant>,
     dwell_ms: u64,
     transition_cfg: TransitionConfig,
 }
@@ -761,7 +751,6 @@ impl WakeScene {
             displayed_at: None,
             pending: VecDeque::new(),
             pending_redraw: false,
-            last_present: None,
             dwell_ms,
             transition_cfg,
         }
@@ -776,7 +765,6 @@ impl WakeScene {
         self.displayed_at = None;
         self.pending.clear();
         self.pending_redraw = false;
-        self.last_present = None;
     }
 
     /// Returns the currently displayed image, if present.
@@ -832,7 +820,6 @@ impl WakeScene {
     /// Clears any serviced redraw request after the frame has been presented.
     pub(super) fn after_present(&mut self) {
         let _ = self.take_redraw_needed();
-        self.last_present = Some(Instant::now());
     }
 
     /// Returns the timestamp when the current image started displaying.
@@ -956,20 +943,42 @@ impl WakeScene {
         }
     }
 
+    /// Keeps a redraw requested whenever the scene has something to draw.
+    ///
+    /// Pacing model: **one submission per `wl_surface.frame` callback**,
+    /// which under sway is one per output refresh. While a transition is in
+    /// progress this always leaves a redraw requested; the viewer calls
+    /// `Window::pre_present_notify` right before every wake-scene present,
+    /// and winit then withholds `RedrawRequested` until the compositor has
+    /// consumed that commit (`FrameCallbackState::Requested` in winit's
+    /// Wayland event loop). The compositor is therefore the clock: a frame
+    /// is rendered only after the previous one has been latched, so mailbox
+    /// never discards a frame and the animation clock advances exactly one
+    /// refresh per displayed frame. No wall-clock floor is needed — one
+    /// would only fight the callback (a floor longer than
+    /// present-to-callback latency delays the next frame past the refresh
+    /// deadline and halves the rate).
+    ///
+    /// Frame callbacks are only delivered while the surface is visible, so
+    /// an occluded or powered-off output pauses submissions instead of
+    /// burning the GPU on frames nobody sees; `Occluded(false)` re-arms the
+    /// redraw. On non-Wayland backends `pre_present_notify` is a no-op and
+    /// pacing falls to the present mode: FIFO blocks in `present()` at the
+    /// refresh rate; mailbox would run unpaced there (use
+    /// `PHOTOFRAME_PRESENT_MODE=fifo`). Wayland under sway is the deployment
+    /// target, so that fallback is documented, not emulated.
+    ///
+    /// `request_redraw` is idempotent in winit (a compare-and-swap on the
+    /// pending flag), so re-running this from every control tick and
+    /// `about_to_wait` is cheap and keeps the request armed for the moment
+    /// the callback lands.
     fn ensure_redraw_requested(&mut self, ctx: &mut SceneContext<'_>) {
         let pending_redraw = self.needs_redraw();
         let has_transition = self.transition_state().is_some();
         if pending_redraw {
             self.take_redraw_needed();
         }
-        // Pace transition frames to the display refresh: the next redraw is
-        // held until MIN_TRANSITION_FRAME_INTERVAL has elapsed since the
-        // last present. The 4ms control tick re-runs this check, so the
-        // redraw fires promptly once the gate opens.
-        let pace_open = self
-            .last_present
-            .is_none_or(|t| t.elapsed() >= MIN_TRANSITION_FRAME_INTERVAL);
-        if pending_redraw || (has_transition && pace_open) {
+        if pending_redraw || has_transition {
             tracing::debug!(pending_redraw, has_transition, "viewer_request_redraw_wake");
             ctx.request_redraw();
         }

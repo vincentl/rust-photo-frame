@@ -1947,7 +1947,9 @@ pub fn run_windowed(
                     // compositors without wp_fifo_v1 (measured: a bare clear
                     // locks at 30fps on a 60Hz output under sway 1.10),
                     // halving every transition. Mailbox latches the newest
-                    // complete frame each vsync and paces normally.
+                    // complete frame each vsync; the Wake scene paces its
+                    // submissions to the compositor's frame callbacks via
+                    // pre_present_notify so mailbox never has to discard.
                     if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
                         info!("viewer_present_mode_default_mailbox");
                         wgpu::PresentMode::Mailbox
@@ -2970,6 +2972,14 @@ pub fn run_windowed(
                                 label: Some("draw-encoder"),
                             });
 
+                    // Greeting and Sleep draw once on demand and deliberately
+                    // do not call pre_present_notify: a frame callback is only
+                    // ever answered after a commit, and these scenes may redraw
+                    // (re-layout, resize) without one, so gating them would
+                    // risk waiting on a callback that never comes. The only
+                    // callback they can inherit is from a wake frame presented
+                    // just before a mode switch, which the compositor answers
+                    // on its next repaint.
                     match mode_kind {
                         ViewerModeKind::Sleep => {
                             let Some(screen) = mode.sleep_mut() else {
@@ -3354,6 +3364,14 @@ pub fn run_windowed(
                             }
 
                             gpu.queue.submit(Some(encoder.finish()));
+                            // Ask winit for a wl_surface.frame callback on the
+                            // commit that present() is about to make. Until the
+                            // compositor answers it (once per output refresh
+                            // under sway), winit withholds RedrawRequested, so
+                            // a transition submits exactly one frame per
+                            // refresh instead of racing mailbox. See
+                            // WakeScene::ensure_redraw_requested for the model.
+                            window.pre_present_notify();
                             frame.present();
                             if let Some(cap) = self.caption_overlay.as_mut() {
                                 cap.after_submit();

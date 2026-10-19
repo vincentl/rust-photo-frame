@@ -374,6 +374,13 @@ impl App {
             rpass.draw(0..3, 0..1);
         }
         gpu.queue.submit(Some(encoder.finish()));
+        // Same pacing as the viewer: request a frame callback on this commit
+        // so winit holds the next RedrawRequested until the compositor has
+        // consumed the frame (one per output refresh under sway). Under any
+        // present mode the probe then reports the compositor's cadence.
+        if let Some(window) = self.window.as_ref() {
+            window.pre_present_notify();
+        }
         frame.present();
 
         let now = Instant::now();

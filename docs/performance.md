@@ -74,11 +74,14 @@ greetd session, not as its own systemd unit.
 
 The stats measure *submission* cadence (when `present()` returns), which
 matches what the panel displays only because transition redraws are paced
-to the refresh interval. If `best_frame_ms` ever drops well below a vsync
-(e.g. 0.4ms), frames are being submitted back-to-back and mailbox is
-discarding some unseen — the displayed motion is then worse than the
-numbers suggest. Trust your eyes (or a phone slow-mo recording of the
-panel) over the log when they disagree.
+to the compositor's frame callbacks (one per output refresh). If
+`best_frame_ms` ever drops well below a vsync (e.g. 0.4ms), frames are
+being submitted back-to-back and mailbox is discarding some unseen — the
+displayed motion is then worse than the numbers suggest. The metric also
+cannot see a frame that was submitted on time but *latched late*: a
+periodic 33 ms double-step on the panel with a clean 60 fps log is a pacing
+problem, not a throughput one. Trust your eyes (or a phone slow-mo
+recording of the panel) over the log when they disagree.
 
 For ground truth, film the panel with a phone's slo-mo camera and run
 `developer/display-cadence.sh <video> <capture_fps>` — it recovers the true
@@ -101,7 +104,17 @@ sudo -u kiosk env XDG_RUNTIME_DIR=/run/user/$(id -u kiosk) WAYLAND_DISPLAY=wayla
 The ladder `solid fifo` → `solid mailbox` → `fade mailbox` separates pacing
 problems (solid can't hit refresh rate) from throughput problems (solid
 can, fade can't). When in doubt, start here — it takes five minutes and
-rules out the entire application.
+rules out the entire application. `frametest` paces exactly like the viewer
+(it calls `pre_present_notify` before every present, see below), so on a
+healthy 60 Hz stack the expected signature of `fade mailbox` is
+
+```
+fps   60.0  avg  16.67ms  best  16.6ms  worst  16.8ms
+```
+
+— best ≈ worst ≈ one refresh. A `best` well under 16 ms means the frame
+callback is not throttling (the probe is racing mailbox); a `worst` near
+33 ms means a frame missed its refresh.
 
 ## Root causes and fixes (June 2026)
 
@@ -135,14 +148,51 @@ rules out the entire application.
    switch is `PHOTOFRAME_PRESENT_MODE=fifo` in the launcher. There is no
    urgency — mailbox remains correct on both broken and fixed stacks.
 
-   **Mailbox must be paced.** Mailbox never blocks, so an unpaced redraw
-   loop submits frames faster than the compositor latches them; mailbox
-   then discards the older ones unseen while the animation clock keeps
-   advancing, so displayed motion is uneven (jerky) even though `avg_fps`
-   looks healthy — the tell is `best_frame_ms` far below a vsync (e.g.
-   0.4 ms). The viewer paces each transition redraw to ≥ one refresh
-   (≈15 ms) since the last present, so submission cadence tracks display
-   cadence: no discarded frames, even motion, honest stats.
+   **Mailbox must be paced — by the compositor, not a clock.** Mailbox
+   never blocks, so an unpaced redraw loop submits frames faster than the
+   compositor latches them; mailbox then discards the older ones unseen
+   while the animation clock keeps advancing, so displayed motion is
+   uneven (jerky) even though `avg_fps` looks healthy — the tell is
+   `best_frame_ms` far below a vsync (e.g. 0.4 ms).
+
+   The first fix was a wall-clock floor: no transition redraw sooner than
+   15 ms after the last present. That is *almost* a refresh, and "almost"
+   is the problem — submitting every 15 ms against a 16.67 ms panel means
+   one frame in every ~10 is overtaken by its successor before the
+   compositor latches it, so mailbox drops it and the animation visibly
+   double-steps (30 ms) every few hundred milliseconds. The log reads a
+   clean 60 fps throughout, because it counts submissions, not latches.
+
+   The viewer now paces to the compositor instead. Before every wake-scene
+   `present()` it calls winit's `Window::pre_present_notify()`, which
+   requests a `wl_surface.frame` callback on that commit; winit then
+   withholds `RedrawRequested` until the compositor answers (winit 0.30,
+   `platform_impl/linux/wayland/event_loop/mod.rs`, the
+   `FrameCallbackState::Requested` check). sway answers once per output
+   refresh, after it has latched the buffer, so the model is **one
+   submission per frame callback = one per refresh**: nothing is ever
+   discarded, the animation advances exactly one refresh per displayed
+   frame, and the stats are honest. A transition in progress always keeps
+   a redraw requested; the compositor decides when it fires. There is no
+   wall-clock floor any more — any floor longer than the present-to-callback
+   latency would push the next frame past its refresh deadline and halve
+   the rate.
+
+   Side effects worth knowing: frame callbacks arrive only while the
+   surface is visible, so an occluded window (the Wi-Fi overlay) or a
+   powered-off output pauses transition rendering rather than burning the
+   GPU on unseen frames; `Occluded(false)` re-arms the redraw. The greeting
+   and sleep screens draw once on demand and do not request callbacks, so
+   they are never left waiting for one. On non-Wayland backends
+   `pre_present_notify` is a no-op and pacing falls to the present mode —
+   FIFO blocks at the refresh rate; mailbox would run unpaced, so use
+   `PHOTOFRAME_PRESENT_MODE=fifo` there.
+
+   Measuring the difference needs the panel, not the log: film a transition
+   in phone slo-mo and run `developer/display-cadence.sh`. Before: median
+   interval one refresh with a periodic two-refresh step. After: a flat
+   one-refresh timeline. `frametest fade mailbox` should read 60.0 fps with
+   best ≈ worst ≈ 16.7 ms.
 
 4. **CPU/GPU contention during transitions.** Preparing the next photo
    runs a JPEG decode + NEON matting on worker threads and ends with a
