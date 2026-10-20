@@ -20,7 +20,7 @@ bytemuck = { version = "1.23.2", features = ["derive"] }
 clap = { version = "4.5.48", features = ["derive"] }
 exif = { version = "0.6.1", package = "kamadak-exif" }
 image = { version = "0.25.8", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-jpeg-decoder = "0.3.2"
+jpeg-decoder = { version = "0.3.2", default-features = false }
 fast_image_resize = { version = "5.3.0", default-features = false, features = ["only_u8x4"] }
 notify = "8.2.0"
 pollster = "0.4.0"
@@ -57,3 +57,4 @@ ash = "0.38"
 naga = { version = "27", features = ["wgsl-in"] }
 tempfile = "3.23.0"
 base64 = "0.22.1"
+jpeg-encoder = "0.6"

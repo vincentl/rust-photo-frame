@@ -66,6 +66,12 @@ pub struct PreparedImageCpu {
     pub path: PathBuf,
     pub width: u32,
     pub height: u32,
+    /// Size of the original photo in its displayed orientation. Equal to
+    /// `(width, height)` unless the loader decoded a JPEG at a reduced DCT
+    /// scale; anything reasoning about the photo itself (fill eligibility,
+    /// whether the pixels suffice for the canvas) must use this, not the
+    /// decoded size.
+    pub source_size: (u32, u32),
     pub pixels: Vec<u8>,
 }
 

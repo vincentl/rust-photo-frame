@@ -13,7 +13,7 @@ use tracing::debug;
 mod decode_scale;
 #[cfg(test)]
 pub(crate) mod scaled_decode_tests;
-pub use decode_scale::{DecodeScaling, DecodeTarget};
+pub use decode_scale::{DecodeScaling, DecodeTarget, bg_sample_scale, decoded_suffices};
 
 /// Upper bound on peak allocation while decoding a single image. On a
 /// memory-constrained Pi a pathological image (e.g. a multi-gigapixel scan or
@@ -24,6 +24,8 @@ const MAX_DECODE_ALLOC_BYTES: u64 = 512 * 1024 * 1024;
 
 /// A JPEG decoded straight from DCT coefficients at a reduced scale.
 struct ScaledJpeg {
+    /// Cropped to `decode_scale::scaled_len` on each axis, in the file's
+    /// (unrotated) orientation.
     img: image::RgbaImage,
     /// DCT scale as `n/8`; `1`, `2` or `4` (`8` is never routed here).
     idct: u8,
@@ -31,107 +33,135 @@ struct ScaledJpeg {
     source: (u16, u16),
 }
 
+/// An image ready for the viewer.
+pub(crate) struct DecodedPhoto {
+    /// Oriented pixels, possibly reduced (see `source_size`).
+    pub image: image::RgbaImage,
+    /// Size of the original photo in its displayed orientation.
+    pub source_size: (u32, u32),
+}
+
+/// Allocation guard for the scaled path. The `image` path charges
+/// `MAX_DECODE_ALLOC_BYTES` against the decoded buffer (width x height x
+/// components); apply the same accounting to what jpeg-decoder holds, which is
+/// that size again for a progressive stream (it keeps all coefficients at full
+/// size, two bytes each). Over the bound the caller defers to the `image` path
+/// rather than rejecting, so whether a photo is accepted never depends on the
+/// scale chosen.
+fn within_scaled_decode_bound(width: u16, height: u16, components: u64, progressive: bool) -> bool {
+    let bytes_per_sample: u64 = if progressive { 2 } else { 1 };
+    width as u64 * height as u64 * components * bytes_per_sample <= MAX_DECODE_ALLOC_BYTES
+}
+
 /// Try to decode a JPEG at the smallest DCT scale that covers `target`.
 ///
-/// `Ok(None)` means "use the `image` crate": the scale came out as full size,
-/// jpeg-decoder rejected the stream (CMYK, arithmetic coding, 12-bit, ...),
-/// or its output did not cover the required size. `Err` is a hard rejection
-/// (the source is over the allocation guard) that the fallback must not
-/// override.
+/// `None` means "use the `image` crate": the scale came out as full size,
+/// the source is large enough that the `image` path should be the one to
+/// accept or reject it, jpeg-decoder rejected the stream (CMYK, arithmetic
+/// coding, 12-bit, ...), or its output did not cover the required size.
 fn decode_jpeg_scaled<R: std::io::Read>(
     reader: R,
     orientation: u16,
     target: &DecodeTarget,
-) -> anyhow::Result<Option<ScaledJpeg>> {
-    use jpeg_decoder::PixelFormat;
+) -> Option<ScaledJpeg> {
+    use jpeg_decoder::{CodingProcess, PixelFormat};
 
     let mut decoder = jpeg_decoder::Decoder::new(reader);
     decoder.set_max_decoding_buffer_size(MAX_DECODE_ALLOC_BYTES as usize);
     if let Err(err) = decoder.read_info() {
         debug!("jpeg-decoder rejected header, using image crate: {err}");
-        return Ok(None);
+        return None;
     }
-    let Some(info) = decoder.info() else {
-        return Ok(None);
+    let info = decoder.info()?;
+    let components: u64 = match info.pixel_format {
+        PixelFormat::RGB24 => 3,
+        PixelFormat::L8 => 1,
+        other => {
+            debug!("jpeg pixel format {other:?} unsupported by scaled decode, using image crate");
+            return None;
+        }
     };
-    if !matches!(info.pixel_format, PixelFormat::RGB24 | PixelFormat::L8) {
-        debug!(
-            "jpeg pixel format {:?} unsupported by scaled decode, using image crate",
-            info.pixel_format
-        );
-        return Ok(None);
-    }
     let (file_w, file_h) = (info.width, info.height);
 
     let (idct, need_w, need_h) = decode_scale::plan(file_w, file_h, orientation, target);
     if idct >= 8 {
-        return Ok(None);
+        return None;
     }
 
-    // The image-crate path is bounded by `MAX_DECODE_ALLOC_BYTES` on the RGBA
-    // it would build from the full-size source; hold the scaled path to the
-    // same bound on the source so that an over-limit image is rejected
-    // identically whichever decoder would have handled it.
-    let full_rgba_bytes = file_w as u64 * file_h as u64 * 4;
-    if full_rgba_bytes > MAX_DECODE_ALLOC_BYTES {
-        anyhow::bail!(
-            "image of {file_w}x{file_h} exceeds the {MAX_DECODE_ALLOC_BYTES}-byte decode limit"
-        );
+    let progressive = info.coding_process == CodingProcess::DctProgressive;
+    if !within_scaled_decode_bound(file_w, file_h, components, progressive) {
+        debug!("{file_w}x{file_h} jpeg over the scaled-decode memory bound, using image crate");
+        return None;
     }
 
     // `scale` picks the smallest scale that covers *either* requested axis, so
     // pass the exact output width of the scale chosen above and an
     // unsatisfiable height: the width alone then decides, and the returned
     // size says what we actually got.
-    let expected = (
-        decode_scale::scaled_len(file_w, idct),
-        decode_scale::scaled_len(file_h, idct),
-    );
-    let request_w = expected.0.min(u16::MAX as u32) as u16;
+    let expected_w = decode_scale::dct_len(file_w, idct);
+    let request_w = expected_w.min(u16::MAX as u32) as u16;
     let (out_w, out_h) = match decoder.scale(request_w, u16::MAX) {
         Ok(size) => size,
         Err(err) => {
             debug!("jpeg-decoder scale failed, using image crate: {err}");
-            return Ok(None);
+            return None;
         }
     };
-    if (out_w as u32) < need_w || (out_h as u32) < need_h {
-        // Never undershoot the rect: decode in full instead.
-        debug!("scaled jpeg {out_w}x{out_h} would undershoot {need_w}x{need_h}, using image crate");
-        return Ok(None);
+    // jpeg-decoder pads the last partial block, so its output is ceil(len*n/8)
+    // pixels of which the last may be replicated edge. Keep only the exact
+    // scaled extent so the buffer spans the photo and nothing more.
+    let (w, h) = (
+        decode_scale::scaled_len(file_w, idct),
+        decode_scale::scaled_len(file_h, idct),
+    );
+    let got = (out_w as u32, out_h as u32);
+    if got
+        != (
+            decode_scale::dct_len(file_w, idct),
+            decode_scale::dct_len(file_h, idct),
+        )
+        || w > got.0
+        || h > got.1
+        || w < need_w
+        || h < need_h
+    {
+        // Not the scale we planned, or it would undershoot the rect: decode in
+        // full instead.
+        debug!("scaled jpeg {got:?} unusable for {need_w}x{need_h}, using image crate");
+        return None;
     }
 
     let pixels = match decoder.decode() {
         Ok(pixels) => pixels,
         Err(err) => {
             debug!("jpeg-decoder failed, using image crate: {err}");
-            return Ok(None);
+            return None;
         }
     };
-    let (w, h) = (out_w as u32, out_h as u32);
-    let pixel_count = w as usize * h as usize;
-    let mut rgba = Vec::with_capacity(pixel_count * 4);
-    match info.pixel_format {
-        PixelFormat::RGB24 if pixels.len() == pixel_count * 3 => {
-            for px in pixels.chunks_exact(3) {
+    let stride = got.0 as usize;
+    let comps = components as usize;
+    if pixels.len() != stride * got.1 as usize * comps {
+        return None;
+    }
+    let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
+    for row in pixels.chunks_exact(stride * comps).take(h as usize) {
+        let row = &row[..w as usize * comps];
+        if comps == 3 {
+            for px in row.chunks_exact(3) {
                 rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
             }
-        }
-        PixelFormat::L8 if pixels.len() == pixel_count => {
-            for &v in &pixels {
+        } else {
+            for &v in row {
                 rgba.extend_from_slice(&[v, v, v, 255]);
             }
         }
-        _ => return Ok(None),
     }
-    let Some(img) = image::RgbaImage::from_raw(w, h, rgba) else {
-        return Ok(None);
-    };
-    Ok(Some(ScaledJpeg {
+    let img = image::RgbaImage::from_raw(w, h, rgba)?;
+    Some(ScaledJpeg {
         img,
         idct,
         source: (file_w, file_h),
-    }))
+    })
 }
 
 // Decodes an image to RGBA8 and applies EXIF orientation if available.
@@ -145,17 +175,23 @@ fn decode_jpeg_scaled<R: std::io::Read>(
 // orientation (EXIF rotations of 90/270 swap the axes first). The covering
 // rect is the contained fit, or the cover fit when `fill-when-fits` is
 // configured, or the blurred-background sample, whichever is largest (see
-// `decode_scale`). The texture that reaches the GPU is the same size as
-// from a full decode.
+// `decode_scale`). jpeg-decoder pads its output to whole blocks, so the
+// buffer is cropped to the exact scaled extent (`len * n / 8`, rounded), which
+// keeps its aspect and edges true to the photo. The result is at most the
+// size of a full decode; `DecodedPhoto::source_size` carries the original
+// photo's size for everything that reasons about the photo itself (fill
+// eligibility, and the matting worker's check that a reduced decode still
+// covers the canvas it is drawn into, which may have changed since).
 //
 // Fallbacks, all of which are a plain full-size `image` crate decode:
 //   - `scaling` is `None` (canvas not yet known, or photo effects are on and
 //     work in source pixels);
 //   - the file is not a JPEG, or the smallest covering scale is full size;
 //   - jpeg-decoder rejects the stream (CMYK, arithmetic coding, 12-bit, ...),
-//     fails mid-decode, or its output would not cover the required size.
-// The one exception is a source over `MAX_DECODE_ALLOC_BYTES` (as full-size
-// RGBA), which is rejected on either path rather than retried.
+//     fails mid-decode, or its output would not cover the required size;
+//   - the source is over the allocation bound as jpeg-decoder would hold it:
+//     the `image` path then accepts or rejects it by its own accounting, so
+//     acceptance does not depend on the scale.
 //
 // Orientation handling is a best-effort; if metadata is missing, the original
 // orientation is preserved. The file is opened only once: EXIF is read first, then
@@ -164,7 +200,7 @@ fn decode_jpeg_scaled<R: std::io::Read>(
 pub(crate) fn decode_rgba8_apply_exif(
     path: &Path,
     scaling: Option<DecodeTarget>,
-) -> anyhow::Result<image::RgbaImage> {
+) -> anyhow::Result<DecodedPhoto> {
     let file = File::open(path)?;
     let mut buf = BufReader::new(file);
 
@@ -185,9 +221,9 @@ pub(crate) fn decode_rgba8_apply_exif(
     let format = reader.format();
     let mut buf = reader.into_inner();
 
-    let mut scaled: Option<image::RgbaImage> = None;
+    let mut scaled: Option<(image::RgbaImage, (u16, u16))> = None;
     if let (Some(target), Some(image::ImageFormat::Jpeg)) = (scaling, format) {
-        if let Some(jpeg) = decode_jpeg_scaled(&mut buf, orientation, &target)? {
+        if let Some(jpeg) = decode_jpeg_scaled(&mut buf, orientation, &target) {
             debug!(
                 path = %path.display(),
                 scale = %format!("{}/8", jpeg.idct),
@@ -199,22 +235,26 @@ pub(crate) fn decode_rgba8_apply_exif(
                 canvas_h = target.canvas_h,
                 "jpeg_scaled_decode"
             );
-            scaled = Some(jpeg.img);
+            scaled = Some((jpeg.img, jpeg.source));
         } else {
             buf.seek(std::io::SeekFrom::Start(0))?;
         }
     }
 
-    let mut img = match scaled {
-        Some(img) => img,
+    let (mut img, stored_source) = match scaled {
+        Some((img, source)) => (img, Some(source)),
         None => {
             let mut reader = image::ImageReader::new(buf).with_guessed_format()?;
             let mut limits = image::Limits::default();
             limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
             reader.limits(limits);
-            reader.decode()?.to_rgba8()
+            (reader.decode()?.to_rgba8(), None)
         }
     };
+    // Original size in the stored orientation, before any EXIF rotation.
+    let stored_source = stored_source
+        .map(|(w, h)| (w as u32, h as u32))
+        .unwrap_or_else(|| img.dimensions());
 
     // Map common EXIF orientations. Unsupported cases fall through as-is.
     match orientation {
@@ -251,7 +291,15 @@ pub(crate) fn decode_rgba8_apply_exif(
         _ => {}
     }
 
-    Ok(img)
+    let source_size = if decode_scale::orientation_swaps_axes(orientation) {
+        (stored_source.1, stored_source.0)
+    } else {
+        stored_source
+    };
+    Ok(DecodedPhoto {
+        image: img,
+        source_size,
+    })
 }
 
 /// Very simple loader:
@@ -271,7 +319,7 @@ pub async fn run(
         std::collections::HashSet::new();
     // Each decode carries the sequence number it was requested in, so results can
     // be emitted in request order even though they finish out of order.
-    let mut tasks: JoinSet<(u64, std::path::PathBuf, Option<image::RgbaImage>)> = JoinSet::new();
+    let mut tasks: JoinSet<(u64, std::path::PathBuf, Option<DecodedPhoto>)> = JoinSet::new();
     let mut next_seq: u64 = 0;
     let mut reorder = ReorderBuffer::new();
     let mut pending_ready: Option<ReadyPhoto> = None;
@@ -316,10 +364,10 @@ pub async fn run(
                     in_flight.remove(&path);
                     let priority = priority_inflight.remove(&path);
                     match maybe_img {
-                        Some(rgba8) => {
+                        Some(DecodedPhoto { image: rgba8, source_size }) => {
                             debug!("loaded (rgba8): {}", path.display());
                             let (width, height) = rgba8.dimensions();
-                            let prepared = PreparedImageCpu { path: path.clone(), width, height, pixels: rgba8.into_raw() };
+                            let prepared = PreparedImageCpu { path: path.clone(), width, height, source_size, pixels: rgba8.into_raw() };
                             let event = PhotoLoaded { prepared, priority };
                             reorder.insert(seq, Some(ReadyPhoto { path, event }));
                         }
@@ -441,6 +489,7 @@ mod tests {
             path: path_buf.clone(),
             width: 1,
             height: 1,
+            source_size: (1, 1),
             pixels: vec![0, 0, 0, 0],
         };
         ReadyPhoto {
@@ -466,7 +515,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("orient6.jpg");
         std::fs::write(&path, &bytes).unwrap();
-        let img = decode_rgba8_apply_exif(&path, None).unwrap();
+        let img = decode_rgba8_apply_exif(&path, None).unwrap().image;
         assert_eq!(img.dimensions(), (1, 2));
     }
 

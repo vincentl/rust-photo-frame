@@ -34,38 +34,42 @@ struct DecodeNeeds {
     bg_sample_scale: Option<f32>,
 }
 
+/// The fraction of the canvas at which `style` samples a cover-cropped copy of
+/// the photo for its background, or `None` when the mat draws no such
+/// background. Mirrors the viewer: the sample is only shrunk when the blur
+/// actually runs, and the scale is clamped to `0.01..=1`.
+pub fn bg_sample_scale(style: &MattingMode) -> Option<f32> {
+    match style {
+        MattingMode::Blur {
+            sigma,
+            sample_scale,
+            ..
+        }
+        | MattingMode::CinematicBlur {
+            sigma,
+            sample_scale,
+            ..
+        } => Some(if *sigma > 0.0 {
+            let scale = if sample_scale.is_finite() {
+                *sample_scale
+            } else {
+                MattingMode::default_blur_sample_scale()
+            };
+            scale.clamp(0.01, 1.0)
+        } else {
+            1.0
+        }),
+        _ => None,
+    }
+}
+
 impl DecodeNeeds {
     fn from_matting(matting: &MattingConfig) -> Self {
-        let mut bg: Option<f32> = None;
-        for option in matting.options() {
-            let scale = match &option.style {
-                MattingMode::Blur {
-                    sigma,
-                    sample_scale,
-                    ..
-                }
-                | MattingMode::CinematicBlur {
-                    sigma,
-                    sample_scale,
-                    ..
-                } => {
-                    // Mirrors the viewer: the sample is only shrunk when the
-                    // blur actually runs, and the scale is clamped to 0.01..=1.
-                    if *sigma > 0.0 {
-                        let scale = if sample_scale.is_finite() {
-                            *sample_scale
-                        } else {
-                            MattingMode::default_blur_sample_scale()
-                        };
-                        scale.clamp(0.01, 1.0)
-                    } else {
-                        1.0
-                    }
-                }
-                _ => continue,
-            };
-            bg = Some(bg.map_or(scale, |prev| prev.max(scale)));
-        }
+        let bg = matting
+            .options()
+            .iter()
+            .filter_map(|option| bg_sample_scale(&option.style))
+            .reduce(f32::max);
         Self {
             cover: matting.fill_when_fits().is_some(),
             bg_sample_scale: bg,
@@ -172,9 +176,19 @@ pub fn required_size(disp_w: u32, disp_h: u32, target: &DecodeTarget) -> (u32, u
     (need(sw), need(sh))
 }
 
-/// Output length of one axis at DCT scale `idct/8` (ceil, as jpeg-decoder).
-pub fn scaled_len(len: u16, idct: u8) -> u32 {
+/// Output length of one axis at DCT scale `idct/8` as jpeg-decoder reports it
+/// (rounded up: the last partial block is padded with replicated edge pixels).
+pub fn dct_len(len: u16, idct: u8) -> u32 {
     (len as u32 * idct as u32).div_ceil(8)
+}
+
+/// Length of one axis of the image the loader hands on at DCT scale `idct/8`:
+/// the exact scaled length `len * idct / 8`, rounded to the nearest pixel.
+/// The padded remainder of jpeg-decoder's output is cropped away, so the
+/// buffer spans the whole photo (to within half a pixel) and the viewer's
+/// resample of it does not stretch the frame.
+pub fn scaled_len(len: u16, idct: u8) -> u32 {
+    ((len as u32 * idct as u32 + 4) / 8).max(1)
 }
 
 /// The smallest DCT scale (`n/8`) whose output covers `need` on both axes, in
@@ -184,6 +198,34 @@ pub fn choose_idct_size(file_w: u16, file_h: u16, need_w: u32, need_h: u32) -> u
         .into_iter()
         .find(|&n| scaled_len(file_w, n) >= need_w && scaled_len(file_h, n) >= need_h)
         .unwrap_or(8)
+}
+
+/// Whether `decoded` pixels (of a photo whose original size is `source`, both
+/// in the displayed orientation) still cover everything the viewer will draw
+/// from them into `canvas`: the contained photo, the cover fit when `cover`,
+/// and a blurred background sampled at `bg_sample_scale`. Used by the matting
+/// worker to catch photos decoded for a canvas that has since changed.
+pub fn decoded_suffices(
+    decoded: (u32, u32),
+    source: (u32, u32),
+    canvas: (u32, u32),
+    cover: bool,
+    bg_sample_scale: Option<f32>,
+) -> bool {
+    if decoded == source {
+        return true;
+    }
+    let (need_w, need_h) = required_size(
+        source.0,
+        source.1,
+        &DecodeTarget {
+            canvas_w: canvas.0,
+            canvas_h: canvas.1,
+            cover,
+            bg_sample_scale,
+        },
+    );
+    decoded.0 >= need_w && decoded.1 >= need_h
 }
 
 /// Plan the scale for a JPEG of `file_w` x `file_h` stored pixels that EXIF

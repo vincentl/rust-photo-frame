@@ -76,6 +76,7 @@ fn dims_for(megapixels: f64, a: f64, b: f64) -> (u16, u16) {
 const MEGAPIXELS: [f64; 3] = [12.0, 24.0, 48.0];
 const ASPECTS: [(f64, f64); 2] = [(3.0, 2.0), (4.0, 3.0)];
 const ORIENTATIONS: [u16; 3] = [1, 6, 8];
+const ALL_ORIENTATIONS: [u16; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 
 #[test]
 fn chosen_scale_never_undershoots_the_photo_rect() {
@@ -97,7 +98,7 @@ fn chosen_scale_never_undershoots_the_photo_rect() {
     ];
     for mp in MEGAPIXELS {
         for (a, b) in ASPECTS {
-            for orientation in ORIENTATIONS {
+            for orientation in ALL_ORIENTATIONS {
                 for target in &targets {
                     let (fw, fh) = dims_for(mp, a, b);
                     let (idct, need_w, need_h) = decode_scale::plan(fw, fh, orientation, target);
@@ -124,20 +125,16 @@ fn chosen_scale_never_undershoots_the_photo_rect() {
                     } else {
                         (fw, fh)
                     };
+                    // Independent of the production helper: nearest pixel of len*n/8.
+                    let out = |len: u16| ((len as f64 * idct as f64 / 8.0) + 0.5).floor();
                     let (out_dw, out_dh) = if decode_scale::orientation_swaps_axes(orientation) {
-                        (
-                            decode_scale::scaled_len(fh, idct),
-                            decode_scale::scaled_len(fw, idct),
-                        )
+                        (out(fh), out(fw))
                     } else {
-                        (
-                            decode_scale::scaled_len(fw, idct),
-                            decode_scale::scaled_len(fh, idct),
-                        )
+                        (out(fw), out(fh))
                     };
                     let fit = (3840.0 / dw as f64).min(2160.0 / dh as f64).min(1.0);
-                    assert!(out_dw as f64 + 1e-6 >= dw as f64 * fit, "{ctx}");
-                    assert!(out_dh as f64 + 1e-6 >= dh as f64 * fit, "{ctx}");
+                    assert!(out_dw + 1e-6 >= dw as f64 * fit, "{ctx}");
+                    assert!(out_dh + 1e-6 >= dh as f64 * fit, "{ctx}");
                 }
             }
         }
@@ -247,8 +244,8 @@ fn decode_picks_scale_per_size_aspect_and_orientation() {
             let expected = [1u8, 2, 4, 8]
                 .into_iter()
                 .find(|&n| {
-                    let ow = (dw as f64 * n as f64 / 8.0).ceil();
-                    let oh = (dh as f64 * n as f64 / 8.0).ceil();
+                    let ow = (dw as f64 * n as f64 / 8.0 + 0.5).floor();
+                    let oh = (dh as f64 * n as f64 / 8.0 + 0.5).floor();
                     ow + 1e-6 >= dw as f64 * fit && oh + 1e-6 >= dh as f64 * fit
                 })
                 .unwrap();
@@ -256,8 +253,7 @@ fn decode_picks_scale_per_size_aspect_and_orientation() {
                 assert_eq!(expected, expected_landscape, "{w}x{h}");
             }
 
-            let scaled =
-                decode_jpeg_scaled(std::io::Cursor::new(&bytes), orientation, &target).unwrap();
+            let scaled = decode_jpeg_scaled(std::io::Cursor::new(&bytes), orientation, &target);
             match (&scaled, expected) {
                 (None, 8) => {}
                 (Some(jpeg), n) if n < 8 => assert_eq!(jpeg.idct, n, "{w}x{h} o{orientation}"),
@@ -265,9 +261,11 @@ fn decode_picks_scale_per_size_aspect_and_orientation() {
             }
 
             // End to end: orientation applied, covers the contained fit.
-            let img = decode_rgba8_apply_exif(&path, Some(target)).unwrap();
-            let full = decode_rgba8_apply_exif(&path, None).unwrap();
+            let photo = decode_rgba8_apply_exif(&path, Some(target)).unwrap();
+            let img = photo.image;
+            let full = decode_rgba8_apply_exif(&path, None).unwrap().image;
             assert_eq!(full.dimensions(), (dw, dh));
+            assert_eq!(photo.source_size, (dw, dh), "source size is the original's");
             assert!(img.width() as f64 + 1e-6 >= dw as f64 * fit);
             assert!(img.height() as f64 + 1e-6 >= dh as f64 * fit);
             if expected == 8 {
@@ -275,8 +273,9 @@ fn decode_picks_scale_per_size_aspect_and_orientation() {
                 assert_eq!(img.as_raw(), full.as_raw(), "full scale is bit-identical");
             } else {
                 let k = 8.0 / expected as f64;
-                assert_eq!(img.width(), (dw as f64 / k).ceil() as u32);
-                assert_eq!(img.height(), (dh as f64 / k).ceil() as u32);
+                // Exact scaled extent, rounded: the padded block remainder is cropped.
+                assert_eq!(img.width(), (dw as f64 / k + 0.5).floor() as u32);
+                assert_eq!(img.height(), (dh as f64 / k + 0.5).floor() as u32);
             }
         }
     }
@@ -287,8 +286,10 @@ fn scaled_decode_matches_full_decode_after_resample() {
     // Resample both decodes to the contained photo rect and compare.
     let bytes = synthetic_jpeg(1000, 750, 1);
     let (_dir, path) = write_temp(&bytes, "photo.jpg");
-    let scaled = decode_rgba8_apply_exif(&path, Some(small_target())).unwrap();
-    let full = decode_rgba8_apply_exif(&path, None).unwrap();
+    let scaled = decode_rgba8_apply_exif(&path, Some(small_target()))
+        .unwrap()
+        .image;
+    let full = decode_rgba8_apply_exif(&path, None).unwrap().image;
     assert_eq!(scaled.dimensions(), (500, 375));
     assert_eq!(full.dimensions(), (1000, 750));
     let a = image::imageops::resize(&scaled, 360, 270, image::imageops::FilterType::Triangle);
@@ -323,8 +324,9 @@ fn png_decodes_through_the_image_crate() {
         rgb.save(&path).unwrap();
         (dir, path)
     };
-    let img = decode_rgba8_apply_exif(&path, Some(small_target())).unwrap();
-    assert_eq!(img.dimensions(), (1000, 750), "PNG is never scaled");
+    let photo = decode_rgba8_apply_exif(&path, Some(small_target())).unwrap();
+    assert_eq!(photo.image.dimensions(), (1000, 750), "PNG is never scaled");
+    assert_eq!(photo.source_size, (1000, 750));
 }
 
 /// A 64x64, four-component (CMYK-style) baseline JPEG of flat mid-grey blocks.
@@ -382,14 +384,14 @@ fn jpeg_rejected_by_scaled_path_falls_back_to_image_crate() {
         bg_sample_scale: None,
     };
     // The scaled path declines it ...
-    let declined = decode_jpeg_scaled(std::io::Cursor::new(&bytes), 1, &target).unwrap();
+    let declined = decode_jpeg_scaled(std::io::Cursor::new(&bytes), 1, &target);
     assert!(declined.is_none());
     // ... and the image crate path is what decodes it, identically with or
     // without a target.
     let (_dir, path) = write_temp(&bytes, "cmyk.jpg");
     let with = decode_rgba8_apply_exif(&path, Some(target));
     let without = decode_rgba8_apply_exif(&path, None);
-    let (with, without) = (with.unwrap(), without.unwrap());
+    let (with, without) = (with.unwrap().image, without.unwrap().image);
     assert_eq!(with.dimensions(), (64, 64));
     assert_eq!(with.as_raw(), without.as_raw());
 }
@@ -404,6 +406,187 @@ fn garbage_after_a_valid_header_falls_back_without_panicking() {
     // Whatever the image crate makes of a truncated file, the scaled request
     // must not change the outcome class.
     assert_eq!(scaled.is_ok(), full.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Textured, non-multiple-of-8 fixtures in several JPEG flavours.
+// ---------------------------------------------------------------------------
+
+/// Photo-like content: smooth gradients plus fine texture and hard edges, so a
+/// resample of a mis-sized or stretched buffer visibly disagrees.
+pub(crate) fn textured_rgb(w: u32, h: u32) -> RgbImage {
+    let mut rgb = smooth_rgb(w, h);
+    for (x, y, px) in rgb.enumerate_pixels_mut() {
+        let hash = x
+            .wrapping_mul(2654435761)
+            .wrapping_add(y.wrapping_mul(40503))
+            .rotate_left(13)
+            .wrapping_mul(2246822519);
+        let noise = ((hash >> 24) as i32 - 128) / 16; // +-8 levels of grain
+        let stripe = (((x as f32) * 0.9).sin() * ((y as f32) * 0.7).cos() * 14.0) as i32;
+        let edge = if (x / 37 + y / 29) % 5 == 0 { 28 } else { 0 };
+        for c in px.0.iter_mut() {
+            *c = (*c as i32 + noise + stripe + edge).clamp(0, 255) as u8;
+        }
+    }
+    rgb
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Flavor {
+    Baseline444,
+    Baseline422,
+    Baseline420,
+    Progressive420,
+    Gray,
+}
+
+pub(crate) const FLAVORS: [Flavor; 5] = [
+    Flavor::Baseline444,
+    Flavor::Baseline422,
+    Flavor::Baseline420,
+    Flavor::Progressive420,
+    Flavor::Gray,
+];
+
+/// A textured `w` x `h` JPEG of the given flavour stored with `orientation`.
+pub(crate) fn photo_jpeg(w: u32, h: u32, orientation: u16, flavor: Flavor) -> Vec<u8> {
+    use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
+    let rgb = textured_rgb(w, h);
+    let mut out = Vec::new();
+    let mut enc = Encoder::new(&mut out, 92);
+    let (data, color) = match flavor {
+        Flavor::Gray => (
+            image::DynamicImage::ImageRgb8(rgb).to_luma8().into_raw(),
+            ColorType::Luma,
+        ),
+        _ => (rgb.into_raw(), ColorType::Rgb),
+    };
+    match flavor {
+        Flavor::Baseline444 => enc.set_sampling_factor(SamplingFactor::F_1_1),
+        Flavor::Baseline422 => enc.set_sampling_factor(SamplingFactor::F_2_1),
+        Flavor::Baseline420 | Flavor::Progressive420 => {
+            enc.set_sampling_factor(SamplingFactor::F_2_2)
+        }
+        Flavor::Gray => {}
+    }
+    enc.set_progressive(matches!(flavor, Flavor::Progressive420));
+    enc.encode(&data, w as u16, h as u16, color).unwrap();
+    with_exif_orientation(&out, orientation)
+}
+
+/// Triangle-resample both to the contained fit of `fit_w` x `fit_h` and score.
+fn resampled_psnr(a: &image::RgbaImage, b: &image::RgbaImage, fit: (u32, u32)) -> f64 {
+    let f = image::imageops::FilterType::Triangle;
+    psnr_rgb(
+        &image::imageops::resize(a, fit.0, fit.1, f),
+        &image::imageops::resize(b, fit.0, fit.1, f),
+    )
+}
+
+/// The contained fit, in pixels, of `dims` on `canvas`.
+fn contain(dims: (u32, u32), canvas: (u32, u32)) -> (u32, u32) {
+    let s = (canvas.0 as f64 / dims.0 as f64)
+        .min(canvas.1 as f64 / dims.1 as f64)
+        .min(1.0);
+    (
+        (dims.0 as f64 * s).round().max(1.0) as u32,
+        (dims.1 as f64 * s).round().max(1.0) as u32,
+    )
+}
+
+fn small_canvas_target(canvas: (u32, u32)) -> DecodeTarget {
+    DecodeTarget {
+        canvas_w: canvas.0,
+        canvas_h: canvas.1,
+        cover: false,
+        bg_sample_scale: None,
+    }
+}
+
+/// jpeg-decoder's own padded output (ceil(len*n/8), the pad replicated edge
+/// data), as an RGBA image: what the loader handed on before cropping.
+fn uncropped_scaled(bytes: &[u8], idct_target: (u16, u16)) -> image::RgbaImage {
+    let mut d = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+    d.scale(idct_target.0, idct_target.1).unwrap();
+    let px = d.decode().unwrap();
+    let info = d.info().unwrap();
+    let mut rgba = Vec::new();
+    for c in px.chunks_exact(3) {
+        rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+    }
+    image::RgbaImage::from_raw(info.width as u32, info.height as u32, rgba).unwrap()
+}
+
+#[test]
+fn reduced_decode_is_cropped_to_the_exact_scaled_extent() {
+    // 997x749 at 1/4: jpeg-decoder returns 250x188 (ceil of 249.25 x 187.25);
+    // the loader must hand on 249x187. Canvas chosen so 1/4 is the plan.
+    let (w, h) = (997u32, 749u32);
+    let canvas = (240u32, 135u32);
+    let bytes = photo_jpeg(w, h, 1, Flavor::Baseline420);
+    let target = small_canvas_target(canvas);
+
+    let jpeg = decode_jpeg_scaled(std::io::Cursor::new(&bytes), 1, &target).expect("reduced");
+    assert_eq!(jpeg.idct, 2);
+    assert_eq!(jpeg.img.dimensions(), (249, 187));
+
+    // The matting resample of the cropped buffer tracks the full decode ...
+    let (_dir, path) = write_temp(&bytes, "photo.jpg");
+    let full = decode_rgba8_apply_exif(&path, None).unwrap().image;
+    let fit = contain((w, h), canvas);
+    let cropped = resampled_psnr(&jpeg.img, &full, fit);
+    // ... and the padded buffer it replaces stretches the frame measurably.
+    let padded = uncropped_scaled(&bytes, (250, 188));
+    assert_eq!(padded.dimensions(), (250, 188));
+    let stretched = resampled_psnr(&padded, &full, fit);
+    assert!(
+        cropped > stretched + 1.0,
+        "cropped {cropped:.1} dB should beat the padded buffer's {stretched:.1} dB"
+    );
+    assert!(cropped > 36.0, "cropped PSNR {cropped:.1} dB");
+}
+
+#[test]
+fn reduced_decode_matches_full_decode_for_every_flavour_and_orientation() {
+    // Deliberately not multiples of 8, on a canvas about half the source:
+    // planned at 1/2.
+    let (w, h) = (499u32, 375u32);
+    let canvas = (240u32, 135u32);
+    for flavor in FLAVORS {
+        for orientation in ALL_ORIENTATIONS {
+            let ctx = format!("{flavor:?} orientation {orientation}");
+            let bytes = photo_jpeg(w, h, orientation, flavor);
+            let (_dir, path) = write_temp(&bytes, "photo.jpg");
+            let swapped = decode_scale::orientation_swaps_axes(orientation);
+            let (dw, dh) = if swapped { (h, w) } else { (w, h) };
+
+            let photo = decode_rgba8_apply_exif(&path, Some(small_canvas_target(canvas))).unwrap();
+            let full = decode_rgba8_apply_exif(&path, None).unwrap().image;
+            assert_eq!(full.dimensions(), (dw, dh), "{ctx}");
+            assert_eq!(photo.source_size, (dw, dh), "{ctx}");
+            assert!(photo.image.width() < dw, "{ctx}: expected a reduced decode");
+
+            let fit = contain((dw, dh), canvas);
+            assert!(
+                photo.image.width() >= fit.0 && photo.image.height() >= fit.1,
+                "{ctx}"
+            );
+            let psnr = resampled_psnr(&photo.image, &full, fit);
+            assert!(psnr > 38.0, "{ctx}: PSNR {psnr:.1} dB");
+        }
+    }
+}
+
+#[test]
+fn guard_does_not_depend_on_scale_or_reject() {
+    // RGB and gray accounting mirrors the image crate's w*h*components.
+    assert!(within_scaled_decode_bound(12000, 12000, 3, false)); // 432 MB
+    assert!(within_scaled_decode_bound(20000, 20000, 1, false)); // gray 400 MB
+    assert!(!within_scaled_decode_bound(16000, 12000, 3, false)); // 576 MB
+    // Progressive keeps full-size coefficients: twice the footprint.
+    assert!(!within_scaled_decode_bound(12000, 12000, 3, true));
+    assert!(within_scaled_decode_bound(8000, 6000, 3, true));
 }
 
 /// Manual measurement, not a regression test. Run once to write the fixture,
@@ -421,7 +604,7 @@ fn bench_48mp() {
     let mode = std::env::var("PF_BENCH").unwrap_or_else(|_| "full".into());
     let target = (mode == "scaled").then(target_4k);
     let start = std::time::Instant::now();
-    let img = decode_rgba8_apply_exif(&path, target).unwrap();
+    let img = decode_rgba8_apply_exif(&path, target).unwrap().image;
     println!(
         "bench_48mp mode={mode} decoded {}x{} ({} MB RGBA) in {:?}",
         img.width(),
