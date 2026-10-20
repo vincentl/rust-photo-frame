@@ -62,7 +62,6 @@ impl DisplaySizes {
     }
 
     /// The recorded displayed size, `None` when unknown or not in inventory.
-    #[cfg(test)]
     pub fn get(&self, path: &Path) -> Option<(u32, u32)> {
         self.sizes.get(path).copied().flatten()
     }

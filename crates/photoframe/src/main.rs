@@ -59,6 +59,21 @@ struct Args {
     /// Deterministic RNG seed for playlist shuffling (applies to dry-run and live modes)
     #[arg(long = "playlist-seed", value_name = "SEED")]
     playlist_seed: Option<u64>,
+    /// Dry run with portrait pairing: the matting canvas (screen x oversample)
+    /// pairability is judged on
+    #[arg(long = "canvas", value_name = "WxH", default_value = "3840x2160", value_parser = parse_canvas)]
+    canvas: (u32, u32),
+}
+
+fn parse_canvas(value: &str) -> Result<(u32, u32), String> {
+    let (w, h) = value
+        .split_once(['x', 'X'])
+        .ok_or_else(|| format!("expected WxH, got {value:?}"))?;
+    let parse = |s: &str| s.trim().parse::<u32>().ok().filter(|v| *v > 0);
+    match (parse(w), parse(h)) {
+        (Some(w), Some(h)) => Ok((w, h)),
+        _ => Err(format!("expected positive WxH, got {value:?}")),
+    }
 }
 
 #[tokio::main]
@@ -77,6 +92,7 @@ async fn main() -> Result<()> {
         playlist_now,
         playlist_dry_run,
         playlist_seed,
+        canvas,
     } = Args::parse();
 
     let now_override = match playlist_now {
@@ -97,7 +113,7 @@ async fn main() -> Result<()> {
     );
 
     if let Some(iterations) = playlist_dry_run {
-        run_playlist_dry_run(&cfg, iterations, now_override, playlist_seed)?;
+        run_playlist_dry_run(&cfg, iterations, now_override, playlist_seed, canvas)?;
         return Ok(());
     }
 
@@ -339,9 +355,17 @@ fn run_playlist_dry_run(
     iterations: usize,
     now_override: Option<SystemTime>,
     seed: Option<u64>,
+    canvas: (u32, u32),
 ) -> Result<()> {
     let now = now_override.unwrap_or_else(SystemTime::now);
-    let photos = tasks::files::discover_startup_photos(cfg)?;
+    let mut photos = tasks::files::discover_startup_photos(cfg)?;
+    let pairing = tasks::manager::pairing::PairingRules::from_config(cfg);
+    if pairing.is_some() {
+        // The dry run reads headers inline.
+        for info in &mut photos {
+            info.display_size = processing::header::read_display_size(&info.path);
+        }
+    }
 
     println!(
         "# playlist dry run\n# photos: {}\n# now: {}\n# iterations: {}\n# seed: {}\n# order: {} (min-spacing {:.3})\n",
@@ -367,6 +391,10 @@ fn run_playlist_dry_run(
         println!("  {:>5.2} × {}", weight, info.path.display());
     }
 
+    if let Some(rules) = pairing {
+        return print_paired_dry_run(cfg, &photos, &rules, canvas, now, iterations, seed);
+    }
+
     let plan = tasks::manager::simulate_playlist(
         photos.clone(),
         cfg.playlist.clone(),
@@ -384,6 +412,104 @@ fn run_playlist_dry_run(
         }
     }
 
+    Ok(())
+}
+
+/// The dry run with portrait pairing on: screens (pairs as `a + b`) and a
+/// `# pairing` block of measured values (design §2 "Dry run").
+fn print_paired_dry_run(
+    cfg: &config::Configuration,
+    photos: &[events::PhotoInfo],
+    rules: &tasks::manager::pairing::PairingRules,
+    canvas: (u32, u32),
+    now: SystemTime,
+    iterations: usize,
+    seed: Option<u64>,
+) -> Result<()> {
+    use std::collections::HashMap;
+    use tasks::manager::planner::ScreenStats;
+
+    let pairing = &cfg.playlist.pairing;
+    println!(
+        "\n# pairing: probability {} bar-ratio {} dwell-multiplier {}",
+        pairing.probability, pairing.bar_ratio, pairing.dwell_multiplier
+    );
+    println!(
+        "# canvas: {}x{} (max-upscale {}, non-zero mats {:.1}%..{:.1}%)",
+        canvas.0,
+        canvas.1,
+        rules.max_upscale,
+        rules.m_min * 100.0,
+        rules.m_max * 100.0
+    );
+
+    let pairable: HashMap<&std::path::Path, bool> = photos
+        .iter()
+        .map(|info| {
+            let ok = rules.is_pairable(info.display_size, Some(canvas));
+            (info.path.as_path(), ok)
+        })
+        .collect();
+    let is_pairable = |path: &std::path::Path| pairable.get(path).copied().unwrap_or(false);
+
+    let screens = tasks::manager::simulate_screens(
+        photos.iter().cloned(),
+        cfg.playlist.clone(),
+        Some(rules),
+        Some(canvas),
+        now,
+        iterations,
+        seed,
+    );
+
+    println!("\n# planned screens:");
+    if screens.is_empty() {
+        println!("(playlist empty)");
+    }
+    for (idx, screen) in screens.iter().enumerate() {
+        match &screen.partner {
+            Some(partner) => println!(
+                "  {:>4}: {} + {}",
+                idx + 1,
+                screen.primary.path.display(),
+                partner.path.display()
+            ),
+            None => println!("  {:>4}: {}", idx + 1, screen.primary.path.display()),
+        }
+    }
+
+    // π: the weight share of pairable photos.
+    let (mut weight_pairable, mut weight_total) = (0.0, 0.0);
+    for info in photos {
+        let weight = cfg.playlist.weight_for(info.created_at, now);
+        weight_total += weight;
+        if is_pairable(&info.path) {
+            weight_pairable += weight;
+        }
+    }
+    let pi = weight_pairable / f64::max(weight_total, f64::MIN_POSITIVE);
+    let stats = ScreenStats::measure(&screens, &is_pairable);
+    println!("\n# pairing");
+    println!(
+        "#   pairable photos: {} of {}",
+        pairable.values().filter(|ok| **ok).count(),
+        photos.len()
+    );
+    println!("#   pi (pairable weight share): {pi:.3}");
+    println!(
+        "#   screens: {} for {} appearances ({} pairs)",
+        stats.screens, stats.appearances, stats.pair_screens
+    );
+    println!(
+        "#   paired share of pairable appearances: {:.3} (2*pi*p/(1+pi*p) = {:.3}, an approximation)",
+        stats.paired_share,
+        ScreenStats::predicted_share(pi, rules.probability)
+    );
+    println!("#   repeat-partner rate: {:.3}", stats.repeat_partner_rate);
+    println!(
+        "#   consecutive-screen repeats: {} (must be 0 unless the unpaired sequence repeats a photo back to back; I5)",
+        stats.consecutive_repeats
+    );
     Ok(())
 }
 

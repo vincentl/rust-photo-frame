@@ -14,7 +14,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 pub mod pairing;
-use pairing::{DisplaySizes, LivePairing};
+pub mod planner;
+use pairing::{DisplaySizes, LivePairing, PairingRules};
+use planner::{Plan, PlannedScreen, ScreenPlanner};
 
 /// Orchestrates the playlist via a virtual-time min-heap scheduler.
 ///
@@ -592,4 +594,52 @@ where
         }
     }
     plan
+}
+
+/// The dry-run screen sequence: the scheduler's appearances grouped into
+/// screens by the back-to-back planner (`planner`). `pairing` is `None` for
+/// pairing off; `canvas` is the matting canvas pairability is judged on
+/// (`None` = not yet published, so nothing pairs). Runs until at least
+/// `iterations` appearances are planned. With pairing off every screen is
+/// solo and the flattened sequence is `simulate_playlist`'s; with pairing on
+/// it is too (P1), only grouped.
+pub fn simulate_screens<I>(
+    photos: I,
+    options: PlaylistOptions,
+    pairing: Option<&PairingRules>,
+    canvas: Option<(u32, u32)>,
+    now: SystemTime,
+    iterations: usize,
+    seed: Option<u64>,
+) -> Vec<PlannedScreen>
+where
+    I: IntoIterator<Item = PhotoInfo>,
+{
+    let mut pl = build_scheduler(options, seed, Some(now));
+    let mut sizes = DisplaySizes::default();
+    for info in photos {
+        sizes.on_added(&info);
+        pl.record_add(info);
+    }
+    let probability = pairing.map_or(0.0, |rules| rules.probability);
+    let mut planner = ScreenPlanner::new(probability, seed);
+    let is_pairable =
+        |path: &Path| pairing.is_some_and(|rules| rules.is_pairable(sizes.get(path), canvas));
+    let pairable: Option<&dyn Fn(&Path) -> bool> =
+        (pairing.is_some() && canvas.is_some()).then_some(&is_pairable as _);
+    let mut screens = Vec::new();
+    let mut appearances = 0;
+    while appearances < iterations {
+        let Some(plan) = planner.plan(pl.as_mut(), pairable) else {
+            break;
+        };
+        let screen = plan.screen();
+        if let Plan::SendThenCommit(_) = plan {
+            planner.commit_after_send(pl.as_mut());
+        }
+        planner.record_sent(&screen);
+        appearances += screen.members().count();
+        screens.push(screen);
+    }
+    screens
 }
