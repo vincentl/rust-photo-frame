@@ -1,4 +1,5 @@
 pub mod config;
+pub mod drm_display;
 pub mod events;
 pub mod gpu;
 pub mod processing;

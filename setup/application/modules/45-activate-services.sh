@@ -9,6 +9,8 @@ SYNC_SERVICE="${SYNC_SERVICE:-photoframe-sync.service}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/systemd.sh
 source "${SCRIPT_DIR}/../../lib/systemd.sh"
+# shellcheck source=../../lib/display-stack.sh
+source "${SCRIPT_DIR}/../../lib/display-stack.sh"
 
 log() {
     local level="$1"; shift
@@ -94,17 +96,17 @@ for seatd_unit in seatd.socket seatd.service; do
     fi
 done
 
-# Enable and restart greetd now that binaries are present.
-# A clean restart ensures the kiosk session picks up freshly installed binaries
-# and recreates the control socket without requiring a reboot.
-if run_sudo systemctl list-unit-files greetd.service >/dev/null 2>&1; then
-    log INFO "Enabling greetd.service"
-    reenable_clean greetd.service
-    log INFO "Restarting greetd.service with stop/sleep/start sequence"
-    run_sudo systemctl stop greetd.service >/dev/null 2>&1 || true
-    sleep 1
-    if ! run_sudo systemctl start greetd.service >/dev/null 2>&1; then
-        log WARN "Failed to start greetd.service; check 'systemctl status greetd.service'"
+# Enable and (re)start the chosen display stack now that binaries are present:
+# greetd/sway (default) or photoframe-kms.service (PHOTOFRAME_DISPLAY=kms,
+# persisted in /etc/photoframe/display.env). A clean restart picks up the
+# freshly installed binaries and recreates the control socket without a reboot.
+display_choice="$(display_stack_resolve)"
+log INFO "Display stack: ${display_choice}"
+if [[ "${display_choice}" == "wayland" ]] && ! run_sudo systemctl list-unit-files greetd.service >/dev/null 2>&1; then
+    log WARN "greetd.service not installed; run 'sudo ./setup/system/install.sh' first"
+else
+    if ! display_stack_apply "${display_choice}" start; then
+        log WARN "Display stack '${display_choice}' did not start cleanly; see the messages above"
     fi
 fi
 

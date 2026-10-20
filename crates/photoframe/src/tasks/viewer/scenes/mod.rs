@@ -14,7 +14,6 @@ use glyphon::{
 use rand::Rng;
 use wgpu::{CommandEncoder, TextureView};
 use winit::dpi::PhysicalSize;
-use winit::window::Window;
 
 use crate::config::{Configuration, MatCaption, TransitionConfig, TransitionKind};
 use crate::tasks::greeting_screen::GreetingScreen;
@@ -591,8 +590,8 @@ impl GreetingScene {
 
 impl Scene for GreetingScene {
     fn enter(&mut self, mut ctx: SceneContext<'_>) {
-        if let Some(window) = ctx.window() {
-            self.resize(window.inner_size(), window.scale_factor());
+        if let Some(viewport) = ctx.viewport() {
+            self.resize(viewport.size, viewport.scale_factor);
         }
         let message = ctx
             .config()
@@ -677,8 +676,8 @@ impl SleepScene {
 
 impl Scene for SleepScene {
     fn enter(&mut self, mut ctx: SceneContext<'_>) {
-        if let Some(window) = ctx.window() {
-            self.resize(window.inner_size(), window.scale_factor());
+        if let Some(viewport) = ctx.viewport() {
+            self.resize(viewport.size, viewport.scale_factor);
         }
         let message = ctx
             .config()
@@ -727,6 +726,10 @@ pub(super) struct WakeScene {
     displayed_at: Option<Instant>,
     pending: VecDeque<ImgTex>,
     pending_redraw: bool,
+    /// Set when a transition finalizes; taken by the viewer's wake plan so
+    /// the work deferred during the animation (uploads, matting refill) runs
+    /// right after it instead of waiting for the next event.
+    just_finalized: bool,
     dwell_ms: u64,
     transition_cfg: TransitionConfig,
 }
@@ -751,6 +754,7 @@ impl WakeScene {
             displayed_at: None,
             pending: VecDeque::new(),
             pending_redraw: false,
+            just_finalized: false,
             dwell_ms,
             transition_cfg,
         }
@@ -765,6 +769,7 @@ impl WakeScene {
         self.displayed_at = None;
         self.pending.clear();
         self.pending_redraw = false;
+        self.just_finalized = false;
     }
 
     /// Returns the currently displayed image, if present.
@@ -822,6 +827,12 @@ impl WakeScene {
         let _ = self.take_redraw_needed();
     }
 
+    /// How long a photo rests on screen before the next transition.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // read by the KMS wake plan
+    pub(super) fn dwell(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.dwell_ms)
+    }
+
     /// Returns the timestamp when the current image started displaying.
     pub(super) fn displayed_at(&self) -> Option<Instant> {
         self.displayed_at
@@ -843,6 +854,16 @@ impl WakeScene {
         self.last_transition_kind
     }
 
+    pub(super) fn transition_state_mut(&mut self) -> Option<&mut TransitionState> {
+        self.transition_state.as_mut()
+    }
+
+    /// Whether a transition finalized since the last call.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // read by the KMS wake plan
+    pub(super) fn take_just_finalized(&mut self) -> bool {
+        std::mem::take(&mut self.just_finalized)
+    }
+
     /// Replaces the active transition state.
     pub(super) fn set_transition_state(&mut self, state: Option<TransitionState>) {
         if let Some(state) = &state {
@@ -862,6 +883,7 @@ impl WakeScene {
                 .transition_state
                 .take()
                 .expect("transition state should exist when complete");
+            self.just_finalized = true;
             if let Some(next) = self.next.take() {
                 let path = next.path.clone();
                 tracing::debug!(
@@ -962,11 +984,13 @@ impl WakeScene {
     /// Frame callbacks are only delivered while the surface is visible, so
     /// an occluded or powered-off output pauses submissions instead of
     /// burning the GPU on frames nobody sees; `Occluded(false)` re-arms the
-    /// redraw. On non-Wayland backends `pre_present_notify` is a no-op and
-    /// pacing falls to the present mode: FIFO blocks in `present()` at the
-    /// refresh rate; mailbox would run unpaced there (use
-    /// `PHOTOFRAME_PRESENT_MODE=fifo`). Wayland under sway is the deployment
-    /// target, so that fallback is documented, not emulated.
+    /// redraw. On DRM/KMS (`PHOTOFRAME_SURFACE=drm`, see `viewer/kms.rs`)
+    /// there are no frame callbacks: the viewer's own loop renders one frame
+    /// per request, and with FIFO (the KMS default) the swapchain acquire
+    /// blocks until vblank, so the display is the clock there too; mailbox
+    /// would run unpaced on KMS and stays an explicit opt-in. On other winit
+    /// backends `pre_present_notify` is a no-op and pacing likewise falls to
+    /// the present mode; that fallback is documented, not emulated.
     ///
     /// `request_redraw` is idempotent in winit (a compare-and-swap on the
     /// pending flag), so re-running this from every control tick and
@@ -985,13 +1009,22 @@ impl WakeScene {
     }
 }
 
+/// Size and scale of the surface a scene draws into: a winit window's inner
+/// size and scale factor on Wayland, the fixed mode and 1.0 on DRM/KMS
+/// (sway runs the panel at scale 1.0, so text sizes match across the two).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Viewport {
+    pub(super) size: PhysicalSize<u32>,
+    pub(super) scale_factor: f64,
+}
+
 /// Execution context shared with viewer scenes.
 ///
 /// A [`SceneContext`] exposes the subset of the viewer application state that a scene may
 /// interact with. This keeps scene logic focused on presentation concerns while preventing
 /// direct access to unrelated subsystems.
 pub(super) struct SceneContext<'a> {
-    window: Option<&'a Window>,
+    viewport: Option<Viewport>,
     redraw: &'a mut dyn FnMut(),
     config: Arc<Configuration>,
     rng: &'a mut rand::rngs::ThreadRng,
@@ -1002,7 +1035,7 @@ pub(super) struct SceneContext<'a> {
 impl<'a> SceneContext<'a> {
     /// Creates a new [`SceneContext`] scoped to the currently active viewer state.
     pub(super) fn new(
-        window: Option<&'a Window>,
+        viewport: Option<Viewport>,
         redraw: &'a mut dyn FnMut(),
         config: Arc<Configuration>,
         rng: &'a mut rand::rngs::ThreadRng,
@@ -1010,7 +1043,7 @@ impl<'a> SceneContext<'a> {
         enqueue_matting: &'a mut dyn FnMut(&mut WakeScene),
     ) -> Self {
         Self {
-            window,
+            viewport,
             redraw,
             config,
             rng,
@@ -1019,9 +1052,9 @@ impl<'a> SceneContext<'a> {
         }
     }
 
-    /// Returns the active window handle, if the viewer has created one.
-    pub(super) fn window(&self) -> Option<&'a Window> {
-        self.window
+    /// Returns the output's size and scale, once the viewer has an output.
+    pub(super) fn viewport(&self) -> Option<Viewport> {
+        self.viewport
     }
 
     /// Requests a redraw from the viewer event loop.

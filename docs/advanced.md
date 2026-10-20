@@ -377,7 +377,7 @@ sudo journalctl -t photoframe -n 100 | grep -i "killed\|error"
 
 ## Kiosk stack
 
-The frame boots straight into the Wayland app via greetd on Debian 13 (Trixie). greetd launches a dedicated Sway session on tty1 and runs the photo frame as the `kiosk` user — no display manager shims or PAM templates.
+The frame boots straight into the Wayland app via greetd on Debian 13 (Trixie). greetd launches a dedicated Sway session on tty1 and runs the photo frame as the `kiosk` user — no display manager shims or PAM templates. This is the default; an opt-in stack that runs the viewer without any compositor is described in [KMS stack (opt-in)](#kms-stack-opt-in).
 
 ### Provisioning
 
@@ -427,3 +427,83 @@ Expected: `greetd` reports `active (running)`; the unit command line includes `/
 Re-running provisioning after OS or app updates is supported. Idempotent status lines like `getty@tty1.service already masked; skipping disable/mask` are normal.
 
 For deeper debug workflows (manual Sway launch, overlay tests, kiosk-shell environment export), see [developer/architecture.md › Debugging the kiosk stack](../developer/architecture.md#debugging-the-kiosk-stack).
+
+---
+
+## KMS stack (opt-in)
+
+With the KMS stack the viewer presents straight to the display (DRM/KMS through Vulkan's `VK_KHR_display`), with no greetd, sway or compositor in between. It exists because the compositor is the frame-rate ceiling. On Mesa 26.2 with sway 1.10, every present mode is capped near 30 fps. Without the compositor, a native-4K fade holds a vblank-locked 60 Hz. See [performance.md](performance.md#the-viewer-on-kms) for the measurements.
+
+**What KMS gives up until the next stage of this work (K2) lands.** Both features below talk to sway, so they do not work on this stack yet:
+
+- **Wi-Fi recovery overlay.** `wifi-manager` keeps running, and it only warns when it cannot show the overlay. But the overlay (the on-screen hotspot instructions and QR code) is a sway window, so it will not appear. Whether the hotspot itself comes up without the overlay has not been verified on a device yet. Until it has, keep Ethernet or a known-good Wi-Fi when trying the KMS stack.
+- **Display power.** `powerctl` drives `swaymsg output power`, so neither the sleep schedule nor buttond's screen-off turns the panel off. Sleep still works as a viewer state (the sleep banner shows and the slideshow stops), but the panel stays lit. buttond's short press, which toggles sleep through the control socket, works as usual.
+
+Greeting, slideshow, sleep/wake through the control socket, transitions, mats, the showcase captions and the `metrics` log lines all behave as on the Wayland stack.
+
+### Switching
+
+The choice is persisted in `/etc/photoframe/display.env`, so a plain `deploy.sh` keeps whichever stack was chosen last:
+
+```bash
+PHOTOFRAME_DISPLAY=kms ./setup/application/deploy.sh
+```
+
+```bash
+PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh
+```
+
+When the setup applies a choice it does three things:
+
+- enables `photoframe-kms.service` and disables `greetd.service`, or the reverse;
+- restarts the chosen unit;
+- makes `postcheck`, `verify.sh` and `print-status` check the chosen unit.
+
+`setup/system/install.sh` honours the same variable.
+
+To try the other stack once without changing the persisted choice, start its unit. The two units conflict, so starting one stops the other. The next boot returns to the enabled stack.
+
+```bash
+sudo systemctl start photoframe-kms.service
+```
+
+```bash
+sudo systemctl start greetd.service
+```
+
+### How it runs
+
+`photoframe-kms.service` runs as `kiosk` (groups `video render input`), with `PHOTOFRAME_SURFACE=drm`. It starts the same `/usr/local/bin/photoframe` launcher sway runs, so logs keep the `photoframe` tag:
+
+```bash
+sudo journalctl -t photoframe -b | grep -E "kms_|viewer presenting"
+```
+
+At startup the viewer logs `kms_probe` lines (cards, connectors, modes, the Vulkan plane) and `kms_target`. On every stop it logs the teardown steps in order: `kms_teardown: releasing swapchain`, then `destroying the wgpu instance`, then `closing the card`. The unit's `TimeoutStopSec=10s` bounds that teardown.
+
+| Knob (unit `Environment=`, via `sudo systemctl edit photoframe-kms.service`) | Default |
+| --- | --- |
+| `PHOTOFRAME_DRM_CONNECTOR` (e.g. `HDMI-A-1`; a name no card has is an error, not a wait) | first connected connector |
+| `PHOTOFRAME_DRM_MODE` (`WxH[@Hz]`, e.g. `3840x2160@60`; must exist) | `3840x2160@60` if the panel offers it (as the sway config pins), else the panel's preferred mode |
+| `PHOTOFRAME_PRESENT_MODE` | `fifo` |
+
+### When it stops
+
+**No display at startup.** If no display is connected when the unit starts, the viewer waits for one and checks once a second. This covers a power cut where the Pi boots before the TV, or a receiver in standby. The journal shows `kms_waiting_for_display` once. When the panel appears, the slideshow starts.
+
+**Display changes.** v1.2 does not adapt to a display change in place. Every time the viewer wakes from idle, it checks the connector. Once per photo, at the end of the dwell, it also forces a fresh read of the panel's mode list, so a panel swapped between two checks is caught. In each of these cases the viewer exits with an error and `Restart=always` brings it back:
+
+- the panel was unplugged;
+- the panel no longer offers the mode in use;
+- the swapchain is lost;
+- frames repeatedly time out.
+
+The restart waits for a display and picks its mode again. Because the check runs on idle wakes, an unplug is noticed at the next photo change, command or matting result.
+
+**Startup failures.** If the viewer cannot start, systemd retries five times in two minutes. The usual cause is that greetd/sway or plymouth still holds the display; the journal reports this as "not DRM master". It then leaves the unit failed and the screen dark. There is deliberately no automatic fallback to greetd. To recover, fix the cause, then:
+
+```bash
+sudo systemctl reset-failed photoframe-kms.service && sudo systemctl start photoframe-kms.service
+```
+
+You can also switch back to the Wayland stack as above.

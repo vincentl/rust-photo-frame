@@ -9,7 +9,6 @@ if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
 else
     SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
 fi
-KIOSK_SERVICE="${KIOSK_SERVICE:-greetd.service}"
 WIFI_SERVICE="${WIFI_SERVICE:-photoframe-wifi-manager.service}"
 SYNC_TIMER="${SYNC_TIMER:-photoframe-sync.timer}"
 BUTTON_SERVICE="${BUTTON_SERVICE:-buttond.service}"
@@ -17,6 +16,11 @@ SEATD_SERVICE="${SEATD_SERVICE:-seatd.service}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/systemd.sh
 source "${SCRIPT_DIR}/../../lib/systemd.sh"
+# shellcheck source=../../lib/display-stack.sh
+source "${SCRIPT_DIR}/../../lib/display-stack.sh"
+# The unit that runs the viewer: greetd.service, or photoframe-kms.service when
+# the KMS stack was chosen. Never touch the other one here.
+KIOSK_SERVICE="${KIOSK_SERVICE:-$(display_stack_unit "$(display_stack_current)")}"
 
 log() {
     local level="$1"; shift
@@ -237,6 +241,19 @@ if systemd_available && systemd_unit_exists "${KIOSK_SERVICE}"; then
             log ERROR "Control socket not found at ${control_socket_path}. Check ${KIOSK_SERVICE} logs."
             exit 1
         fi
+    fi
+fi
+
+# On the KMS stack "active" and a bound control socket do not prove the
+# viewer runs: the socket is bound before the card is opened, and a
+# crash-looping Restart=always unit is active part of the time.
+if [[ "${KIOSK_SERVICE}" == "${DISPLAY_KMS_UNIT}" ]] && systemd_available && systemd_unit_exists "${KIOSK_SERVICE}"; then
+    log INFO "Checking that the KMS viewer reached the display and stays up"
+    if kms_health="$(display_stack_kms_healthy 30 6 2>&1)"; then
+        log INFO "${kms_health}"
+    else
+        log ERROR "${kms_health}"
+        exit 1
     fi
 fi
 

@@ -1,0 +1,45 @@
+# Managed by setup (setup/lib/display-stack.sh). Opt-in alternative to the
+# greetd -> sway kiosk session: the viewer presents straight to DRM/KMS with
+# no compositor. Enabled only when PHOTOFRAME_DISPLAY=kms was chosen at setup;
+# otherwise installed but disabled. Until K2 it gives up the Wi-Fi recovery
+# overlay and powerctl's display sleep (both talk to sway).
+[Unit]
+Description=Photo frame viewer on DRM/KMS (no compositor)
+# plymouth (when installed) holds DRM master until it quits; display
+# managers order after plymouth-quit-wait for the same reason.
+After=systemd-user-sessions.service plymouth-quit-wait.service greetd.service
+# Only one display stack at a time: starting this unit stops greetd (and
+# starting greetd stops this unit), so nothing else holds DRM master.
+Conflicts=greetd.service
+# Skip (don't crash-loop) until the application stage installs the binary.
+ConditionPathExists=/opt/photoframe/bin/photoframe
+# StartLimit* belongs in [Unit]. A viewer that cannot start (not DRM master,
+# Vulkan refused) is retried 5 times in 2 minutes, then left failed for the
+# operator; there is deliberately no fallback to greetd. A display that is
+# not connected yet is not a failure: the viewer waits for it.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=kiosk
+Group=kiosk
+# video: /dev/dri/card* (vc4, KMS); render: /dev/dri/renderD* (v3d);
+# input: parity with the kiosk session.
+SupplementaryGroups=video render input
+WorkingDirectory=/var/lib/photoframe
+Environment=PHOTOFRAME_SURFACE=drm
+# The same launcher sway runs: env knobs stay in one place, and output still
+# goes to the journal tagged "photoframe" (journalctl -t photoframe).
+ExecStart=/usr/local/bin/photoframe /etc/photoframe/config.yaml
+# Any exit restarts the viewer, including the deliberate ones: a display
+# mode/connector change or a lost swapchain ends the process (v1.2 does not
+# handle them in place) and the restart re-enumerates the display.
+Restart=always
+RestartSec=2s
+# SIGTERM triggers the ordered teardown (swapchain, Vulkan instance, card);
+# bound it.
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=graphical.target

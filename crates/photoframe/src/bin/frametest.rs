@@ -108,8 +108,7 @@ struct Options {
     /// `Some(device)` selects the DRM/KMS path; `None` means a Wayland window.
     drm: Option<Option<String>>,
     connector: Option<String>,
-    /// `(width, height, refresh_hz)`.
-    mode_req: Option<(u32, u32, Option<u32>)>,
+    mode_req: Option<photoframe::drm_display::ModeRequest>,
     plane: Option<u32>,
     seconds: Option<f32>,
 }
@@ -543,303 +542,34 @@ impl ApplicationHandler for App {
     }
 }
 
-/// DRM/KMS presentation without a compositor.
-///
-/// Order matters: the card is opened *before* the wgpu instance exists. The
-/// kernel grants implicit DRM master to the first client that opens a primary
-/// node while no master is held, and Mesa's display WSI only honours
-/// `vkAcquireDrmDisplayEXT` with an fd that is master. If the driver's own
-/// instance-time open of the card came first, it would inherit master instead
-/// and the acquire would fail.
+/// DRM/KMS presentation without a compositor, through the shared
+/// `photoframe::drm_display` module (the same target selection and ordering
+/// rules the viewer uses with `PHOTOFRAME_SURFACE=drm`): open the card before
+/// the wgpu instance exists, and close it only after the instance is gone.
 #[cfg(target_os = "linux")]
 mod drm_probe {
     use super::{App, Options};
-    use drm::Device;
-    use drm::control::{Device as ControlDevice, ModeTypeFlags, connector};
-    use std::fs::{File, OpenOptions};
-    use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
-
-    pub struct Card(File);
-
-    impl AsFd for Card {
-        fn as_fd(&self) -> BorrowedFd<'_> {
-            self.0.as_fd()
-        }
-    }
-    impl Device for Card {}
-    impl ControlDevice for Card {}
-
-    struct Target {
-        card: Card,
-        path: String,
-        connector_id: u32,
-        connector_name: String,
-        width: u32,
-        height: u32,
-        vrefresh_hz: u32,
-    }
-
-    fn candidate_paths(explicit: Option<&str>) -> Vec<String> {
-        if let Some(p) = explicit {
-            return vec![p.to_string()];
-        }
-        (0..8)
-            .map(|i| format!("/dev/dri/card{i}"))
-            .filter(|p| std::path::Path::new(p).exists())
-            .collect()
-    }
-
-    /// Open a card and pick a connector + mode from what KMS reports.
-    fn pick_target(opts: &Options) -> Result<Target, String> {
-        let explicit = opts.drm.as_ref().and_then(|d| d.as_deref());
-        let mut notes = Vec::new();
-        for path in candidate_paths(explicit) {
-            let file = match OpenOptions::new().read(true).write(true).open(&path) {
-                Ok(f) => f,
-                Err(e) => {
-                    notes.push(format!("{path}: open failed: {e}"));
-                    continue;
-                }
-            };
-            let card = Card(file);
-            let driver = card
-                .get_driver()
-                .map(|d| d.name().to_string_lossy().into_owned())
-                .unwrap_or_else(|_| "?".into());
-            let res = match card.resource_handles() {
-                Ok(r) => r,
-                Err(e) => {
-                    // v3d (the render-only GPU node on a Pi 5) has no KMS
-                    // resources at all; vc4 is the one with connectors.
-                    notes.push(format!("{path} ({driver}): no KMS resources ({e})"));
-                    continue;
-                }
-            };
-            println!(
-                "{path}: driver={driver} connectors={} crtcs={}",
-                res.connectors().len(),
-                res.crtcs().len()
-            );
-            let mut chosen: Option<(connector::Info, String)> = None;
-            for handle in res.connectors() {
-                let Ok(info) = card.get_connector(*handle, false) else {
-                    continue;
-                };
-                let name = info.to_string();
-                let state = info.state();
-                let modes = info.modes().len();
-                println!(
-                    "  connector {name} (id {}): {state:?}, {modes} modes",
-                    u32::from(*handle)
-                );
-                let wanted = match opts.connector.as_deref() {
-                    Some(n) => n.eq_ignore_ascii_case(&name),
-                    None => state == connector::State::Connected,
-                };
-                if wanted && chosen.is_none() {
-                    chosen = Some((info, name));
-                }
-            }
-            let Some((info, name)) = chosen else {
-                notes.push(format!("{path}: no matching connected connector"));
-                continue;
-            };
-            if info.state() != connector::State::Connected {
-                return Err(format!("connector {name} on {path} is {:?}", info.state()));
-            }
-            let modes = info.modes();
-            if modes.is_empty() {
-                return Err(format!("connector {name} on {path} reports no modes"));
-            }
-            for m in modes {
-                let (w, h) = m.size();
-                let flags = m.mode_type();
-                println!(
-                    "    mode {w}x{h}@{} clock={} htotal={} vtotal={}{}",
-                    m.vrefresh(),
-                    m.clock(),
-                    m.hsync().2,
-                    m.vsync().2,
-                    if flags.contains(ModeTypeFlags::PREFERRED) {
-                        " (preferred)"
-                    } else {
-                        ""
-                    }
-                );
-            }
-            let mode = match opts.mode_req {
-                Some((w, h, hz)) => modes
-                    .iter()
-                    .find(|m| {
-                        let (mw, mh) = m.size();
-                        u32::from(mw) == w
-                            && u32::from(mh) == h
-                            && hz.is_none_or(|hz| m.vrefresh() == hz)
-                    })
-                    .ok_or_else(|| {
-                        format!(
-                            "connector {name} has no mode {w}x{h}{}",
-                            hz.map(|z| format!("@{z}")).unwrap_or_default()
-                        )
-                    })?,
-                None => modes
-                    .iter()
-                    .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
-                    .unwrap_or(&modes[0]),
-            };
-            let (w, h) = mode.size();
-            return Ok(Target {
-                connector_id: u32::from(info.handle()),
-                connector_name: name,
-                width: u32::from(w),
-                height: u32::from(h),
-                vrefresh_hz: mode.vrefresh(),
-                card,
-                path,
-            });
-        }
-        Err(format!(
-            "no usable DRM card found:\n  {}",
-            notes.join("\n  ")
-        ))
-    }
-
-    /// Ask Vulkan which plane index shows this connector and which exact
-    /// refresh value (mHz) its mode list carries, so the values handed to
-    /// `SurfaceTargetUnsafe::Drm` match what wgpu-hal will compare against.
-    unsafe fn vulkan_plane_and_refresh(
-        instance: &wgpu::Instance,
-        fd: i32,
-        target: &Target,
-        plane_override: Option<u32>,
-    ) -> Result<(u32, u32), String> {
-        use wgpu::hal::api::Vulkan;
-        let hal = unsafe { instance.as_hal::<Vulkan>() }
-            .ok_or("the wgpu instance is not Vulkan; --drm needs WGPU_BACKEND=vulkan")?;
-        let shared = hal.shared_instance();
-        let exts = shared.extensions();
-        for required in [ash::khr::display::NAME, ash::ext::acquire_drm_display::NAME] {
-            if !exts.contains(&required) {
-                return Err(format!(
-                    "Vulkan instance lacks {} (driver does not advertise it)",
-                    required.to_string_lossy()
-                ));
-            }
-        }
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .map_err(|e| format!("no Vulkan adapter: {e}"))?;
-        let pd = {
-            let a = unsafe { adapter.as_hal::<Vulkan>() }.ok_or("adapter is not Vulkan")?;
-            a.raw_physical_device()
-        };
-        let entry = shared.entry();
-        let raw = shared.raw_instance();
-        let acquire = ash::ext::acquire_drm_display::Instance::new(entry, raw);
-        let display_ext = ash::khr::display::Instance::new(entry, raw);
-
-        let display =
-            unsafe { acquire.get_drm_display(pd, fd, target.connector_id) }.map_err(|e| {
-                format!(
-                    "vkGetDrmDisplayEXT(connector {}) failed: {e}",
-                    target.connector_id
-                )
-            })?;
-
-        let modes = unsafe { display_ext.get_display_mode_properties(pd, display) }
-            .map_err(|e| format!("vkGetDisplayModePropertiesKHR failed: {e}"))?;
-        let mut best: Option<u32> = None;
-        for m in &modes {
-            let p = m.parameters;
-            println!(
-                "  vulkan mode {}x{} refresh={} mHz",
-                p.visible_region.width, p.visible_region.height, p.refresh_rate
-            );
-            if p.visible_region.width == target.width && p.visible_region.height == target.height {
-                let want = target.vrefresh_hz * 1000;
-                let closer = |r: u32| r.abs_diff(want);
-                if best.is_none_or(|b| closer(p.refresh_rate) < closer(b)) {
-                    best = Some(p.refresh_rate);
-                }
-            }
-        }
-        let refresh = best.ok_or_else(|| {
-            format!(
-                "Vulkan lists no {}x{} mode for {}",
-                target.width, target.height, target.connector_name
-            )
-        })?;
-
-        let plane = match plane_override {
-            Some(p) => p,
-            None => {
-                let planes =
-                    unsafe { display_ext.get_physical_device_display_plane_properties(pd) }
-                        .map_err(|e| {
-                            format!("vkGetPhysicalDeviceDisplayPlanePropertiesKHR failed: {e}")
-                        })?;
-                let mut found = None;
-                for (i, p) in planes.iter().enumerate() {
-                    let supported =
-                        unsafe { display_ext.get_display_plane_supported_displays(pd, i as u32) }
-                            .unwrap_or_default();
-                    let current = p.current_display == display;
-                    let supports = supported.contains(&display);
-                    println!(
-                        "  vulkan plane {i}: current_display={} supports_target={supports}",
-                        if current { "target" } else { "other/none" }
-                    );
-                    if found.is_none() && (current || supports) {
-                        found = Some(i as u32);
-                    }
-                }
-                found.ok_or("no Vulkan display plane supports the target display")?
-            }
-        };
-        Ok((plane, refresh))
-    }
+    use photoframe::drm_display::{self, KmsRequest};
 
     pub fn run(opts: &Options) -> Result<(), String> {
-        let target = pick_target(opts)?;
-        println!(
-            "drm target: {} {} connector_id={} mode={}x{}@{}",
-            target.path,
-            target.connector_name,
-            target.connector_id,
-            target.width,
-            target.height,
-            target.vrefresh_hz
-        );
-        // Explicit master: a no-op if the open above already made us master,
-        // and a clear failure (EACCES/EBUSY) if something else — sway under
-        // greetd, usually — still owns the display.
-        target.card.acquire_master_lock().map_err(|e| {
-            format!(
-                "not DRM master on {} ({e}); stop the kiosk session first: \
-                 sudo systemctl stop greetd.service",
-                target.path
-            )
-        })?;
-        let fd = target.card.as_fd().as_raw_fd();
+        let request = KmsRequest {
+            card: opts.drm.as_ref().and_then(|d| d.as_deref()).map(Into::into),
+            connector: opts.connector.clone(),
+            mode: opts.mode_req,
+            // The probe keeps KMS's own default (the EDID-preferred mode).
+            prefer_mode: None,
+            plane: opts.plane,
+        };
+        let mut trace = |line: &str| println!("{line}");
+        let target = drm_display::open_target(&request, &mut trace).map_err(|e| e.to_string())?;
+        println!("drm target: {}", target.describe());
+        target.assert_master().map_err(|e| e.to_string())?;
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
-        let (plane, refresh) =
-            unsafe { vulkan_plane_and_refresh(&instance, fd, &target, opts.plane) }?;
-        println!("creating DRM surface: plane={plane} refresh={refresh} mHz");
-        let surface = unsafe {
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::Drm {
-                fd,
-                plane,
-                connector_id: target.connector_id,
-                width: target.width,
-                height: target.height,
-                refresh_rate: refresh,
-            })
-        }
-        .map_err(|e| format!("create DRM surface: {e}"))?;
+        let surface_target = unsafe { drm_display::surface_target(&instance, &target, &mut trace) }
+            .map_err(|e| e.to_string())?;
+        let surface = unsafe { instance.create_surface_unsafe(surface_target) }
+            .map_err(|e| format!("create DRM surface: {e}"))?;
 
         let mut app = App::new(opts);
         app.gpu = Some(app.build_gpu(&instance, surface, target.width, target.height));
@@ -847,8 +577,8 @@ mod drm_probe {
         while !app.expired() {
             app.draw();
         }
-        // Drop the GPU objects before the card so the swapchain releases its
-        // framebuffers while the fd is still open.
+        // Drop the GPU objects, then the instance (Mesa's display WSI still
+        // polls the card fd until then), then the card.
         app.gpu = None;
         drop(instance);
         drop(target);
@@ -863,15 +593,6 @@ fn usage_exit(msg: &str) -> ! {
          [--drm[=/dev/dri/cardN]] [--connector NAME] [--mode WxH[@Hz]] [--plane N] [--seconds N]"
     );
     std::process::exit(2);
-}
-
-fn parse_mode_req(s: &str) -> Option<(u32, u32, Option<u32>)> {
-    let (size, hz) = match s.split_once('@') {
-        Some((size, hz)) => (size, Some(hz.parse().ok()?)),
-        None => (s, None),
-    };
-    let (w, h) = size.split_once(['x', 'X'])?;
-    Some((w.parse().ok()?, h.parse().ok()?, hz))
 }
 
 fn parse_args() -> Options {
@@ -899,7 +620,8 @@ fn parse_args() -> Options {
             "--mode" => {
                 let v = take_value("--mode");
                 opts.mode_req = Some(
-                    parse_mode_req(&v).unwrap_or_else(|| usage_exit("--mode expects WxH[@Hz]")),
+                    v.parse()
+                        .unwrap_or_else(|_| usage_exit("--mode expects WxH[@Hz]")),
                 );
             }
             "--plane" => {

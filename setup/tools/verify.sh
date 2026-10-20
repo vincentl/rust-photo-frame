@@ -6,6 +6,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # shellcheck source=../lib/systemd.sh
 source "${SCRIPT_DIR}/../lib/systemd.sh"
+# shellcheck source=../lib/display-stack.sh
+source "${SCRIPT_DIR}/../lib/display-stack.sh"
 
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/photoframe}"
 SERVICE_USER="${SERVICE_USER:-kiosk}"
@@ -231,7 +233,8 @@ if systemd_available; then
     failures=$((failures+1))
   }
 
-  check_unit greetd.service ERROR "set via system install"
+  display_choice="$(display_stack_current)"
+  check_unit "$(display_stack_unit "${display_choice}")" ERROR "display stack '${display_choice}' (${DISPLAY_ENV_PATH}); set via system install"
   check_seatd
   check_unit photoframe-wifi-manager.service ERROR "installed by app deploy"
   check_unit buttond.service WARN "optional, installed by app deploy"

@@ -52,8 +52,13 @@ config-model = { path = "../config-model" }
 [target.'cfg(target_os = "linux")'.dependencies]
 drm = "0.14"
 ash = "0.38"
+# clock_gettime(CLOCK_MONOTONIC) to place kernel vblank timestamps on the
+# Instant clock (viewer/kms.rs).
+libc = "0.2"
 
 [dev-dependencies]
+# Paused clock for the viewer wake-loop tests (tokio::test(start_paused)).
+tokio = { version = "1.47.1", features = ["test-util"] }
 naga = { version = "27", features = ["wgsl-in"] }
 tempfile = "3.23.0"
 base64 = "0.22.1"

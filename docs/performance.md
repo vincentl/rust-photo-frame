@@ -69,8 +69,9 @@ the startup-scanned library it is just the photo's age at first show, so filter
 to photos whose birth time is later than the `playlist_scheduler` line when
 measuring how quickly a fresh upload appears.
 
-Use `-t photoframe` (syslog identifier), not `-u` — the app runs inside the
-greetd session, not as its own systemd unit.
+Use `-t photoframe` (syslog identifier), not `-u`: on the default stack the
+app runs inside the greetd session, not as its own systemd unit. The KMS
+stack (`photoframe-kms.service`) logs under the same tag.
 
 The stats measure *submission* cadence (when `present()` returns), which
 matches what the panel displays only because transition redraws are paced
@@ -160,6 +161,97 @@ therefore carries a vendored copy of wgpu-hal 27.0.4 under
 whose `vkGetDrmDisplayEXT` resolves the connector on that fd. It is wired
 in through `[patch.crates-io]` in the root `Cargo.toml` and affects only
 this code path; remove both once the fix is upstream.
+
+### The viewer on KMS
+
+The viewer itself can present the same way: set `PHOTOFRAME_SURFACE=drm`
+(the opt-in `photoframe-kms.service` does; see
+[advanced.md › KMS stack](advanced.md#kms-stack-opt-in)). It shares the
+probe's target selection and ordering rules
+(`crates/photoframe/src/drm_display.rs`):
+- The card is opened before the wgpu instance, so the process is DRM
+  master.
+- The card is closed only after the instance is gone, because Mesa's
+  display WSI keeps polling the fd until then.
+
+**Pacing model.** Each transition frame is rendered right after a vblank.
+The viewer waits for that vblank explicitly with `DRM_IOCTL_WAIT_VBLANK`
+on the connector's CRTC, then draws the frame for that vblank's kernel
+timestamp.
+
+The transition's clock starts at the vblank before its first frame. So:
+- the first frame shows progress 0;
+- each later frame advances by exactly the time between the vblanks that
+  it and the previous frame are shown on.
+
+`transition_frame_metric` records the same clock, so it reports the
+display's cadence.
+
+**Why the blocking FIFO acquire alone is not enough.** After a dwell,
+every swapchain image except the one on screen is idle. The first
+frames of a transition would get those images back to back and be
+presented a few ms apart, ahead of the display. The animation clock
+would then run ahead of the panel, and the metric would read
+`best_frame_ms` of 1–3 ms. With the explicit wait at most one frame is
+queued, so FIFO only guarantees there is no tearing.
+
+**Present mode.** FIFO stays the default on KMS.
+`PHOTOFRAME_PRESENT_MODE=mailbox` is honoured; transitions are still
+vblank-paced, and resting frames are single presents.
+
+**Fallback.** If a vblank wait fails, the rest of that transition is
+paced by FIFO alone, and the journal logs `kms_vblank_wait_failed`.
+
+**Idle behaviour.** There is no 4 ms control tick on KMS. While nothing
+animates, the viewer sleeps until one of these happens:
+- a control command arrives;
+- a matting result arrives;
+- a decoded photo arrives while the preload queue is short;
+- the dwell deadline passes.
+
+A resting photo therefore costs no frames and no wakeups. The Wayland path
+still ticks every 4 ms. T5 moves it onto the same plan
+(`crates/photoframe/src/tasks/viewer/wake.rs`).
+
+**Reading `transition_frame_metric` on KMS.** On KMS the line has one
+more field than on Wayland, `late_frames`. The fields answer two
+different questions:
+
+- **`best_frame_ms` / `worst_frame_ms` / `avg_fps`: did the CPU loop
+  keep up?** These are the times between the vblanks the frames were
+  paced on. A `worst_frame_ms` of about 33 means the loop missed a
+  vblank.
+- **`late_frames`: did the panel show a new frame on every refresh?**
+  It counts the refreshes during the transition on which the panel
+  showed no new frame, whatever the cause: the CPU loop was late, or the
+  GPU finished a frame after the vblank it was meant for. The interval
+  fields cannot see the second case, because the CPU stays on time while
+  the panel repeats a frame.
+
+How `late_frames` is computed: each paced frame registers a
+GPU-completion callback, and every pacing wake polls for it. The viewer
+then replays FIFO: a frame flips at the first vblank by which it is
+complete, and never before the frame ahead of it. That replay is
+optimistic by at most the microseconds between a vblank and the wake
+after it.
+
+**What to expect.** For a transition that holds 60 at native 4K:
+`avg_fps` ≈ 60, `best_frame_ms` ≈ `worst_frame_ms` ≈ 16.7, and
+`late_frames=0`.
+
+**When the field is missing.** It is absent if vblank pacing failed
+during that transition. Look for `kms_vblank_wait_failed` in the
+journal.
+
+**GPU slack.** With the explicit vblank wait, a frame has less than one
+refresh to finish. FIFO's run-ahead allowed up to two, but that
+run-ahead is what put every transition's first frames ahead of the
+display. A miss leaves one frame queued, which gives every later frame
+of that transition two refreshes. So one miss costs exactly one
+repeated refresh and does not cascade.
+
+**For T4.** The native-resolution decision should require
+`late_frames=0`, not just the interval fields.
 
 ## Root causes and fixes (June 2026)
 
@@ -287,15 +379,22 @@ traffic a native 4K fade generates — on a bus that is the binding
 constraint at 4K60. Two ways out: a sway/wlroots/Mesa upgrade that gets
 scanout working (`journalctl -t photoframe` with `sway -d` shows per-frame
 scan-out decisions), or no compositor at all. `frametest --drm` (above)
-measures the second option without touching the viewer.
+measures the second option without touching the viewer. The opt-in KMS
+stack is that second option for the viewer itself (see
+[The viewer on KMS](#the-viewer-on-kms)).
 
 ## Environment knobs
 
-Set in `/usr/local/bin/photoframe` (the launcher); all optional:
+Set in `/usr/local/bin/photoframe` (the launcher), or for the KMS stack in
+the unit (`sudo systemctl edit photoframe-kms.service`, `[Service]`
+`Environment=`); all optional:
 
 | Variable | Values | Default |
 | --- | --- | --- |
-| `PHOTOFRAME_PRESENT_MODE` | `fifo` / `mailbox` / `immediate` | mailbox when available |
+| `PHOTOFRAME_SURFACE` | `wayland` / `drm` | `wayland` (the KMS unit sets `drm`) |
+| `PHOTOFRAME_PRESENT_MODE` | `fifo` / `mailbox` / `immediate` | mailbox when available on Wayland; fifo on KMS |
+| `PHOTOFRAME_DRM_CONNECTOR` | e.g. `HDMI-A-1` (KMS only) | first connected connector |
+| `PHOTOFRAME_DRM_MODE` | `WxH[@Hz]` (KMS only; must exist) | `3840x2160@60` if offered, else the connector's preferred mode |
 | `PHOTOFRAME_TRANSITION_SCALE` | 1–4 | 2 |
 | `PHOTOFRAME_IRIS_LAYER_SCALE` | 1–8 | 4 |
 | `WGPU_BACKEND` | `vulkan` / `gl` | vulkan |
