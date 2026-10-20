@@ -1,5 +1,6 @@
 mod config;
-#[allow(dead_code)] // shared with frametest; the viewer uses a subset
+// Shared with frametest (via lib.rs); this binary uses a subset.
+#[allow(dead_code, unused_imports)]
 mod drm_display;
 mod events;
 mod gpu;
@@ -100,6 +101,10 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Decided before any task starts so a bad value fails fast.
+    let surface = tasks::viewer::ViewerSurface::from_env()?;
+    tracing::info!(?surface, "viewer surface");
+
     // Channels (bounded).  Capacities are chosen to bound memory while keeping the pipeline fluid:
     // - inv_tx: burst during startup scan can be large; 128 gives headroom without unbounded growth.
     // - invalid_tx / displayed_tx: low-frequency bookkeeping; 64 is generous.
@@ -143,6 +148,29 @@ async fn main() -> Result<()> {
             }
             tracing::info!("ctrl-c received; initiating shutdown");
             cancel.cancel();
+        });
+    }
+
+    // SIGTERM (systemctl stop, and every Restart= cycle) gets the same
+    // graceful shutdown as Ctrl-C. Without it the default action kills the
+    // process outright; on DRM/KMS the viewer must instead release the
+    // swapchain, then the Vulkan instance, then the card (viewer/kms.rs).
+    #[cfg(unix)]
+    {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut term = match signal(SignalKind::terminate()) {
+                Ok(term) => term,
+                Err(err) => {
+                    tracing::warn!("SIGTERM handler failed: {err}");
+                    return;
+                }
+            };
+            if term.recv().await.is_some() {
+                tracing::info!("SIGTERM received; initiating shutdown");
+                cancel.cancel();
+            }
         });
     }
 
@@ -234,15 +262,28 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Run the windowed viewer on the main thread (blocking) after spawning other tasks
-    // This call returns when the window closes or cancellation occurs
-    let viewer_result = tasks::viewer::run_windowed(
-        processed_rx,
-        displayed_tx.clone(),
-        cancel.clone(),
-        Arc::clone(&cfg),
-        viewer_control_rx,
-    )
+    // Run the viewer on the main thread after spawning the other tasks. It
+    // returns when the window closes, cancellation occurs, or (on KMS) the
+    // display fails in a way that needs a restart.
+    let viewer_result = match surface {
+        tasks::viewer::ViewerSurface::Wayland => tasks::viewer::run_windowed(
+            processed_rx,
+            displayed_tx.clone(),
+            cancel.clone(),
+            Arc::clone(&cfg),
+            viewer_control_rx,
+        ),
+        tasks::viewer::ViewerSurface::Drm => {
+            tasks::viewer::run_kms(
+                processed_rx,
+                displayed_tx.clone(),
+                cancel.clone(),
+                Arc::clone(&cfg),
+                viewer_control_rx,
+            )
+            .await
+        }
+    }
     .context("viewer failed");
 
     if let Err(err) = &viewer_result {

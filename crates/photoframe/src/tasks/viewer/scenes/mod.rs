@@ -821,6 +821,12 @@ impl WakeScene {
         let _ = self.take_redraw_needed();
     }
 
+    /// How long a photo rests on screen before the next transition.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // read by the KMS wake plan
+    pub(super) fn dwell(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.dwell_ms)
+    }
+
     /// Returns the timestamp when the current image started displaying.
     pub(super) fn displayed_at(&self) -> Option<Instant> {
         self.displayed_at
@@ -961,11 +967,13 @@ impl WakeScene {
     /// Frame callbacks are only delivered while the surface is visible, so
     /// an occluded or powered-off output pauses submissions instead of
     /// burning the GPU on frames nobody sees; `Occluded(false)` re-arms the
-    /// redraw. On non-Wayland backends `pre_present_notify` is a no-op and
-    /// pacing falls to the present mode: FIFO blocks in `present()` at the
-    /// refresh rate; mailbox would run unpaced there (use
-    /// `PHOTOFRAME_PRESENT_MODE=fifo`). Wayland under sway is the deployment
-    /// target, so that fallback is documented, not emulated.
+    /// redraw. On DRM/KMS (`PHOTOFRAME_SURFACE=drm`, see `viewer/kms.rs`)
+    /// there are no frame callbacks: the viewer's own loop renders one frame
+    /// per request, and with FIFO (the KMS default) the swapchain acquire
+    /// blocks until vblank, so the display is the clock there too; mailbox
+    /// would run unpaced on KMS and stays an explicit opt-in. On other winit
+    /// backends `pre_present_notify` is a no-op and pacing likewise falls to
+    /// the present mode; that fallback is documented, not emulated.
     ///
     /// `request_redraw` is idempotent in winit (a compare-and-swap on the
     /// pending flag), so re-running this from every control tick and

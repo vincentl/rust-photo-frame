@@ -1,5 +1,8 @@
 mod image_ops;
+#[cfg(target_os = "linux")]
+mod kms;
 pub mod scenes;
+mod wake;
 
 use self::image_ops::*;
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene, Viewport};
@@ -344,6 +347,18 @@ struct MatResult {
     canvas: ImagePlane,
     priority: bool,
     mat_kind: Option<crate::config::MattingKind>,
+}
+
+// Manual so logs and test failures never dump the canvas pixels.
+impl std::fmt::Debug for MatResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MatResult")
+            .field("path", &self.path)
+            .field("width", &self.canvas.width)
+            .field("height", &self.canvas.height)
+            .field("priority", &self.priority)
+            .finish_non_exhaustive()
+    }
 }
 
 struct QueuedImage {
@@ -1544,6 +1559,7 @@ enum Output {
     Window(Arc<Window>),
     /// Direct scanout on DRM/KMS through `VK_KHR_display` (see `kms.rs`). The
     /// mode is fixed for the process lifetime.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // built only on Linux
     Kms {
         size: PhysicalSize<u32>,
         /// Set by `SceneContext::request_redraw`; the KMS loop takes it.
@@ -1617,6 +1633,7 @@ enum PresentDefault {
     /// blocks until a swapchain image is free, which is the only clock the
     /// KMS loop has. Mailbox on KMS has no pacing beyond whatever the driver
     /// does, so it stays an explicit opt-in.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // built only on Linux
     Kms,
 }
 
@@ -3346,6 +3363,96 @@ impl App {
     }
 }
 
+impl App {
+    /// The viewer state shared by both outputs; no output or GPU yet.
+    fn new(
+        from_loader: Receiver<PhotoLoaded>,
+        to_manager_displayed: Sender<Displayed>,
+        cancel: CancellationToken,
+        cfg: Arc<crate::config::Configuration>,
+    ) -> Self {
+        let worker_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .max(1);
+        let pipeline_capacity = cfg.viewer_preload_count.max(2);
+        let mat_pipeline = MattingPipeline::new(worker_count, pipeline_capacity);
+        let clear_color = cfg
+            .matting
+            .primary_option()
+            .and_then(MattingOptions::fixed_color)
+            .map(|color| wgpu::Color {
+                // Config colors are sRGB; clear values for sRGB render targets
+                // (and the in-shader background composite) are linear.
+                r: srgb_to_linear((color[0] as f32) / 255.0) as f64,
+                g: srgb_to_linear((color[1] as f32) / 255.0) as f64,
+                b: srgb_to_linear((color[2] as f32) / 255.0) as f64,
+                a: 1.0,
+            })
+            .unwrap_or(wgpu::Color::BLACK);
+        let initial_wake =
+            scenes::WakeScene::new(cfg.global_photo_settings.dwell_ms, cfg.transition.clone());
+        App {
+            from_loader,
+            to_manager_displayed,
+            cancel,
+            output: None,
+            gpu: None,
+            surface_configured: false,
+            surface_gate: SurfaceReadyGate::default(),
+            pending_scene_enter: true,
+            mode: Some(ViewerMode::new(ViewerModeKind::Greeting, initial_wake)),
+            preload_count: cfg.viewer_preload_count,
+            oversample: cfg.global_photo_settings.oversample,
+            max_upscale_factor: cfg.global_photo_settings.max_upscale_factor,
+            matting: cfg.matting.clone(),
+            mat_pipeline,
+            mat_inflight: 0,
+            ready_results: VecDeque::new(),
+            deferred_images: VecDeque::new(),
+            clear_color,
+            rng: rand::rng(),
+            full_config: cfg,
+            surface_timeout_streak: 0,
+            configured_surface_size: None,
+            caption_overlay: None,
+            transition_frame_metric: None,
+        }
+    }
+
+    /// The state `wake::plan_wake` decides from. See `wake.rs` for the
+    /// model; the DRM/KMS loop drives itself from this, and T5 applies it to
+    /// the Wayland driver.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // KMS loop; T5 for Wayland
+    fn wake_plan(&self, now: Instant) -> wake::WakePlan {
+        let kind = self.mode_kind();
+        let wake = self.mode().wake();
+        let redraw_requested = match &self.output {
+            Some(Output::Kms {
+                redraw_requested, ..
+            }) => redraw_requested.load(Ordering::Relaxed),
+            // winit owns the request on Wayland.
+            _ => false,
+        };
+        wake::plan_wake(
+            wake::WakeInputs {
+                slideshow_active: kind == ViewerModeKind::Wake,
+                sleeping: kind == ViewerModeKind::Sleep,
+                redraw_requested,
+                transition_active: wake.transition_state().is_some(),
+                displayed_at: wake.displayed_at(),
+                dwell: wake.dwell(),
+                surface_ready: self.surface_configured,
+                pending: wake.pending().len(),
+                in_flight: self.mat_inflight,
+                deferred: self.deferred_images.len(),
+                preload: self.preload_count,
+            },
+            now,
+        )
+    }
+}
+
 impl ApplicationHandler<ViewerEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         debug!("viewer_app_resumed");
@@ -3545,6 +3652,57 @@ impl ApplicationHandler<ViewerEvent> for App {
     }
 }
 
+/// Which output the viewer presents to, chosen at launch by
+/// `PHOTOFRAME_SURFACE` (`wayland` | `drm`; unset means `wayland`). The
+/// systemd unit `photoframe-kms.service` sets `drm`; the greetd/sway kiosk
+/// session leaves it unset. There is deliberately no config.yaml key: the
+/// surface is a property of how the process is launched, and a second
+/// source of truth could contradict the installed stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewerSurface {
+    /// A fullscreen winit window under the Wayland compositor.
+    Wayland,
+    /// Direct DRM/KMS scanout with no compositor (Linux only).
+    Drm,
+}
+
+impl ViewerSurface {
+    pub const ENV: &'static str = "PHOTOFRAME_SURFACE";
+
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::parse(std::env::var(Self::ENV).ok().as_deref())
+    }
+
+    /// Unset or empty means Wayland. Anything unrecognised is an error
+    /// rather than a silent Wayland fallback: under the KMS unit that would
+    /// fail later and far less clearly (no compositor to connect to).
+    pub fn parse(value: Option<&str>) -> anyhow::Result<Self> {
+        match value.map(str::trim) {
+            None | Some("") | Some("wayland") => Ok(Self::Wayland),
+            Some("drm") => Ok(Self::Drm),
+            Some(other) => Err(anyhow::anyhow!(
+                "{}={other:?} is not a surface kind; use wayland or drm",
+                Self::ENV
+            )),
+        }
+    }
+}
+
+/// Run the viewer on DRM/KMS; see `kms.rs`.
+#[cfg(target_os = "linux")]
+pub use kms::run_kms;
+
+#[cfg(not(target_os = "linux"))]
+pub async fn run_kms(
+    _from_loader: Receiver<PhotoLoaded>,
+    _to_manager_displayed: Sender<Displayed>,
+    _cancel: CancellationToken,
+    _cfg: Arc<crate::config::Configuration>,
+    _control: Receiver<ViewerCommand>,
+) -> anyhow::Result<()> {
+    anyhow::bail!("PHOTOFRAME_SURFACE=drm is only available on Linux")
+}
+
 pub fn run_windowed(
     from_loader: Receiver<PhotoLoaded>,
     to_manager_displayed: Sender<Displayed>,
@@ -3573,25 +3731,6 @@ pub fn run_windowed(
         }
         Err(other) => return Err(other.into()),
     };
-    let worker_count = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2)
-        .max(1);
-    let pipeline_capacity = cfg.viewer_preload_count.max(2);
-    let mat_pipeline = MattingPipeline::new(worker_count, pipeline_capacity);
-    let clear_color = cfg
-        .matting
-        .primary_option()
-        .and_then(MattingOptions::fixed_color)
-        .map(|color| wgpu::Color {
-            // Config colors are sRGB; clear values for sRGB render targets
-            // (and the in-shader background composite) are linear.
-            r: srgb_to_linear((color[0] as f32) / 255.0) as f64,
-            g: srgb_to_linear((color[1] as f32) / 255.0) as f64,
-            b: srgb_to_linear((color[2] as f32) / 255.0) as f64,
-            a: 1.0,
-        })
-        .unwrap_or(wgpu::Color::BLACK);
     let proxy: EventLoopProxy<ViewerEvent> = event_loop.create_proxy();
     let control_cancel = cancel.clone();
     let (command_tx, command_rx) = tokio::sync::mpsc::channel(64);
@@ -3606,34 +3745,7 @@ pub fn run_windowed(
         })
     };
     let control_driver = tokio::spawn(drive_viewer_events(command_rx, control_cancel, proxy));
-    let initial_wake =
-        scenes::WakeScene::new(cfg.global_photo_settings.dwell_ms, cfg.transition.clone());
-    let mut app = App {
-        from_loader,
-        to_manager_displayed,
-        cancel,
-        output: None,
-        gpu: None,
-        surface_configured: false,
-        surface_gate: SurfaceReadyGate::default(),
-        pending_scene_enter: true,
-        mode: Some(ViewerMode::new(ViewerModeKind::Greeting, initial_wake)),
-        preload_count: cfg.viewer_preload_count,
-        oversample: cfg.global_photo_settings.oversample,
-        max_upscale_factor: cfg.global_photo_settings.max_upscale_factor,
-        matting: cfg.matting.clone(),
-        mat_pipeline,
-        mat_inflight: 0,
-        ready_results: VecDeque::new(),
-        deferred_images: VecDeque::new(),
-        clear_color,
-        rng: rand::rng(),
-        full_config: cfg,
-        surface_timeout_streak: 0,
-        configured_surface_size: None,
-        caption_overlay: None,
-        transition_frame_metric: None,
-    };
+    let mut app = App::new(from_loader, to_manager_displayed, cancel, cfg);
     app.enter_greeting();
     event_loop.run_app(&mut app)?;
 
@@ -3834,6 +3946,84 @@ mod tests {
             let g = ((y * 255) / height.max(1)).min(255) as u8;
             Rgba([r, g, 0, 255])
         })
+    }
+
+    #[test]
+    fn surface_defaults_to_wayland_and_rejects_unknown_values() {
+        assert_eq!(ViewerSurface::parse(None).unwrap(), ViewerSurface::Wayland);
+        assert_eq!(
+            ViewerSurface::parse(Some("")).unwrap(),
+            ViewerSurface::Wayland
+        );
+        assert_eq!(
+            ViewerSurface::parse(Some("wayland")).unwrap(),
+            ViewerSurface::Wayland
+        );
+        assert_eq!(
+            ViewerSurface::parse(Some("drm")).unwrap(),
+            ViewerSurface::Drm
+        );
+        assert_eq!(
+            ViewerSurface::parse(Some(" drm\n")).unwrap(),
+            ViewerSurface::Drm
+        );
+        for bad in ["kms", "DRM", "x11", "wayland,drm"] {
+            assert!(ViewerSurface::parse(Some(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn present_mode_defaults_per_surface_kind() {
+        use wgpu::PresentMode::*;
+        let all = [Fifo, Mailbox, Immediate];
+        assert_eq!(choose_present_mode(None, &all, PresentDefault::Kms), Fifo);
+        assert_eq!(
+            choose_present_mode(None, &all, PresentDefault::Wayland),
+            Mailbox
+        );
+        assert_eq!(
+            choose_present_mode(None, &[Fifo], PresentDefault::Wayland),
+            AutoVsync
+        );
+    }
+
+    #[test]
+    fn present_mode_override_is_honoured_when_supported() {
+        use wgpu::PresentMode::*;
+        let all = [Fifo, Mailbox, Immediate];
+        for (env, want) in [
+            ("fifo", Fifo),
+            ("mailbox", Mailbox),
+            ("immediate", Immediate),
+        ] {
+            assert_eq!(
+                choose_present_mode(Some(env), &all, PresentDefault::Kms),
+                want
+            );
+            assert_eq!(
+                choose_present_mode(Some(env), &all, PresentDefault::Wayland),
+                want
+            );
+        }
+    }
+
+    #[test]
+    fn present_mode_falls_back_to_the_surface_default() {
+        use wgpu::PresentMode::*;
+        // Unsupported request.
+        assert_eq!(
+            choose_present_mode(Some("mailbox"), &[Fifo], PresentDefault::Kms),
+            Fifo
+        );
+        assert_eq!(
+            choose_present_mode(Some("immediate"), &[Fifo, Mailbox], PresentDefault::Wayland),
+            Mailbox
+        );
+        // Unknown value.
+        assert_eq!(
+            choose_present_mode(Some("vsync"), &[Fifo, Mailbox], PresentDefault::Kms),
+            Fifo
+        );
     }
 
     #[test]
