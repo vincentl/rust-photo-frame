@@ -25,20 +25,46 @@
 //!   anchor_once`), so the first frame shows progress 0 and each later frame
 //!   advances by exactly the time between the vblanks the two frames are
 //!   paced on, which is the time between the vblanks they are shown on.
-//!   `transition_frame_metric` records the same clock, so it reports the
-//!   display's cadence. Why not let FIFO's blocking acquire pace on its own:
-//!   after a dwell every swapchain image but the one on screen is idle, so
-//!   the first frames of a transition are handed out back to back and
-//!   presented a few ms apart, ahead of the display, and the transition
-//!   clock (and the metric) would run ahead of what the panel shows. With
-//!   the explicit wait, at most one frame is queued and an idle image is
-//!   always free, so the acquire no longer decides the timing; FIFO still
-//!   guarantees no tearing. Frames outside a transition (greeting, sleep,
-//!   the first frame of a photo) render at once. If the vblank wait fails,
-//!   the rest of that transition falls back to FIFO pacing (logged).
+//!   `transition_frame_metric` records the same clock, so its frame times
+//!   report the vblanks the loop paced on. Why not let FIFO's blocking
+//!   acquire pace on its own: after a dwell every swapchain image but the one
+//!   on screen is idle, so the first frames of a transition are handed out
+//!   back to back and presented a few ms apart, ahead of the display, and the
+//!   transition clock (and the metric) would run ahead of what the panel
+//!   shows. With the explicit wait, at most one frame is queued and an idle
+//!   image is always free, so the acquire no longer decides the timing; FIFO
+//!   still guarantees no tearing. Frames outside a transition (greeting,
+//!   sleep, the resting photo) render at once, except the first frame after
+//!   a transition, which is paced too so the audit below can close.
+//! * **Late frames.** Vblank-to-vblank times cannot show a frame whose GPU
+//!   work finishes after the vblank it was meant for: the CPU loop stays on
+//!   time while the panel repeats a frame. So each paced frame registers a
+//!   submitted-work-done callback, every pacing wake polls the device, and
+//!   `pacing::FlipAudit` replays FIFO (a frame flips at the first vblank by
+//!   which it is complete, never before its predecessor) to count the
+//!   refreshes on which no new frame appeared. `transition_frame_metric`
+//!   logs that count as `late_frames`; with best ≈ worst ≈ one refresh and
+//!   `late_frames=0` the panel showed every frame on consecutive refreshes.
+//! * **GPU slack.** The explicit wait gives a frame less than one refresh
+//!   from its vblank to finish, where FIFO's run-ahead allowed up to two.
+//!   That is accepted: (1) the exact clock is the point, and FIFO's slack
+//!   came with the run-ahead that put every transition's first frames ahead
+//!   of the display; (2) the trade is bounded, because after a miss one frame
+//!   stays queued and every later frame of that transition gets two refreshes
+//!   of GPU time, so a miss costs exactly one repeated refresh and does not
+//!   cascade; (3) it is measured, not assumed: `late_frames` counts every
+//!   such repeat, which is what Pi gate 1 and the T4 native-resolution
+//!   decision read.
+//! * **Pacer failures.** A failed vblank wait (disabled CRTC: immediate
+//!   EINVAL; vblanks stopped: the kernel's 3 s timeout) leaves the rest of
+//!   that transition to FIFO alone and drops its `late_frames` field; two
+//!   failures in a row disable vblank pacing for the process
+//!   (`pacing::PacerHealth`), so a stopped CRTC costs at most two 3 s stalls.
 //! * **Runtime display changes.** Every idle wake checks that the connector
 //!   is still connected and still offers the mode in use
-//!   (`KmsDisplay::check_unchanged`); if not, the process exits with an
+//!   (`KmsDisplay::check_unchanged`; the dwell-deadline wake, once per
+//!   photo, forces a probe so a panel swapped between two checks is seen
+//!   too); if not, the process exits with an
 //!   error and `Restart=always` brings it back, and the restart waits for a
 //!   connected display and re-enumerates its mode. A lost or outdated
 //!   swapchain, any other surface error, or a streak of acquire timeouts
@@ -246,48 +272,57 @@ impl App {
 }
 
 /// Times transition frames on the display's vblanks; see "Pacing model"
-/// in the module docs.
+/// and "Pacer failures" in the module docs.
 struct VblankPacer {
     display: KmsDisplay,
-    /// Cleared when a vblank wait fails; the rest of that transition is
-    /// paced by FIFO alone. Re-armed once no transition is animating.
-    enabled: bool,
+    health: pacing::PacerHealth,
+    counter: pacing::VblankCounter,
 }
 
 impl VblankPacer {
     fn new(display: KmsDisplay) -> Self {
         Self {
             display,
-            enabled: true,
+            health: pacing::PacerHealth::default(),
+            counter: pacing::VblankCounter::default(),
         }
     }
 
-    /// Wait for the next vblank and return its time as an `Instant`, the
-    /// clock the next transition frame is drawn for. `None` when vblank
-    /// pacing is unavailable for this transition.
-    fn next_frame_time(&mut self) -> Option<Instant> {
-        if !self.enabled {
+    /// Wait for the next vblank; return its time on the `Instant` clock (the
+    /// clock the next transition frame is drawn for) and its sequence number.
+    /// `None` when vblank pacing is unavailable.
+    fn wait(&mut self) -> Option<(Instant, u64)> {
+        if !self.health.may_wait() {
             return None;
         }
         match self.display.wait_next_vblank() {
-            Ok(vblank) => Some(monotonic_to_instant(vblank.monotonic)),
+            Ok(vblank) => {
+                self.health.succeeded();
+                Some((
+                    monotonic_to_instant(vblank.monotonic),
+                    self.counter.extend(vblank.sequence),
+                ))
+            }
             Err(err) => {
-                warn!(error = %err, "kms_vblank_wait_failed; FIFO pacing for the rest of this transition");
-                self.enabled = false;
+                if self.health.failed() {
+                    warn!(
+                        error = %err,
+                        failures = pacing::PACER_FAILURES_TO_DISABLE,
+                        "kms_vblank_wait_failed; vblank pacing disabled for this process, FIFO alone paces transitions"
+                    );
+                } else {
+                    warn!(error = %err, "kms_vblank_wait_failed; FIFO pacing for the rest of this transition");
+                }
                 None
             }
         }
     }
-
-    fn rearm(&mut self) {
-        self.enabled = true;
-    }
 }
 
-/// Convert a kernel CLOCK_MONOTONIC timestamp (vblank times are monotonic)
-/// to an `Instant`, which is CLOCK_MONOTONIC on Linux too: subtract its age
-/// from `Instant::now()`. The two clock reads are adjacent, so the error is
-/// a few hundred nanoseconds.
+/// Place a kernel CLOCK_MONOTONIC timestamp (vblank times are monotonic) on
+/// the `Instant` clock, which is CLOCK_MONOTONIC on Linux too; see
+/// `pacing::place_on_instant`. The two clock reads are adjacent, so the
+/// error is a few hundred nanoseconds.
 fn monotonic_to_instant(timestamp: Duration) -> Instant {
     let mut now = libc::timespec {
         tv_sec: 0,
@@ -297,9 +332,24 @@ fn monotonic_to_instant(timestamp: Duration) -> Instant {
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
     let instant_now = Instant::now();
     let monotonic_now = Duration::new(now.tv_sec as u64, now.tv_nsec as u32);
-    instant_now
-        .checked_sub(monotonic_now.saturating_sub(timestamp))
-        .unwrap_or(instant_now)
+    pacing::place_on_instant(instant_now, monotonic_now, timestamp)
+}
+
+impl App {
+    /// Run the device's completion callbacks (the late-frame audit's input).
+    fn poll_device(&self) {
+        if let Some(gpu) = self.gpu.as_ref() {
+            let _ = gpu.device.poll(wgpu::PollType::Poll);
+        }
+    }
+
+    /// KMS: the audited late-frame count for the transition being measured;
+    /// `None` when vblank pacing was unavailable for part of it.
+    fn set_kms_late_frames(&mut self, late_frames: Option<u32>) {
+        if let Some(metric) = self.transition_frame_metric.as_mut() {
+            metric.late_frames = late_frames;
+        }
+    }
 }
 
 async fn drive(
@@ -308,6 +358,9 @@ async fn drive(
     pacer: &mut VblankPacer,
 ) -> anyhow::Result<()> {
     let mut loader_open = true;
+    let mut audit = pacing::FlipAudit::default();
+    // Every frame of the transition being audited was vblank-paced.
+    let mut audit_complete = true;
     loop {
         if app.cancel.is_cancelled() {
             info!("kms_viewer_cancelled");
@@ -332,10 +385,35 @@ async fn drive(
         // configured and the overlays never have a zero size), except after
         // an acquire timeout, which re-arms the request itself.
         if app.take_kms_redraw_request() {
-            let frame_time = if app.transition_animating() {
-                pacer.next_frame_time()
+            let animating = app.transition_animating();
+            // Transition frames, and the first frame after a transition
+            // (it closes the audit), wait for the next vblank.
+            let paced = if animating || audit.has_unresolved() {
+                pacer.wait()
             } else {
-                pacer.rearm();
+                None
+            };
+            if let Some((_, vblank)) = paced {
+                app.poll_device();
+                if animating {
+                    audit.observe(vblank);
+                } else {
+                    let late = audit.finish(vblank);
+                    app.set_kms_late_frames(audit_complete.then_some(late));
+                }
+            } else if animating {
+                audit_complete = false;
+            } else if audit.has_unresolved() {
+                let _ = audit.finish(0);
+                app.set_kms_late_frames(None);
+            }
+            if !animating {
+                pacer.health.transition_ended();
+                audit_complete = true;
+            }
+            let frame_time = if animating {
+                paced.map(|(t, _)| t)
+            } else {
                 None
             };
             match app.redraw(frame_time) {
@@ -349,6 +427,12 @@ async fn drive(
                 Err(RedrawError::Fatal(reason)) => {
                     anyhow::bail!("{reason}; exiting for a restart");
                 }
+            }
+            if let Some(done) = app.paced_submission.take()
+                && let Some((_, vblank)) = paced
+                && animating
+            {
+                audit.submitted(vblank, done);
             }
         }
 
@@ -366,6 +450,7 @@ async fn drive(
             loader,
         )
         .await;
+        let dwell_elapsed = matches!(event, WakeEvent::DwellElapsed);
         match event {
             WakeEvent::Cancelled => {
                 info!("kms_viewer_cancelled");
@@ -398,8 +483,10 @@ async fn drive(
         // Runtime display changes: the loop only waits while idle, so every
         // wait ends here. An unplugged connector or a panel that no longer
         // offers the mode ends this process; the restart waits for a
-        // display and picks its mode again.
-        if let Err(err) = pacer.display.check_unchanged() {
+        // display and picks its mode again. The dwell deadline (once per
+        // photo, just before the next transition) forces a probe; other
+        // wakes read the kernel's cached state.
+        if let Err(err) = pacer.display.check_unchanged(dwell_elapsed) {
             anyhow::bail!("kms_display_changed: {err}; exiting for a restart");
         }
     }

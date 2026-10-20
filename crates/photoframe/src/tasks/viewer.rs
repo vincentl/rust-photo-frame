@@ -1,6 +1,7 @@
 mod image_ops;
 #[cfg(target_os = "linux")]
 mod kms;
+mod pacing;
 pub mod scenes;
 mod wake;
 
@@ -281,6 +282,10 @@ pub(super) struct TransitionFrameMetric {
     frames: u32,
     worst_frame_ms: f32,
     best_frame_ms: f32,
+    /// DRM/KMS only: refreshes on which the panel showed no new frame
+    /// (`pacing::FlipAudit`). `None` on Wayland, or when KMS vblank pacing
+    /// was unavailable for this transition; the field is then not logged.
+    late_frames: Option<u32>,
 }
 
 impl TransitionFrameMetric {
@@ -292,6 +297,7 @@ impl TransitionFrameMetric {
             frames: 1,
             worst_frame_ms: 0.0,
             best_frame_ms: f32::INFINITY,
+            late_frames: None,
         }
     }
 
@@ -314,6 +320,19 @@ impl TransitionFrameMetric {
             .as_secs_f32()
             .max(f32::EPSILON);
         let intervals = (self.frames - 1) as f32;
+        if let Some(late_frames) = self.late_frames {
+            info!(
+                transition = %self.kind,
+                frames = self.frames,
+                avg_fps = format_args!("{:.1}", intervals / span),
+                avg_frame_ms = format_args!("{:.1}", 1000.0 * span / intervals),
+                best_frame_ms = format_args!("{:.1}", self.best_frame_ms),
+                worst_frame_ms = format_args!("{:.1}", self.worst_frame_ms),
+                late_frames,
+                "transition_frame_metric"
+            );
+            return;
+        }
         info!(
             transition = %self.kind,
             frames = self.frames,
@@ -2113,6 +2132,9 @@ struct App {
     caption_overlay: Option<scenes::CaptionOverlay>,
     /// Frame cadence of the transition currently being presented.
     transition_frame_metric: Option<TransitionFrameMetric>,
+    /// DRM/KMS: completion flag of the transition frame just submitted,
+    /// taken by the KMS loop for `pacing::FlipAudit`. Never set on Wayland.
+    paced_submission: Option<Arc<AtomicBool>>,
 }
 
 impl App {
@@ -2975,11 +2997,15 @@ impl App {
         }
         let Some(frame) = frame else {
             if encountered_timeout {
-                // The request that brought us here has been consumed and no
-                // frame was presented. On KMS nothing else re-arms it for a
+                // KMS: the request that brought us here has been consumed and
+                // no frame was presented. Nothing else re-arms it for a
                 // resting photo (there is no tick), so the screen would keep
-                // the previous frame until the next dwell; ask again.
-                (self.redraw_requester())();
+                // the previous frame until the next dwell; ask again. Wayland
+                // keeps its old behaviour (no retry): there a retry blocks
+                // the winit thread and a streak escalates to a GPU rebuild.
+                if self.output.as_ref().is_some_and(Output::is_kms) {
+                    (self.redraw_requester())();
+                }
                 return self.note_surface_timeout();
             }
             return Ok(());
@@ -3365,8 +3391,17 @@ impl App {
                 }
 
                 gpu.queue.submit(Some(encoder.finish()));
-                // Wayland: frame-callback pacing; KMS: nothing (FIFO
-                // acquire is the clock). See Output::before_present.
+                // KMS transition frames (the only ones with a frame_time):
+                // learn when the GPU finished, for the late-frame audit.
+                if frame_time.is_some() {
+                    let done = Arc::new(AtomicBool::new(false));
+                    let flag = Arc::clone(&done);
+                    gpu.queue
+                        .on_submitted_work_done(move || flag.store(true, Ordering::Release));
+                    self.paced_submission = Some(done);
+                }
+                // Wayland: frame-callback pacing; KMS: nothing (the loop
+                // waits for the vblank). See Output::before_present.
                 if let Some(output) = self.output.as_ref() {
                     output.before_present();
                 }
@@ -3465,6 +3500,7 @@ impl App {
             configured_surface_size: None,
             caption_overlay: None,
             transition_frame_metric: None,
+            paced_submission: None,
         }
     }
 

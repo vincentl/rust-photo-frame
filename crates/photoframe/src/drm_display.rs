@@ -239,6 +239,26 @@ pub struct PlaneCandidate {
     pub supports: bool,
 }
 
+/// The error when no card yielded a target. Waiting only helps when the
+/// requested display can still appear: some card has connectors, and a
+/// connector named by the operator exists (a misspelled name such as
+/// `HDMI-1` for `HDMI-A-1` would otherwise be waited for forever).
+pub fn no_target_error(
+    notes: &[String],
+    saw_kms_card: bool,
+    connector_requested: Option<&str>,
+    connector_seen: bool,
+) -> KmsError {
+    let found = format!("no usable DRM card found:\n  {}", notes.join("\n  "));
+    match connector_requested {
+        Some(name) if !connector_seen => KmsError::failed(format!(
+            "no connector is named {name:?} on any card (names look like HDMI-A-1); {found}"
+        )),
+        _ if saw_kms_card => KmsError::no_connected_display(found),
+        _ => KmsError::failed(found),
+    }
+}
+
 /// Retry `attempt` while it fails only because no display is connected,
 /// polling every `poll`; return its value, its first other error, or
 /// `Ok(None)` once `cancel` fires.
@@ -351,6 +371,8 @@ mod device {
         // Whether some card had connectors at all: then "nothing connected"
         // is a display that may still appear, not a missing device.
         let mut saw_kms_card = false;
+        // Whether a connector with the requested name exists on any card.
+        let mut connector_seen = false;
         for path in candidate_paths(request.card.as_deref()) {
             let file = match OpenOptions::new().read(true).write(true).open(&path) {
                 Ok(f) => f,
@@ -399,6 +421,9 @@ mod device {
                     connected: i.state() == connector::State::Connected,
                 })
                 .collect();
+            if let Some(name) = request.connector.as_deref() {
+                connector_seen |= candidates.iter().any(|c| c.name.eq_ignore_ascii_case(name));
+            }
             let chosen = pick_connector(&candidates, request.connector.as_deref())
                 .map_err(|e| e.context(&path))?;
             let Some(index) = chosen else {
@@ -449,12 +474,12 @@ mod device {
                 plane: request.plane,
             });
         }
-        let message = format!("no usable DRM card found:\n  {}", notes.join("\n  "));
-        if saw_kms_card {
-            Err(KmsError::no_connected_display(message))
-        } else {
-            Err(KmsError::failed(message))
-        }
+        Err(no_target_error(
+            &notes,
+            saw_kms_card,
+            request.connector.as_deref(),
+            connector_seen,
+        ))
     }
 
     impl KmsTarget {
@@ -528,14 +553,14 @@ mod device {
     }
 
     impl KmsDisplay {
-        fn connector(&self) -> Result<connector::Info, KmsError> {
+        fn connector(&self, force_probe: bool) -> Result<connector::Info, KmsError> {
             self.card
                 .get_connector(
                     connector::Handle::from(
                         drm::control::RawResourceHandle::new(self.connector_id)
                             .ok_or_else(|| KmsError::failed("connector id 0"))?,
                     ),
-                    false,
+                    force_probe,
                 )
                 .map_err(|e| {
                     KmsError::failed(format!("query connector {}: {e}", self.connector_id))
@@ -543,7 +568,7 @@ mod device {
         }
 
         fn resolve_pipe(&self) -> Result<u32, KmsError> {
-            let info = self.connector()?;
+            let info = self.connector(false)?;
             let encoder = info
                 .current_encoder()
                 .ok_or_else(|| KmsError::failed("connector has no active encoder yet"))?;
@@ -600,11 +625,17 @@ mod device {
         }
 
         /// The display this process was started for is still there: the
-        /// connector is connected and still lists the mode in use. Uses the
-        /// kernel's last known state (no forced probe), which hot-plug
-        /// detection keeps current.
-        pub fn check_unchanged(&self) -> Result<(), KmsError> {
-            let info = self.connector()?;
+        /// connector is connected and still lists the mode in use.
+        ///
+        /// Without `force_probe` this reads the kernel's last known state,
+        /// which hot-plug detection keeps current for the connection status
+        /// but not for the mode list: that is refreshed only by a probe, so a
+        /// panel swapped between two checks would look unchanged. A forced
+        /// probe re-reads the EDID over DDC (tens of ms; needs DRM master,
+        /// which this dup'd fd shares), so the caller forces one only once
+        /// per photo, at the dwell deadline.
+        pub fn check_unchanged(&self, force_probe: bool) -> Result<(), KmsError> {
+            let info = self.connector(force_probe)?;
             if info.state() != connector::State::Connected {
                 return Err(KmsError::no_connected_display(format!(
                     "connector {info} is {:?}",
@@ -910,6 +941,26 @@ mod tests {
         assert_eq!(err.kind(), KmsErrorKind::NoConnectedDisplay);
         let err = pick_mode(&[], None, None).unwrap_err();
         assert_eq!(err.kind(), KmsErrorKind::Failed);
+    }
+
+    #[test]
+    fn a_misspelled_connector_fails_instead_of_waiting() {
+        let notes = vec!["/dev/dri/card1: no matching connected connector".to_string()];
+        let err = no_target_error(&notes, true, Some("HDMI-1"), false);
+        assert_eq!(err.kind(), KmsErrorKind::Failed);
+        assert!(err.to_string().contains("HDMI-1"), "{err}");
+        // An existing but unplugged named connector is still waited for.
+        let err = no_target_error(&notes, true, Some("HDMI-A-1"), true);
+        assert_eq!(err.kind(), KmsErrorKind::NoConnectedDisplay);
+        // No name: wait if a card has connectors at all.
+        assert_eq!(
+            no_target_error(&notes, true, None, false).kind(),
+            KmsErrorKind::NoConnectedDisplay
+        );
+        assert_eq!(
+            no_target_error(&notes, false, None, false).kind(),
+            KmsErrorKind::Failed
+        );
     }
 
     #[tokio::test(start_paused = true)]
