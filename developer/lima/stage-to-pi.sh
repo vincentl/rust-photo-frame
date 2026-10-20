@@ -4,6 +4,11 @@
 # Pi. Run INSIDE the VM (see developer/lima.md):
 #
 #   limactl shell photoframe -- developer/lima/stage-to-pi.sh [--deploy] USER@HOST
+#   limactl shell photoframe -- developer/lima/stage-to-pi.sh --stage-only
+#
+# --stage-only builds and stages, runs the checks below and stops: no Pi, no
+# ssh agent, no rsync (USER@HOST is not needed). The result is in
+# ${STAGE_ROOT}/stage inside the VM.
 #
 # Without --deploy it stops after the rsync and prints the command to finish.
 # With --deploy it also runs, on the Pi:
@@ -28,16 +33,19 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 PI_REPO="${PI_REPO:-photoframe}"
 PI_STAGE="${PI_STAGE:-photoframe-stage}"
 deploy=0
+stage_only=0
 target=""
 for arg in "$@"; do
     case "${arg}" in
         --deploy) deploy=1 ;;
+        --stage-only) stage_only=1 ;;
         -h|--help) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         -*) lima_die "unknown option ${arg}" ;;
         *) [[ -z "${target}" ]] || lima_die "only one USER@HOST"; target="${arg}" ;;
     esac
 done
-[[ -n "${target}" ]] || lima_die "usage: stage-to-pi.sh [--deploy] USER@HOST"
+(( stage_only )) && (( deploy )) && lima_die "--stage-only and --deploy are mutually exclusive"
+(( stage_only )) || [[ -n "${target}" ]] || lima_die "usage: stage-to-pi.sh [--deploy] USER@HOST | --stage-only"
 
 lima_require_vm
 
@@ -50,7 +58,7 @@ esac
 export CARGO_PROFILE=release
 export STAGE_ROOT="${STAGE_ROOT:-${BUILD_ROOT}/stage-root}"
 
-ssh-add -l >/dev/null 2>&1 || lima_die "no ssh-agent in the VM; on the Mac run 'ssh-add' and restart the shell ('limactl shell' forwards the agent)"
+(( stage_only )) || ssh-add -l >/dev/null 2>&1 || lima_die "no ssh-agent in the VM; on the Mac run 'ssh-add' and restart the shell ('limactl shell' forwards the agent)"
 
 lima_sync_src
 
@@ -60,7 +68,10 @@ lima_log "Staging (20-stage.sh) -> ${STAGE_ROOT}/stage"
 bash "${SRC_COPY}/setup/application/modules/20-stage.sh"
 
 stage="${STAGE_ROOT}/stage"
-for bin in photoframe wifi-manager buttond; do
+# frametest is staged only when it was built; check it like the others if so.
+checked_bins=(photoframe wifi-manager buttond)
+[[ -e "${stage}/bin/frametest" ]] && checked_bins+=(frametest)
+for bin in "${checked_bins[@]}"; do
     [[ -x "${stage}/bin/${bin}" ]] || lima_die "${stage}/bin/${bin} missing after staging"
     file "${stage}/bin/${bin}" | grep -q "ARM aarch64" || lima_die "${bin} is not an aarch64 ELF"
     if ldd "${stage}/bin/${bin}" | grep -q "not found"; then
@@ -68,6 +79,11 @@ for bin in photoframe wifi-manager buttond; do
         lima_die "${bin} has unresolved shared libraries"
     fi
 done
+
+if (( stage_only )); then
+    lima_log "Staged at ${stage} (--stage-only: nothing sent anywhere)"
+    exit 0
+fi
 
 lima_log "rsync ${stage}/ -> ${target}:${PI_STAGE}/stage/"
 rsync -rlptD --delete --mkpath --no-owner --no-group \
