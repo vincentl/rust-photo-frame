@@ -65,6 +65,11 @@ provision:
     set -eux -o pipefail
     export DEBIAN_FRONTEND=noninteractive
 
+    # Lima runs provision scripts on every boot, not only the first. Everything
+    # below is a one-time install, so stop here once it has completed (and
+    # `limactl start` works offline afterwards).
+    [ -e /var/lib/photoframe-provisioned ] && exit 0
+
     # setup/system/modules/10-apt-packages.sh, minus the compositor stack
     # (sway, swaybg, swayidle, swaylock, seatd, libgl1-mesa-dri), kmscube and
     # network-manager. Those are only needed for the setup smoke test, and
@@ -97,6 +102,7 @@ provision:
     done
 
     install -d -m 0755 -o "{{.User}}" /var/cache/photoframe-build
+    touch /var/lib/photoframe-provisioned
 
 message: |
   Debian 13 arm64 VM "{{.Name}}" is ready. The repo is visible read-only at
