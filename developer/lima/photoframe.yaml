@@ -44,6 +44,13 @@ env:
   # build in the VM runnable on the Pi.
   RUSTFLAGS: "-Ctarget-cpu=cortex-a76"
 
+# Lima enables rootless containerd by default: it downloads nerdctl-full (a few
+# hundred MB), drops ~60 binaries into /usr/local/bin and makes `limactl start`
+# wait on it. Nothing here uses containers.
+containerd:
+  system: false
+  user: false
+
 ssh:
   # So the VM can rsync to the Pi using the Mac's ssh-agent (no keys copied
   # into the VM). Only used by developer/lima/stage-to-pi.sh.
