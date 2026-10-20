@@ -1,4 +1,6 @@
 mod config;
+#[allow(dead_code)] // shared with frametest; the viewer uses a subset
+mod drm_display;
 mod events;
 mod gpu;
 mod processing;
