@@ -103,6 +103,37 @@ problems (solid can't hit refresh rate) from throughput problems (solid
 can, fade can't). When in doubt, start here — it takes five minutes and
 rules out the entire application.
 
+**`frametest --drm`** runs the same workloads with **no compositor**: it
+opens the DRM card, becomes DRM master, and presents through Vulkan's
+`VK_KHR_display` + `VK_EXT_acquire_drm_display` (wgpu's
+`SurfaceTargetUnsafe::Drm`), so every frame goes straight to a KMS page
+flip. This is the feasibility probe for running the viewer without sway
+(see the direct-scanout note below). The kiosk session must be stopped
+first, because sway holds DRM master while it runs:
+
+```bash
+sudo systemctl stop greetd.service
+sudo -u kiosk /opt/photoframe/bin/frametest solid fifo --drm --seconds 15
+sudo -u kiosk /opt/photoframe/bin/frametest fade fifo --drm --seconds 15
+sudo -u kiosk /opt/photoframe/bin/frametest fade mailbox --drm --seconds 15
+sudo systemctl start greetd.service
+```
+
+It prints what KMS reports (cards, connectors, modes), what Vulkan reports
+(display modes, planes), then the usual per-second cadence line. Flags:
+`--drm=/dev/dri/cardN` to pick a card (default: the first with a connected
+connector — on a Pi 5 that is the `vc4` card, not the render-only `v3d`
+one), `--connector HDMI-A-1`, `--mode 3840x2160@60` (default: the
+connector's preferred mode), `--plane N` (default: the Vulkan plane that
+reports the display), `--seconds N` (default: run until Ctrl-C). When it
+exits the screen goes dark until greetd restarts sway. Read the ladder the
+same way as on Wayland, with one addition: `solid fifo --drm` at a locked
+60.0 fps with best ≈ worst ≈ 16.7 ms means page flips are vblank-locked
+with no compositor handshake, which is what FIFO cannot deliver under
+sway 1.10. If the probe fails before the first cadence line it says which
+step refused — missing Vulkan extension, not DRM master, no matching
+mode, or the surface/swapchain creation — and that answer is the result.
+
 ## Root causes and fixes (June 2026)
 
 1. **Bootloader EEPROM memory regression.** Pi 5 bootloaders v2025.01.22
@@ -186,9 +217,13 @@ fails: v3dv allocates UIF-tiled swapchain buffers (modifier
 `0x0700000000000006`), which the display controller cannot scan out, and
 `MESA_VK_WSI_DEBUG=linear` does not change the negotiated modifier (tested
 on Mesa 25.0). sway therefore composites — on the GPU, costing a few ms per
-frame. Parked: not worth chasing while transitions hold 60 fps. Revisit
-alongside a sway/wlroots/Mesa upgrade (`journalctl -t photoframe` with
-`sway -d` shows per-frame scan-out decisions).
+frame. In memory-traffic terms that pass reads the 33 MB client buffer and
+writes a 33 MB output buffer every frame — about a third of all the
+traffic a native 4K fade generates — on a bus that is the binding
+constraint at 4K60. Two ways out: a sway/wlroots/Mesa upgrade that gets
+scanout working (`journalctl -t photoframe` with `sway -d` shows per-frame
+scan-out decisions), or no compositor at all. `frametest --drm` (above)
+measures the second option without touching the viewer.
 
 ## Environment knobs
 

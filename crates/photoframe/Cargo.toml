@@ -46,6 +46,13 @@ fontdb = "0.23.0"
 palette = "0.7.6"
 config-model = { path = "../config-model" }
 
+# DRM/KMS surface mode for frametest (`--drm`): connector/mode enumeration and
+# the raw Vulkan queries behind wgpu's `SurfaceTargetUnsafe::Drm`. `ash` must
+# stay on the same major as the one wgpu-hal uses so the handles interoperate.
+[target.'cfg(target_os = "linux")'.dependencies]
+drm = "0.14"
+ash = "0.38"
+
 [dev-dependencies]
 naga = { version = "27", features = ["wgsl-in"] }
 tempfile = "3.23.0"
