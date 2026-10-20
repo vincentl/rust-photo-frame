@@ -5,6 +5,8 @@ members = [
     "crates/wifi-manager",
     "crates/config-model",
 ]
+# Vendored, patched copy (see [patch.crates-io] below); not a workspace member.
+exclude = ["vendor/wgpu-hal"]
 resolver = "2"
 
 [workspace.package]
@@ -15,3 +17,8 @@ edition = "2024"
 
 [patch.crates-io]
 cosmic-text = { git = "https://github.com/pop-os/cosmic-text.git", rev = "646e04389e1c2e03a85e61946ace06d8fada1fa1" }
+# frametest --drm needs wgpu-hal's DRM surface path to cope with the Pi's split
+# GPU (v3d) / display (vc4) devices. One small fallback in
+# vendor/wgpu-hal/src/vulkan/drm.rs (marked PHOTOFRAME PATCH); everything else
+# is wgpu-hal 27.0.4 as published. Drop this once the fix is upstream.
+wgpu-hal = { path = "vendor/wgpu-hal" }

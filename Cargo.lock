@@ -2425,6 +2425,7 @@ name = "photoframe"
 version = "1.1.0"
 dependencies = [
  "anyhow",
+ "ash",
  "base64",
  "bytemuck",
  "chrono",
@@ -2432,6 +2433,7 @@ dependencies = [
  "clap",
  "config-model",
  "crossbeam-channel",
+ "drm",
  "fast_image_resize",
  "fontdb",
  "futures",
@@ -4007,8 +4009,6 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "27.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b21cb61c57ee198bc4aff71aeadff4cbb80b927beb912506af9c780d64313ce"
 dependencies = [
  "android_system_properties",
  "arrayvec",
