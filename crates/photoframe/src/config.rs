@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde::de::{self, DeserializeOwned, Deserializer, MapAccess, SeqAccess, Unexpected, Visitor};
 use serde_yaml::{Mapping, Value as YamlValue};
 
+use crate::processing::color::PhotoSwatches;
 use crate::processing::fixed_image::FixedImageBackground;
 
 pub use config_model::{
@@ -404,21 +405,40 @@ impl PartialEq for MattingSelection {
 
 impl Eq for MattingSelection {}
 
+/// Caption label for a baked mat (showcase mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatCaption {
+    pub kind: MattingKind,
+    pub photo_cluster: bool,
+}
+
+impl fmt::Display for MatCaption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.photo_cluster {
+            write!(f, "{} (photo-cluster)", self.kind)
+        } else {
+            fmt::Display::fmt(&self.kind, f)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StudioMatColor {
     Rgb([u8; 3]),
     PhotoAverage,
+    PhotoCluster,
 }
 
 impl StudioMatColor {
-    fn resolve(self, fallback: [f32; 3]) -> [f32; 3] {
+    fn resolve(self, swatches: &PhotoSwatches) -> [f32; 3] {
         match self {
             StudioMatColor::Rgb(rgb) => [
                 (rgb[0] as f32) / 255.0,
                 (rgb[1] as f32) / 255.0,
                 (rgb[2] as f32) / 255.0,
             ],
-            StudioMatColor::PhotoAverage => fallback,
+            StudioMatColor::PhotoAverage => swatches.average(),
+            StudioMatColor::PhotoCluster => swatches.cluster(),
         }
     }
 }
@@ -434,7 +454,7 @@ impl<'de> Deserialize<'de> for StudioMatColor {
             type Value = StudioMatColor;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("an RGB triple or the string 'photo-average'")
+                formatter.write_str("an RGB triple, 'photo-average' or 'photo-cluster'")
             }
 
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
@@ -443,6 +463,7 @@ impl<'de> Deserialize<'de> for StudioMatColor {
             {
                 match value {
                     "photo-average" => Ok(StudioMatColor::PhotoAverage),
+                    "photo-cluster" => Ok(StudioMatColor::PhotoCluster),
                     other => Err(de::Error::invalid_value(Unexpected::Str(other), &self)),
                 }
             }
@@ -490,21 +511,21 @@ impl MattingRuntime {
         self.fixed_color
     }
 
-    pub fn studio_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
-        self.studio_color.map(|color| color.resolve(fallback))
+    pub fn studio_color(&self, swatches: &PhotoSwatches) -> Option<[f32; 3]> {
+        self.studio_color.map(|color| color.resolve(swatches))
     }
 
-    pub fn passe_partout_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
+    pub fn passe_partout_color(&self, swatches: &PhotoSwatches) -> Option<[f32; 3]> {
         self.passe_partout_color
-            .map(|color| color.resolve(fallback))
+            .map(|color| color.resolve(swatches))
     }
 
-    pub fn vignette_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
-        self.vignette_color.map(|color| color.resolve(fallback))
+    pub fn vignette_color(&self, swatches: &PhotoSwatches) -> Option<[f32; 3]> {
+        self.vignette_color.map(|color| color.resolve(swatches))
     }
 
-    pub fn drop_shadow_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
-        self.drop_shadow_color.map(|color| color.resolve(fallback))
+    pub fn drop_shadow_color(&self, swatches: &PhotoSwatches) -> Option<[f32; 3]> {
+        self.drop_shadow_color.map(|color| color.resolve(swatches))
     }
 
     pub fn fixed_image(&self) -> Option<Arc<FixedImageBackground>> {
@@ -1040,6 +1061,36 @@ impl MattingOptions {
         let mut opt = MattingOptions::with_kind(kind, builder);
         opt.minimum_mat_percentage = minimum_mat_percentage;
         Some(opt)
+    }
+
+    /// Showcase-only companion to the default `studio` slot: the same mat with
+    /// `photo-cluster`, so the two swatches can be compared on the wall.
+    pub(crate) fn studio_photo_cluster_for_showcase(minimum_mat_percentage: f32) -> Self {
+        let builder = MattingOptionBuilder {
+            minimum_mat_percentage: Some(minimum_mat_percentage),
+            studio_colors: Some(vec![StudioMatColor::PhotoCluster]),
+            ..Default::default()
+        };
+        let mut opt = MattingOptions::with_kind(MattingKind::Studio, builder);
+        opt.minimum_mat_percentage = minimum_mat_percentage;
+        opt
+    }
+
+    /// What the showcase caption says about this mat: its kind, plus the swatch
+    /// token when it is `photo-cluster` (so it reads differently from the
+    /// default `photo-average` slot of the same kind).
+    pub(crate) fn caption(&self) -> MatCaption {
+        let first = match &self.style {
+            MattingMode::Studio { colors, .. }
+            | MattingMode::Vignette { colors, .. }
+            | MattingMode::PassePartout { colors, .. }
+            | MattingMode::DropShadow { colors, .. } => colors.first().copied(),
+            _ => None,
+        };
+        MatCaption {
+            kind: self.kind(),
+            photo_cluster: first == Some(StudioMatColor::PhotoCluster),
+        }
     }
 
     pub(crate) fn kind(&self) -> MattingKind {
@@ -3517,12 +3568,19 @@ impl Configuration {
         let min_pct = 6.0_f32;
         let fixed_image_path = self.showcase.fixed_image_path.clone();
 
-        let matting_options: Vec<MattingOptions> = MattingKind::ALL
-            .iter()
-            .filter_map(|&kind| {
+        let mut matting_options: Vec<MattingOptions> = Vec::new();
+        for &kind in MattingKind::ALL {
+            if let Some(option) =
                 MattingOptions::default_for_showcase(kind, min_pct, fixed_image_path.clone())
-            })
-            .collect();
+            {
+                matting_options.push(option);
+                if kind == MattingKind::Studio {
+                    // Right after the default (`photo-average`) studio slot.
+                    matting_options
+                        .push(MattingOptions::studio_photo_cluster_for_showcase(min_pct));
+                }
+            }
+        }
 
         if matting_options.is_empty() {
             tracing::warn!("showcase mode produced zero matting options; keeping original config");

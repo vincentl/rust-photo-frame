@@ -14,6 +14,11 @@
 #   Mats (9):        fixed-color, blur, studio, fixed-image*, gradient,
 #                    vignette, cinematic-blur, passe-partout, drop-shadow
 #
+#   Plus one extra studio slot, right after the default one, that uses the
+#   `photo-cluster` swatch (dominant color) instead of the default
+#   `photo-average` (mean color); its caption reads
+#   "mat: studio (photo-cluster)" so the two can be compared on the wall.
+#
 #   * fixed-image is skipped unless the backdrop file referenced by
 #     `showcase.fixed-image-path` (below) exists. The tour always reflects
 #     whatever the binary supports, so this list is just a snapshot — to tune

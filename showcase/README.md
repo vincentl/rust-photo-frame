@@ -11,6 +11,12 @@ see to a config key.
   automatically from its internal `TransitionKind::ALL` / `MattingKind::ALL`
   arrays. Adding a new effect to the frame automatically adds it to the tour —
   no manual edits required.
+- **Swatch comparison:** the tour includes two `studio` slots back to back. The
+  first uses the default `photo-average` swatch (the mean of the photo's pixels)
+  and is captioned `mat: studio`; the second uses `photo-cluster` (the dominant
+  colour actually present in the photo) and is captioned
+  `mat: studio (photo-cluster)`. Watch the same kind of photo under both to see
+  when the mean turns muddy and the cluster colour does not.
 
 ## Quick start (on the Pi)
 
@@ -49,6 +55,9 @@ Each frame displays a single line in the bottom-left, e.g.:
 ```
 transition: crossfade-zoom    mat: passe-partout
 ```
+
+The `studio` mat appears twice: plain `studio` (default `photo-average` swatch)
+and `studio (photo-cluster)`.
 
 When `fill-when-fits` triggers (a near-16:9 photo renders full-bleed), the mat
 label reads `full-bleed`. Copy the names you like directly into your real
