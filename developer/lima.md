@@ -39,8 +39,9 @@ From the repo root (or any git worktree of it, anywhere under your home director
 limactl start --name=photoframe developer/lima/photoframe.yaml
 ```
 
-The first start downloads the Debian image and provisions the VM (apt packages,
-rustup); expect a few minutes. After that:
+The first start downloads the Debian image (about 335 MB, cached by Lima afterwards) and
+provisions the VM (apt packages, rustup). Measured: 1.5 minutes with the image already
+cached, plus the download time on a cold cache. After that:
 
 ```bash
 limactl stop photoframe        # free the CPU and RAM
@@ -74,6 +75,8 @@ What the template sets up:
   `libclang-dev`, `libdrm2`, `libgbm1`, `libinput10`, `libwayland-client0`) and
   `mesa-vulkan-drivers` + `vulkan-tools`, which give you lavapipe, a software Vulkan
   device, for any test that creates a wgpu adapter.
+- **No containerd.** Lima turns on rootless containerd by default (nerdctl-full download, ~60
+  binaries in `/usr/local/bin`, `limactl start` waits on it); the template switches it off.
 - **ssh agent forwarding** so the VM can rsync to the Pi with your Mac's keys
   (nothing is copied into the VM).
 
@@ -93,6 +96,25 @@ tree; later runs are incremental. To confirm what you are running on:
 
 ```bash
 limactl shell photoframe -- bash -c '. /etc/os-release; uname -m; echo $VERSION_CODENAME; ldd --version | head -1; rustc --version'
+```
+
+**Toolchain drift.** The VM installs *current* stable (rustc 1.99.1 on 2026-10-19), which can be
+newer than the Mac's, and a newer clippy has more lints, so `-D warnings` can fail in the VM on
+code the Mac passes. To tell "new lint" from "Linux-only problem", also run the older toolchain
+(here the Mac's 1.89.0):
+
+```bash
+limactl shell photoframe -- sudo env RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo /usr/local/cargo/bin/rustup toolchain install 1.89.0 --profile minimal -c clippy
+limactl shell photoframe -- cargo +1.89.0 clippy --workspace --all-targets -- -D warnings
+```
+
+**Disk.** `cargo test` plus clippy on two toolchains leaves about 11 GB of debug output in the VM
+(release is about 1 GB), and the VM's disk image grows on the Mac by the same amount. Give
+the Mac that much room, and reclaim it with:
+
+```bash
+limactl shell photoframe -- bash -c 'rm -rf $CARGO_TARGET_DIR/debug && sudo fstrim -v /'
+limactl stop photoframe   # the image file shrinks on the Mac once the VM is stopped
 ```
 
 If a test needs to write inside the source tree it will fail with
@@ -143,8 +165,10 @@ limactl start photoframe
 **What "pass" means here.** The script ends with `N hard failure(s), M expected-in-VM item(s)`
 and exits non-zero only for hard failures. `greetd.service` cannot bring up a compositor
 without the Pi's GPU and display, so these are expected and listed separately, not counted
-as failures: `50-postcheck` failing on greetd or the control socket, and `verify.sh`
-reporting `greetd.service not active`. Every other module, every unit verification, and
+as failures: `50-postcheck` failing on greetd or the control socket, and `verify.sh` reporting `greetd.service not active` (greetd restart-loops, so
+verify.sh may just as well catch it "active"; on the first run it did). `verify.sh` runs under
+`sudo`: as the VM user it cannot see the 0750 `/var/lib/photoframe` or the 0660 `sync.env`
+and prints phantom warnings. Every other module, every unit verification, and
 every other `verify.sh` error is a real finding. `photoframe-wifi-manager.service` may
 also restart-loop in the journal (no Wi-Fi hardware); that is worth a look but is not
 scripted as a failure.
@@ -163,6 +187,13 @@ ssh-add
 
 # build release in the VM, stage, rsync to the Pi
 limactl shell photoframe -- developer/lima/stage-to-pi.sh pi@picframe.local
+```
+
+To build and stage without a Pi (no ssh agent, no rsync; the tree is left in
+`/var/cache/photoframe-build/stage-root/stage` in the VM):
+
+```bash
+limactl shell photoframe -- developer/lima/stage-to-pi.sh --stage-only
 ```
 
 That script copies the working tree into the VM, runs `10-build.sh` and `20-stage.sh`
@@ -221,7 +252,12 @@ limactl shell photoframe-qemu -- bash -c 'ls -l /dev/dri; sudo modetest -M virti
 limactl shell photoframe-qemu -- bash -c 'vulkaninfo 2>/dev/null | grep -E "VK_KHR_display|VK_EXT_acquire_drm_display|VK_EXT_physical_device_drm"'
 ```
 
-**Unverified.** Expectation, to be confirmed by those commands:
+**Result (2026-10-19, see "First run"): this does not work.** The qemu guest has a virtio-gpu PCI
+device but no `/dev/dri` (Debian's *cloud* kernel is built without DRM), and the `grep` above
+is a **false positive**: `VK_KHR_display` and `VK_EXT_acquire_drm_display` show up as *instance*
+extensions from the Vulkan loader whatever the device is. The only device is `llvmpipe`
+(`PHYSICAL_DEVICE_TYPE_CPU`) and it lacks the device extension `VK_EXT_physical_device_drm`, so
+look for that one instead. The original expectation, kept for reference:
 
 - A `/dev/dri/card0` may appear (virtio-gpu); whether it does under Lima's qemu setup is the first
   thing to check.
@@ -230,7 +266,7 @@ limactl shell photoframe-qemu -- bash -c 'vulkaninfo 2>/dev/null | grep -E "VK_K
   prints nothing, stop here: the most the VM can then show is that the unit starts, logs the
   failure, and respects `StartLimit*` and `Conflicts=greetd.service` ordering. That is a legitimate
   crash/ordering test, but it is not a KMS test.
-- If both extensions do show up, check out the KMS branch, run setup with
+- If the extensions *and* `VK_EXT_physical_device_drm` show up, check out the KMS branch, run setup with
   `PHOTOFRAME_DISPLAY=kms` as that branch documents, and read
   `journalctl -u photoframe-kms.service -t photoframe`.
 
@@ -271,3 +307,67 @@ You cannot get this wrong by reading; run these once and look for three things.
 3. `smoke-setup.sh` ends with **0 hard failures**, and the only expected-in-VM items are the greetd ones.
    Any `systemd-analyze verify` complaint, or a module before `50-postcheck` not completing,
    is a real finding.
+
+---
+
+## First run, 2026-10-19/20
+
+Done by following this guide on branch `claude/lima-verify-2eeddf` (from `7ca4fce`) on an M-series
+Mac (8 cores, 16 GiB) with Lima 2.2.0 and three other Lima VMs running. Debian image
+`debian-13-genericcloud-arm64-20260712-2537` was already in Lima's cache, so no download time
+is included.
+
+| Step | Command | Measured |
+|------|---------|----------|
+| Create and provision | `limactl start --name=photoframe developer/lima/photoframe.yaml` | 1 m 30 s, every provision step succeeded (cloud-init `degraded done` is only Lima's own deprecated `ssh-authorized-keys`). Before the containerd fix, 40 s of that was waiting for rootless containerd. |
+| Sanity | the First-run check commands below | `aarch64`, trixie, glibc 2.41, rustc/cargo 1.99.1, `CARGO_TARGET_DIR` and `RUSTFLAGS` set |
+| `cargo test --workspace` | cold target dir | 3 m 01 s, 192 passed / 0 failed / 13 suites; 1 m 43 s when re-run from the VM-local copy |
+| `cargo clippy --workspace --all-targets -- -D warnings` | rustc 1.99.1 | 50 s, **fails** (below) |
+| same with `cargo +1.89.0` | | 28 s, **fails** with 2 errors (below) |
+| `cargo fmt --all --check` | | fails, 4 hunks; identical on the Mac, not VM-related |
+| Clone | `limactl stop photoframe && limactl clone --start photoframe photoframe-smoke` | 17 s |
+| Smoke test | `limactl shell photoframe-smoke -- developer/lima/smoke-setup.sh` | 3 m 43 s first run (includes a release build), 2 m 55 s on the re-run; both ended `0 hard failure(s), 1 expected-in-VM item(s)` |
+| Release build + stage | `limactl shell photoframe -- developer/lima/stage-to-pi.sh --stage-only` | 1 m 42 s (6 CPUs), then 0.2 s when nothing changed |
+| qemu variant | `limactl start --name=photoframe-qemu --cpus 4 --memory 4 --disk 20 developer/lima/photoframe-qemu.yaml` | boots in 1 m 22 s; no `/dev/dri`; see KMS section |
+
+**Clippy.** Eleven of the thirteen distinct errors under 1.99.1 are lints new since 1.89
+(4 `derivable_impls` in `config.rs`, 6 `chunks_exact_to_as_chunks` in `fixed_image.rs` and
+`scenes/mod.rs`, 1 `question_mark` in `manager.rs`); they would appear on the Mac with a current
+toolchain too. Two are **Linux-only** and fail under 1.89.0 as well, because the Mac compiles
+the `cfg(target_os = "linux")` block out: `needless_return` in `with_photo_app_id`
+(`crates/photoframe/src/tasks/viewer.rs`) and `with_overlay_app_id`
+(`crates/wifi-manager/src/overlay/ui.rs:68`). Not fixed here; this branch only changes the Lima
+files. The same two are the only 1.89 clippy errors on `claude/viewer-on-kms-1eefd2` (`aed0dbf`),
+whose `kms.rs`, `drm_display.rs` and `wake.rs` add no clippy warning on Linux; its
+`cargo test --workspace` passes there too (260 passed, 0 failed).
+
+**Staged layout.** `20-stage.sh` produced 60 entries: `bin/` {`photoframe`, `wifi-manager`, `buttond`,
+`frametest`, `photoframe-cloud-sync`, `powerctl`, `print-status.sh`} at 0755 (the first four are
+aarch64 ELFs, no unresolved libraries), `etc/photoframe/{config.yaml,sync.env}` and
+`etc/wifi-manager.yaml` at 0644, `share/wordlist.txt` at 0644 plus an empty `share/backgrounds/`,
+`docs/` (35 files plus `LICENSE`, all 0644), `systemd/` (4 units, 0644). That is exactly what the
+module's rules give, and it is byte-for-byte the same file set and modes as the stage the
+smoke run installed, and as `/opt/photoframe` after `30-install.sh`, apart from `/opt/photoframe`
+itself (0755 root, the module creates it). Directories are 0775 owned by the build user, from the
+VM user's umask 002, probably what an on-Pi build gives too (not checked on a Pi); `30-install.sh` copies the
+stage's directory modes and owners as they are.
+
+**Things the setup scripts do that are not Lima's fault** (found by the smoke test, not fixed):
+
+- `sync_is_configured` reads `/etc/photoframe/sync.env` (0660 `kiosk:kiosk`) with `awk` as the
+  deploying user, so `45-activate-services` and `50-postcheck` print `awk: cannot open ...
+  (Permission denied)` and treat sync as unconfigured. On a Pi where the deploying user is not
+  in `kiosk`, a configured sync would likewise not get its timer enabled.
+- `verify.sh` has the same visibility problem when run unprivileged: phantom "library directory
+  missing" warnings. Run it with `sudo`.
+- `wifi-manager` logs `nmcli connection up pf-hotspot failed` every few seconds (no Wi-Fi
+  radio): expected.
+
+**What changed in the Lima files because of this run:** containerd disabled in the template;
+`smoke-setup.sh` runs `verify.sh` under `sudo` and lists `seatd.service` (there is no
+`seatd.socket`); `stage-to-pi.sh` gained `--stage-only` and checks `frametest` too.
+
+**VM state left behind:** `photoframe` (clean base: toolchains 1.99.1 and 1.89.0, release build
+cache, debug cache removed, trimmed) and `photoframe-smoke` (the clone with the full kiosk setup
+installed, greetd restart-looping), both stopped. `limactl start photoframe` brings the base back;
+`limactl delete --force photoframe photoframe-smoke` removes them. The qemu VM was deleted.
