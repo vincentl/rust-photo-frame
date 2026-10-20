@@ -174,13 +174,33 @@ probe's target selection and ordering rules
 - The card is closed only after the instance is gone, because Mesa's
   display WSI keeps polling the fd until then.
 
-**Present mode.** FIFO is the default on KMS. Page flips are
-vblank-locked, and the next swapchain acquire blocks until a buffer is
-free. That blocking acquire is the only pacing source: during a
-transition the viewer renders one frame per refresh, with no frame
-callbacks and no wall-clock floor. `PHOTOFRAME_PRESENT_MODE=mailbox` is
-honoured but has no pacing beyond what the driver does, so it stays an
-experiment.
+**Pacing model.** Each transition frame is rendered right after a vblank.
+The viewer waits for that vblank explicitly with `DRM_IOCTL_WAIT_VBLANK`
+on the connector's CRTC, then draws the frame for that vblank's kernel
+timestamp.
+
+The transition's clock starts at the vblank before its first frame. So:
+- the first frame shows progress 0;
+- each later frame advances by exactly the time between the vblanks that
+  it and the previous frame are shown on.
+
+`transition_frame_metric` records the same clock, so it reports the
+display's cadence.
+
+**Why the blocking FIFO acquire alone is not enough.** After a dwell,
+every swapchain image except the one on screen is idle. The first
+frames of a transition would get those images back to back and be
+presented a few ms apart, ahead of the display. The animation clock
+would then run ahead of the panel, and the metric would read
+`best_frame_ms` of 1–3 ms. With the explicit wait at most one frame is
+queued, so FIFO only guarantees there is no tearing.
+
+**Present mode.** FIFO stays the default on KMS.
+`PHOTOFRAME_PRESENT_MODE=mailbox` is honoured; transitions are still
+vblank-paced, and resting frames are single presents.
+
+**Fallback.** If a vblank wait fails, the rest of that transition is
+paced by FIFO alone, and the journal logs `kms_vblank_wait_failed`.
 
 **Idle behaviour.** There is no 4 ms control tick on KMS. While nothing
 animates, the viewer sleeps until one of these happens:
@@ -196,7 +216,15 @@ still ticks every 4 ms. T5 moves it onto the same plan
 **Expected `transition_frame_metric` on KMS.** For fade, wipe and push at
 native 4K the metric should read `avg_fps` ≈ 60 and
 `best_frame_ms` ≈ `worst_frame_ms` ≈ 16.7, because the stats measure the
-FIFO acquire cadence, which is the panel's.
+vblanks the frames are paced on.
+
+A `worst_frame_ms` of about 33 means the loop missed a vblank.
+
+One case does not show up in this metric. If the GPU finishes a frame
+too late for its vblank, the panel repeats the previous frame once, and
+the rest of the transition is shown one refresh later. The metric does
+not see that until late frames back up into the swapchain. The phone
+slo-mo clip (`developer/display-cadence.sh`) is the check for it.
 
 ## Root causes and fixes (June 2026)
 
@@ -339,7 +367,7 @@ the unit (`sudo systemctl edit photoframe-kms.service`, `[Service]`
 | `PHOTOFRAME_SURFACE` | `wayland` / `drm` | `wayland` (the KMS unit sets `drm`) |
 | `PHOTOFRAME_PRESENT_MODE` | `fifo` / `mailbox` / `immediate` | mailbox when available on Wayland; fifo on KMS |
 | `PHOTOFRAME_DRM_CONNECTOR` | e.g. `HDMI-A-1` (KMS only) | first connected connector |
-| `PHOTOFRAME_DRM_MODE` | `WxH[@Hz]` (KMS only) | the connector's preferred mode |
+| `PHOTOFRAME_DRM_MODE` | `WxH[@Hz]` (KMS only; must exist) | `3840x2160@60` if offered, else the connector's preferred mode |
 | `PHOTOFRAME_TRANSITION_SCALE` | 1–4 | 2 |
 | `PHOTOFRAME_IRIS_LAYER_SCALE` | 1–8 | 4 |
 | `WGPU_BACKEND` | `vulkan` / `gl` | vulkan |

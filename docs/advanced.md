@@ -484,20 +484,23 @@ At startup the viewer logs `kms_probe` lines (cards, connectors, modes, the Vulk
 | Knob (unit `Environment=`, via `sudo systemctl edit photoframe-kms.service`) | Default |
 | --- | --- |
 | `PHOTOFRAME_DRM_CONNECTOR` (e.g. `HDMI-A-1`) | first connected connector |
-| `PHOTOFRAME_DRM_MODE` (`WxH[@Hz]`, e.g. `3840x2160@60`) | the connector's preferred mode |
+| `PHOTOFRAME_DRM_MODE` (`WxH[@Hz]`, e.g. `3840x2160@60`; must exist) | `3840x2160@60` if the panel offers it (as the sway config pins), else the panel's preferred mode |
 | `PHOTOFRAME_PRESENT_MODE` | `fifo` |
 
 ### When it stops
 
-v1.2 does not adapt to display changes in place. In each of these cases the viewer exits with an error and `Restart=always` brings it back:
+**No display at startup.** If no display is connected when the unit starts, the viewer waits for one and checks once a second. This covers a power cut where the Pi boots before the TV, or a receiver in standby. The journal shows `kms_waiting_for_display` once. When the panel appears, the slideshow starts.
 
-- the panel is unplugged or re-plugged with a different mode;
+**Display changes.** v1.2 does not adapt to a display change in place. Every time the viewer wakes from idle, it checks the connector. In each of these cases the viewer exits with an error and `Restart=always` brings it back:
+
+- the panel was unplugged;
+- the panel no longer offers the mode in use;
 - the swapchain is lost;
 - frames repeatedly time out.
 
-The restart re-enumerates the card, connector and preferred mode.
+The restart waits for a display and picks its mode again. Because the check runs on idle wakes, an unplug is noticed at the next photo change, command or matting result.
 
-If the viewer cannot start (most often because greetd/sway still holds the display, which the journal reports as "not DRM master"), systemd retries five times in two minutes. It then leaves the unit failed and the screen dark. There is deliberately no automatic fallback to greetd. To recover, fix the cause, then:
+**Startup failures.** If the viewer cannot start, systemd retries five times in two minutes. The usual cause is that greetd/sway or plymouth still holds the display; the journal reports this as "not DRM master". It then leaves the unit failed and the screen dark. There is deliberately no automatic fallback to greetd. To recover, fix the cause, then:
 
 ```bash
 sudo systemctl reset-failed photoframe-kms.service && sudo systemctl start photoframe-kms.service
