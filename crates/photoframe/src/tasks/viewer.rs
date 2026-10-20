@@ -15,6 +15,7 @@ use crate::processing::blur::apply_blur;
 use crate::processing::color::PhotoSwatches;
 use crate::processing::layout::center_offset;
 use crate::tasks::greeting_screen::GreetingScreen;
+use crate::tasks::loader;
 use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
 use futures::executor::block_on;
 use image::{Rgba, RgbaImage, imageops};
@@ -583,8 +584,8 @@ impl<'a> MattingBridge<'a> {
                 .fill_when_fits()
                 .map(|fill| {
                     fill.should_fill(
-                        queued.image.width,
-                        queued.image.height,
+                        queued.image.source_size.0,
+                        queued.image.source_size.1,
                         surface.width.max(1),
                         surface.height.max(1),
                         self.max_upscale_factor,
@@ -671,12 +672,13 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         path,
         width,
         height,
+        source_size,
         pixels,
     } = image;
     if width == 0 || height == 0 {
         return None;
     }
-    let src = RgbaImage::from_raw(width, height, pixels)?;
+    let mut src = RgbaImage::from_raw(width, height, pixels)?;
     let MatParams {
         screen_w,
         screen_h,
@@ -691,6 +693,44 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
     }
 
     let (canvas_w, canvas_h) = compute_canvas_size(screen_w, screen_h, oversample, max_dim);
+
+    // The loader may have decoded a JPEG at a reduced DCT scale sized for the
+    // canvas as it was then. If the canvas has since grown (rotation, a new
+    // output) so that those pixels no longer cover what this task draws, decode
+    // in full here, off the render thread, rather than upscale a soft buffer.
+    let bg_scale = if fill_screen {
+        None
+    } else {
+        loader::bg_sample_scale(&matting.style)
+    };
+    if !loader::decoded_suffices(
+        (width, height),
+        source_size,
+        (canvas_w, canvas_h),
+        fill_screen,
+        bg_scale,
+    ) {
+        match loader::decode_rgba8_apply_exif(&path, None) {
+            Ok(full) => {
+                debug!(
+                    path = %path.display(),
+                    reduced_w = width,
+                    reduced_h = height,
+                    full_w = full.image.width(),
+                    full_h = full.image.height(),
+                    canvas_w,
+                    canvas_h,
+                    "reduced_decode_insufficient_redecoding_full"
+                );
+                src = full.image;
+            }
+            Err(err) => warn!(
+                path = %path.display(),
+                "full re-decode of reduced photo failed, using reduced pixels: {err}"
+            ),
+        }
+    }
+    let (width, height) = src.dimensions();
 
     // `fill-when-fits`: render the photo full-bleed (cover-crop, no mat).
     if fill_screen {
@@ -1192,6 +1232,7 @@ pub fn run_windowed(
     cancel: CancellationToken,
     cfg: Arc<crate::config::Configuration>,
     mut control: Receiver<ViewerCommand>,
+    decode_scaling: super::loader::DecodeScaling,
 ) -> anyhow::Result<()> {
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
@@ -1571,6 +1612,7 @@ pub fn run_windowed(
         surface_timeout_streak: u32,
         // Last surface size that we considered "configured" and stabilized
         configured_surface_size: Option<(u32, u32)>,
+        decode_scaling: super::loader::DecodeScaling,
         /// Caption overlay for showcase mode; `None` when showcase is disabled.
         caption_overlay: Option<scenes::CaptionOverlay>,
         /// Frame cadence of the transition currently being presented.
@@ -1624,6 +1666,16 @@ pub fn run_windowed(
             self.surface_configured = ready;
             if !ready {
                 self.pending_scene_enter = true;
+            } else if let Some(surface) = self.active_surface() {
+                // Same canvas the matting worker will render into; the loader
+                // sizes JPEG decodes against it.
+                let (canvas_w, canvas_h) = compute_canvas_size(
+                    surface.width.max(1),
+                    surface.height.max(1),
+                    self.oversample,
+                    surface.max_texture_dimension,
+                );
+                self.decode_scaling.publish_canvas(canvas_w, canvas_h);
             }
             ready
         }
@@ -3499,6 +3551,7 @@ pub fn run_windowed(
         full_config: cfg,
         surface_timeout_streak: 0,
         configured_surface_size: None,
+        decode_scaling,
         caption_overlay: None,
         transition_frame_metric: None,
     };
@@ -3751,6 +3804,206 @@ mod tests {
         assert!(w > 0 && h > 0);
     }
 
+    use crate::tasks::loader::DecodedPhoto;
+    use crate::tasks::loader::scaled_decode_tests::{Flavor, photo_jpeg, psnr_rgb, synthetic_jpeg};
+
+    fn mat_canvas(
+        photo: &DecodedPhoto,
+        path: &std::path::Path,
+        screen: (u32, u32),
+        oversample: f32,
+        kind: crate::config::MattingKind,
+        fill_screen: bool,
+    ) -> RgbaImage {
+        use crate::config::MattingOptions;
+        let task = MatTask {
+            image: PreparedImageCpu {
+                path: path.to_path_buf(),
+                width: photo.image.width(),
+                height: photo.image.height(),
+                source_size: photo.source_size,
+                pixels: photo.image.as_raw().clone(),
+            },
+            params: MatParams {
+                screen_w: screen.0,
+                screen_h: screen.1,
+                oversample,
+                max_dim: 4096,
+                max_upscale_factor: 2.0,
+                matting: MattingOptions::default_for_showcase(kind, 6.0, None).expect("mat option"),
+                fill_screen,
+            },
+            priority: false,
+            mat_kind: Some(kind),
+        };
+        let c = process_mat_task(task).expect("matted canvas").canvas;
+        RgbaImage::from_raw(c.width, c.height, c.pixels).unwrap()
+    }
+
+    /// The canvas produced from a DCT-scaled decode must match the one from a
+    /// full decode, for every mat that draws the photo or samples it. Textured,
+    /// non-multiple-of-8 sources so that a stretched or mis-sized buffer shows.
+    #[test]
+    fn matted_canvas_from_scaled_decode_matches_full_decode() {
+        use crate::config::MattingKind;
+        use crate::tasks::loader::{DecodeTarget, decode_rgba8_apply_exif};
+
+        let (screen_w, screen_h) = (240u32, 135u32);
+        let dir = tempfile::tempdir().unwrap();
+        for (orientation, oversample) in [(1u16, 1.0f32), (6, 1.0), (3, 1.25), (8, 0.75)] {
+            for flavor in [Flavor::Baseline420, Flavor::Progressive420] {
+                let path = dir.path().join(format!("photo-{orientation}.jpg"));
+                std::fs::write(&path, photo_jpeg(499, 375, orientation, flavor)).unwrap();
+                let full = decode_rgba8_apply_exif(&path, None).unwrap();
+                let (canvas_w, canvas_h) =
+                    compute_canvas_size(screen_w, screen_h, oversample, 4096);
+
+                for kind in [
+                    MattingKind::Studio,
+                    MattingKind::Blur,
+                    MattingKind::DropShadow,
+                ] {
+                    for fill_screen in [false, true] {
+                        // `cover` is what `fill-when-fits` being configured asks
+                        // for; 0.125 is the default blur sample scale.
+                        let target = DecodeTarget {
+                            canvas_w,
+                            canvas_h,
+                            cover: fill_screen,
+                            bg_sample_scale: Some(0.125),
+                        };
+                        let scaled = decode_rgba8_apply_exif(&path, Some(target)).unwrap();
+                        assert_eq!(scaled.source_size, full.source_size);
+                        if !fill_screen {
+                            assert!(
+                                scaled.image.width() < full.image.width(),
+                                "orientation {orientation}: expected a reduced decode"
+                            );
+                        }
+                        let ctx = format!(
+                            "{flavor:?} {kind:?} fill={fill_screen} o{orientation} x{oversample}"
+                        );
+                        let screen = (screen_w, screen_h);
+                        let a = mat_canvas(&full, &path, screen, oversample, kind, fill_screen);
+                        let b = mat_canvas(&scaled, &path, screen, oversample, kind, fill_screen);
+                        assert_eq!(a.dimensions(), b.dimensions(), "{ctx}");
+                        let psnr = psnr_rgb(&a, &b);
+                        // Grain on every pixel makes this far harsher than a photo
+                        // (real files measure 45-53 dB); a stretched or shifted
+                        // buffer lands several dB below these bounds.
+                        let floor = if fill_screen { 36.0 } else { 44.0 };
+                        assert!(psnr > floor, "{ctx}: PSNR {psnr:.1} dB");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A reduced decode planned for a small canvas must not be upscaled when
+    /// the canvas has since grown: the worker re-decodes in full.
+    #[test]
+    fn matting_worker_redecodes_when_canvas_outgrows_reduced_decode() {
+        use crate::config::MattingKind;
+        use crate::tasks::loader::{DecodeTarget, decode_rgba8_apply_exif};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.jpg");
+        std::fs::write(&path, photo_jpeg(997, 749, 1, Flavor::Baseline420)).unwrap();
+        let small = DecodeTarget {
+            canvas_w: 240,
+            canvas_h: 135,
+            cover: false,
+            bg_sample_scale: None,
+        };
+        let reduced = decode_rgba8_apply_exif(&path, Some(small)).unwrap();
+        let full = decode_rgba8_apply_exif(&path, None).unwrap();
+        assert!(reduced.image.width() < 997);
+
+        // The surface settles larger: 960x540 now needs more than 249x187.
+        for kind in [MattingKind::Studio, MattingKind::Blur] {
+            let from_reduced = mat_canvas(&reduced, &path, (960, 540), 1.0, kind, false);
+            let from_full = mat_canvas(&full, &path, (960, 540), 1.0, kind, false);
+            assert_eq!(from_reduced.as_raw(), from_full.as_raw(), "{kind:?}");
+        }
+
+        // Still sufficient for the canvas it was planned for: left alone.
+        let a = mat_canvas(&reduced, &path, (240, 135), 1.0, MattingKind::Studio, false);
+        let b = mat_canvas(&full, &path, (240, 135), 1.0, MattingKind::Studio, false);
+        assert!(psnr_rgb(&a, &b) > 34.0);
+    }
+
+    /// `fill-when-fits` must judge the original photo, not the reduced decode,
+    /// including when the canvas is smaller than the screen (oversample < 1).
+    #[test]
+    fn fill_when_fits_uses_source_size_of_reduced_decode() {
+        use crate::config::MattingConfig;
+        use crate::tasks::loader::{DecodeTarget, decode_rgba8_apply_exif};
+
+        let matting: MattingConfig = serde_yaml::from_str(
+            "fill-when-fits:\n  maximum-crop-percentage: 5.0\n  skip-matting-probability: 1.0\n\
+             selection: fixed\nactive:\n  - kind: fixed-color\n    colors:\n      - [0, 0, 0]\n",
+        )
+        .unwrap();
+        assert!(matting.fill_when_fits().is_some());
+
+        // 16:9 photo, 1920x1080 screen, canvas halved by oversample 0.5.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.jpg");
+        std::fs::write(&path, synthetic_jpeg(2000, 1125, 1)).unwrap();
+        let target = DecodeTarget {
+            canvas_w: 960,
+            canvas_h: 540,
+            cover: true,
+            bg_sample_scale: None,
+        };
+        let photo = decode_rgba8_apply_exif(&path, Some(target)).unwrap();
+        assert!(photo.image.width() < 2000, "expected a reduced decode");
+        assert_eq!(photo.source_size, (2000, 1125));
+
+        let mut mat_inflight = 0usize;
+        let mut deferred_images = VecDeque::new();
+        deferred_images.push_back(QueuedImage {
+            image: PreparedImageCpu {
+                path: path.clone(),
+                width: photo.image.width(),
+                height: photo.image.height(),
+                source_size: photo.source_size,
+                pixels: photo.image.as_raw().clone(),
+            },
+            priority: false,
+        });
+        let mut ready_results = VecDeque::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        drop(tx);
+        let mat_pipeline = MattingPipeline::new(1, 2);
+        let mut bridge = MattingBridge {
+            preload_count: 1,
+            mat_inflight: &mut mat_inflight,
+            deferred_images: &mut deferred_images,
+            ready_results: &mut ready_results,
+            from_loader: &mut rx,
+            surface: Some(SurfaceState::new(1920, 1080, 4096)),
+            matting: &matting,
+            oversample: 0.5,
+            // 1.0: the photo (2000 px) fills the 1920 px screen without upscaling,
+            // but its 960 px reduced decode would look like it needs 2x.
+            max_upscale_factor: 1.0,
+            mat_pipeline: &mat_pipeline,
+        };
+        let mut wake = scenes::WakeScene::new(5_000, TransitionConfig::default());
+        bridge.queue_for_wake(&mut wake);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let result = loop {
+            if let Some(result) = mat_pipeline.try_recv() {
+                break result;
+            }
+            assert!(std::time::Instant::now() < deadline, "matting timed out");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert!(result.mat_kind.is_none(), "photo should have been filled");
+    }
+
     #[test]
     fn matting_bridge_defers_until_surface_configured() {
         let mut mat_inflight = 0usize;
@@ -3759,6 +4012,7 @@ mod tests {
             path: PathBuf::from("/tmp/photo.jpg"),
             width: 100,
             height: 50,
+            source_size: (100, 50),
             pixels: vec![0; (100 * 50 * 4) as usize],
         };
         deferred_images.push_back(QueuedImage {
@@ -3809,6 +4063,7 @@ mod tests {
                 path: PathBuf::from("/tmp/photo.jpg"),
                 width: 800,
                 height: 600,
+                source_size: (800, 600),
                 pixels: gradient,
             },
             false,
