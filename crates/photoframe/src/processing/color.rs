@@ -110,8 +110,8 @@ pub fn average_color_rgba(img: &RgbaImage) -> Rgba<u8> {
 /// several clusters, so a small flat region can win against a far bigger sky.
 /// Why not a single bandwidth: wide enough to keep a sunset gradient whole, it
 /// would blend neighbouring hues; narrow enough to keep hues apart, it splits
-/// the gradient into weak peaks. Two distinct hues closer than the coarse
-/// bandwidth count as one region and report the representative of the denser
+/// the gradient into weak peaks. Two distinct hues closer than about 0.1 Oklab
+/// (measured; the coarse bandwidth is 0.15) count as one region and report the representative of the denser
 /// one (or, on a tie, the lowest histogram cell: darkest, then lowest a, then
 /// lowest b, a rule that depends on the colours, never on where they sit in the
 /// frame); mean-shift may stop a hair short of its fixed point at the iteration
@@ -497,7 +497,7 @@ mod tests {
         }
     }
 
-    /// Two hues closer than the coarse bandwidth are one region; the answer is
+    /// Two hues closer than about 0.1 Oklab are one region; the answer is
     /// the representative of one of them (the lower cell on this exact tie), not
     /// the blend of the two.
     #[test]
