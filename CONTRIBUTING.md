@@ -9,6 +9,7 @@ debugging — live under **[developer/](developer/)**.
 
 - **[developer/testing.md](developer/testing.md)** — automated checks, the on-device test plan, and the release checklist.
 - **[developer/architecture.md](developer/architecture.md)** — setup-script architecture and kiosk-stack debugging.
+- **[developer/lima.md](developer/lima.md)** — a Debian 13 arm64 VM on an Apple Silicon Mac: Linux tests, a setup/systemd smoke test, and building binaries off the Pi.
 
 ---
 

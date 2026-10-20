@@ -51,6 +51,26 @@ ensure_journald_persistence() {
     fi
 }
 
+# --skip-build: install a tree that was already built and staged elsewhere
+# (see developer/lima.md). Skips 10-build and 20-stage; every other module runs
+# as usual against ${STAGE_ROOT}/stage. Without the flag nothing changes.
+SKIP_BUILD=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-build) SKIP_BUILD=1 ;;
+        -h|--help)
+            echo "Usage: ${SCRIPT_NAME} [--skip-build]"
+            echo "  --skip-build  skip the build and stage modules; install the tree already at \${STAGE_ROOT}/stage"
+            exit 0
+            ;;
+        *)
+            log ERROR "Unknown argument: $1"
+            exit 2
+            ;;
+    esac
+    shift
+done
+
 trap 'log ERROR "${SCRIPT_NAME} failed on line ${LINENO}"' ERR
 
 if [[ ! -d "${MODULE_DIR}" ]]; then
@@ -108,6 +128,11 @@ if [[ ${#modules[@]} -eq 0 ]]; then
     exit 0
 fi
 
+if (( SKIP_BUILD )) && [[ ! -x "${STAGE_ROOT}/stage/bin/photoframe" ]]; then
+    log ERROR "--skip-build needs a staged tree: ${STAGE_ROOT}/stage/bin/photoframe not found (set STAGE_ROOT)."
+    exit 1
+fi
+
 # Re-assert persistent journald logging before running modules so their output
 # (and any failure diagnostics) survive a reboot even after RaspberryPi OS
 # updates restore the volatile-storage drop-in.
@@ -116,6 +141,10 @@ ensure_journald_persistence
 log INFO "Executing application deployment modules as user $(id -un)"
 for module in "${modules[@]}"; do
     module_name="$(basename "${module}")"
+    if (( SKIP_BUILD )) && [[ "${module_name}" == 10-build.sh || "${module_name}" == 20-stage.sh ]]; then
+        log INFO "Skipping ${module_name} (--skip-build)"
+        continue
+    fi
     log INFO "Starting ${module_name}"
     if [[ ! -x "${module}" ]]; then
         chmod +x "${module}"

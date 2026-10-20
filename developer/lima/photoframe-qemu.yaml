@@ -1,0 +1,30 @@
+# EXPERIMENTAL. Same VM as photoframe.yaml on the qemu backend, to see whether
+# a virtio-gpu DRM node appears for a KMS crash/ordering smoke test.
+#
+#   limactl start --name=photoframe-qemu developer/lima/photoframe-qemu.yaml
+#
+# Not verified. Nothing in developer/lima.md depends on it. It is slower than
+# vz, and even with a DRM node the software Vulkan driver (lavapipe) has no
+# VK_KHR_display, so the viewer's KMS present path will most likely refuse to
+# start rather than run. See "KMS smoke test (experimental)" in
+# developer/lima.md for what to check and how to read the result.
+minimumLimaVersion: 2.0.0
+
+base:
+- photoframe.yaml
+
+vmType: qemu
+
+video:
+  # vnc keeps it headless but gives qemu a display device.
+  display: vnc
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    # modetest, to list DRM connectors/planes on the virtio-gpu node.
+    apt-get -y --no-install-recommends install libdrm-tests
