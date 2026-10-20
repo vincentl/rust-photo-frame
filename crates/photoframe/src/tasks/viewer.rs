@@ -2230,8 +2230,25 @@ impl App {
         self.surface_configured = ready;
         if !ready {
             self.pending_scene_enter = true;
+        } else {
+            self.publish_canvas();
         }
         ready
+    }
+
+    /// Publish the canvas the matting worker renders into (the surface times
+    /// the oversample factor, within the texture limit); the loader sizes
+    /// JPEG decodes against it. Called wherever the surface becomes ready.
+    fn publish_canvas(&self) {
+        if let Some(surface) = self.active_surface() {
+            let (canvas_w, canvas_h) = compute_canvas_size(
+                surface.width.max(1),
+                surface.height.max(1),
+                self.oversample,
+                surface.max_texture_dimension,
+            );
+            self.decode_scaling.publish_canvas(canvas_w, canvas_h);
+        }
     }
 
     fn on_surface_size_settled(&mut self) {
@@ -2339,16 +2356,6 @@ impl App {
         if !self.surface_configured {
             if matches!(hook, SceneHook::Enter) {
                 self.pending_scene_enter = true;
-            } else if let Some(surface) = self.active_surface() {
-                // Same canvas the matting worker will render into; the loader
-                // sizes JPEG decodes against it.
-                let (canvas_w, canvas_h) = compute_canvas_size(
-                    surface.width.max(1),
-                    surface.height.max(1),
-                    self.oversample,
-                    surface.max_texture_dimension,
-                );
-                self.decode_scaling.publish_canvas(canvas_w, canvas_h);
             }
             debug!(hook = ?hook, "viewer_scene_hook_deferred_until_surface_configured");
             return;

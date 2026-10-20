@@ -243,6 +243,7 @@ impl App {
         self.surface_gate.awaiting = false;
         self.surface_configured = true;
         self.configured_surface_size = Some((size.width, size.height));
+        self.publish_canvas();
     }
 
     /// Take the KMS redraw request (set by `SceneContext::request_redraw`).
