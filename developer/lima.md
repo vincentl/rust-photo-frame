@@ -61,10 +61,16 @@ What the template sets up:
   and the cargo registry lives in the VM user's `~/.cargo`. Nothing is written
   to the macOS mount, which would be slow and would mix Linux artifacts into your
   Mac `target/`.
-- **`RUSTFLAGS=-Ctarget-cpu=cortex-a76`** (the Pi 5's core) for every build in
-  the VM. `10-build.sh` otherwise defaults to `target-cpu=native`, which in the VM
-  means an Apple core and can emit instructions the Pi lacks (the symptom is
-  `SIGILL` on the Pi). Do not override this for anything you intend to ship.
+- **`RUSTFLAGS=-Ctarget-cpu=cortex-a76 -Ctarget-feature=-aes,-sha2`** for every build in the
+  VM. `10-build.sh` otherwise defaults to `target-cpu=native`, which in the VM means an
+  Apple core and can emit instructions the Pi lacks (the symptom is `SIGILL` on the Pi).
+  Plain `cortex-a76` is not enough: rustc's definition of that core also enables `aes`
+  and `sha2` (the Armv8 crypto extension), and the Pi 5's BCM2712 does not implement it on
+  every stepping (reports of `/proc/cpuinfo` differ, and nothing in the VM can tell which
+  you have: Apple cores have crypto). `-aes,-sha2` removes exactly those two and leaves
+  `crc`, `lse`, `dotprod`, `fp16`, `rcpc`, `rdm`, which every Pi 5 reports. `stage-to-pi.sh`
+  refuses `native`, and `cortex-a76` without the two minuses. Do not override this for
+  anything you intend to ship.
 - **Rust** installed system-wide under `/usr/local/{rustup,cargo}`, stable, with
   clippy and rustfmt, like `setup/system/modules/20-rust.sh`.
 - **apt packages** from `setup/system/modules/10-apt-packages.sh`, *minus*:
@@ -299,7 +305,7 @@ Treat any VM result as "the code and scripts run on arm64 Debian 13", never as "
 You cannot get this wrong by reading; run these once and look for three things.
 
 1. `limactl shell photoframe -- bash -c 'uname -m; echo $CARGO_TARGET_DIR $RUSTFLAGS; cargo --version'`
-   prints `aarch64`, `/var/cache/photoframe-build/target -Ctarget-cpu=cortex-a76` and a cargo version.
+   prints `aarch64`, `/var/cache/photoframe-build/target -Ctarget-cpu=cortex-a76 -Ctarget-feature=-aes,-sha2` and a cargo version.
    If the two variables are empty, `/etc/environment` did not reach the shell; use
    `limactl shell photoframe -- bash -lc '<cmd>'` and fix the template.
 2. `cargo test --workspace` and clippy finish in the VM, and your Mac `target/` is untouched

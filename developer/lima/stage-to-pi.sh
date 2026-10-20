@@ -51,9 +51,12 @@ lima_require_vm
 
 # Binaries built here must run on a Cortex-A76. The template pins the flag;
 # refuse anything that would reintroduce target-cpu=native on the VM's CPU.
-export RUSTFLAGS="${RUSTFLAGS:--Ctarget-cpu=cortex-a76}"
+export RUSTFLAGS="${RUSTFLAGS:--Ctarget-cpu=cortex-a76 -Ctarget-feature=-aes,-sha2}"
 case "${RUSTFLAGS}" in
     *native*) lima_die "RUSTFLAGS=${RUSTFLAGS} would target the VM's CPU, not the Pi's (SIGILL risk)" ;;
+    # rustc's cortex-a76 enables aes and sha2, which not every Pi 5 implements.
+    *cortex-a76*) [[ "${RUSTFLAGS}" == *-aes* && "${RUSTFLAGS}" == *-sha2* ]] \
+        || lima_die "RUSTFLAGS=${RUSTFLAGS}: cortex-a76 needs -Ctarget-feature=-aes,-sha2 (the Pi 5's crypto extension is not guaranteed)" ;;
 esac
 export CARGO_PROFILE=release
 export STAGE_ROOT="${STAGE_ROOT:-${BUILD_ROOT}/stage-root}"

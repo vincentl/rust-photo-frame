@@ -40,9 +40,11 @@ env:
   STAGE_ROOT: /var/cache/photoframe-build/stage-root
   # Pi 5 = Cortex-A76. setup/application/modules/10-build.sh defaults to
   # target-cpu=native, which on this VM would be an Apple core and can emit
-  # instructions the Pi's CPU lacks (SIGILL). Pinning it here keeps every
-  # build in the VM runnable on the Pi.
-  RUSTFLAGS: "-Ctarget-cpu=cortex-a76"
+  # instructions the Pi's CPU lacks (SIGILL). cortex-a76 is the right core, but
+  # rustc's cortex-a76 also turns on aes and sha2 (the Armv8 crypto extension),
+  # which only some BCM2712 steppings implement. Switching them off leaves the
+  # features every Pi 5 reports (crc, lse, dotprod, fp16, rcpc, rdm, ...).
+  RUSTFLAGS: "-Ctarget-cpu=cortex-a76 -Ctarget-feature=-aes,-sha2"
 
 # Lima enables rootless containerd by default: it downloads nerdctl-full (a few
 # hundred MB), drops ~60 binaries into /usr/local/bin and makes `limactl start`
