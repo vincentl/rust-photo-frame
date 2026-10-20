@@ -4,6 +4,8 @@ mod kms;
 mod pacing;
 pub mod scenes;
 mod wake;
+#[cfg(test)]
+mod pair_canvas_tests;
 
 use self::image_ops::*;
 use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene, Viewport};
