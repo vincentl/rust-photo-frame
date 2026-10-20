@@ -24,8 +24,8 @@ const MAX_DECODE_ALLOC_BYTES: u64 = 512 * 1024 * 1024;
 
 /// A JPEG decoded straight from DCT coefficients at a reduced scale.
 struct ScaledJpeg {
-    /// Cropped to `decode_scale::scaled_len` on each axis, in the file's
-    /// (unrotated) orientation.
+    /// `decode_scale::scaled_len` on each axis, spanning exactly the photo,
+    /// in the file's (unrotated) orientation.
     img: image::RgbaImage,
     /// DCT scale as `n/8`; `1`, `2` or `4` (`8` is never routed here).
     idct: u8,
@@ -51,6 +51,27 @@ pub(crate) struct DecodedPhoto {
 fn within_scaled_decode_bound(width: u16, height: u16, components: u64, progressive: bool) -> bool {
     let bytes_per_sample: u64 = if progressive { 2 } else { 1 };
     width as u64 * height as u64 * components * bytes_per_sample <= MAX_DECODE_ALLOC_BYTES
+}
+
+/// Resample `img` so that its first `extent` pixels (fractional) fill an
+/// `out_w` x `out_h` image exactly: drops the padding past the photo's true
+/// edge and removes the sub-pixel mismatch that rounding to a whole pixel
+/// would leave. The factor is within one pixel of 1:1.
+fn resample_to_extent(
+    img: image::RgbaImage,
+    extent: (f64, f64),
+    out: (u32, u32),
+) -> Option<image::RgbaImage> {
+    use fast_image_resize as fir;
+    let (src_w, src_h) = img.dimensions();
+    let src =
+        fir::images::Image::from_vec_u8(src_w, src_h, img.into_raw(), fir::PixelType::U8x4).ok()?;
+    let mut dst = fir::images::Image::new(out.0, out.1, fir::PixelType::U8x4);
+    let options = fir::ResizeOptions::new()
+        .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom))
+        .crop(0.0, 0.0, extent.0, extent.1);
+    fir::Resizer::new().resize(&src, &mut dst, &options).ok()?;
+    image::RgbaImage::from_raw(out.0, out.1, dst.into_vec())
 }
 
 /// Try to decode a JPEG at the smallest DCT scale that covers `target`.
@@ -107,9 +128,10 @@ fn decode_jpeg_scaled<R: std::io::Read>(
             return None;
         }
     };
-    // jpeg-decoder pads the last partial block, so its output is ceil(len*n/8)
-    // pixels of which the last may be replicated edge. Keep only the exact
-    // scaled extent so the buffer spans the photo and nothing more.
+    // jpeg-decoder pads the last partial block, so its output is
+    // ceil(len*n/8) pixels covering the photo's exact extent len*n/8 plus a
+    // sliver of replicated edge. The viewer resamples the whole buffer as the
+    // whole photo, so the buffer must span exactly that extent.
     let (w, h) = (
         decode_scale::scaled_len(file_w, idct),
         decode_scale::scaled_len(file_h, idct),
@@ -120,8 +142,6 @@ fn decode_jpeg_scaled<R: std::io::Read>(
             decode_scale::dct_len(file_w, idct),
             decode_scale::dct_len(file_h, idct),
         )
-        || w > got.0
-        || h > got.1
         || w < need_w
         || h < need_h
     {
@@ -138,25 +158,31 @@ fn decode_jpeg_scaled<R: std::io::Read>(
             return None;
         }
     };
-    let stride = got.0 as usize;
     let comps = components as usize;
-    if pixels.len() != stride * got.1 as usize * comps {
+    if pixels.len() != got.0 as usize * got.1 as usize * comps {
         return None;
     }
-    let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
-    for row in pixels.chunks_exact(stride * comps).take(h as usize) {
-        let row = &row[..w as usize * comps];
-        if comps == 3 {
-            for px in row.chunks_exact(3) {
-                rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
-            }
-        } else {
-            for &v in row {
-                rgba.extend_from_slice(&[v, v, v, 255]);
-            }
+    let mut rgba = Vec::with_capacity(got.0 as usize * got.1 as usize * 4);
+    if comps == 3 {
+        for px in pixels.chunks_exact(3) {
+            rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
+        }
+    } else {
+        for &v in &pixels {
+            rgba.extend_from_slice(&[v, v, v, 255]);
         }
     }
-    let img = image::RgbaImage::from_raw(w, h, rgba)?;
+    let padded = image::RgbaImage::from_raw(got.0, got.1, rgba)?;
+    let img = if file_w as u32 * idct as u32 % 8 == 0 && file_h as u32 * idct as u32 % 8 == 0 {
+        // Exact multiple of the block size: nothing was padded.
+        padded
+    } else {
+        let extent = (
+            file_w as f64 * idct as f64 / 8.0,
+            file_h as f64 * idct as f64 / 8.0,
+        );
+        resample_to_extent(padded, extent, (w, h))?
+    };
     Some(ScaledJpeg {
         img,
         idct,
@@ -175,9 +201,10 @@ fn decode_jpeg_scaled<R: std::io::Read>(
 // orientation (EXIF rotations of 90/270 swap the axes first). The covering
 // rect is the contained fit, or the cover fit when `fill-when-fits` is
 // configured, or the blurred-background sample, whichever is largest (see
-// `decode_scale`). jpeg-decoder pads its output to whole blocks, so the
-// buffer is cropped to the exact scaled extent (`len * n / 8`, rounded), which
-// keeps its aspect and edges true to the photo. The result is at most the
+// `decode_scale`). jpeg-decoder pads its output to whole blocks, so when the
+// scaled extent (`len * n / 8`) is fractional the buffer is resampled, near
+// 1:1, to its rounded length so that it spans exactly the photo: the viewer
+// treats the whole buffer as the whole photo. The result is at most the
 // size of a full decode; `DecodedPhoto::source_size` carries the original
 // photo's size for everything that reasons about the photo itself (fill
 // eligibility, and the matting worker's check that a reduced decode still

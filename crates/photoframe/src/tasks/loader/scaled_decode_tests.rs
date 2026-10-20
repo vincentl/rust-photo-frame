@@ -273,7 +273,7 @@ fn decode_picks_scale_per_size_aspect_and_orientation() {
                 assert_eq!(img.as_raw(), full.as_raw(), "full scale is bit-identical");
             } else {
                 let k = 8.0 / expected as f64;
-                // Exact scaled extent, rounded: the padded block remainder is cropped.
+                // Exact scaled extent, rounded: the padded block remainder is resampled away.
                 assert_eq!(img.width(), (dw as f64 / k + 0.5).floor() as u32);
                 assert_eq!(img.height(), (dh as f64 / k + 0.5).floor() as u32);
             }
@@ -519,7 +519,7 @@ fn uncropped_scaled(bytes: &[u8], idct_target: (u16, u16)) -> image::RgbaImage {
 }
 
 #[test]
-fn reduced_decode_is_cropped_to_the_exact_scaled_extent() {
+fn reduced_decode_spans_exactly_the_photo() {
     // 997x749 at 1/4: jpeg-decoder returns 250x188 (ceil of 249.25 x 187.25);
     // the loader must hand on 249x187. Canvas chosen so 1/4 is the plan.
     let (w, h) = (997u32, 749u32);
@@ -541,10 +541,10 @@ fn reduced_decode_is_cropped_to_the_exact_scaled_extent() {
     assert_eq!(padded.dimensions(), (250, 188));
     let stretched = resampled_psnr(&padded, &full, fit);
     assert!(
-        cropped > stretched + 1.0,
+        cropped > stretched + 4.0,
         "cropped {cropped:.1} dB should beat the padded buffer's {stretched:.1} dB"
     );
-    assert!(cropped > 36.0, "cropped PSNR {cropped:.1} dB");
+    assert!(cropped > 44.0, "cropped PSNR {cropped:.1} dB");
 }
 
 #[test]
@@ -573,7 +573,7 @@ fn reduced_decode_matches_full_decode_for_every_flavour_and_orientation() {
                 "{ctx}"
             );
             let psnr = resampled_psnr(&photo.image, &full, fit);
-            assert!(psnr > 38.0, "{ctx}: PSNR {psnr:.1} dB");
+            assert!(psnr > 46.0, "{ctx}: PSNR {psnr:.1} dB");
         }
     }
 }

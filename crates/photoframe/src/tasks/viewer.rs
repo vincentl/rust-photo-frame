@@ -3888,7 +3888,7 @@ mod tests {
                         // Grain on every pixel makes this far harsher than a photo
                         // (real files measure 45-53 dB); a stretched or shifted
                         // buffer lands several dB below these bounds.
-                        let floor = if fill_screen { 34.0 } else { 40.0 };
+                        let floor = if fill_screen { 36.0 } else { 44.0 };
                         assert!(psnr > floor, "{ctx}: PSNR {psnr:.1} dB");
                     }
                 }

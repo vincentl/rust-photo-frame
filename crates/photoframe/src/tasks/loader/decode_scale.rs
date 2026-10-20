@@ -184,9 +184,9 @@ pub fn dct_len(len: u16, idct: u8) -> u32 {
 
 /// Length of one axis of the image the loader hands on at DCT scale `idct/8`:
 /// the exact scaled length `len * idct / 8`, rounded to the nearest pixel.
-/// The padded remainder of jpeg-decoder's output is cropped away, so the
-/// buffer spans the whole photo (to within half a pixel) and the viewer's
-/// resample of it does not stretch the frame.
+/// jpeg-decoder's padded output is resampled onto exactly this many pixels
+/// spanning the photo's true extent, so the viewer's resample of the buffer
+/// neither stretches nor shifts the frame.
 pub fn scaled_len(len: u16, idct: u8) -> u32 {
     ((len as u32 * idct as u32 + 4) / 8).max(1)
 }
