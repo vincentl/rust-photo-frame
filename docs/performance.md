@@ -134,6 +134,20 @@ sway 1.10. If the probe fails before the first cadence line it says which
 step refused — missing Vulkan extension, not DRM master, no matching
 mode, or the surface/swapchain creation — and that answer is the result.
 
+One such refusal is already known and worked around. The Pi's GPU (`v3d`,
+`/dev/dri/card0`) and display controller (`vc4`, `/dev/dri/card1`) are
+separate DRM devices, and v3dv reports the GPU's nodes through
+`VK_EXT_physical_device_drm`. Upstream wgpu-hal matches the display fd
+against those nodes by device number and gives up with "Failed to find
+suitable drm device" (observed 2026-10-19 on Mesa 26.2.2, after
+`vkGetDrmDisplayEXT` had already resolved the connector). The workspace
+therefore carries a vendored copy of wgpu-hal 27.0.4 under
+`vendor/wgpu-hal` with one fallback in `src/vulkan/drm.rs` (marked
+`PHOTOFRAME PATCH`): when no device matches by number, use the first one
+whose `vkGetDrmDisplayEXT` resolves the connector on that fd. It is wired
+in through `[patch.crates-io]` in the root `Cargo.toml` and affects only
+this code path; remove both once the fix is upstream.
+
 ## Root causes and fixes (June 2026)
 
 1. **Bootloader EEPROM memory regression.** Pi 5 bootloaders v2025.01.22
