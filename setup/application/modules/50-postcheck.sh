@@ -9,7 +9,6 @@ if id -u "${SERVICE_USER}" >/dev/null 2>&1; then
 else
     SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
 fi
-KIOSK_SERVICE="${KIOSK_SERVICE:-greetd.service}"
 WIFI_SERVICE="${WIFI_SERVICE:-photoframe-wifi-manager.service}"
 SYNC_TIMER="${SYNC_TIMER:-photoframe-sync.timer}"
 BUTTON_SERVICE="${BUTTON_SERVICE:-buttond.service}"
@@ -17,6 +16,11 @@ SEATD_SERVICE="${SEATD_SERVICE:-seatd.service}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/systemd.sh
 source "${SCRIPT_DIR}/../../lib/systemd.sh"
+# shellcheck source=../../lib/display-stack.sh
+source "${SCRIPT_DIR}/../../lib/display-stack.sh"
+# The unit that runs the viewer: greetd.service, or photoframe-kms.service when
+# the KMS stack was chosen. Never touch the other one here.
+KIOSK_SERVICE="${KIOSK_SERVICE:-$(display_stack_unit "$(display_stack_current)")}"
 
 log() {
     local level="$1"; shift

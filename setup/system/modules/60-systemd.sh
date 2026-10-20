@@ -5,6 +5,8 @@ MODULE="system:60-systemd"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/systemd.sh
 source "${SCRIPT_DIR}/../lib/systemd.sh"
+# shellcheck source=../../lib/display-stack.sh
+source "${SCRIPT_DIR}/../../lib/display-stack.sh"
 
 log() {
     printf '[%s] %s\n' "${MODULE}" "$*"
@@ -126,7 +128,6 @@ enable_systemd_units() {
     fi
 
     local session_bin="/opt/photoframe/bin/photoframe"
-    local greetd_started=0
 
     local seatd_units=(seatd.service seatd.socket)
     local seatd_unit
@@ -139,20 +140,19 @@ enable_systemd_units() {
         fi
     done
 
-    log "Setting greetd as the system display manager"
-    if [[ -x "${session_bin}" ]]; then
-        systemctl enable --now greetd.service >/dev/null 2>&1 || true
-        greetd_started=1
-    else
-        log "photoframe binary missing at ${session_bin}; enabling greetd without starting"
-        systemctl enable greetd.service >/dev/null 2>&1 || true
-    fi
+    # greetd/sway (default) or photoframe-kms.service (PHOTOFRAME_DISPLAY=kms,
+    # see setup/lib/display-stack.sh). Enable only: install.sh restarts the
+    # chosen stack once every module has run.
+    local display_choice
+    display_choice="$(display_stack_resolve)"
+    log "Enabling the ${display_choice} display stack"
+    display_stack_apply "${display_choice}" enable-only || true
 
-    if (( greetd_started )); then
+    if [[ "${display_choice}" == "wayland" && -x "${session_bin}" ]]; then
         log "Verifying display-manager alias"
         systemctl status display-manager.service --no-pager || true
-    else
-        log "Skipping display-manager status until application binaries are installed"
+    elif [[ ! -x "${session_bin}" ]]; then
+        log "photoframe binary missing at ${session_bin}; the display stack starts after the application deploy"
     fi
 
     local wifi_bin="/opt/photoframe/bin/wifi-manager"

@@ -206,7 +206,12 @@ fi
 
 print_header "Photo Frame"
 if [[ -z "${PHOTO_SERVICE:-}" ]]; then
-    PHOTO_SERVICE="greetd.service"
+    # The display stack chosen at setup (setup/lib/display-stack.sh).
+    if grep -qsE '^[[:space:]]*PHOTOFRAME_DISPLAY[[:space:]]*=[[:space:]]*"?kms"?[[:space:]]*$' /etc/photoframe/display.env; then
+        PHOTO_SERVICE="photoframe-kms.service"
+    else
+        PHOTO_SERVICE="greetd.service"
+    fi
 fi
 PHOTO_STATUS="$(unit_status "${PHOTO_SERVICE}")"
 PHOTO_ENABLED="$(unit_enabled "${PHOTO_SERVICE}")"

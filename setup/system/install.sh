@@ -15,8 +15,15 @@ log() {
 trap 'log ERROR "${SCRIPT_NAME} failed on line ${LINENO}"' ERR
 
 if [[ $(id -u) -ne 0 ]]; then
-    exec sudo -- "$0" "$@"
+    # PHOTOFRAME_DISPLAY (kms|wayland) chooses the display stack; keep it
+    # across sudo's environment reset.
+    exec sudo --preserve-env=PHOTOFRAME_DISPLAY -- "$0" "$@"
 fi
+
+# shellcheck source=../lib/systemd.sh
+source "${REPO_ROOT}/setup/lib/systemd.sh"
+# shellcheck source=../lib/display-stack.sh
+source "${REPO_ROOT}/setup/lib/display-stack.sh"
 
 if [[ ! -d "${MODULE_DIR}" ]]; then
     log ERROR "Module directory not found: ${MODULE_DIR}"
@@ -79,9 +86,9 @@ ensure_polkit_rules() {
 
 ensure_polkit_rules
 
-# Ensure greetd owns VT1 and launches on graphical.target
+# Ensure the display stack owns VT1 and launches on graphical.target
 if command -v systemctl >/dev/null 2>&1; then
-    log INFO "Enforcing greetd ownership of tty1"
+    log INFO "Enforcing display-stack ownership of tty1"
     getty_state="$(systemctl show -p UnitFileState getty@tty1.service 2>/dev/null | cut -d'=' -f2 | tr -d $'\n' || true)"
     if [[ "${getty_state}" == "masked" || "${getty_state}" == "masked-runtime" ]]; then
         log INFO "getty@tty1.service already masked; skipping disable/mask"
@@ -98,51 +105,24 @@ if command -v systemctl >/dev/null 2>&1; then
         fi
     fi
 
-    greetd_state="$(systemctl show -p UnitFileState greetd.service 2>/dev/null | cut -d'=' -f2 | tr -d $'\n' || true)"
-    case "${greetd_state}" in
-        static)
-            log INFO "greetd.service is static; nothing to enable"
-            ;;
-        masked|masked-runtime)
-            log WARN "greetd.service is masked; enable manually once unmasked"
-            ;;
-        *)
-            if sudo systemctl enable greetd.service >/dev/null 2>&1; then
-                log INFO "Enabled greetd.service"
-            else
-                log WARN "Failed to enable greetd.service (state: ${greetd_state:-unknown})"
-            fi
-            ;;
-    esac
-
     if sudo systemctl set-default graphical.target >/dev/null 2>&1; then
         log INFO "Set graphical.target as default boot target"
     else
         log WARN "Failed to set graphical.target as default"
     fi
 
-    if sudo systemctl reset-failed greetd.service >/dev/null 2>&1; then
-        log INFO "Cleared greetd.service failure state"
-    else
-        log WARN "Failed to reset greetd.service failure state"
+    # greetd/sway (default) or photoframe-kms.service (PHOTOFRAME_DISPLAY=kms);
+    # enables one, disables the other, and restarts the chosen one.
+    display_choice="$(display_stack_resolve)"
+    log INFO "Display stack: ${display_choice}"
+    if ! display_stack_apply "${display_choice}" start; then
+        log WARN "Display stack '${display_choice}' did not start cleanly; see the messages above"
     fi
 
-    if sudo systemctl stop greetd.service >/dev/null 2>&1; then
-        log INFO "Stopped greetd.service"
-    else
-        log WARN "Failed to stop greetd.service"
-    fi
-    sleep 1
-    if sudo systemctl start greetd.service >/dev/null 2>&1; then
-        log INFO "Started greetd.service"
-    else
-        log WARN "Failed to start greetd.service"
-    fi
-
-    # Restart buttond so it rebinds to the fresh sway IPC socket after greetd restart
+    # Restart buttond so it rebinds to the fresh session after the restart
     if systemctl list-unit-files buttond.service >/dev/null 2>&1; then
         if sudo systemctl restart buttond.service >/dev/null 2>&1; then
-            log INFO "Restarted buttond.service to sync with new sway session"
+            log INFO "Restarted buttond.service to sync with the new session"
         else
             log WARN "Failed to restart buttond.service"
         fi
@@ -150,7 +130,7 @@ if command -v systemctl >/dev/null 2>&1; then
         log INFO "buttond.service not installed; skipping restart"
     fi
 else
-    log WARN "systemctl not available; skipping greetd ownership enforcement"
+    log WARN "systemctl not available; skipping display-stack enforcement"
 fi
 
 
