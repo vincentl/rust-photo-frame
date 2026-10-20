@@ -146,6 +146,9 @@ pub(super) struct ImgTex {
 
 pub(super) struct TransitionState {
     started_at: std::time::Instant,
+    /// Set once `started_at` has been moved to the first frame's clock
+    /// (DRM/KMS; see `anchor_once`).
+    anchored: bool,
     duration: std::time::Duration,
     kind: TransitionKind,
     variant: ActiveTransition,
@@ -224,6 +227,7 @@ impl TransitionState {
 
         Self {
             started_at,
+            anchored: false,
             duration,
             kind,
             variant,
@@ -235,9 +239,27 @@ impl TransitionState {
     }
 
     pub(super) fn progress(&self) -> f32 {
-        let elapsed = self.started_at.elapsed().as_secs_f32();
+        self.progress_at(Instant::now())
+    }
+
+    /// Progress at clock time `now`: wall time on Wayland, the vblank a
+    /// frame is paced on for DRM/KMS frames (see `viewer/kms.rs`).
+    pub(super) fn progress_at(&self, now: Instant) -> f32 {
+        let elapsed = now.saturating_duration_since(self.started_at).as_secs_f32();
         let duration = self.duration.as_secs_f32().max(f32::EPSILON);
         (elapsed / duration).clamp(0.0, 1.0)
+    }
+
+    /// DRM/KMS: start the transition clock at the first frame's vblank
+    /// instead of when the transition was created (the end of a dwell, at an
+    /// arbitrary phase of the refresh). The first frame therefore shows
+    /// progress 0, and every later frame advances by exactly the time
+    /// between the vblanks it and its predecessor are paced on.
+    pub(super) fn anchor_once(&mut self, frame_time: Instant) {
+        if !self.anchored {
+            self.started_at = frame_time;
+            self.anchored = true;
+        }
     }
 
     pub(super) fn kind(&self) -> TransitionKind {
@@ -271,6 +293,15 @@ impl TransitionFrameMetric {
             worst_frame_ms: 0.0,
             best_frame_ms: f32::INFINITY,
         }
+    }
+
+    /// One more presented frame of the same transition, at clock `now`.
+    fn record(&mut self, now: Instant) {
+        let dt_ms = now.saturating_duration_since(self.last_frame).as_secs_f32() * 1000.0;
+        self.worst_frame_ms = self.worst_frame_ms.max(dt_ms);
+        self.best_frame_ms = self.best_frame_ms.min(dt_ms);
+        self.frames += 1;
+        self.last_frame = now;
     }
 
     fn log(&self, enabled: bool) {
@@ -2731,7 +2762,11 @@ impl App {
     /// Render and present one frame of the active scene. Shared by the
     /// winit handler (RedrawRequested) and the KMS loop; each decides what
     /// a `RedrawError` means for its output.
-    fn redraw(&mut self) -> Result<(), RedrawError> {
+    ///
+    /// `frame_time` is the clock a transition frame is drawn for: `None`
+    /// means "now" (Wayland, and KMS frames outside a transition); the KMS
+    /// loop passes the vblank it paced the frame on.
+    fn redraw(&mut self, frame_time: Option<Instant>) -> Result<(), RedrawError> {
         let mode_kind = self.mode_kind();
         let Some(_) = self.gpu.as_ref() else {
             return Ok(());
@@ -2940,6 +2975,11 @@ impl App {
         }
         let Some(frame) = frame else {
             if encountered_timeout {
+                // The request that brought us here has been consumed and no
+                // frame was presented. On KMS nothing else re-arms it for a
+                // resting photo (there is no tick), so the screen would keep
+                // the previous frame until the next dwell; ask again.
+                (self.redraw_requester())();
                 return self.note_surface_timeout();
             }
             return Ok(());
@@ -3003,6 +3043,9 @@ impl App {
             }
             ViewerModeKind::Wake => {
                 let wake = mode.wake_mut();
+                if let (Some(frame_time), Some(state)) = (frame_time, wake.transition_state_mut()) {
+                    state.anchor_once(frame_time);
+                }
                 encoder.push_debug_group("wake-draw");
                 // Created up front: later code holds immutable
                 // borrows of gpu for the bind groups.
@@ -3081,7 +3124,10 @@ impl App {
                     should_draw_quad = have_current;
                 } else if let Some(state) = wake.transition_state() {
                     should_draw_quad = have_current || have_next;
-                    let base_progress = state.progress();
+                    let base_progress = match frame_time {
+                        Some(frame_time) => state.progress_at(frame_time),
+                        None => state.progress(),
+                    };
                     let eased_progress =
                         base_progress * base_progress * (3.0 - 2.0 * base_progress);
                     uniforms.progress = eased_progress;
@@ -3330,7 +3376,10 @@ impl App {
                 }
                 wake.after_present();
                 self.record_frame_presented();
-                self.note_transition_frame(active_transition);
+                self.note_transition_frame(
+                    active_transition,
+                    frame_time.unwrap_or_else(Instant::now),
+                );
             }
         }
         Ok(())
@@ -3338,19 +3387,18 @@ impl App {
 
     /// Track per-frame cadence while a transition plays; log a summary
     /// once it ends (or hands over to a different transition kind).
-    fn note_transition_frame(&mut self, active: Option<TransitionKind>) {
-        let now = Instant::now();
+    ///
+    /// `now` is the frame's clock: wall time at present on Wayland, the
+    /// pacing vblank on DRM/KMS, so the metric reports the display's
+    /// cadence rather than how quickly frames were queued.
+    fn note_transition_frame(&mut self, active: Option<TransitionKind>, now: Instant) {
         let metrics = self.full_config.metrics;
         match (self.transition_frame_metric.take(), active) {
             (None, Some(kind)) => {
                 self.transition_frame_metric = Some(TransitionFrameMetric::begin(kind, now));
             }
             (Some(mut stats), Some(kind)) if stats.kind == kind => {
-                let dt_ms = now.duration_since(stats.last_frame).as_secs_f32() * 1000.0;
-                stats.worst_frame_ms = stats.worst_frame_ms.max(dt_ms);
-                stats.best_frame_ms = stats.best_frame_ms.min(dt_ms);
-                stats.frames += 1;
-                stats.last_frame = now;
+                stats.record(now);
                 self.transition_frame_metric = Some(stats);
             }
             (Some(stats), Some(kind)) => {
@@ -3424,7 +3472,8 @@ impl App {
     /// model; the DRM/KMS loop drives itself from this, and T5 applies it to
     /// the Wayland driver.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // KMS loop; T5 for Wayland
-    fn wake_plan(&self, now: Instant) -> wake::WakePlan {
+    fn wake_plan(&mut self, now: Instant) -> wake::WakePlan {
+        let transition_just_finished = self.mode_mut().wake_mut().take_just_finalized();
         let kind = self.mode_kind();
         let wake = self.mode().wake();
         let redraw_requested = match &self.output {
@@ -3440,6 +3489,7 @@ impl App {
                 sleeping: kind == ViewerModeKind::Sleep,
                 redraw_requested,
                 transition_active: wake.transition_state().is_some(),
+                transition_just_finished,
                 displayed_at: wake.displayed_at(),
                 dwell: wake.dwell(),
                 surface_ready: self.surface_configured,
@@ -3601,7 +3651,7 @@ impl ApplicationHandler<ViewerEvent> for App {
             WindowEvent::Occluded(true) => {
                 debug!("viewer_window_occluded_true");
             }
-            WindowEvent::RedrawRequested => match self.redraw() {
+            WindowEvent::RedrawRequested => match self.redraw(None) {
                 Ok(()) => {}
                 Err(RedrawError::TimeoutStreak) => self.recover_from_surface_timeouts(event_loop),
                 Err(RedrawError::Fatal(reason)) => {
@@ -3946,6 +3996,146 @@ mod tests {
             let g = ((y * 255) / height.max(1)).min(255) as u8;
             Rgba([r, g, 0, 255])
         })
+    }
+
+    /// `wake::plan_wake`'s `want_photo` must say "take a photo from the
+    /// loader" exactly when `MattingBridge::queue_for_wake` would read the
+    /// loader itself; otherwise the KMS loop either sleeps while the bridge
+    /// wants photos, or drains the loader past its backpressure. Checked
+    /// against the real bridge over every queue state it can see without a
+    /// GPU (pending uploads need textures, so `pending` stays 0 here).
+    #[test]
+    fn want_photo_matches_the_bridge_gate() {
+        const PRELOAD: usize = 3;
+        let cfg = crate::config::TransitionConfig::default();
+        let matting = MattingConfig::default();
+        let now = Instant::now();
+        for transition in [false, true] {
+            for surface_ready in [false, true] {
+                for in_flight in 0..=PRELOAD + 1 {
+                    for deferred in 0..=2usize {
+                        // Fresh per case: the bridge only ever sees a task
+                        // queue no fuller than its own in-flight count.
+                        let pipeline = MattingPipeline::new(1, PRELOAD);
+                        let mut wake = scenes::WakeScene::new(8_000, cfg.clone());
+                        if transition {
+                            let selected = cfg.primary_selected().expect("default transition");
+                            wake.set_transition_state(Some(TransitionState::new(
+                                selected,
+                                now,
+                                &mut rand::rng(),
+                            )));
+                        }
+                        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+                        tx.try_send(PhotoLoaded {
+                            prepared: PreparedImageCpu {
+                                path: "loader.jpg".into(),
+                                width: 4,
+                                height: 4,
+                                pixels: vec![0; 64],
+                            },
+                            priority: false,
+                        })
+                        .unwrap();
+                        let mut deferred_images: VecDeque<QueuedImage> = (0..deferred)
+                            .map(|i| QueuedImage {
+                                image: PreparedImageCpu {
+                                    path: format!("deferred-{i}.jpg").into(),
+                                    width: 4,
+                                    height: 4,
+                                    pixels: vec![0; 64],
+                                },
+                                priority: false,
+                            })
+                            .collect();
+                        let mut mat_inflight = in_flight;
+                        let mut ready_results = VecDeque::new();
+                        let mut bridge = MattingBridge {
+                            preload_count: PRELOAD,
+                            mat_inflight: &mut mat_inflight,
+                            deferred_images: &mut deferred_images,
+                            ready_results: &mut ready_results,
+                            from_loader: &mut rx,
+                            surface: surface_state_for_queue(
+                                surface_ready,
+                                Some(SurfaceState::new(64, 64, 4096)),
+                            ),
+                            matting: &matting,
+                            oversample: 1.0,
+                            max_upscale_factor: 1.0,
+                            mat_pipeline: &pipeline,
+                        };
+                        bridge.queue_for_wake(&mut wake);
+                        let bridge_read_loader = rx.is_empty();
+
+                        let plan = wake::plan_wake(
+                            wake::WakeInputs {
+                                slideshow_active: true,
+                                sleeping: false,
+                                redraw_requested: false,
+                                transition_active: transition,
+                                transition_just_finished: false,
+                                displayed_at: None,
+                                dwell: Duration::from_secs(8),
+                                surface_ready,
+                                pending: 0,
+                                in_flight,
+                                deferred,
+                                preload: PRELOAD,
+                            },
+                            now,
+                        );
+                        assert_eq!(
+                            plan.want_photo, bridge_read_loader,
+                            "transition={transition} surface_ready={surface_ready} \
+                             in_flight={in_flight} deferred={deferred}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kms_frame_clock_reports_the_display_cadence() {
+        // Frames paced on consecutive vblanks of a 60 Hz panel, the first
+        // one arriving at an arbitrary phase after the dwell ended (the
+        // transition was created 7 ms before it).
+        let period = Duration::from_nanos(16_666_667);
+        let created = Instant::now();
+        let vblank0 = created + Duration::from_millis(7);
+        let cfg = crate::config::TransitionConfig::default();
+        let selected = cfg.primary_selected().expect("default transition");
+        let mut state = TransitionState::new(selected, created, &mut rand::rng());
+        let duration = state.duration.as_secs_f32();
+        // Frames up to (not including) the one that completes the transition.
+        let count = (state.duration.as_secs_f64() / period.as_secs_f64()).floor() as u32;
+        let frames: Vec<Instant> = (0..count).map(|k| vblank0 + period * k).collect();
+
+        let mut metric: Option<TransitionFrameMetric> = None;
+        let mut progress = Vec::new();
+        for &t in &frames {
+            state.anchor_once(t);
+            progress.push(state.progress_at(t));
+            match metric.as_mut() {
+                None => metric = Some(TransitionFrameMetric::begin(state.kind(), t)),
+                Some(m) => m.record(t),
+            }
+        }
+        // The first frame shows the resting photo; every step is one refresh.
+        assert_eq!(progress[0], 0.0);
+        let step = period.as_secs_f32() / duration;
+        for pair in progress.windows(2) {
+            assert!(((pair[1] - pair[0]) - step).abs() < 1e-4, "{pair:?}");
+        }
+        let m = metric.unwrap();
+        let ms = period.as_secs_f32() * 1000.0;
+        assert!((m.best_frame_ms - ms).abs() < 0.01, "best {}", m.best_frame_ms);
+        assert!((m.worst_frame_ms - ms).abs() < 0.01, "worst {}", m.worst_frame_ms);
+        // Re-anchoring is one-shot: a later frame time does not restart it.
+        let last = *frames.last().unwrap();
+        state.anchor_once(last + period);
+        assert!(state.progress_at(last) > 0.0);
     }
 
     #[test]

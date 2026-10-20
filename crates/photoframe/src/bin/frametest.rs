@@ -556,6 +556,8 @@ mod drm_probe {
             card: opts.drm.as_ref().and_then(|d| d.as_deref()).map(Into::into),
             connector: opts.connector.clone(),
             mode: opts.mode_req,
+            // The probe keeps KMS's own default (the EDID-preferred mode).
+            prefer_mode: None,
             plane: opts.plane,
         };
         let mut trace = |line: &str| println!("{line}");

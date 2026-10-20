@@ -2443,6 +2443,7 @@ dependencies = [
  "image",
  "jpeg-decoder",
  "kamadak-exif",
+ "libc",
  "naga",
  "notify",
  "palette",

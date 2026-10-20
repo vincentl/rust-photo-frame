@@ -4,8 +4,12 @@
 //! The viewer has exactly two reasons to do work:
 //!
 //! * **Redraw now**: a scene requested a frame, or a transition is
-//!   animating. The loop renders back to back; on DRM/KMS with FIFO the
-//!   swapchain acquire blocks until vblank, so the display paces it.
+//!   animating. The loop renders frame after frame; on DRM/KMS each
+//!   transition frame waits for the next vblank first (see `kms.rs`), so
+//!   the display paces it.
+//! * **Tick now**: a transition just finished, so the uploads and matting
+//!   refill it held back (they compete with the animation for memory
+//!   bandwidth) run right away instead of on the next transition's frames.
 //! * **An event**: a control command, a matting result, a decoded photo
 //!   when the preload queue is short, or the dwell deadline of the photo
 //!   on screen. Nothing else changes what is on screen, so between these
@@ -36,9 +40,12 @@ pub(super) struct WakeInputs {
     /// A scene asked for a frame that has not been rendered yet.
     pub(super) redraw_requested: bool,
     pub(super) transition_active: bool,
+    /// A transition finalized since the last plan (taken once).
+    pub(super) transition_just_finished: bool,
     /// When the current photo went on screen; `None` before the first one.
     pub(super) displayed_at: Option<Instant>,
     pub(super) dwell: Duration,
+    /// The surface has a usable size (always, on KMS).
     pub(super) surface_ready: bool,
     /// Photos uploaded and waiting their turn.
     pub(super) pending: usize,
@@ -55,6 +62,9 @@ pub(super) struct WakeInputs {
 pub(super) struct WakePlan {
     /// Render again without waiting.
     pub(super) redraw_now: bool,
+    /// Run the control step again without waiting. One-shot (its input is
+    /// taken), so it cannot keep the loop awake.
+    pub(super) tick_now: bool,
     /// Wake at this instant even if no event arrives: the dwell of the photo
     /// on screen ends. Always in the future when set, so a wait on it can
     /// never spin.
@@ -83,14 +93,29 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
         _ => None,
     };
 
+    // The step that finalized a transition ran its uploads and matting
+    // refill *before* the finalize, while both were still gated off, so the
+    // deferred work runs on one more step right after it.
+    let tick_now = inputs.transition_just_finished && !inputs.sleeping;
+
+    // Exactly when MattingBridge::queue_for_wake reads the loader (the test
+    // `want_photo_matches_the_bridge_gate` in viewer.rs holds the two
+    // together): never while a transition animates; with a usable surface
+    // it first submits every deferred photo and keeps reading while the
+    // queue is short; without one it reads a single photo into `deferred`
+    // and stops there.
+    let queued = inputs.pending + inputs.in_flight;
     let want_photo = !inputs.sleeping
         && !inputs.transition_active
-        && inputs.surface_ready
-        && inputs.deferred == 0
-        && inputs.pending + inputs.in_flight < inputs.preload;
+        && if inputs.surface_ready {
+            queued + inputs.deferred < inputs.preload
+        } else {
+            inputs.deferred == 0 && queued < inputs.preload
+        };
 
     WakePlan {
         redraw_now,
+        tick_now,
         deadline,
         want_photo,
     }
@@ -173,6 +198,7 @@ mod tests {
             sleeping: false,
             redraw_requested: false,
             transition_active: false,
+            transition_just_finished: false,
             displayed_at: Some(now),
             dwell: DWELL,
             surface_ready: true,
@@ -191,6 +217,7 @@ mod tests {
             plan,
             WakePlan {
                 redraw_now: false,
+                tick_now: false,
                 deadline: Some(now + DWELL),
                 want_photo: false,
             }
@@ -262,10 +289,47 @@ mod tests {
             plan,
             WakePlan {
                 redraw_now: false,
+                tick_now: false,
                 deadline: None,
                 want_photo: false,
             }
         );
+    }
+
+    #[test]
+    fn a_finished_transition_runs_its_deferred_work_at_once() {
+        let now = Instant::now();
+        // The frame after finalize: no transition, photo just went on
+        // screen, a result held back during the animation.
+        let after = WakeInputs {
+            transition_just_finished: true,
+            pending: 1,
+            in_flight: 0,
+            ..resting(now)
+        };
+        let plan = plan_wake(after, now);
+        assert!(plan.tick_now);
+        assert!(!plan.redraw_now);
+        // One-shot: the next plan (input taken) waits for the dwell.
+        let plan = plan_wake(
+            WakeInputs {
+                transition_just_finished: false,
+                ..after
+            },
+            now,
+        );
+        assert!(!plan.tick_now);
+        assert_eq!(plan.deadline, Some(now + DWELL));
+        // Asleep: deferred work waits for the wake command.
+        let plan = plan_wake(
+            WakeInputs {
+                sleeping: true,
+                slideshow_active: false,
+                ..after
+            },
+            now,
+        );
+        assert!(!plan.tick_now);
     }
 
     #[test]
@@ -283,49 +347,6 @@ mod tests {
         assert!(!plan.redraw_now);
         assert_eq!(plan.deadline, None);
         assert!(plan.want_photo);
-    }
-
-    #[test]
-    fn want_photo_matches_the_matting_queue_gate() {
-        let now = Instant::now();
-        let short = WakeInputs {
-            pending: 1,
-            in_flight: 1,
-            ..resting(now)
-        };
-        assert!(plan_wake(short, now).want_photo);
-        // Full once in-flight work is counted.
-        assert!(
-            !plan_wake(
-                WakeInputs {
-                    in_flight: 2,
-                    ..short
-                },
-                now
-            )
-            .want_photo
-        );
-        // A photo already taken from the loader is submitted first.
-        assert!(
-            !plan_wake(
-                WakeInputs {
-                    deferred: 1,
-                    ..short
-                },
-                now
-            )
-            .want_photo
-        );
-        assert!(
-            !plan_wake(
-                WakeInputs {
-                    surface_ready: false,
-                    ..short
-                },
-                now
-            )
-            .want_photo
-        );
     }
 
     fn photo(name: &str) -> PhotoLoaded {
@@ -381,6 +402,7 @@ mod tests {
     fn idle_plan() -> WakePlan {
         WakePlan {
             redraw_now: false,
+            tick_now: false,
             deadline: None,
             want_photo: false,
         }

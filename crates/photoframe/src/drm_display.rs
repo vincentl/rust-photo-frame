@@ -42,7 +42,7 @@ impl FromStr for ModeRequest {
     type Err = KmsError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bad = || KmsError(format!("invalid mode {s:?}; expected WxH[@Hz]"));
+        let bad = || KmsError::failed(format!("invalid mode {s:?}; expected WxH[@Hz]"));
         let (size, hz) = match s.trim().split_once('@') {
             Some((size, hz)) => (size, Some(hz.parse().map_err(|_| bad())?)),
             None => (s.trim(), None),
@@ -74,11 +74,54 @@ impl fmt::Display for ModeRequest {
 /// Error from DRM target selection or DRM surface setup. The message is
 /// written for the operator reading the journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KmsError(pub String);
+pub struct KmsError {
+    kind: KmsErrorKind,
+    message: String,
+}
+
+/// Whether waiting can fix the error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KmsErrorKind {
+    /// A card with KMS resources exists but no (requested) connector is
+    /// connected: the panel is off, unplugged, or not passing hot-plug
+    /// detect yet. Plugging it in fixes this; see [`wait_for_display`].
+    NoConnectedDisplay,
+    /// Anything else (no DRM card, not master, Vulkan refused, no such mode).
+    Failed,
+}
+
+impl KmsError {
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            kind: KmsErrorKind::Failed,
+            message: message.into(),
+        }
+    }
+
+    pub fn no_connected_display(message: impl Into<String>) -> Self {
+        Self {
+            kind: KmsErrorKind::NoConnectedDisplay,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> KmsErrorKind {
+        self.kind
+    }
+
+    /// Same kind, message extended with where it happened.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // used by the Linux device layer
+    fn context(self, context: impl fmt::Display) -> Self {
+        Self {
+            kind: self.kind,
+            message: format!("{} ({context})", self.message),
+        }
+    }
+}
 
 impl fmt::Display for KmsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
@@ -109,7 +152,7 @@ pub fn pick_connector(
         None => c.connected,
     });
     match found {
-        Some(i) if !candidates[i].connected => Err(KmsError(format!(
+        Some(i) if !candidates[i].connected => Err(KmsError::no_connected_display(format!(
             "connector {} is not connected",
             candidates[i].name
         ))),
@@ -126,24 +169,46 @@ pub struct ModeCandidate {
     pub preferred: bool,
 }
 
-/// Choose a mode: an explicit request must match exactly (any refresh when
-/// the request has none); otherwise the connector's preferred mode, else its
-/// first mode.
-pub fn pick_mode(modes: &[ModeCandidate], request: Option<ModeRequest>) -> Result<usize, KmsError> {
+fn mode_matches(m: &ModeCandidate, req: ModeRequest) -> bool {
+    m.width == req.width
+        && m.height == req.height
+        && req.refresh_hz.is_none_or(|hz| m.refresh_hz == hz)
+}
+
+/// Choose a mode, in this order:
+///
+/// 1. `request` (an operator's explicit choice) must match exactly (any
+///    refresh when the request has none), or it is an error;
+/// 2. else `prefer`, if the connector lists it (the viewer passes the mode
+///    the sway kiosk config pins, so both stacks drive the panel the same
+///    way);
+/// 3. else the connector's EDID-preferred mode, else its first mode.
+///
+/// Among several modes that match a request or preference (e.g. 60 and
+/// 59.94 Hz, both reported as 60 by KMS), the EDID-preferred one wins, then
+/// the first listed.
+pub fn pick_mode(
+    modes: &[ModeCandidate],
+    request: Option<ModeRequest>,
+    prefer: Option<ModeRequest>,
+) -> Result<usize, KmsError> {
     if modes.is_empty() {
-        return Err(KmsError("connector reports no modes".into()));
+        return Err(KmsError::failed("connector reports no modes"));
     }
-    match request {
-        Some(req) => modes
+    let best_match = |req: ModeRequest| {
+        modes
             .iter()
-            .position(|m| {
-                m.width == req.width
-                    && m.height == req.height
-                    && req.refresh_hz.is_none_or(|hz| m.refresh_hz == hz)
-            })
-            .ok_or_else(|| KmsError(format!("connector has no mode {req}"))),
-        None => Ok(modes.iter().position(|m| m.preferred).unwrap_or(0)),
+            .position(|m| m.preferred && mode_matches(m, req))
+            .or_else(|| modes.iter().position(|m| mode_matches(m, req)))
+    };
+    if let Some(req) = request {
+        return best_match(req)
+            .ok_or_else(|| KmsError::failed(format!("connector has no mode {req}")));
     }
+    if let Some(index) = prefer.and_then(best_match) {
+        return Ok(index);
+    }
+    Ok(modes.iter().position(|m| m.preferred).unwrap_or(0))
 }
 
 /// From Vulkan's display-mode list (`(width, height, refresh in mHz)`), the
@@ -172,6 +237,36 @@ pub struct PlaneCandidate {
     pub current: bool,
     /// The plane can show the target display.
     pub supports: bool,
+}
+
+/// Retry `attempt` while it fails only because no display is connected,
+/// polling every `poll`; return its value, its first other error, or
+/// `Ok(None)` once `cancel` fires.
+///
+/// The KMS viewer calls this before it creates the wgpu instance, so a frame
+/// that boots before its panel (power cut, TV or switch in standby, no HPD
+/// yet) waits for the panel the way sway does, instead of exhausting the
+/// unit's StartLimit and staying dark. `on_wait` runs once per failed
+/// attempt (the caller logs the first).
+pub async fn wait_for_display<T>(
+    mut attempt: impl FnMut() -> Result<T, KmsError>,
+    poll: std::time::Duration,
+    cancel: &tokio_util::sync::CancellationToken,
+    mut on_wait: impl FnMut(&KmsError),
+) -> Result<Option<T>, KmsError> {
+    loop {
+        match attempt() {
+            Ok(value) => return Ok(Some(value)),
+            Err(err) if err.kind() == KmsErrorKind::NoConnectedDisplay => {
+                on_wait(&err);
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(None),
+                    _ = tokio::time::sleep(poll) => {}
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 /// The first plane that shows or can show the target display.
@@ -213,6 +308,9 @@ mod device {
         /// e.g. `HDMI-A-1`.
         pub connector: Option<String>,
         pub mode: Option<ModeRequest>,
+        /// Used when `mode` is `None` and the connector lists it; see
+        /// [`pick_mode`].
+        pub prefer_mode: Option<ModeRequest>,
         /// Vulkan display plane index.
         pub plane: Option<u32>,
     }
@@ -250,6 +348,9 @@ mod device {
         trace: &mut dyn FnMut(&str),
     ) -> Result<KmsTarget, KmsError> {
         let mut notes = Vec::new();
+        // Whether some card had connectors at all: then "nothing connected"
+        // is a display that may still appear, not a missing device.
+        let mut saw_kms_card = false;
         for path in candidate_paths(request.card.as_deref()) {
             let file = match OpenOptions::new().read(true).write(true).open(&path) {
                 Ok(f) => f,
@@ -272,6 +373,7 @@ mod device {
                     continue;
                 }
             };
+            saw_kms_card |= !res.connectors().is_empty();
             trace(&format!(
                 "{path}: driver={driver} connectors={} crtcs={}",
                 res.connectors().len(),
@@ -298,7 +400,7 @@ mod device {
                 })
                 .collect();
             let chosen = pick_connector(&candidates, request.connector.as_deref())
-                .map_err(|e| KmsError(format!("{e} on {path}")))?;
+                .map_err(|e| e.context(&path))?;
             let Some(index) = chosen else {
                 notes.push(format!("{path}: no matching connected connector"));
                 continue;
@@ -333,8 +435,8 @@ mod device {
                     }
                 })
                 .collect();
-            let mode = pick_mode(&mode_candidates, request.mode)
-                .map_err(|e| KmsError(format!("{name} on {path}: {e}")))?;
+            let mode = pick_mode(&mode_candidates, request.mode, request.prefer_mode)
+                .map_err(|e| e.context(format!("{name} on {path}")))?;
             let mode = mode_candidates[mode];
             return Ok(KmsTarget {
                 connector_id: u32::from(info.handle()),
@@ -347,10 +449,12 @@ mod device {
                 plane: request.plane,
             });
         }
-        Err(KmsError(format!(
-            "no usable DRM card found:\n  {}",
-            notes.join("\n  ")
-        )))
+        let message = format!("no usable DRM card found:\n  {}", notes.join("\n  "));
+        if saw_kms_card {
+            Err(KmsError::no_connected_display(message))
+        } else {
+            Err(KmsError::failed(message))
+        }
     }
 
     impl KmsTarget {
@@ -359,7 +463,7 @@ mod device {
         /// else (sway under greetd, usually) still owns the display.
         pub fn assert_master(&self) -> Result<(), KmsError> {
             self.card.acquire_master_lock().map_err(|e| {
-                KmsError(format!(
+                KmsError::failed(format!(
                     "not DRM master on {} ({e}); is the greetd/sway kiosk session still \
                      running? stop it first: sudo systemctl stop greetd.service",
                     self.path
@@ -381,6 +485,148 @@ mod device {
         }
     }
 
+    /// The kernel's timestamp of one vblank on the display's CRTC.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Vblank {
+        pub sequence: u32,
+        /// CLOCK_MONOTONIC, as the kernel reports it.
+        pub monotonic: std::time::Duration,
+    }
+
+    /// A second handle on the target's card (a dup of its fd: same open
+    /// file, so same DRM master) for what the viewer needs at runtime: vblank
+    /// timing and connector state. Safe to drop at any time; only the
+    /// original fd in [`KmsTarget`] is shared with Mesa.
+    pub struct KmsDisplay {
+        card: Card,
+        connector_id: u32,
+        width: u32,
+        height: u32,
+        vrefresh_hz: u32,
+        /// Index of the CRTC driving the connector (the "pipe" the vblank
+        /// ioctl addresses); resolved lazily because Mesa picks the CRTC at
+        /// its first modeset.
+        pipe: Option<u32>,
+    }
+
+    impl KmsTarget {
+        pub fn display_handle(&self) -> Result<KmsDisplay, KmsError> {
+            let file = self
+                .card
+                .0
+                .try_clone()
+                .map_err(|e| KmsError::failed(format!("dup {}: {e}", self.path)))?;
+            Ok(KmsDisplay {
+                card: Card(file),
+                connector_id: self.connector_id,
+                width: self.width,
+                height: self.height,
+                vrefresh_hz: self.vrefresh_hz,
+                pipe: None,
+            })
+        }
+    }
+
+    impl KmsDisplay {
+        fn connector(&self) -> Result<connector::Info, KmsError> {
+            self.card
+                .get_connector(
+                    connector::Handle::from(
+                        drm::control::RawResourceHandle::new(self.connector_id)
+                            .ok_or_else(|| KmsError::failed("connector id 0"))?,
+                    ),
+                    false,
+                )
+                .map_err(|e| {
+                    KmsError::failed(format!("query connector {}: {e}", self.connector_id))
+                })
+        }
+
+        fn resolve_pipe(&self) -> Result<u32, KmsError> {
+            let info = self.connector()?;
+            let encoder = info
+                .current_encoder()
+                .ok_or_else(|| KmsError::failed("connector has no active encoder yet"))?;
+            let crtc = self
+                .card
+                .get_encoder(encoder)
+                .map_err(|e| KmsError::failed(format!("query encoder: {e}")))?
+                .crtc()
+                .ok_or_else(|| KmsError::failed("encoder drives no CRTC yet"))?;
+            let res = self
+                .card
+                .resource_handles()
+                .map_err(|e| KmsError::failed(format!("query resources: {e}")))?;
+            res.crtcs()
+                .iter()
+                .position(|c| *c == crtc)
+                .map(|i| i as u32)
+                .ok_or_else(|| KmsError::failed("CRTC not in the card's list"))
+        }
+
+        /// Block until the next vblank of the CRTC showing this connector and
+        /// return the kernel's timestamp for it. The kernel bounds the wait
+        /// (about 3 s, then EBUSY), so a stopped CRTC is an error, not a hang.
+        pub fn wait_next_vblank(&mut self) -> Result<Vblank, KmsError> {
+            use drm::{VblankWaitFlags, VblankWaitTarget};
+            let pipe = match self.pipe {
+                Some(pipe) => pipe,
+                None => {
+                    let pipe = self.resolve_pipe()?;
+                    self.pipe = Some(pipe);
+                    pipe
+                }
+            };
+            let reply = self
+                .card
+                .wait_vblank(
+                    VblankWaitTarget::Relative(1),
+                    VblankWaitFlags::empty(),
+                    pipe,
+                    0,
+                )
+                .map_err(|e| {
+                    // Re-resolve next time in case the CRTC changed.
+                    self.pipe = None;
+                    KmsError::failed(format!("wait for vblank on pipe {pipe}: {e}"))
+                })?;
+            let monotonic = reply
+                .time()
+                .ok_or_else(|| KmsError::failed("vblank reply carried no timestamp"))?;
+            Ok(Vblank {
+                sequence: reply.frame(),
+                monotonic,
+            })
+        }
+
+        /// The display this process was started for is still there: the
+        /// connector is connected and still lists the mode in use. Uses the
+        /// kernel's last known state (no forced probe), which hot-plug
+        /// detection keeps current.
+        pub fn check_unchanged(&self) -> Result<(), KmsError> {
+            let info = self.connector()?;
+            if info.state() != connector::State::Connected {
+                return Err(KmsError::no_connected_display(format!(
+                    "connector {info} is {:?}",
+                    info.state()
+                )));
+            }
+            let still_offered = info.modes().iter().any(|m| {
+                let (w, h) = m.size();
+                u32::from(w) == self.width
+                    && u32::from(h) == self.height
+                    && m.vrefresh() == self.vrefresh_hz
+            });
+            if !still_offered {
+                return Err(KmsError::failed(format!(
+                    "connector {info} no longer offers {}x{}@{}",
+                    self.width, self.height, self.vrefresh_hz
+                )));
+            }
+            Ok(())
+        }
+    }
+
     /// Build the `SurfaceTargetUnsafe::Drm` for `target`: checks the Vulkan
     /// extensions, resolves the connector through `vkGetDrmDisplayEXT`, and
     /// picks the exact refresh value (mHz) and display plane that wgpu-hal
@@ -398,13 +644,13 @@ mod device {
         use wgpu::hal::api::Vulkan;
         let fd = target.card.as_fd().as_raw_fd();
         let hal = unsafe { instance.as_hal::<Vulkan>() }.ok_or_else(|| {
-            KmsError("the wgpu instance is not Vulkan; DRM presentation needs WGPU_BACKEND=vulkan (or unset)".into())
+            KmsError::failed("the wgpu instance is not Vulkan; DRM presentation needs WGPU_BACKEND=vulkan (or unset)")
         })?;
         let shared = hal.shared_instance();
         let exts = shared.extensions();
         for required in [ash::khr::display::NAME, ash::ext::acquire_drm_display::NAME] {
             if !exts.contains(&required) {
-                return Err(KmsError(format!(
+                return Err(KmsError::failed(format!(
                     "Vulkan instance lacks {} (driver does not advertise it)",
                     required.to_string_lossy()
                 )));
@@ -415,10 +661,10 @@ mod device {
             compatible_surface: None,
             force_fallback_adapter: false,
         }))
-        .map_err(|e| KmsError(format!("no Vulkan adapter: {e}")))?;
+        .map_err(|e| KmsError::failed(format!("no Vulkan adapter: {e}")))?;
         let pd = {
             let a = unsafe { adapter.as_hal::<Vulkan>() }
-                .ok_or_else(|| KmsError("adapter is not Vulkan".into()))?;
+                .ok_or_else(|| KmsError::failed("adapter is not Vulkan"))?;
             a.raw_physical_device()
         };
         let entry = shared.entry();
@@ -428,14 +674,14 @@ mod device {
 
         let display =
             unsafe { acquire.get_drm_display(pd, fd, target.connector_id) }.map_err(|e| {
-                KmsError(format!(
+                KmsError::failed(format!(
                     "vkGetDrmDisplayEXT(connector {}) failed: {e}",
                     target.connector_id
                 ))
             })?;
 
         let modes = unsafe { display_ext.get_display_mode_properties(pd, display) }
-            .map_err(|e| KmsError(format!("vkGetDisplayModePropertiesKHR failed: {e}")))?;
+            .map_err(|e| KmsError::failed(format!("vkGetDisplayModePropertiesKHR failed: {e}")))?;
         let vk_modes: Vec<(u32, u32, u32)> = modes
             .iter()
             .map(|m| {
@@ -454,7 +700,7 @@ mod device {
         let refresh =
             closest_refresh_mhz(&vk_modes, target.width, target.height, target.vrefresh_hz)
                 .ok_or_else(|| {
-                    KmsError(format!(
+                    KmsError::failed(format!(
                         "Vulkan lists no {}x{} mode for {}",
                         target.width, target.height, target.connector_name
                     ))
@@ -466,7 +712,7 @@ mod device {
                 let planes =
                     unsafe { display_ext.get_physical_device_display_plane_properties(pd) }
                         .map_err(|e| {
-                            KmsError(format!(
+                            KmsError::failed(format!(
                                 "vkGetPhysicalDeviceDisplayPlanePropertiesKHR failed: {e}"
                             ))
                         })?;
@@ -495,7 +741,7 @@ mod device {
                     })
                     .collect();
                 pick_plane(&candidates).ok_or_else(|| {
-                    KmsError("no Vulkan display plane supports the target display".into())
+                    KmsError::failed("no Vulkan display plane supports the target display")
                 })?
             }
         };
@@ -514,7 +760,7 @@ mod device {
 }
 
 #[cfg(target_os = "linux")]
-pub use device::{Card, KmsRequest, KmsTarget, open_target, surface_target};
+pub use device::{Card, KmsDisplay, KmsRequest, KmsTarget, Vblank, open_target, surface_target};
 
 #[cfg(test)]
 mod tests {
@@ -604,10 +850,10 @@ mod tests {
     #[test]
     fn mode_prefers_preferred_then_first() {
         let m = [mode(1920, 1080, 60, false), mode(3840, 2160, 60, true)];
-        assert_eq!(pick_mode(&m, None).unwrap(), 1);
+        assert_eq!(pick_mode(&m, None, None).unwrap(), 1);
         let m = [mode(1920, 1080, 60, false), mode(3840, 2160, 30, false)];
-        assert_eq!(pick_mode(&m, None).unwrap(), 0);
-        assert!(pick_mode(&[], None).is_err());
+        assert_eq!(pick_mode(&m, None, None).unwrap(), 0);
+        assert!(pick_mode(&[], None, None).is_err());
     }
 
     #[test]
@@ -618,11 +864,108 @@ mod tests {
             mode(1920, 1080, 60, false),
         ];
         let req = |s: &str| Some(s.parse::<ModeRequest>().unwrap());
-        assert_eq!(pick_mode(&m, req("3840x2160@60")).unwrap(), 1);
+        assert_eq!(pick_mode(&m, req("3840x2160@60"), None).unwrap(), 1);
         // No refresh in the request: the first mode of that size.
-        assert_eq!(pick_mode(&m, req("3840x2160")).unwrap(), 0);
-        assert!(pick_mode(&m, req("2560x1440")).is_err());
-        assert!(pick_mode(&m, req("1920x1080@50")).is_err());
+        assert_eq!(pick_mode(&m, req("3840x2160"), None).unwrap(), 0);
+        assert!(pick_mode(&m, req("2560x1440"), None).is_err());
+        assert!(pick_mode(&m, req("1920x1080@50"), None).is_err());
+    }
+
+    #[test]
+    fn preference_beats_edid_preferred_when_listed() {
+        let kiosk = Some("3840x2160@60".parse::<ModeRequest>().unwrap());
+        // A TV whose first DTD (EDID-preferred) is 1080p60 but that offers 4K60.
+        let m = [
+            mode(1920, 1080, 60, true),
+            mode(3840, 2160, 30, false),
+            mode(3840, 2160, 60, false),
+        ];
+        assert_eq!(pick_mode(&m, None, kiosk).unwrap(), 2);
+        // Not offered: fall back to the EDID-preferred mode, not an error.
+        let m = [mode(1920, 1080, 60, true), mode(3840, 2160, 30, false)];
+        assert_eq!(pick_mode(&m, None, kiosk).unwrap(), 0);
+        // An explicit request still wins and still must exist.
+        let req = Some("3840x2160@30".parse::<ModeRequest>().unwrap());
+        assert_eq!(pick_mode(&m, req, kiosk).unwrap(), 1);
+        let req = Some("2560x1440".parse::<ModeRequest>().unwrap());
+        assert!(pick_mode(&m, req, kiosk).is_err());
+    }
+
+    #[test]
+    fn among_equal_matches_the_edid_preferred_one_wins() {
+        let kiosk = Some("3840x2160@60".parse::<ModeRequest>().unwrap());
+        // 60 and 59.94 Hz both read 60 from KMS.
+        let m = [
+            mode(3840, 2160, 60, false),
+            mode(3840, 2160, 60, true),
+            mode(1920, 1080, 60, false),
+        ];
+        assert_eq!(pick_mode(&m, None, kiosk).unwrap(), 1);
+    }
+
+    #[test]
+    fn only_a_missing_display_is_worth_waiting_for() {
+        let c = [conn("HDMI-A-1", false)];
+        let err = pick_connector(&c, Some("HDMI-A-1")).unwrap_err();
+        assert_eq!(err.kind(), KmsErrorKind::NoConnectedDisplay);
+        let err = pick_mode(&[], None, None).unwrap_err();
+        assert_eq!(err.kind(), KmsErrorKind::Failed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_display_polls_until_the_panel_appears() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let poll = std::time::Duration::from_secs(1);
+        let start = tokio::time::Instant::now();
+        let mut attempts = 0;
+        let mut waits = 0;
+        let got = wait_for_display(
+            || {
+                attempts += 1;
+                if attempts < 4 {
+                    Err(KmsError::no_connected_display("HDMI-A-1 is Disconnected"))
+                } else {
+                    Ok("target")
+                }
+            },
+            poll,
+            &cancel,
+            |_| waits += 1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, Some("target"));
+        assert_eq!((attempts, waits), (4, 3));
+        assert_eq!(start.elapsed(), poll * 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_display_returns_other_errors_at_once() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let err = wait_for_display(
+            || -> Result<(), KmsError> { Err(KmsError::failed("not DRM master")) },
+            std::time::Duration::from_secs(1),
+            &cancel,
+            |_| panic!("must not wait"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.kind(), KmsErrorKind::Failed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_display_stops_on_cancel() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let token = cancel.clone();
+        let got = wait_for_display(
+            || -> Result<(), KmsError> { Err(KmsError::no_connected_display("no panel")) },
+            std::time::Duration::from_secs(1),
+            &cancel,
+            move |_| token.cancel(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, None);
     }
 
     #[test]

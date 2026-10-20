@@ -13,20 +13,40 @@
 //!   not have.
 //! * **Loop.** No winit and no 4 ms ticker. Each iteration drains control
 //!   commands, runs `process_tick()`, and renders if a scene asked for a
-//!   frame. With FIFO (the KMS default) `get_current_texture` blocks until a
-//!   swapchain image is free, i.e. until vblank, so a transition renders one
-//!   frame per refresh with no other clock. When nothing needs drawing the
-//!   loop sleeps in `wake::next_wake_event` until a control command, a
-//!   matting result, a decoded photo (only while the preload queue is
-//!   short), or the dwell deadline. See `wake.rs`.
-//! * **Runtime display changes (v1.2: not handled).** A lost or outdated
-//!   swapchain (connector unplugged or re-plugged with another mode), any
-//!   other surface error, or a streak of acquire timeouts ends the process
-//!   with an error; `Restart=always` brings it back and the restart
-//!   re-enumerates the card, connector and preferred mode. Losing DRM master
-//!   at runtime would need logind or VT switching, which this stack does not
-//!   use; in practice "not master" is a startup failure (greetd still
-//!   running), retried by systemd until its StartLimit and then left failed.
+//!   frame. When nothing needs drawing the loop sleeps in
+//!   `wake::next_wake_event` until a control command, a matting result, a
+//!   decoded photo (only while the preload queue is short), or the dwell
+//!   deadline. See `wake.rs`.
+//! * **Pacing model (transitions).** Each transition frame is rendered right
+//!   after a vblank, which the loop waits for explicitly
+//!   (`DRM_IOCTL_WAIT_VBLANK` on the connector's CRTC, see `VblankPacer`),
+//!   and is drawn for that vblank's kernel timestamp. The transition's clock
+//!   starts at the vblank before its first frame (`TransitionState::
+//!   anchor_once`), so the first frame shows progress 0 and each later frame
+//!   advances by exactly the time between the vblanks the two frames are
+//!   paced on, which is the time between the vblanks they are shown on.
+//!   `transition_frame_metric` records the same clock, so it reports the
+//!   display's cadence. Why not let FIFO's blocking acquire pace on its own:
+//!   after a dwell every swapchain image but the one on screen is idle, so
+//!   the first frames of a transition are handed out back to back and
+//!   presented a few ms apart, ahead of the display, and the transition
+//!   clock (and the metric) would run ahead of what the panel shows. With
+//!   the explicit wait, at most one frame is queued and an idle image is
+//!   always free, so the acquire no longer decides the timing; FIFO still
+//!   guarantees no tearing. Frames outside a transition (greeting, sleep,
+//!   the first frame of a photo) render at once. If the vblank wait fails,
+//!   the rest of that transition falls back to FIFO pacing (logged).
+//! * **Runtime display changes.** Every idle wake checks that the connector
+//!   is still connected and still offers the mode in use
+//!   (`KmsDisplay::check_unchanged`); if not, the process exits with an
+//!   error and `Restart=always` brings it back, and the restart waits for a
+//!   connected display and re-enumerates its mode. A lost or outdated
+//!   swapchain, any other surface error, or a streak of acquire timeouts
+//!   also ends the process the same way. Changes are not handled in place
+//!   in v1.2. Losing DRM master at runtime would need logind or VT
+//!   switching, which this stack does not use; "not master" is a startup
+//!   failure (greetd or plymouth still holding the display), retried by
+//!   systemd until its StartLimit and then left failed.
 //! * **Shutdown.** Every exit (SIGTERM/SIGINT/stdin via the cancel token,
 //!   the control or matting channel closing, a fatal surface error) returns
 //!   through `run_kms`, which tears down in the only safe order: GPU objects
@@ -34,12 +54,27 @@
 
 use super::wake::{self, WakeEvent};
 use super::*;
-use crate::drm_display::{self, KmsRequest, KmsTarget, ModeRequest};
+use crate::drm_display::{self, KmsDisplay, KmsRequest, KmsTarget, ModeRequest};
 
 /// `PHOTOFRAME_DRM_CONNECTOR`, e.g. `HDMI-A-1`; default: first connected.
 const CONNECTOR_ENV: &str = "PHOTOFRAME_DRM_CONNECTOR";
-/// `PHOTOFRAME_DRM_MODE`, `WxH[@Hz]`; default: the connector's preferred mode.
+/// `PHOTOFRAME_DRM_MODE`, `WxH[@Hz]`: an explicit mode, which must exist.
+/// Default: [`KIOSK_MODE`] when the panel offers it, else its EDID-preferred
+/// mode.
 const MODE_ENV: &str = "PHOTOFRAME_DRM_MODE";
+/// The mode the sway kiosk config pins on HDMI-A-1/2
+/// (setup/system/modules/50-greetd.sh), so both stacks drive the panel the
+/// same way by default. TVs often list 1080p60 or 4K30 as their preferred
+/// mode even when they accept 4K60.
+const KIOSK_MODE: ModeRequest = ModeRequest {
+    width: 3840,
+    height: 2160,
+    refresh_hz: Some(60),
+};
+/// How often to look for a display while none is connected at startup.
+/// One cheap KMS query per second; a panel that appears is picked up
+/// within a second.
+const DISPLAY_POLL: Duration = Duration::from_secs(1);
 
 fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name)
@@ -57,6 +92,7 @@ fn kms_request_from_env() -> anyhow::Result<KmsRequest> {
         card: None,
         connector: non_empty_env(CONNECTOR_ENV),
         mode,
+        prefer_mode: Some(KIOSK_MODE),
         plane: None,
     })
 }
@@ -74,13 +110,49 @@ pub async fn run_kms(
     // `target` (card fd), which is the order kms_teardown enforces on the
     // normal path.
     let request = kms_request_from_env()?;
-    let mut trace = |line: &str| info!("kms_probe: {line}");
-    // 1. Card first, so this process (not v3dv's own open) holds master.
-    let target = drm_display::open_target(&request, &mut trace)?;
+    // 1. Card first, so this process (not v3dv's own open) holds master. A
+    //    panel that is not connected yet (boot before the TV, receiver in
+    //    standby) is waited for instead of exhausting the unit's StartLimit.
+    let mut first_attempt = true;
+    let target = drm_display::wait_for_display(
+        || {
+            // Log the enumeration once, not on every poll.
+            let mut lines = Vec::new();
+            let result =
+                drm_display::open_target(&request, &mut |line| lines.push(line.to_string()));
+            if first_attempt || result.is_ok() {
+                for line in &lines {
+                    info!("kms_probe: {line}");
+                }
+            }
+            first_attempt = false;
+            result
+        },
+        DISPLAY_POLL,
+        &cancel,
+        {
+            let mut announced = false;
+            move |err| {
+                if !announced {
+                    warn!(error = %err, "kms_waiting_for_display: polling every second");
+                    announced = true;
+                }
+            }
+        },
+    )
+    .await?;
+    let Some(target) = target else {
+        info!("kms_viewer_cancelled before a display appeared");
+        return Ok(());
+    };
     info!(target = %target.describe(), "kms_target");
     target.assert_master()?;
+    // A dup of the card fd for vblank waits and connector checks; dropping
+    // it never releases master (the original fd in `target` stays open).
+    let display = target.display_handle()?;
     // 2. Only now the wgpu instance.
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+    let mut trace = |line: &str| info!("kms_probe: {line}");
     // SAFETY: `target` (the card fd inside the surface target) outlives
     // `instance` and everything created from it; see kms_teardown.
     let surface_target = unsafe { drm_display::surface_target(&instance, &target, &mut trace) }?;
@@ -104,11 +176,12 @@ pub async fn run_kms(
         "viewer presenting straight to KMS"
     );
 
-    let result = drive(&mut app, &mut control).await;
+    let mut pacer = VblankPacer::new(display);
+    let result = drive(&mut app, &mut control, &mut pacer).await;
     if let Err(err) = &result {
         warn!(error = %err, "kms_viewer_exiting_with_error");
     }
-    kms_teardown(app, instance, target);
+    kms_teardown(app, pacer, instance, target);
     result
 }
 
@@ -119,9 +192,11 @@ pub async fn run_kms(
 /// and only then the card fd, which also releases DRM master and lets the
 /// kernel restore the console. Each step is logged so the journal shows the
 /// order on every stop.
-fn kms_teardown(app: App, instance: wgpu::Instance, target: KmsTarget) {
+fn kms_teardown(app: App, pacer: VblankPacer, instance: wgpu::Instance, target: KmsTarget) {
     info!("kms_teardown: releasing swapchain and GPU objects");
     drop(app);
+    // The dup'd fd; any position before `target` is safe.
+    drop(pacer);
     info!("kms_teardown: destroying the wgpu instance");
     drop(instance);
     info!(card = %target.path, "kms_teardown: closing the card (releases DRM master)");
@@ -153,6 +228,11 @@ impl App {
         }
     }
 
+    /// The slideshow is showing a transition (the frames the pacer times).
+    fn transition_animating(&self) -> bool {
+        self.mode_kind() == ViewerModeKind::Wake && self.mode().wake().transition_state().is_some()
+    }
+
     /// One matting result from the awaited channel; same bookkeeping as
     /// `drain_mat_results`.
     fn accept_mat_result(&mut self, result: MatResult) {
@@ -165,7 +245,68 @@ impl App {
     }
 }
 
-async fn drive(app: &mut App, control: &mut Receiver<ViewerCommand>) -> anyhow::Result<()> {
+/// Times transition frames on the display's vblanks; see "Pacing model"
+/// in the module docs.
+struct VblankPacer {
+    display: KmsDisplay,
+    /// Cleared when a vblank wait fails; the rest of that transition is
+    /// paced by FIFO alone. Re-armed once no transition is animating.
+    enabled: bool,
+}
+
+impl VblankPacer {
+    fn new(display: KmsDisplay) -> Self {
+        Self {
+            display,
+            enabled: true,
+        }
+    }
+
+    /// Wait for the next vblank and return its time as an `Instant`, the
+    /// clock the next transition frame is drawn for. `None` when vblank
+    /// pacing is unavailable for this transition.
+    fn next_frame_time(&mut self) -> Option<Instant> {
+        if !self.enabled {
+            return None;
+        }
+        match self.display.wait_next_vblank() {
+            Ok(vblank) => Some(monotonic_to_instant(vblank.monotonic)),
+            Err(err) => {
+                warn!(error = %err, "kms_vblank_wait_failed; FIFO pacing for the rest of this transition");
+                self.enabled = false;
+                None
+            }
+        }
+    }
+
+    fn rearm(&mut self) {
+        self.enabled = true;
+    }
+}
+
+/// Convert a kernel CLOCK_MONOTONIC timestamp (vblank times are monotonic)
+/// to an `Instant`, which is CLOCK_MONOTONIC on Linux too: subtract its age
+/// from `Instant::now()`. The two clock reads are adjacent, so the error is
+/// a few hundred nanoseconds.
+fn monotonic_to_instant(timestamp: Duration) -> Instant {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid, writable timespec.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    let instant_now = Instant::now();
+    let monotonic_now = Duration::new(now.tv_sec as u64, now.tv_nsec as u32);
+    instant_now
+        .checked_sub(monotonic_now.saturating_sub(timestamp))
+        .unwrap_or(instant_now)
+}
+
+async fn drive(
+    app: &mut App,
+    control: &mut Receiver<ViewerCommand>,
+    pacer: &mut VblankPacer,
+) -> anyhow::Result<()> {
     let mut loader_open = true;
     loop {
         if app.cancel.is_cancelled() {
@@ -187,11 +328,17 @@ async fn drive(app: &mut App, control: &mut Receiver<ViewerCommand>) -> anyhow::
 
         app.process_tick();
 
-        // On KMS every requested redraw presents: the surface is always
-        // configured and the overlays always have a non-zero size, so a
-        // request cannot be left pending without a (vblank-paced) present.
+        // Every requested redraw presents on KMS (the surface is always
+        // configured and the overlays never have a zero size), except after
+        // an acquire timeout, which re-arms the request itself.
         if app.take_kms_redraw_request() {
-            match app.redraw() {
+            let frame_time = if app.transition_animating() {
+                pacer.next_frame_time()
+            } else {
+                pacer.rearm();
+                None
+            };
+            match app.redraw(frame_time) {
                 Ok(()) => {}
                 Err(RedrawError::TimeoutStreak) => {
                     anyhow::bail!(
@@ -206,7 +353,7 @@ async fn drive(app: &mut App, control: &mut Receiver<ViewerCommand>) -> anyhow::
         }
 
         let plan = app.wake_plan(Instant::now());
-        if plan.redraw_now {
+        if plan.redraw_now || plan.tick_now {
             continue;
         }
 
@@ -246,6 +393,14 @@ async fn drive(app: &mut App, control: &mut Receiver<ViewerCommand>) -> anyhow::
                 loader_open = false;
             }
             WakeEvent::DwellElapsed => {}
+        }
+
+        // Runtime display changes: the loop only waits while idle, so every
+        // wait ends here. An unplugged connector or a panel that no longer
+        // offers the mode ends this process; the restart waits for a
+        // display and picks its mode again.
+        if let Err(err) = pacer.display.check_unchanged() {
+            anyhow::bail!("kms_display_changed: {err}; exiting for a restart");
         }
     }
 }

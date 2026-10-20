@@ -726,6 +726,10 @@ pub(super) struct WakeScene {
     displayed_at: Option<Instant>,
     pending: VecDeque<ImgTex>,
     pending_redraw: bool,
+    /// Set when a transition finalizes; taken by the viewer's wake plan so
+    /// the work deferred during the animation (uploads, matting refill) runs
+    /// right after it instead of waiting for the next event.
+    just_finalized: bool,
     dwell_ms: u64,
     transition_cfg: TransitionConfig,
 }
@@ -750,6 +754,7 @@ impl WakeScene {
             displayed_at: None,
             pending: VecDeque::new(),
             pending_redraw: false,
+            just_finalized: false,
             dwell_ms,
             transition_cfg,
         }
@@ -764,6 +769,7 @@ impl WakeScene {
         self.displayed_at = None;
         self.pending.clear();
         self.pending_redraw = false;
+        self.just_finalized = false;
     }
 
     /// Returns the currently displayed image, if present.
@@ -848,6 +854,16 @@ impl WakeScene {
         self.last_transition_kind
     }
 
+    pub(super) fn transition_state_mut(&mut self) -> Option<&mut TransitionState> {
+        self.transition_state.as_mut()
+    }
+
+    /// Whether a transition finalized since the last call.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // read by the KMS wake plan
+    pub(super) fn take_just_finalized(&mut self) -> bool {
+        std::mem::take(&mut self.just_finalized)
+    }
+
     /// Replaces the active transition state.
     pub(super) fn set_transition_state(&mut self, state: Option<TransitionState>) {
         if let Some(state) = &state {
@@ -867,6 +883,7 @@ impl WakeScene {
                 .transition_state
                 .take()
                 .expect("transition state should exist when complete");
+            self.just_finalized = true;
             if let Some(next) = self.next.take() {
                 let path = next.path.clone();
                 tracing::debug!(
