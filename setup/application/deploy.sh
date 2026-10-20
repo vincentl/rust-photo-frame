@@ -109,6 +109,7 @@ else
     RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
 fi
 
+STAGE_ROOT_FROM_ENV="${STAGE_ROOT:-}"
 STAGE_ROOT="${STAGE_ROOT:-${SCRIPT_DIR}/build}"
 export STAGE_ROOT
 
@@ -128,9 +129,44 @@ if [[ ${#modules[@]} -eq 0 ]]; then
     exit 0
 fi
 
-if (( SKIP_BUILD )) && [[ ! -x "${STAGE_ROOT}/stage/bin/photoframe" ]]; then
-    log ERROR "--skip-build needs a staged tree: ${STAGE_ROOT}/stage/bin/photoframe not found (set STAGE_ROOT)."
-    exit 1
+if (( SKIP_BUILD )); then
+    # Installing a tree nobody built from this checkout is the failure mode of
+    # this flag, so refuse early (before anything is modified) and say what is
+    # about to be installed.
+    if [[ -z "${STAGE_ROOT_FROM_ENV}" ]]; then
+        log ERROR "--skip-build needs STAGE_ROOT set explicitly (the default is the stage of the last on-device build, which is stale after a git pull)."
+        exit 1
+    fi
+    stage_dir="${STAGE_ROOT}/stage"
+    for required in photoframe wifi-manager; do
+        if [[ ! -x "${stage_dir}/bin/${required}" ]]; then
+            log ERROR "--skip-build: ${stage_dir}/bin/${required} is missing; the staged tree is incomplete."
+            exit 1
+        fi
+    done
+    if [[ ! -f "${stage_dir}/.stamp" ]]; then
+        log ERROR "--skip-build: ${stage_dir}/.stamp is missing; the tree was not staged by developer/lima/stage-to-pi.sh or the transfer did not finish."
+        exit 1
+    fi
+    log INFO "--skip-build will install the tree at ${stage_dir}, staged as:"
+    sed 's/^/    /' "${stage_dir}/.stamp"
+    for bin in "${stage_dir}"/bin/*; do
+        [[ -x "${bin}" ]] && printf '    %s  %s\n' "$(stat -c '%y' "${bin}" | cut -d. -f1)" "$(basename "${bin}")"
+    done
+    stamp_rev="$(sed -n 's/^rev=//p' "${stage_dir}/.stamp")"
+    if head_rev="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null)"; then
+        if [[ "${stamp_rev}" != "${head_rev}" && "${ALLOW_STAGE_REV_MISMATCH:-0}" != 1 ]]; then
+            log ERROR "--skip-build: staged tree is from ${stamp_rev:-unknown} but this checkout is at ${head_rev}. git pull / check out that commit, or set ALLOW_STAGE_REV_MISMATCH=1."
+            exit 1
+        fi
+    else
+        log WARN "--skip-build: ${REPO_ROOT} is not a git checkout; cannot compare it with the staged revision."
+    fi
+    # What the system stage leaves behind. Without it 05/30/45 would half-provision the device.
+    if ! id -u "${SERVICE_USER}" >/dev/null 2>&1 || ! getent group seat >/dev/null 2>&1; then
+        log ERROR "--skip-build: the system stage has not run (no ${SERVICE_USER} user or seat group). Run sudo ./setup/system/install.sh first."
+        exit 1
+    fi
 fi
 
 # Re-assert persistent journald logging before running modules so their output

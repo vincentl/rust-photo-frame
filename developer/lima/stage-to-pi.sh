@@ -65,6 +65,11 @@ export STAGE_ROOT="${STAGE_ROOT:-${BUILD_ROOT}/stage-root}"
 
 lima_sync_src
 
+# The target dir is shared by every checkout built in this VM and cargo never
+# deletes the binary of a removed or renamed bin target, so drop the binaries
+# 20-stage.sh would pick up and let cargo (cheaply) re-link the current ones.
+rm -f "${CARGO_TARGET_DIR:-${SRC_COPY}/target}/release/"{photoframe,wifi-manager,buttond,frametest}
+
 lima_log "Building (10-build.sh, RUSTFLAGS=${RUSTFLAGS})"
 bash "${SRC_COPY}/setup/application/modules/10-build.sh"
 lima_log "Staging (20-stage.sh) -> ${STAGE_ROOT}/stage"
@@ -77,26 +82,52 @@ checked_bins=(photoframe wifi-manager buttond)
 for bin in "${checked_bins[@]}"; do
     [[ -x "${stage}/bin/${bin}" ]] || lima_die "${stage}/bin/${bin} missing after staging"
     file "${stage}/bin/${bin}" | grep -q "ARM aarch64" || lima_die "${bin} is not an aarch64 ELF"
-    if ldd "${stage}/bin/${bin}" | grep -q "not found"; then
-        ldd "${stage}/bin/${bin}" | grep "not found" >&2
+    # No `grep -q` in the pipeline: under pipefail it can SIGPIPE ldd and hide the match.
+    missing="$(ldd "${stage}/bin/${bin}" | grep "not found" || true)"
+    if [[ -n "${missing}" ]]; then
+        printf '%s\n' "${missing}" >&2
         lima_die "${bin} has unresolved shared libraries"
     fi
 done
+
+# Written last and shipped last: deploy.sh --skip-build refuses a stage without
+# it, so an interrupted transfer cannot be installed, and prints it so you can
+# see what you are about to install.
+stamp="${stage}/.stamp"
+host_rev="$(git -C "${HOST_REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
+host_dirty=no
+[[ -n "$(git -C "${HOST_REPO_ROOT}" status --porcelain -- . ':!.claude' 2>/dev/null)" ]] && host_dirty=yes
+{
+    echo "rev=${host_rev}"
+    echo "dirty=${host_dirty}"
+    echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "profile=${CARGO_PROFILE}"
+    echo "rustflags=${RUSTFLAGS}"
+    echo "builder=$(uname -n)"
+} >"${stamp}"
+lima_log "Stamp: rev ${host_rev} (dirty: ${host_dirty})"
 
 if (( stage_only )); then
     lima_log "Staged at ${stage} (--stage-only: nothing sent anywhere)"
     exit 0
 fi
 
+# accept-new: the VM has an empty known_hosts and no tty under `limactl shell`,
+# so a first connection would otherwise fail with "Host key verification failed".
+ssh_opts=(-o StrictHostKeyChecking=accept-new)
 lima_log "rsync ${stage}/ -> ${target}:${PI_STAGE}/stage/"
-rsync -rlptD --delete --mkpath --no-owner --no-group \
-    "${stage}/" "${target}:${PI_STAGE}/stage/"
+# shellcheck disable=SC2029  # PI_STAGE is meant to expand on this side
+ssh "${ssh_opts[@]}" "${target}" "rm -f -- '${PI_STAGE}/stage/.stamp'"
+rsync -e "ssh ${ssh_opts[*]}" -rlptD --delete --delay-updates --mkpath --no-owner --no-group \
+    --exclude=/.stamp "${stage}/" "${target}:${PI_STAGE}/stage/"
+rsync -e "ssh ${ssh_opts[*]}" -t "${stamp}" "${target}:${PI_STAGE}/stage/.stamp"
 
 deploy_cmd="cd ${PI_REPO} && STAGE_ROOT=\"\$HOME/${PI_STAGE}\" ./setup/application/deploy.sh --skip-build"
 if (( deploy )); then
     lima_log "Running deploy on ${target}"
-    ssh -t "${target}" "${deploy_cmd}"
+    ssh -t "${ssh_opts[@]}" "${target}" "${deploy_cmd}"
 else
     lima_log "Staged. To install on the Pi:"
     printf '    ssh -t %s %q\n' "${target}" "${deploy_cmd}"
+    echo "(set ALLOW_STAGE_REV_MISMATCH=1 only if the Pi checkout is at a different commit on purpose)"
 fi
