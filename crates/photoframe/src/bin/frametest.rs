@@ -126,7 +126,8 @@ struct App {
     frames: u32,
     worst_ms: f32,
     best_ms: f32,
-    last_frame: Instant,
+    /// Time of the previous present; `None` until the first one.
+    last_frame: Option<Instant>,
 }
 
 fn checker_texture(
@@ -202,7 +203,7 @@ impl App {
             frames: 0,
             worst_ms: 0.0,
             best_ms: f32::INFINITY,
-            last_frame: now,
+            last_frame: None,
         }
     }
 
@@ -451,17 +452,26 @@ impl App {
         gpu.queue.submit(Some(encoder.finish()));
         frame.present();
 
+        // Cadence accounting. Every present after the first closes one
+        // interval, and a window spans from the present that closed the
+        // previous window to the one that closes this one, so the number of
+        // intervals in a window equals the number of presents counted in it.
+        // (An earlier version divided by frames-1 and under-reported a steady
+        // 60 Hz as 59.0.)
         let now = Instant::now();
-        let dt_ms = now.duration_since(self.last_frame).as_secs_f32() * 1000.0;
-        self.last_frame = now;
-        if self.frames > 0 {
-            self.worst_ms = self.worst_ms.max(dt_ms);
-            self.best_ms = self.best_ms.min(dt_ms);
-        }
+        let Some(prev) = self.last_frame else {
+            self.last_frame = Some(now);
+            self.window_start = now;
+            return;
+        };
+        let dt_ms = now.duration_since(prev).as_secs_f32() * 1000.0;
+        self.last_frame = Some(now);
+        self.worst_ms = self.worst_ms.max(dt_ms);
+        self.best_ms = self.best_ms.min(dt_ms);
         self.frames += 1;
         let span = now.duration_since(self.window_start).as_secs_f32();
-        if span >= 1.0 && self.frames > 1 {
-            let intervals = (self.frames - 1) as f32;
+        if span >= 1.0 {
+            let intervals = self.frames as f32;
             println!(
                 "fps {:6.1}  avg {:6.2}ms  best {:6.2}ms  worst {:6.2}ms  ({} frames)",
                 intervals / span,
