@@ -204,17 +204,29 @@ async fn main() -> Result<()> {
         }
     });
 
+    // The viewer publishes its canvas size here once it has a surface; the loader
+    // uses it to decode JPEGs at the smallest DCT scale that still covers it.
+    let decode_scaling = tasks::loader::DecodeScaling::from_config(&cfg);
+
     // PhotoLoader
     tasks.spawn({
+        let decode_scaling = decode_scaling.clone();
         let to_load_rx = to_load_rx;
         let invalid_tx = invalid_tx.clone();
         let loaded_tx = loaded_tx.clone();
         let cancel = cancel.clone();
         let max_in_flight = cfg.loader_max_concurrent_decodes;
         async move {
-            tasks::loader::run(to_load_rx, invalid_tx, loaded_tx, cancel, max_in_flight)
-                .await
-                .context("loader task failed")
+            tasks::loader::run(
+                to_load_rx,
+                invalid_tx,
+                loaded_tx,
+                cancel,
+                max_in_flight,
+                decode_scaling,
+            )
+            .await
+            .context("loader task failed")
         }
     });
 
@@ -240,6 +252,7 @@ async fn main() -> Result<()> {
         cancel.clone(),
         Arc::clone(&cfg),
         viewer_control_rx,
+        decode_scaling,
     )
     .context("viewer failed");
 

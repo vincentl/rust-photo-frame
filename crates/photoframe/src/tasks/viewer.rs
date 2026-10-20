@@ -1189,6 +1189,7 @@ pub fn run_windowed(
     cancel: CancellationToken,
     cfg: Arc<crate::config::Configuration>,
     mut control: Receiver<ViewerCommand>,
+    decode_scaling: super::loader::DecodeScaling,
 ) -> anyhow::Result<()> {
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
@@ -1568,6 +1569,7 @@ pub fn run_windowed(
         surface_timeout_streak: u32,
         // Last surface size that we considered "configured" and stabilized
         configured_surface_size: Option<(u32, u32)>,
+        decode_scaling: super::loader::DecodeScaling,
         /// Caption overlay for showcase mode; `None` when showcase is disabled.
         caption_overlay: Option<scenes::CaptionOverlay>,
         /// Frame cadence of the transition currently being presented.
@@ -1621,6 +1623,16 @@ pub fn run_windowed(
             self.surface_configured = ready;
             if !ready {
                 self.pending_scene_enter = true;
+            } else if let Some(surface) = self.active_surface() {
+                // Same canvas the matting worker will render into; the loader
+                // sizes JPEG decodes against it.
+                let (canvas_w, canvas_h) = compute_canvas_size(
+                    surface.width.max(1),
+                    surface.height.max(1),
+                    self.oversample,
+                    surface.max_texture_dimension,
+                );
+                self.decode_scaling.publish_canvas(canvas_w, canvas_h);
             }
             ready
         }
@@ -3496,6 +3508,7 @@ pub fn run_windowed(
         full_config: cfg,
         surface_timeout_streak: 0,
         configured_surface_size: None,
+        decode_scaling,
         caption_overlay: None,
         transition_frame_metric: None,
     };
@@ -3746,6 +3759,86 @@ mod tests {
         let (w, h) = resize_to_fit_with_margin(1920, 1080, 4000, 1000, 0.1, 1.5);
         assert!(w <= 1920 && h <= 1080);
         assert!(w > 0 && h > 0);
+    }
+
+    /// The canvas produced from a DCT-scaled decode must match the one from a
+    /// full decode, for every mat that draws the photo or samples it.
+    #[test]
+    fn matted_canvas_from_scaled_decode_matches_full_decode() {
+        use crate::config::{MattingKind, MattingOptions};
+        use crate::tasks::loader::scaled_decode_tests::{psnr_rgb, synthetic_jpeg};
+        use crate::tasks::loader::{DecodeTarget, decode_rgba8_apply_exif};
+
+        let (screen_w, screen_h) = (480u32, 270u32);
+        let dir = tempfile::tempdir().unwrap();
+        // 48 MP-equivalent (1/8 linear) 4:3 sources: landscape, and the same
+        // stored image displayed rotated by EXIF.
+        for orientation in [1u16, 6] {
+            let path = dir.path().join(format!("photo-{orientation}.jpg"));
+            std::fs::write(&path, synthetic_jpeg(1000, 750, orientation)).unwrap();
+            let full = decode_rgba8_apply_exif(&path, None).unwrap();
+
+            for kind in [
+                MattingKind::Studio,
+                MattingKind::FixedColor,
+                MattingKind::Blur,
+                MattingKind::CinematicBlur,
+                MattingKind::DropShadow,
+            ] {
+                for fill_screen in [false, true] {
+                    // `cover` is what `fill-when-fits` being configured asks
+                    // for; 0.125 is the default blur sample scale.
+                    let target = DecodeTarget {
+                        canvas_w: screen_w,
+                        canvas_h: screen_h,
+                        cover: fill_screen,
+                        bg_sample_scale: Some(0.125),
+                    };
+                    let scaled = decode_rgba8_apply_exif(&path, Some(target)).unwrap();
+                    if !fill_screen {
+                        assert!(
+                            scaled.width() < full.width(),
+                            "orientation {orientation}: expected a reduced decode"
+                        );
+                    }
+                    let option =
+                        MattingOptions::default_for_showcase(kind, 6.0, None).expect("mat option");
+                    let canvases: Vec<ImagePlane> = [&full, &scaled]
+                        .into_iter()
+                        .map(|img| {
+                            let task = MatTask {
+                                image: PreparedImageCpu {
+                                    path: path.clone(),
+                                    width: img.width(),
+                                    height: img.height(),
+                                    pixels: img.as_raw().clone(),
+                                },
+                                params: MatParams {
+                                    screen_w,
+                                    screen_h,
+                                    oversample: 1.0,
+                                    max_dim: 4096,
+                                    max_upscale_factor: 2.0,
+                                    matting: option.clone(),
+                                    fill_screen,
+                                },
+                                priority: false,
+                                mat_kind: Some(kind),
+                            };
+                            process_mat_task(task).expect("matted canvas").canvas
+                        })
+                        .collect();
+                    let [a, b] = [&canvases[0], &canvases[1]]
+                        .map(|c| RgbaImage::from_raw(c.width, c.height, c.pixels.clone()).unwrap());
+                    assert_eq!(a.dimensions(), b.dimensions());
+                    let psnr = psnr_rgb(&a, &b);
+                    assert!(
+                        psnr > 40.0,
+                        "{kind:?} fill={fill_screen} orientation {orientation}: PSNR {psnr:.1} dB"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
