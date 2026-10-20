@@ -14,6 +14,7 @@
 //! decodes at full size exactly as before.
 
 use crate::config::{Configuration, MattingConfig, MattingMode};
+use crate::events::CanvasShape;
 use std::sync::{Arc, Mutex};
 
 /// JPEG DCT output scales are expressed as `n/8` for `n` in this list
@@ -93,6 +94,9 @@ pub struct DecodeTarget {
 pub struct DecodeScaling {
     needs: Option<DecodeNeeds>,
     canvas: Arc<Mutex<Option<(u32, u32)>>>,
+    /// Portrait pairing's view of the same canvas, published with it even
+    /// when scaled decode is off (see [`CanvasShape`]).
+    shape: CanvasShape,
 }
 
 impl DecodeScaling {
@@ -113,11 +117,21 @@ impl DecodeScaling {
         Self {
             needs: Some(DecodeNeeds::from_matting(&cfg.matting)),
             canvas: Arc::default(),
+            shape: CanvasShape::default(),
         }
     }
 
-    /// Record the canvas the viewer currently renders into.
+    /// Also publish every canvas to `shape` (portrait pairing reads it).
+    pub fn with_canvas_shape(mut self, shape: CanvasShape) -> Self {
+        self.shape = shape;
+        self
+    }
+
+    /// Record the canvas the viewer currently renders into. Portrait
+    /// pairing's `CanvasShape` is published here too, so the two can never
+    /// disagree.
     pub fn publish_canvas(&self, canvas_w: u32, canvas_h: u32) {
+        self.shape.publish(canvas_w, canvas_h);
         if self.needs.is_none() {
             return;
         }
@@ -293,6 +307,7 @@ mod tests {
                 bg_sample_scale: None,
             }),
             canvas: Arc::default(),
+            shape: CanvasShape::default(),
         };
         assert!(scaling.target().is_none());
         scaling.publish_canvas(3840, 2160);
@@ -303,5 +318,21 @@ mod tests {
         );
         scaling.publish_canvas(0, 0);
         assert!(scaling.target().is_none());
+    }
+
+    #[test]
+    fn canvas_shape_is_published_even_with_scaled_decode_off() {
+        let shape = CanvasShape::default();
+        let scaling = DecodeScaling::disabled().with_canvas_shape(shape.clone());
+        assert_eq!(shape.get(), None);
+        assert_eq!(shape.version(), 0);
+        scaling.publish_canvas(3840, 2160);
+        assert_eq!(scaling.target(), None);
+        assert_eq!(shape.get(), Some((3840, 2160)));
+        assert_eq!(shape.version(), 1);
+        scaling.publish_canvas(3840, 2160);
+        assert_eq!(shape.version(), 1, "unchanged canvas keeps its version");
+        scaling.publish_canvas(2560, 1600);
+        assert_eq!(shape.version(), 2);
     }
 }

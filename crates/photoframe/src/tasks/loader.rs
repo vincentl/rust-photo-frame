@@ -1,4 +1,6 @@
-use crate::events::{InvalidPhoto, LoadPhoto, PhotoLoaded, PreparedImageCpu};
+use crate::events::{
+    InvalidPhoto, InventoryEvent, LoadPhoto, MetaSource, PhotoLoaded, PreparedImageCpu,
+};
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -13,7 +15,9 @@ use tracing::debug;
 mod decode_scale;
 #[cfg(test)]
 pub(crate) mod scaled_decode_tests;
-pub use decode_scale::{DecodeScaling, DecodeTarget, bg_sample_scale, decoded_suffices};
+pub use decode_scale::{
+    DecodeScaling, DecodeTarget, bg_sample_scale, decoded_suffices, orientation_swaps_axes,
+};
 
 /// Upper bound on peak allocation while decoding a single image. On a
 /// memory-constrained Pi a pathological image (e.g. a multi-gigapixel scan or
@@ -231,15 +235,9 @@ pub(crate) fn decode_rgba8_apply_exif(
     let file = File::open(path)?;
     let mut buf = BufReader::new(file);
 
-    // Read EXIF orientation from the already-open handle.
-    let orientation: u16 = (|| -> Option<u16> {
-        let exif = exif::Reader::new().read_from_container(&mut buf).ok()?;
-        let field = exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)?;
-        let val = field.value.get_uint(0)? as u16;
-        debug!("exif orientation {} for {}", val, path.display());
-        Some(val)
-    })()
-    .unwrap_or(1);
+    // Read EXIF orientation from the already-open handle (the same read the
+    // header pass uses, so the two agree).
+    let orientation = crate::processing::header::read_exif_orientation(&mut buf, path);
 
     // Seek back to the start so the image decoder reads from the beginning.
     buf.seek(std::io::SeekFrom::Start(0))?;
@@ -318,11 +316,7 @@ pub(crate) fn decode_rgba8_apply_exif(
         _ => {}
     }
 
-    let source_size = if decode_scale::orientation_swaps_axes(orientation) {
-        (stored_source.1, stored_source.0)
-    } else {
-        stored_source
-    };
+    let source_size = crate::processing::header::displayed_dimensions(stored_source, orientation);
     Ok(DecodedPhoto {
         image: img,
         source_size,
@@ -332,6 +326,9 @@ pub(crate) fn decode_rgba8_apply_exif(
 /// Very simple loader:
 /// - Reads the bytes (to prove existence) and forwards a `PreparedPhoto`.
 /// - On I/O error, emits `InvalidPhoto`.
+/// - With portrait pairing enabled (`meta_tx` is `Some`), reports every
+///   successful decode's displayed size to the inventory as
+///   `PhotoMeta { source: Decoded }`, the authority for pairability.
 pub async fn run(
     mut load_rx: Receiver<LoadPhoto>,
     invalid_tx: Sender<InvalidPhoto>,
@@ -339,6 +336,7 @@ pub async fn run(
     cancel: CancellationToken,
     max_in_flight: usize,
     scaling: DecodeScaling,
+    meta_tx: Option<Sender<InventoryEvent>>,
 ) -> Result<()> {
     let mut in_flight: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
@@ -393,6 +391,7 @@ pub async fn run(
                     match maybe_img {
                         Some(DecodedPhoto { image: rgba8, source_size }) => {
                             debug!("loaded (rgba8): {}", path.display());
+                            send_decoded_meta(meta_tx.as_ref(), &path, source_size).await;
                             let (width, height) = rgba8.dimensions();
                             let prepared = PreparedImageCpu { path: path.clone(), width, height, source_size, pixels: rgba8.into_raw() };
                             let event = PhotoLoaded { prepared, priority };
@@ -424,6 +423,24 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+/// `PhotoMeta::Decoded` for one successful decode; a no-op unless pairing
+/// is enabled (`meta_tx` is `Some`).
+async fn send_decoded_meta(
+    meta_tx: Option<&Sender<InventoryEvent>>,
+    path: &Path,
+    source_size: (u32, u32),
+) {
+    if let Some(tx) = meta_tx {
+        let _ = tx
+            .send(InventoryEvent::PhotoMeta {
+                path: path.to_path_buf(),
+                display_size: source_size,
+                source: MetaSource::Decoded,
+            })
+            .await;
+    }
 }
 
 struct ReadyPhoto {
@@ -622,5 +639,69 @@ mod tests {
         assert_eq!(ready_paths(&buf.drain_ready()), ["d"]);
 
         assert_eq!(buf.next_emit(), 4);
+    }
+
+    /// Load one photo through `run` and return what reached the viewer and
+    /// the inventory.
+    async fn load_once(meta: bool) -> (PhotoLoaded, Vec<InventoryEvent>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.png");
+        image::RgbaImage::from_pixel(30, 40, image::Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .unwrap();
+        let (load_tx, load_rx) = mpsc::channel(4);
+        let (invalid_tx, _invalid_rx) = mpsc::channel(4);
+        let (viewer_tx, mut viewer_rx) = mpsc::channel(4);
+        let (meta_tx, mut meta_rx) = mpsc::channel(4);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run(
+            load_rx,
+            invalid_tx,
+            viewer_tx,
+            cancel.clone(),
+            2,
+            DecodeScaling::disabled(),
+            meta.then_some(meta_tx),
+        ));
+        load_tx
+            .send(LoadPhoto {
+                path: path.clone(),
+                priority: false,
+            })
+            .await
+            .unwrap();
+        let loaded = tokio::time::timeout(std::time::Duration::from_secs(5), viewer_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        cancel.cancel();
+        let _ = task.await;
+        let mut metas = Vec::new();
+        while let Ok(event) = meta_rx.try_recv() {
+            metas.push(event);
+        }
+        (loaded, metas)
+    }
+
+    #[tokio::test]
+    async fn decoded_meta_is_sent_only_when_pairing_is_enabled() {
+        let (loaded, metas) = load_once(true).await;
+        assert_eq!(loaded.prepared.source_size, (30, 40));
+        match metas.as_slice() {
+            [
+                InventoryEvent::PhotoMeta {
+                    path,
+                    display_size,
+                    source,
+                },
+            ] => {
+                assert_eq!(path, &loaded.prepared.path);
+                assert_eq!(*display_size, (30, 40));
+                assert_eq!(*source, MetaSource::Decoded);
+            }
+            other => panic!("expected one Decoded meta, got {other:?}"),
+        }
+        let (_, metas) = load_once(false).await;
+        assert!(metas.is_empty(), "{metas:?}");
     }
 }

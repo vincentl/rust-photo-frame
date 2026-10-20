@@ -13,6 +13,9 @@ use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+pub mod pairing;
+use pairing::{DisplaySizes, LivePairing};
+
 /// Orchestrates the playlist via a virtual-time min-heap scheduler.
 ///
 /// Rules:
@@ -67,6 +70,7 @@ pub async fn run(
     now_override: Option<SystemTime>,
     seed_override: Option<u64>,
     metrics: bool,
+    pairing: Option<LivePairing>,
 ) -> Result<()> {
     if metrics {
         // Stamp the scheme + parameters once per process so a grepped
@@ -83,8 +87,15 @@ pub async fn run(
     }
     let mut playlist = build_scheduler(options, seed_override, now_override);
     let mut display_log = DisplayLog::default();
+    // Displayed sizes under the one-authority rule (pairing; see `pairing`).
+    let mut sizes = DisplaySizes::default();
+    let mut canvas_version_seen = 0;
 
     loop {
+        if let Some(pairing) = &pairing {
+            log_canvas_change(pairing, &sizes, &mut canvas_version_seen);
+        }
+
         let next = playlist.peek_next();
         let next_is_some = next.is_some();
 
@@ -116,8 +127,17 @@ pub async fn run(
 
             // Inventory updates (from files task)
             maybe_ev = inv_rx.recv() => match maybe_ev {
-                Some(InventoryEvent::PhotoAdded(info)) => playlist.record_add(info),
-                Some(InventoryEvent::PhotoRemoved(p)) => playlist.record_remove(&p),
+                Some(InventoryEvent::PhotoAdded(info)) => {
+                    sizes.on_added(&info);
+                    playlist.record_add(info);
+                }
+                Some(InventoryEvent::PhotoRemoved(p)) => {
+                    sizes.on_removed(&p);
+                    playlist.record_remove(&p);
+                }
+                Some(InventoryEvent::PhotoMeta { path, display_size, source }) => {
+                    sizes.on_meta(&path, display_size, source);
+                }
                 None => {}
             },
 
@@ -138,6 +158,30 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Log the published canvas and how much of the inventory is pairable on
+/// it, once per canvas version (`pairing_canvas`).
+fn log_canvas_change(pairing: &LivePairing, sizes: &DisplaySizes, seen: &mut u64) {
+    let version = pairing.canvas.version();
+    if version == *seen {
+        return;
+    }
+    *seen = version;
+    let canvas = pairing.canvas.get();
+    let (mut known, mut pairable, mut total) = (0usize, 0usize, 0usize);
+    for (_, size) in sizes.iter() {
+        total += 1;
+        known += usize::from(size.is_some());
+        pairable += usize::from(pairing.rules.is_pairable(size, canvas));
+    }
+    info!(
+        canvas = ?canvas,
+        inventory = total,
+        size_known = known,
+        pairable,
+        "pairing_canvas"
+    );
 }
 
 struct PlaylistState {
@@ -476,7 +520,11 @@ impl DisplayLog {
         let first_show = entry.0 == 0;
         // Displays since this photo was last shown; -1 the first time it appears.
         // Expected ≈ inventory size under uniform random selection.
-        let gap: i64 = if first_show { -1 } else { (seq - entry.1) as i64 };
+        let gap: i64 = if first_show {
+            -1
+        } else {
+            (seq - entry.1) as i64
+        };
         entry.0 += 1;
         entry.1 = seq;
         let shown_count = entry.0;

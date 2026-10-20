@@ -1,5 +1,6 @@
 use crate::config::Configuration;
-use crate::events::{CreatedSource, InvalidPhoto, InventoryEvent, PhotoInfo};
+use crate::events::{CreatedSource, InvalidPhoto, InventoryEvent, MetaSource, PhotoInfo};
+use crate::processing::header::read_display_size;
 use anyhow::Result;
 use notify::event::{ModifyKind, RemoveKind};
 use notify::{Event, EventKind, RecursiveMode, Watcher, recommended_watcher};
@@ -8,7 +9,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
@@ -40,6 +41,15 @@ pub async fn run(
         discovered = initial.len(),
         "startup recursive scan complete (shuffled)"
     );
+    // Portrait pairing needs each photo's displayed size before it is
+    // planned. `PhotoAdded` went out first so the first photo is not
+    // delayed; the headers are read afterwards, off the async runtime.
+    let read_headers = cfg.playlist.pairing.enabled;
+    if read_headers {
+        let paths: Vec<PathBuf> = initial.iter().map(|info| info.path.clone()).collect();
+        let to_manager = to_manager.clone();
+        tokio::task::spawn_blocking(move || header_pass(paths, &to_manager));
+    }
 
     // 2) Bridge notify callback -> async channel
     let (watch_tx, mut watch_rx) = mpsc::channel::<notify::Result<Event>>(128);
@@ -85,7 +95,7 @@ pub async fn run(
                             // which also closes the race where files land before the
                             // recursive watch attaches to the new subdir.
                             for p in event.paths {
-                                add_path(&p, &to_manager).await;
+                                add_path(&p, &to_manager, read_headers).await;
                             }
                         }
                         EventKind::Remove(RemoveKind::File) => {
@@ -100,7 +110,7 @@ pub async fn run(
                             // per-path by existence, recursing into moved-in dirs.
                             for p in event.paths {
                                 if p.exists() {
-                                    add_path(&p, &to_manager).await;
+                                    add_path(&p, &to_manager, read_headers).await;
                                 } else {
                                     debug!(path = %p.display(), "fs: remove (rename/name)");
                                     let _ = to_manager.send(InventoryEvent::PhotoRemoved(p)).await;
@@ -133,22 +143,26 @@ fn is_image(p: &Path) -> bool {
 /// recursive watch does not replay files already inside it). Idempotent: the
 /// manager treats an already-known path as a metadata refresh, so overlap with
 /// later per-file watch events is harmless.
-async fn add_path(path: &Path, to_manager: &Sender<InventoryEvent>) {
+async fn add_path(path: &Path, to_manager: &Sender<InventoryEvent>, read_headers: bool) {
     if path.is_dir() {
         debug!(path = %path.display(), "fs: add (dir, recursing)");
         for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
             let p = entry.path();
             if p.is_file() && is_image(p) {
-                send_added(p, to_manager).await;
+                send_added(p, to_manager, read_headers).await;
             }
         }
     } else if is_image(path) {
         debug!(path = %path.display(), "fs: add (file)");
-        send_added(path, to_manager).await;
+        send_added(path, to_manager, read_headers).await;
     }
 }
 
-async fn send_added(path: &Path, to_manager: &Sender<InventoryEvent>) {
+/// `read_headers` (portrait pairing enabled): the displayed size is read
+/// inline from the header, so a runtime-added photo is pairable from its
+/// first appearance. A `PhotoAdded` for a path the manager already knows (a
+/// rename or replace) overwrites its size when this read succeeds.
+async fn send_added(path: &Path, to_manager: &Sender<InventoryEvent>, read_headers: bool) {
     let (created_at, created_source) = photo_created_at(path);
     let info = PhotoInfo {
         path: path.to_path_buf(),
@@ -156,8 +170,52 @@ async fn send_added(path: &Path, to_manager: &Sender<InventoryEvent>) {
         created_source,
         // Discovered at runtime → eligible for the priority FIFO.
         runtime_added: true,
+        display_size: if read_headers {
+            read_display_size(path)
+        } else {
+            None
+        },
     };
     let _ = to_manager.send(InventoryEvent::PhotoAdded(info)).await;
+}
+
+/// The startup header pass (portrait pairing): read every startup photo's
+/// displayed size and report it as `PhotoMeta { source: Header }`, which
+/// only fills sizes still unknown. Runs on a blocking thread; logs its cost
+/// once as `pairing_header_pass` (acceptance: median <= 2 ms per photo on
+/// the Pi).
+fn header_pass(paths: Vec<PathBuf>, to_manager: &Sender<InventoryEvent>) {
+    let started = Instant::now();
+    let mut per_photo_us: Vec<u128> = Vec::with_capacity(paths.len());
+    let mut read = 0usize;
+    for path in paths {
+        let t0 = Instant::now();
+        let size = read_display_size(&path);
+        per_photo_us.push(t0.elapsed().as_micros());
+        if let Some(display_size) = size {
+            read += 1;
+            let event = InventoryEvent::PhotoMeta {
+                path,
+                display_size,
+                source: MetaSource::Header,
+            };
+            if to_manager.blocking_send(event).is_err() {
+                return;
+            }
+        }
+    }
+    per_photo_us.sort_unstable();
+    let median_us = per_photo_us
+        .get(per_photo_us.len() / 2)
+        .copied()
+        .unwrap_or(0);
+    info!(
+        photos = per_photo_us.len(),
+        read,
+        median_ms = format_args!("{:.3}", median_us as f64 / 1000.0),
+        total_ms = started.elapsed().as_millis(),
+        "pairing_header_pass"
+    );
 }
 
 /// Age a photo by when its file was staged to the frame. Prefer the filesystem
@@ -213,6 +271,9 @@ pub fn discover_startup_photos(cfg: &Configuration) -> Result<Vec<PhotoInfo>> {
                 created_source,
                 // Startup scan → schedule straight onto the timeline, not the FIFO.
                 runtime_added: false,
+                // Read by the header pass after the adds (or inline by the
+                // dry run), only when pairing is enabled.
+                display_size: None,
             }
         })
         .collect())

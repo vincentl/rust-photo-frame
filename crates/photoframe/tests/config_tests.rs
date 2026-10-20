@@ -1980,3 +1980,80 @@ fn showcase_tour_visits_every_transition_and_mat_pair() {
         );
     }
 }
+
+// ── Portrait pairing (`playlist.pairing`) ───────────────────────────────────
+
+fn pairing_config(pairing: &str, mats: &str) -> anyhow::Result<Configuration> {
+    let yaml = format!(
+        "photo-library-path: /photos\nplaylist:\n  pairing:\n{pairing}\nmatting:\n  selection: random\n  active:\n{mats}"
+    );
+    serde_yaml::from_str::<Configuration>(&yaml)?.validated()
+}
+
+#[test]
+fn pairing_defaults_to_off() {
+    let cfg: Configuration = serde_yaml::from_str("photo-library-path: /photos\n").unwrap();
+    let cfg = cfg.validated().unwrap();
+    let pairing = cfg.playlist.pairing;
+    assert!(!pairing.enabled);
+    assert_eq!(pairing.probability, 1.0);
+    assert_eq!(pairing.bar_ratio, 0.618);
+    assert_eq!(pairing.dwell_multiplier, 1.5);
+}
+
+#[test]
+fn pairing_round_trips_through_the_configuration() {
+    let cfg = pairing_config(
+        "    enabled: true\n    probability: 0.5\n    bar-ratio: 0.4\n    dwell-multiplier: 2.25\n",
+        "    - kind: fixed-color\n      minimum-mat-percentage: 5\n",
+    )
+    .expect("valid");
+    let pairing = cfg.playlist.pairing;
+    assert!(pairing.enabled);
+    assert_eq!(pairing.probability, 0.5);
+    assert_eq!(pairing.bar_ratio, 0.4);
+    assert_eq!(pairing.dwell_multiplier, 2.25);
+}
+
+#[test]
+fn pairing_out_of_range_values_are_rejected_naming_the_key() {
+    let mat = "    - kind: fixed-color\n      minimum-mat-percentage: 5\n";
+    for (line, key) in [
+        ("    probability: 2.0\n", "playlist.pairing.probability"),
+        ("    bar-ratio: 1.5\n", "playlist.pairing.bar-ratio"),
+        (
+            "    dwell-multiplier: 0.1\n",
+            "playlist.pairing.dwell-multiplier",
+        ),
+    ] {
+        let err = pairing_config(&format!("    enabled: true\n{line}"), mat)
+            .expect_err(line)
+            .to_string();
+        assert!(err.contains(key), "{line}: {err}");
+    }
+}
+
+#[test]
+fn pairing_enabled_requires_a_nonzero_mat() {
+    let err = pairing_config(
+        "    enabled: true\n",
+        "    - kind: fixed-color\n      minimum-mat-percentage: 0\n    - kind: blur\n",
+    )
+    .expect_err("only zero-margin mats")
+    .to_string();
+    assert!(err.contains("minimum-mat-percentage > 0"), "{err}");
+
+    // One zero-margin and one non-zero mat: accepted.
+    pairing_config(
+        "    enabled: true\n",
+        "    - kind: fixed-color\n      minimum-mat-percentage: 0\n    - kind: blur\n      minimum-mat-percentage: 3.5\n",
+    )
+    .expect("one non-zero mat suffices");
+
+    // Disabled: zero-margin mats alone stay valid.
+    pairing_config(
+        "    enabled: false\n",
+        "    - kind: fixed-color\n      minimum-mat-percentage: 0\n",
+    )
+    .expect("pairing off");
+}

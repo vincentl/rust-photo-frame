@@ -122,6 +122,16 @@ async fn main() -> Result<()> {
 
     let cancel = CancellationToken::new();
 
+    // Portrait pairing: the viewer publishes its canvas shape here; the
+    // manager reads it at each pairing decision.
+    let canvas_shape = events::CanvasShape::default();
+    let live_pairing = tasks::manager::pairing::PairingRules::from_config(&cfg).map(|rules| {
+        tasks::manager::pairing::LivePairing {
+            rules,
+            canvas: canvas_shape.clone(),
+        }
+    });
+
     // Both the stdin watcher and the Ctrl-C handler call cancel.cancel().
     // CancellationToken::cancel() is idempotent, so whichever fires first wins and
     // the second call is a no-op.
@@ -228,6 +238,7 @@ async fn main() -> Result<()> {
                 now_override,
                 seed_override,
                 metrics,
+                live_pairing,
             )
             .await
             .context("manager task failed")
@@ -236,7 +247,9 @@ async fn main() -> Result<()> {
 
     // The viewer publishes its canvas size here once it has a surface; the loader
     // uses it to decode JPEGs at the smallest DCT scale that still covers it.
-    let decode_scaling = tasks::loader::DecodeScaling::from_config(&cfg);
+    // Portrait pairing's `CanvasShape` is published through the same call.
+    let decode_scaling =
+        tasks::loader::DecodeScaling::from_config(&cfg).with_canvas_shape(canvas_shape);
 
     // PhotoLoader
     tasks.spawn({
@@ -246,6 +259,8 @@ async fn main() -> Result<()> {
         let loaded_tx = loaded_tx.clone();
         let cancel = cancel.clone();
         let max_in_flight = cfg.loader_max_concurrent_decodes;
+        // Decoded sizes feed pairability; sent only while pairing is enabled.
+        let meta_tx = cfg.playlist.pairing.enabled.then(|| inv_tx.clone());
         async move {
             tasks::loader::run(
                 to_load_rx,
@@ -254,6 +269,7 @@ async fn main() -> Result<()> {
                 cancel,
                 max_in_flight,
                 decode_scaling,
+                meta_tx,
             )
             .await
             .context("loader task failed")

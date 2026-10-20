@@ -23,6 +23,7 @@ async fn manager_ignores_spurious_remove_and_sends_load_on_add() {
         None,
         Some(42),
         false,
+        None,
     ));
 
     // Spurious remove for path never added
@@ -77,6 +78,7 @@ async fn manager_rotates_actual_sent_item() {
         None,
         Some(42),
         false,
+        None,
     ));
 
     let initial_a = PathBuf::from("/photos/a.jpg");
@@ -162,6 +164,7 @@ fn photo_info(path: PathBuf, created_at: SystemTime) -> PhotoInfo {
         // Default to startup-scan semantics so existing tests exercise the heap;
         // FIFO-specific tests set this true explicitly.
         runtime_added: false,
+        display_size: None,
     }
 }
 
@@ -371,6 +374,7 @@ fn runtime_added_photo_debuts_promptly_via_priority_fifo() {
         created_at: now,
         created_source: CreatedSource::Birthtime,
         runtime_added: true,
+        display_size: None,
     });
 
     // It must debut quickly. With weight ~3 the FIFO wins at odds 3:1, so the
@@ -429,7 +433,10 @@ fn bulk_import_does_not_starve_old_photos() {
             .map(|i| photo_info(PathBuf::from(format!("new_{i}.jpg")), now))
             .collect();
         for p in &old_paths {
-            photos.push(photo_info(p.clone(), now - Duration::from_secs(86_400 * 30)));
+            photos.push(photo_info(
+                p.clone(),
+                now - Duration::from_secs(86_400 * 30),
+            ));
         }
         photos
     };
@@ -471,6 +478,7 @@ async fn manager_churn_tombstone_and_generation() {
         None,
         Some(42),
         false,
+        None,
     ));
 
     let path_a = PathBuf::from("/photos/a.jpg");
