@@ -14,7 +14,6 @@ use glyphon::{
 use rand::Rng;
 use wgpu::{CommandEncoder, TextureView};
 use winit::dpi::PhysicalSize;
-use winit::window::Window;
 
 use crate::config::{Configuration, MattingKind, TransitionConfig, TransitionKind};
 use crate::tasks::greeting_screen::GreetingScreen;
@@ -591,8 +590,8 @@ impl GreetingScene {
 
 impl Scene for GreetingScene {
     fn enter(&mut self, mut ctx: SceneContext<'_>) {
-        if let Some(window) = ctx.window() {
-            self.resize(window.inner_size(), window.scale_factor());
+        if let Some(viewport) = ctx.viewport() {
+            self.resize(viewport.size, viewport.scale_factor);
         }
         let message = ctx
             .config()
@@ -677,8 +676,8 @@ impl SleepScene {
 
 impl Scene for SleepScene {
     fn enter(&mut self, mut ctx: SceneContext<'_>) {
-        if let Some(window) = ctx.window() {
-            self.resize(window.inner_size(), window.scale_factor());
+        if let Some(viewport) = ctx.viewport() {
+            self.resize(viewport.size, viewport.scale_factor);
         }
         let message = ctx
             .config()
@@ -985,13 +984,22 @@ impl WakeScene {
     }
 }
 
+/// Size and scale of the surface a scene draws into: a winit window's inner
+/// size and scale factor on Wayland, the fixed mode and 1.0 on DRM/KMS
+/// (sway runs the panel at scale 1.0, so text sizes match across the two).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Viewport {
+    pub(super) size: PhysicalSize<u32>,
+    pub(super) scale_factor: f64,
+}
+
 /// Execution context shared with viewer scenes.
 ///
 /// A [`SceneContext`] exposes the subset of the viewer application state that a scene may
 /// interact with. This keeps scene logic focused on presentation concerns while preventing
 /// direct access to unrelated subsystems.
 pub(super) struct SceneContext<'a> {
-    window: Option<&'a Window>,
+    viewport: Option<Viewport>,
     redraw: &'a mut dyn FnMut(),
     config: Arc<Configuration>,
     rng: &'a mut rand::rngs::ThreadRng,
@@ -1002,7 +1010,7 @@ pub(super) struct SceneContext<'a> {
 impl<'a> SceneContext<'a> {
     /// Creates a new [`SceneContext`] scoped to the currently active viewer state.
     pub(super) fn new(
-        window: Option<&'a Window>,
+        viewport: Option<Viewport>,
         redraw: &'a mut dyn FnMut(),
         config: Arc<Configuration>,
         rng: &'a mut rand::rngs::ThreadRng,
@@ -1010,7 +1018,7 @@ impl<'a> SceneContext<'a> {
         enqueue_matting: &'a mut dyn FnMut(&mut WakeScene),
     ) -> Self {
         Self {
-            window,
+            viewport,
             redraw,
             config,
             rng,
@@ -1019,9 +1027,9 @@ impl<'a> SceneContext<'a> {
         }
     }
 
-    /// Returns the active window handle, if the viewer has created one.
-    pub(super) fn window(&self) -> Option<&'a Window> {
-        self.window
+    /// Returns the output's size and scale, once the viewer has an output.
+    pub(super) fn viewport(&self) -> Option<Viewport> {
+        self.viewport
     }
 
     /// Requests a redraw from the viewer event loop.

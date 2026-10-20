@@ -2,7 +2,7 @@ mod image_ops;
 pub mod scenes;
 
 use self::image_ops::*;
-use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene};
+use self::scenes::{GreetingScene, Scene, SceneContext, SleepScene, Viewport};
 
 use crate::config::{
     MattingConfig, MattingMode, MattingOptions, SelectedTransition, TransitionConfig,
@@ -15,13 +15,14 @@ use crate::processing::blur::apply_blur;
 use crate::processing::color::average_color;
 use crate::processing::layout::center_offset;
 use crate::tasks::greeting_screen::GreetingScreen;
-use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
+use crossbeam_channel::{Sender as CbSender, TrySendError, bounded};
 use futures::executor::block_on;
 use image::{Rgba, RgbaImage, imageops};
 use rand::Rng;
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{MissedTickBehavior, interval};
@@ -352,7 +353,9 @@ struct QueuedImage {
 
 struct MattingPipeline {
     task_tx: CbSender<MatTask>,
-    result_rx: CbReceiver<MatResult>,
+    /// A tokio channel (not crossbeam) so the DRM/KMS loop can await
+    /// results; the winit path keeps polling it with `try_recv`.
+    result_rx: Receiver<MatResult>,
 }
 
 impl MattingPipeline {
@@ -360,16 +363,17 @@ impl MattingPipeline {
         let worker_count = worker_count.max(1);
         let capacity = capacity.max(worker_count).max(2);
         let (task_tx, task_rx) = bounded::<MatTask>(capacity);
-        let (result_tx, result_rx) = bounded::<MatResult>(capacity);
+        let (result_tx, result_rx) = tokio::sync::mpsc::channel::<MatResult>(capacity);
         let task_rx = Arc::new(task_rx);
-        let result_tx = Arc::new(result_tx);
         for _ in 0..worker_count {
             let task_rx = Arc::clone(&task_rx);
-            let result_tx = Arc::clone(&result_tx);
+            let result_tx = result_tx.clone();
+            // Plain OS threads (outside the tokio runtime), so blocking_send
+            // is the right call.
             std::thread::spawn(move || {
                 while let Ok(task) = task_rx.recv() {
                     if let Some(result) = process_mat_task(task)
-                        && result_tx.send(result).is_err()
+                        && result_tx.blocking_send(result).is_err()
                     {
                         break;
                     }
@@ -389,7 +393,7 @@ impl MattingPipeline {
         }
     }
 
-    fn try_recv(&self) -> Option<MatResult> {
+    fn try_recv(&mut self) -> Option<MatResult> {
         self.result_rx.try_recv().ok()
     }
 }
@@ -1184,6 +1188,7 @@ async fn drive_viewer_events(
 }
 
 use winit::application::ApplicationHandler;
+use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
@@ -1499,7 +1504,7 @@ impl ViewerMode {
     #[allow(clippy::too_many_arguments)]
     fn with_scene_mut<'a, R>(
         &'a mut self,
-        window: Option<&'a Window>,
+        viewport: Option<Viewport>,
         config: Arc<crate::config::Configuration>,
         redraw: &'a mut dyn FnMut(),
         rng: &'a mut rand::rngs::ThreadRng,
@@ -1508,7 +1513,7 @@ impl ViewerMode {
         f: impl FnOnce(&mut dyn Scene, SceneContext<'a>) -> R,
     ) -> Option<R> {
         let ctx = SceneContext::new(
-            window,
+            viewport,
             redraw,
             config,
             rng,
@@ -1532,11 +1537,511 @@ impl ViewerMode {
     }
 }
 
+/// Where the viewer's frames go. Exactly two kinds, selected at launch by
+/// `PHOTOFRAME_SURFACE` (see `ViewerSurface`); no trait, no other backends.
+enum Output {
+    /// A fullscreen winit window under the Wayland compositor (the default).
+    Window(Arc<Window>),
+    /// Direct scanout on DRM/KMS through `VK_KHR_display` (see `kms.rs`). The
+    /// mode is fixed for the process lifetime.
+    Kms {
+        size: PhysicalSize<u32>,
+        /// Set by `SceneContext::request_redraw`; the KMS loop takes it.
+        redraw_requested: Arc<AtomicBool>,
+    },
+}
+
+impl Output {
+    fn window(&self) -> Option<&Arc<Window>> {
+        match self {
+            Output::Window(window) => Some(window),
+            Output::Kms { .. } => None,
+        }
+    }
+
+    fn is_kms(&self) -> bool {
+        matches!(self, Output::Kms { .. })
+    }
+
+    fn size(&self) -> PhysicalSize<u32> {
+        match self {
+            Output::Window(window) => window.inner_size(),
+            Output::Kms { size, .. } => *size,
+        }
+    }
+
+    /// 1.0 on KMS: the kiosk sway config runs the panel at `scale 1.0`, so
+    /// greeting and sleep text keep the size they have under Wayland.
+    fn scale_factor(&self) -> f64 {
+        match self {
+            Output::Window(window) => window.scale_factor(),
+            Output::Kms { .. } => 1.0,
+        }
+    }
+
+    fn viewport(&self) -> Viewport {
+        Viewport {
+            size: self.size(),
+            scale_factor: self.scale_factor(),
+        }
+    }
+
+    /// Called immediately before every wake-scene present. On Wayland this
+    /// asks winit for a `wl_surface.frame` callback on the commit present()
+    /// is about to make; until the compositor answers it (once per output
+    /// refresh under sway), winit withholds RedrawRequested, so a transition
+    /// submits exactly one frame per refresh instead of racing mailbox. See
+    /// WakeScene::ensure_redraw_requested for the model. On KMS nothing is
+    /// needed: with FIFO the next acquire blocks until a swapchain image is
+    /// free, which is vblank.
+    fn before_present(&self) {
+        if let Output::Window(window) = self {
+            window.pre_present_notify();
+        }
+    }
+}
+
+/// What the viewer presents with when `PHOTOFRAME_PRESENT_MODE` is unset (or
+/// names a mode the surface does not support).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PresentDefault {
+    /// Mailbox when available, else AutoVsync. FIFO emulated over Wayland
+    /// frame callbacks costs two vsyncs per frame on compositors without
+    /// wp_fifo_v1 (measured: a bare clear locks at 30fps on a 60Hz output
+    /// under sway 1.10), halving every transition. Mailbox latches the
+    /// newest complete frame each vsync; the Wake scene paces its
+    /// submissions to the compositor's frame callbacks via
+    /// pre_present_notify so mailbox never has to discard.
+    Wayland,
+    /// FIFO, always supported. Page flips are vblank-locked and the acquire
+    /// blocks until a swapchain image is free, which is the only clock the
+    /// KMS loop has. Mailbox on KMS has no pacing beyond whatever the driver
+    /// does, so it stays an explicit opt-in.
+    Kms,
+}
+
+impl PresentDefault {
+    fn resolve(self, supported: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+        match self {
+            PresentDefault::Wayland if supported.contains(&wgpu::PresentMode::Mailbox) => {
+                wgpu::PresentMode::Mailbox
+            }
+            PresentDefault::Wayland => wgpu::PresentMode::AutoVsync,
+            PresentDefault::Kms => wgpu::PresentMode::Fifo,
+        }
+    }
+}
+
+/// PHOTOFRAME_PRESENT_MODE=fifo|mailbox|immediate overrides the presentation
+/// mode for frame-pacing experiments on either surface kind. An unknown
+/// value or a mode the surface does not support falls back to the surface
+/// kind's default.
+fn choose_present_mode(
+    requested: Option<&str>,
+    supported: &[wgpu::PresentMode],
+    default: PresentDefault,
+) -> wgpu::PresentMode {
+    let fallback = default.resolve(supported);
+    let requested_mode = match requested {
+        Some("fifo") => wgpu::PresentMode::Fifo,
+        Some("mailbox") => wgpu::PresentMode::Mailbox,
+        Some("immediate") => wgpu::PresentMode::Immediate,
+        Some(other) => {
+            warn!(
+                requested = other,
+                fallback = ?fallback,
+                "unknown PHOTOFRAME_PRESENT_MODE; using the default"
+            );
+            return fallback;
+        }
+        None => {
+            info!(present_mode = ?fallback, ?default, "viewer_present_mode_default");
+            return fallback;
+        }
+    };
+    if supported.contains(&requested_mode) {
+        info!(present_mode = ?requested_mode, "viewer_present_mode_override");
+        requested_mode
+    } else {
+        warn!(
+            requested = ?requested_mode,
+            supported = ?supported,
+            fallback = ?fallback,
+            "requested present mode unsupported; using the default"
+        );
+        fallback
+    }
+}
+
+/// Why a redraw could not complete; each driver decides what to do.
+#[derive(Debug)]
+enum RedrawError {
+    /// `MAX_CONSECUTIVE_SURFACE_TIMEOUTS` acquires timed out in a row.
+    /// Wayland recreates the GPU context; KMS exits for a systemd restart.
+    TimeoutStreak,
+    /// Unrecoverable for this process (out of memory; on KMS also a lost or
+    /// outdated swapchain). The driver exits the viewer.
+    Fatal(String),
+}
+
+const MAX_CONSECUTIVE_SURFACE_TIMEOUTS: u32 = 6;
+
+/// Everything created from a fresh surface + device.
+struct GpuParts {
+    gpu: GpuCtx,
+    greeting: GreetingScene,
+    sleep: SleepScene,
+    caption_overlay: Option<scenes::CaptionOverlay>,
+}
+
+/// Adapter, device, surface configuration (not yet applied), pipelines and
+/// the overlay scenes for one surface. Shared by the Wayland window and the
+/// DRM/KMS output; only the present-mode default differs.
+fn build_gpu(
+    instance: &wgpu::Instance,
+    surface: wgpu::Surface<'static>,
+    size: PhysicalSize<u32>,
+    present_default: PresentDefault,
+    cfg: &crate::config::Configuration,
+    reason: &'static str,
+) -> Result<GpuParts, String> {
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: Some(&surface),
+        force_fallback_adapter: false,
+    }))
+    .map_err(|err| format!("failed to acquire GPU adapter: {err}"))?;
+    let info = adapter.get_info();
+    debug!(context = reason, ?info, "viewer_gpu_adapter_acquired");
+    let limits = adapter.limits();
+    debug!(
+        context = reason,
+        max_texture_dimension_2d = limits.max_texture_dimension_2d,
+        max_buffer_size = limits.max_buffer_size,
+        "viewer_gpu_limits"
+    );
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("viewer-device"),
+        required_features: wgpu::Features::empty(),
+        required_limits: limits.clone(),
+        experimental_features: wgpu::ExperimentalFeatures::default(),
+        memory_hints: wgpu::MemoryHints::default(),
+        trace: wgpu::Trace::default(),
+    }))
+    .map_err(|err| format!("failed to acquire GPU device: {err}"))?;
+    debug!(context = reason, "viewer_gpu_device_ready");
+    let caps = surface.get_capabilities(&adapter);
+    let format = caps
+        .formats
+        .iter()
+        .copied()
+        .find(|f| f.is_srgb())
+        .or_else(|| caps.formats.first().copied())
+        .ok_or("surface reported no supported texture formats")?;
+    // Prefer an opaque surface: the viewer always fills every pixel,
+    // and an opaque fullscreen surface is what lets the compositor
+    // skip blending — and, with matching formats, hand the buffer
+    // straight to the display (direct scanout, no composite copy).
+    let alpha_mode = caps
+        .alpha_modes
+        .iter()
+        .copied()
+        .find(|m| *m == wgpu::CompositeAlphaMode::Opaque)
+        .or_else(|| caps.alpha_modes.first().copied())
+        .ok_or("surface reported no alpha modes")?;
+    debug!(
+        context = reason,
+        surface_width = size.width,
+        surface_height = size.height,
+        format = ?format,
+        present_modes = ?caps.present_modes,
+        "viewer_gpu_surface_caps"
+    );
+    let present_mode = choose_present_mode(
+        std::env::var("PHOTOFRAME_PRESENT_MODE").ok().as_deref(),
+        &caps.present_modes,
+        present_default,
+    );
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: size.width.max(1),
+        height: size.height.max(1),
+        present_mode,
+        alpha_mode,
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+    // Resources for quad
+    let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("viewer-uniforms"),
+        size: std::mem::size_of::<TransitionUniforms>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("uniform-layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let uniform_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("uniform-bind"),
+        layout: &uniform_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform_buf.as_entire_binding(),
+        }],
+    });
+    let img_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("image-bind-layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("linear-clamp"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("viewer-quad"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+            "shaders/viewer_quad.wgsl"
+        ))),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("pipeline-layout"),
+        bind_group_layouts: &[
+            &uniform_layout,
+            &img_bind_layout,
+            &img_bind_layout,
+            &img_bind_layout,
+        ],
+        push_constant_ranges: &[],
+    });
+    let iris_layer_pipeline_layout =
+        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("iris-layer-pipeline-layout"),
+            bind_group_layouts: &[&uniform_layout],
+            push_constant_ranges: &[],
+        });
+    let iris_layer_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("iris-layer-pipeline"),
+        layout: Some(&iris_layer_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_iris_layer"),
+            targets: &[Some(wgpu::ColorTargetState {
+                // Must match the iris layer texture (Rgba16Float):
+                // dark petals band in 8-bit, see ensure_iris_layer.
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview: None,
+        cache: None,
+    });
+    let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("blit-pipeline-layout"),
+        bind_group_layouts: &[&uniform_layout, &img_bind_layout],
+        push_constant_ranges: &[],
+    });
+    let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("blit-pipeline"),
+        layout: Some(&blit_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_blit"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview: None,
+        cache: None,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("quad-pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                // Opaque: the shader composites letterbox regions over
+                // U.background itself. Skipping blending avoids a
+                // destination read on every pixel (significant at 4K)
+                // and keeps the surface scanout-friendly.
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview: None,
+        cache: None,
+    });
+    let make_plane = |label: &str, width: u32, height: u32, data: &[u8]| -> TexturePlane {
+        let w = width.max(1);
+        let h = height.max(1);
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * w),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &img_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        TexturePlane { bind, w, h }
+    };
+
+    let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
+
+    let greeting = GreetingScene::new(GreetingScreen::new(
+        &device,
+        &queue,
+        format,
+        cfg.greeting_screen.screen(),
+    ));
+
+    let sleep = SleepScene::new(GreetingScreen::new(
+        &device,
+        &queue,
+        format,
+        cfg.sleep_screen.screen(),
+    ));
+
+    let caption_overlay = (cfg.showcase.enabled && cfg.showcase.caption_enabled())
+        .then(|| scenes::CaptionOverlay::new(&device, &queue, format));
+    let gpu = GpuCtx {
+        device,
+        queue,
+        surface,
+        config,
+        limits,
+        uniform_buf,
+        uniform_bind,
+        img_bind_layout,
+        sampler,
+        pipeline,
+        blank_plane,
+        iris_layer_pipeline,
+        iris_layer: None,
+        blit_pipeline,
+        half_target: None,
+    };
+    Ok(GpuParts {
+        gpu,
+        greeting,
+        sleep,
+        caption_overlay,
+    })
+}
+
 struct App {
     from_loader: Receiver<PhotoLoaded>,
     to_manager_displayed: Sender<Displayed>,
     cancel: CancellationToken,
-    window: Option<Arc<Window>>,
+    /// `None` until the Wayland window exists; set once at startup on KMS.
+    output: Option<Output>,
     gpu: Option<GpuCtx>,
     surface_configured: bool,
     surface_gate: SurfaceReadyGate,
@@ -1633,16 +2138,8 @@ impl App {
             debug!("viewer_scene_waiting_for_surface_configuration");
             return None;
         }
-        let window_handle = self.window.as_ref().map(Arc::clone);
-        let window_ref = window_handle.as_deref();
-        let mut request_redraw = {
-            let window_handle = window_handle.clone();
-            move || {
-                if let Some(window) = window_handle.as_ref() {
-                    window.request_redraw();
-                }
-            }
-        };
+        let viewport = self.output.as_ref().map(Output::viewport);
+        let mut request_redraw = self.redraw_requester();
         let config = Arc::clone(&self.full_config);
         let mut notify_displayed = {
             let sender = self.to_manager_displayed.clone();
@@ -1671,7 +2168,7 @@ impl App {
         let rng = &mut self.rng;
 
         let result = mode.with_scene_mut(
-            window_ref,
+            viewport,
             config,
             &mut request_redraw,
             rng,
@@ -1685,6 +2182,23 @@ impl App {
 
     fn mode_kind(&self) -> ViewerModeKind {
         self.mode().kind()
+    }
+
+    /// The closure scenes call through `SceneContext::request_redraw`.
+    fn redraw_requester(&self) -> Box<dyn FnMut()> {
+        match &self.output {
+            Some(Output::Window(window)) => {
+                let window = Arc::clone(window);
+                Box::new(move || window.request_redraw())
+            }
+            Some(Output::Kms {
+                redraw_requested, ..
+            }) => {
+                let flag = Arc::clone(redraw_requested);
+                Box::new(move || flag.store(true, Ordering::Relaxed))
+            }
+            None => Box::new(|| {}),
+        }
     }
 
     fn set_mode(&mut self, target: ViewerModeKind) -> ViewerModeKind {
@@ -1713,16 +2227,8 @@ impl App {
             debug!(hook = ?hook, "viewer_scene_hook_deferred_until_surface_configured");
             return;
         }
-        let window_handle = self.window.as_ref().map(Arc::clone);
-        let window_ref = window_handle.as_deref();
-        let mut request_redraw = {
-            let window_handle = window_handle.clone();
-            move || {
-                if let Some(window) = window_handle.as_ref() {
-                    window.request_redraw();
-                }
-            }
-        };
+        let viewport = self.output.as_ref().map(Output::viewport);
+        let mut request_redraw = self.redraw_requester();
         let config = Arc::clone(&self.full_config);
         let mut notify_displayed = {
             let sender = self.to_manager_displayed.clone();
@@ -1748,7 +2254,7 @@ impl App {
         };
         let rng = &mut self.rng;
         let _ = mode.with_scene_mut(
-            window_ref,
+            viewport,
             config,
             &mut request_redraw,
             rng,
@@ -1770,6 +2276,8 @@ impl App {
         }
     }
 
+    /// Wayland: create the window and its surface, then the shared GPU
+    /// context. A failure exits the event loop.
     fn ensure_gpu_ready(&mut self, event_loop: &ActiveEventLoop, reason: &'static str) -> bool {
         let Some(window) = self.ensure_window(event_loop) else {
             debug!(context = reason, "viewer_gpu_ensure_no_window");
@@ -1805,415 +2313,40 @@ impl App {
                 return false;
             }
         };
-        let adapter =
-            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })) {
-                Ok(adapter) => {
-                    let info = adapter.get_info();
-                    debug!(context = reason, ?info, "viewer_gpu_adapter_acquired");
-                    adapter
-                }
-                Err(err) => {
-                    warn!(
-                        context = reason,
-                        error = %err,
-                        "failed to acquire GPU adapter; exiting viewer"
-                    );
-                    event_loop.exit();
-                    return false;
-                }
-            };
-        let limits = adapter.limits();
-        debug!(
-            context = reason,
-            max_texture_dimension_2d = limits.max_texture_dimension_2d,
-            max_buffer_size = limits.max_buffer_size,
-            "viewer_gpu_limits"
-        );
-        let (device, queue) =
-            match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("viewer-device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: limits.clone(),
-                experimental_features: wgpu::ExperimentalFeatures::default(),
-                memory_hints: wgpu::MemoryHints::default(),
-                trace: wgpu::Trace::default(),
-            })) {
-                Ok(pair) => {
-                    debug!(context = reason, "viewer_gpu_device_ready");
-                    pair
-                }
-                Err(err) => {
-                    warn!(
-                        context = reason,
-                        error = %err,
-                        "failed to acquire GPU device; exiting viewer"
-                    );
-                    event_loop.exit();
-                    return false;
-                }
-            };
-        let caps = surface.get_capabilities(&adapter);
-        let Some(format) = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .or_else(|| caps.formats.first().copied())
-        else {
-            warn!(
-                context = reason,
-                "surface reported no supported texture formats; exiting viewer"
-            );
-            event_loop.exit();
-            return false;
-        };
-        // Prefer an opaque surface: the viewer always fills every pixel,
-        // and an opaque fullscreen surface is what lets the compositor
-        // skip blending — and, with matching formats, hand the buffer
-        // straight to the display (direct scanout, no composite copy).
-        let Some(alpha_mode) = caps
-            .alpha_modes
-            .iter()
-            .copied()
-            .find(|m| *m == wgpu::CompositeAlphaMode::Opaque)
-            .or_else(|| caps.alpha_modes.first().copied())
-        else {
-            warn!(
-                context = reason,
-                "surface reported no alpha modes; exiting viewer"
-            );
-            event_loop.exit();
-            return false;
-        };
         let size = window.inner_size();
-        debug!(
-            context = reason,
-            surface_width = size.width,
-            surface_height = size.height,
-            format = ?format,
-            present_modes = ?caps.present_modes,
-            "viewer_gpu_surface_caps"
-        );
-        // PHOTOFRAME_PRESENT_MODE=fifo|mailbox|immediate overrides the
-        // presentation mode for frame-pacing experiments: fifo serializes
-        // on the compositor's vsync cadence, mailbox lets the app render
-        // ahead and the compositor latch the newest complete frame.
-        let requested_present = std::env::var("PHOTOFRAME_PRESENT_MODE").ok();
-        let present_mode = match requested_present.as_deref() {
-            Some("fifo") => Some(wgpu::PresentMode::Fifo),
-            Some("mailbox") => Some(wgpu::PresentMode::Mailbox),
-            Some("immediate") => Some(wgpu::PresentMode::Immediate),
-            Some(other) => {
-                warn!(
-                    requested = other,
-                    "unknown PHOTOFRAME_PRESENT_MODE; using auto-vsync"
-                );
-                None
-            }
-            None => None,
-        };
-        let present_mode = match present_mode {
-            Some(mode) if caps.present_modes.contains(&mode) => {
-                info!(present_mode = ?mode, "viewer_present_mode_override");
-                mode
-            }
-            Some(mode) => {
-                warn!(
-                    requested = ?mode,
-                    supported = ?caps.present_modes,
-                    "requested present mode unsupported; using auto-vsync"
-                );
-                wgpu::PresentMode::AutoVsync
-            }
-            None => {
-                // Default to mailbox when available: FIFO emulated over
-                // Wayland frame callbacks costs two vsyncs per frame on
-                // compositors without wp_fifo_v1 (measured: a bare clear
-                // locks at 30fps on a 60Hz output under sway 1.10),
-                // halving every transition. Mailbox latches the newest
-                // complete frame each vsync; the Wake scene paces its
-                // submissions to the compositor's frame callbacks via
-                // pre_present_notify so mailbox never has to discard.
-                if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-                    info!("viewer_present_mode_default_mailbox");
-                    wgpu::PresentMode::Mailbox
-                } else {
-                    wgpu::PresentMode::AutoVsync
-                }
-            }
-        };
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode,
-            alpha_mode,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        // Resources for quad
-        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("viewer-uniforms"),
-            size: std::mem::size_of::<TransitionUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("uniform-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let uniform_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("uniform-bind"),
-            layout: &uniform_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buf.as_entire_binding(),
-            }],
-        });
-        let img_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("image-bind-layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("linear-clamp"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("viewer-quad"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                "shaders/viewer_quad.wgsl"
-            ))),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("pipeline-layout"),
-            bind_group_layouts: &[
-                &uniform_layout,
-                &img_bind_layout,
-                &img_bind_layout,
-                &img_bind_layout,
-            ],
-            push_constant_ranges: &[],
-        });
-        let iris_layer_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("iris-layer-pipeline-layout"),
-                bind_group_layouts: &[&uniform_layout],
-                push_constant_ranges: &[],
-            });
-        let iris_layer_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("iris-layer-pipeline"),
-            layout: Some(&iris_layer_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_iris_layer"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    // Must match the iris layer texture (Rgba16Float):
-                    // dark petals band in 8-bit, see ensure_iris_layer.
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            multiview: None,
-            cache: None,
-        });
-        let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("blit-pipeline-layout"),
-            bind_group_layouts: &[&uniform_layout, &img_bind_layout],
-            push_constant_ranges: &[],
-        });
-        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("blit-pipeline"),
-            layout: Some(&blit_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_blit"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            multiview: None,
-            cache: None,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("quad-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    // Opaque: the shader composites letterbox regions over
-                    // U.background itself. Skipping blending avoids a
-                    // destination read on every pixel (significant at 4K)
-                    // and keeps the surface scanout-friendly.
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            multiview: None,
-            cache: None,
-        });
-        let make_plane = |label: &str, width: u32, height: u32, data: &[u8]| -> TexturePlane {
-            let w = width.max(1);
-            let h = height.max(1);
-            let tex = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d {
-                    width: w,
-                    height: h,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                data,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * w),
-                    rows_per_image: Some(h),
-                },
-                wgpu::Extent3d {
-                    width: w,
-                    height: h,
-                    depth_or_array_layers: 1,
-                },
-            );
-            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: &img_bind_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&sampler),
-                    },
-                ],
-            });
-            TexturePlane { bind, w, h }
-        };
-
-        let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
-
-        let greeting = GreetingScene::new(GreetingScreen::new(
-            &device,
-            &queue,
-            format,
-            self.full_config.greeting_screen.screen(),
-        ));
-
-        let sleep = SleepScene::new(GreetingScreen::new(
-            &device,
-            &queue,
-            format,
-            self.full_config.sleep_screen.screen(),
-        ));
-
-        if self.full_config.showcase.enabled && self.full_config.showcase.caption_enabled() {
-            self.caption_overlay = Some(scenes::CaptionOverlay::new(&device, &queue, format));
-        }
-        self.window = Some(window);
-        let gpu = GpuCtx {
-            device,
-            queue,
+        let parts = match build_gpu(
+            &instance,
             surface,
-            config,
-            limits,
-            uniform_buf,
-            uniform_bind,
-            img_bind_layout,
-            sampler,
-            pipeline,
-            blank_plane,
-            iris_layer_pipeline,
-            iris_layer: None,
-            blit_pipeline,
-            half_target: None,
+            size,
+            PresentDefault::Wayland,
+            &self.full_config,
+            reason,
+        ) {
+            Ok(parts) => parts,
+            Err(err) => {
+                warn!(context = reason, error = %err, "failed to initialize GPU; exiting viewer");
+                event_loop.exit();
+                return false;
+            }
         };
+        self.output = Some(Output::Window(window));
+        self.install_gpu(parts, size, reason);
+        true
+    }
+
+    /// Bookkeeping shared by both outputs once a GPU context exists: the
+    /// overlay scenes are rebuilt for the new device, and the slideshow
+    /// restarts from an empty stage. The surface is not yet "configured";
+    /// Wayland waits for the compositor's configure events
+    /// (SurfaceReadyGate), KMS marks it ready itself (fixed mode).
+    fn install_gpu(&mut self, parts: GpuParts, size: PhysicalSize<u32>, reason: &'static str) {
+        let GpuParts {
+            gpu,
+            greeting,
+            sleep,
+            caption_overlay,
+        } = parts;
+        self.caption_overlay = caption_overlay;
         if let Some(mode) = self.mode.as_mut() {
             mode.set_overlays(Some(greeting), Some(sleep));
         }
@@ -2230,7 +2363,6 @@ impl App {
         wake.set_displayed_at(None);
         let ready_log = format!("{reason}_gpu_ready");
         self.log_event_loop_state(&ready_log);
-        true
     }
 
     fn reset_for_resume(&mut self) {
@@ -2276,7 +2408,7 @@ impl App {
         debug!(
             context = context,
             viewer_mode = ?self.mode_kind(),
-            has_window = self.window.is_some(),
+            has_output = self.output.is_some(),
             has_gpu = self.gpu.is_some(),
             surface_configured = self.surface_configured,
             pending_queue_len = wake.pending().len(),
@@ -2299,7 +2431,7 @@ impl App {
     }
 
     fn ensure_window(&mut self, event_loop: &ActiveEventLoop) -> Option<Arc<Window>> {
-        if let Some(window) = self.window.as_ref().cloned() {
+        if let Some(window) = self.output.as_ref().and_then(Output::window).cloned() {
             self.log_event_loop_state("ensure_window_cached");
             return Some(window);
         }
@@ -2322,7 +2454,7 @@ impl App {
             None => Fullscreen::Borderless(None),
         }));
         window.set_cursor_visible(false);
-        self.window = Some(window.clone());
+        self.output = Some(Output::Window(window.clone()));
         self.log_event_loop_state("ensure_window_created");
         Some(window)
     }
@@ -2356,13 +2488,12 @@ impl App {
         }
     }
 
-    fn process_tick(&mut self, event_loop: &ActiveEventLoop) {
+    /// One control step: matting results in, uploads, matting work out, and
+    /// the active scene's tick (dwell, transition start/finish, redraw
+    /// requests). Driven by the 4 ms ticker on Wayland and once per loop
+    /// iteration on KMS. Cancellation is the driver's job.
+    fn process_tick(&mut self) {
         self.log_event_loop_state("process_tick_start");
-        if self.cancel.is_cancelled() {
-            event_loop.exit();
-            return;
-        }
-
         // Keep surface configuration and readiness in sync even if winit
         // doesn't deliver an explicit resize event (Wayland/Sway can do this).
         self.refresh_surface_config_from_window();
@@ -2394,7 +2525,10 @@ impl App {
     }
 
     fn refresh_surface_config_from_window(&mut self) {
-        let (Some(window), Some(gpu)) = (self.window.as_ref(), self.gpu.as_mut()) else {
+        let (Some(window), Some(gpu)) = (
+            self.output.as_ref().and_then(Output::window),
+            self.gpu.as_mut(),
+        ) else {
             return;
         };
         let size = window.inner_size();
@@ -2548,20 +2682,24 @@ impl App {
         self.log_event_loop_state("enter_greeting");
     }
 
-    fn handle_surface_timeout(&mut self, event_loop: &ActiveEventLoop) {
-        const MAX_CONSECUTIVE_TIMEOUTS: u32 = 6;
-
+    /// Count one acquire timeout; a streak of
+    /// `MAX_CONSECUTIVE_SURFACE_TIMEOUTS` is an error for the driver.
+    fn note_surface_timeout(&mut self) -> Result<(), RedrawError> {
         self.surface_timeout_streak = self.surface_timeout_streak.saturating_add(1);
-        if self.surface_timeout_streak < MAX_CONSECUTIVE_TIMEOUTS {
-            return;
+        if self.surface_timeout_streak < MAX_CONSECUTIVE_SURFACE_TIMEOUTS {
+            return Ok(());
         }
-
         warn!(
             streak = self.surface_timeout_streak,
-            "viewer_surface_timeout_recovering"
+            "viewer_surface_timeout_streak"
         );
         self.surface_timeout_streak = 0;
+        Err(RedrawError::TimeoutStreak)
+    }
 
+    /// Wayland: rebuild the window's GPU context after a timeout streak.
+    fn recover_from_surface_timeouts(&mut self, event_loop: &ActiveEventLoop) {
+        warn!("viewer_surface_timeout_recovering");
         self.teardown_gpu();
         self.reset_for_resume();
         if self.ensure_gpu_ready(event_loop, "surface_timeout_recover") {
@@ -2571,6 +2709,614 @@ impl App {
 
     fn record_frame_presented(&mut self) {
         self.surface_timeout_streak = 0;
+    }
+
+    /// Render and present one frame of the active scene. Shared by the
+    /// winit handler (RedrawRequested) and the KMS loop; each decides what
+    /// a `RedrawError` means for its output.
+    fn redraw(&mut self) -> Result<(), RedrawError> {
+        let mode_kind = self.mode_kind();
+        let Some(_) = self.gpu.as_ref() else {
+            return Ok(());
+        };
+        if !self.surface_configured {
+            debug!("viewer_redraw_waiting_for_surface_configuration");
+            return Ok(());
+        }
+        let overlay_pending = match mode_kind {
+            ViewerModeKind::Greeting => self
+                .mode()
+                .greeting()
+                .map(GreetingScene::needs_redraw)
+                .unwrap_or(false),
+            ViewerModeKind::Sleep => self
+                .mode()
+                .sleep()
+                .map(SleepScene::needs_redraw)
+                .unwrap_or(false),
+            ViewerModeKind::Wake => false,
+        };
+        let (pending_redraw, queue_depth, has_transition) = {
+            let wake = self.mode().wake();
+            (
+                wake.needs_redraw(),
+                wake.pending().len(),
+                wake.transition_state().is_some(),
+            )
+        };
+        debug!(
+            viewer_mode = ?mode_kind,
+            overlay_pending,
+            pending_redraw,
+            queue_depth,
+            ready_results = self.ready_results.len(),
+            mat_inflight = self.mat_inflight,
+            has_transition,
+            "viewer_window_redraw_requested"
+        );
+        if matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep) && !overlay_pending
+        {
+            return Ok(());
+        }
+        if matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep) {
+            let Some(output) = self.output.as_ref() else {
+                return Ok(());
+            };
+            let size = output.size();
+            let scale_factor = output.scale_factor();
+            let layout_ready = {
+                let Some(mode) = self.mode.as_mut() else {
+                    return Ok(());
+                };
+                match mode_kind {
+                    ViewerModeKind::Greeting => {
+                        if let Some(screen) = mode.greeting_mut() {
+                            let message = self
+                                .full_config
+                                .greeting_screen
+                                .screen()
+                                .message_or_default()
+                                .into_owned();
+                            screen.resize(size, scale_factor);
+                            screen.set_message(message);
+                            screen.ensure_layout_ready()
+                        } else {
+                            false
+                        }
+                    }
+                    ViewerModeKind::Sleep => {
+                        if let Some(screen) = mode.sleep_mut() {
+                            let message = self
+                                .full_config
+                                .sleep_screen
+                                .screen()
+                                .message_or_default()
+                                .into_owned();
+                            screen.resize(size, scale_factor);
+                            screen.set_message(message);
+                            screen.ensure_layout_ready()
+                        } else {
+                            false
+                        }
+                    }
+                    ViewerModeKind::Wake => true,
+                }
+            };
+            if !layout_ready {
+                debug!(
+                    viewer_mode = ?mode_kind,
+                    width = size.width,
+                    height = size.height,
+                    "viewer_overlay_waiting_for_layout"
+                );
+                return Ok(());
+            }
+        }
+
+        let mut frame = None;
+        let mut encountered_timeout = false;
+        let mut need_scene_enter = false;
+        for attempt in 0..2 {
+            let surface_result = {
+                let Some(gpu) = self.gpu.as_mut() else {
+                    return Ok(());
+                };
+                gpu.surface.get_current_texture()
+            };
+            match surface_result {
+                Ok(current) => {
+                    frame = Some(current);
+                    break;
+                }
+                Err(err) => match err {
+                    wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+                        // DRM/KMS (v1.2): the mode is fixed for the process
+                        // lifetime, so a lost or outdated swapchain means the
+                        // connector or mode changed under us. Not handled: exit and
+                        // let systemd restart the unit, which re-enumerates.
+                        let window = match self.output.as_ref() {
+                            Some(Output::Window(window)) => Arc::clone(window),
+                            _ => {
+                                return Err(RedrawError::Fatal(format!(
+                                    "kms_surface_lost: {err:?} (connector or mode changed?)"
+                                )));
+                            }
+                        };
+                        let size = window.inner_size();
+                        warn!(
+                            attempt = attempt,
+                            error = ?err,
+                            width = size.width,
+                            height = size.height,
+                            "viewer_surface_reconfigure"
+                        );
+                        if size.width == 0 || size.height == 0 {
+                            if let Some(gpu) = self.gpu.as_mut() {
+                                gpu.config.width = 0;
+                                gpu.config.height = 0;
+                            }
+                            self.surface_gate.arm_for_initial_report();
+                            self.update_surface_ready(
+                                size.width,
+                                size.height,
+                                SurfaceReport::ConfigureEvent,
+                            );
+                            break;
+                        }
+                        if let Some(gpu) = self.gpu.as_mut() {
+                            gpu.config.width = size.width;
+                            gpu.config.height = size.height;
+                            gpu.surface.configure(&gpu.device, &gpu.config);
+                        } else {
+                            return Ok(());
+                        }
+                        let ready = self.update_surface_ready(
+                            size.width,
+                            size.height,
+                            SurfaceReport::ConfigureEvent,
+                        );
+                        if ready && self.pending_scene_enter {
+                            need_scene_enter = true;
+                        }
+                        if !ready {
+                            break;
+                        }
+                        if attempt == 0 {
+                            continue;
+                        } else {
+                            break;
+                        }
+                    }
+                    wgpu::SurfaceError::Timeout => {
+                        warn!("viewer_surface_timeout");
+                        encountered_timeout = true;
+                        if attempt == 0 {
+                            continue;
+                        } else {
+                            break;
+                        }
+                    }
+                    wgpu::SurfaceError::OutOfMemory => {
+                        return Err(RedrawError::Fatal("viewer_surface_out_of_memory".into()));
+                    }
+                    wgpu::SurfaceError::Other => {
+                        // Wayland shrugs this off and retries on the next redraw;
+                        // on KMS there is no compositor to recover the surface, so
+                        // it is treated like a lost one.
+                        if self.output.as_ref().is_some_and(Output::is_kms) {
+                            return Err(RedrawError::Fatal(format!("kms_surface_error: {err:?}")));
+                        }
+                        warn!(?err, "viewer_surface_error");
+                        return Ok(());
+                    }
+                },
+            }
+        }
+        if need_scene_enter {
+            self.pending_scene_enter = false;
+            let _ = self.with_active_scene(|scene, ctx| {
+                scene.enter(ctx);
+            });
+            if !self.surface_configured {
+                return Ok(());
+            }
+        }
+        let Some(frame) = frame else {
+            if encountered_timeout {
+                return self.note_surface_timeout();
+            }
+            return Ok(());
+        };
+        let (Some(gpu), Some(mode)) = (self.gpu.as_mut(), self.mode.as_mut()) else {
+            return Ok(());
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("draw-encoder"),
+            });
+
+        // Greeting and Sleep draw once on demand and deliberately
+        // do not call pre_present_notify: a frame callback is only
+        // ever answered after a commit, and these scenes may redraw
+        // (re-layout, resize) without one, so gating them would
+        // risk waiting on a callback that never comes. The only
+        // callback they can inherit is from a wake frame presented
+        // just before a mode switch, which the compositor answers
+        // on its next repaint.
+        match mode_kind {
+            ViewerModeKind::Sleep => {
+                let Some(screen) = mode.sleep_mut() else {
+                    return Ok(());
+                };
+                encoder.push_debug_group("sleep-banner");
+                let rendered = screen.render(&mut encoder, &view);
+                encoder.pop_debug_group();
+
+                if !rendered {
+                    debug!("sleep_banner_render_deferred");
+                    return Ok(());
+                }
+
+                gpu.queue.submit(Some(encoder.finish()));
+                frame.present();
+                screen.after_submit();
+                self.record_frame_presented();
+            }
+            ViewerModeKind::Greeting => {
+                let Some(screen) = mode.greeting_mut() else {
+                    return Ok(());
+                };
+                encoder.push_debug_group("greeting-banner");
+                let rendered = screen.render(&mut encoder, &view);
+                encoder.pop_debug_group();
+
+                if !rendered {
+                    debug!("greeting_banner_render_deferred");
+                    return Ok(());
+                }
+
+                gpu.queue.submit(Some(encoder.finish()));
+                frame.present();
+                screen.after_submit();
+                self.record_frame_presented();
+            }
+            ViewerModeKind::Wake => {
+                let wake = mode.wake_mut();
+                encoder.push_debug_group("wake-draw");
+                // Created up front: later code holds immutable
+                // borrows of gpu for the bind groups.
+                if let Some(kind) = wake.transition_state().map(|s| s.kind()) {
+                    if transition_scale() > 1 {
+                        gpu.ensure_half_target();
+                    }
+                    if kind == TransitionKind::Iris {
+                        gpu.ensure_iris_layer();
+                    }
+                }
+                let screen_w = gpu.config.width as f32;
+                let screen_h = gpu.config.height as f32;
+                let mut uniforms = TransitionUniforms {
+                    screen_size: [screen_w, screen_h],
+                    progress: 0.0,
+                    kind: 0,
+                    current_dest: [0.0; 4],
+                    next_dest: [0.0; 4],
+                    params0: [0.0; 4],
+                    params1: [0.0; 4],
+                    params3: [0.0; 4],
+                    background: [
+                        self.clear_color.r as f32,
+                        self.clear_color.g as f32,
+                        self.clear_color.b as f32,
+                        1.0,
+                    ],
+                    petals_a: [[0.0; 4]; 16],
+                    petals_b: [[0.0; 4]; 16],
+                };
+                let mut current_bind = &gpu.blank_plane.bind;
+                let mut next_bind = &gpu.blank_plane.bind;
+                let mut have_current = false;
+                let mut have_next = false;
+
+                if let Some(cur) = wake.current() {
+                    let rect = compute_cover_rect(
+                        cur.plane.w,
+                        cur.plane.h,
+                        gpu.config.width,
+                        gpu.config.height,
+                    );
+                    uniforms.current_dest = rect_to_uniform(rect);
+                    current_bind = &cur.plane.bind;
+                    have_current = true;
+                }
+                if let Some(next) = wake.next() {
+                    let rect = compute_cover_rect(
+                        next.plane.w,
+                        next.plane.h,
+                        gpu.config.width,
+                        gpu.config.height,
+                    );
+                    uniforms.next_dest = rect_to_uniform(rect);
+                    next_bind = &next.plane.bind;
+                    have_next = true;
+                }
+
+                let active_transition = wake.transition_state().map(|state| state.kind());
+                let mut should_draw_quad = false;
+                let debug_bezier = std::env::var("PHOTOFRAME_DEBUG_BEZIER")
+                    .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
+                    .unwrap_or(false);
+
+                if debug_bezier {
+                    // Draw current image and overlay a debug quadratic Bezier stroke.
+                    uniforms.kind = 6; // bezier overlay
+                    // Control points in UV for a gentle arc across center
+                    uniforms.params0 = [0.15, 0.60, 0.50, 0.25]; // P0.xy, P1.xy
+                    uniforms.params1[0] = 0.85; // P2.x
+                    uniforms.params1[1] = 0.60; // P2.y
+                    uniforms.params1[2] = 4.0; // stroke width px
+                    // Red stroke by default
+                    uniforms.params3 = [1.0, 0.1, 0.1, 1.0];
+                    should_draw_quad = have_current;
+                } else if let Some(state) = wake.transition_state() {
+                    should_draw_quad = have_current || have_next;
+                    let base_progress = state.progress();
+                    let eased_progress =
+                        base_progress * base_progress * (3.0 - 2.0 * base_progress);
+                    uniforms.progress = eased_progress;
+                    uniforms.kind = state.kind().as_index();
+                    match state.variant() {
+                        ActiveTransition::Fade { through_black } => {
+                            uniforms.params0[0] = if *through_black { 1.0 } else { 0.0 };
+                        }
+                        ActiveTransition::Wipe { normal, softness } => {
+                            let normal = *normal;
+                            let (min_proj, inv_span) =
+                                compute_wipe_span(normal, screen_w, screen_h);
+                            uniforms.params0 = [normal[0], normal[1], min_proj, inv_span];
+                            uniforms.params1[0] = *softness;
+                        }
+                        ActiveTransition::Push { direction } => {
+                            let direction = *direction;
+                            let diag = (screen_w * screen_w + screen_h * screen_h).sqrt();
+                            uniforms.params0[0] = direction[0] * diag;
+                            uniforms.params0[1] = direction[1] * diag;
+                        }
+                        ActiveTransition::EInk {
+                            flash_count,
+                            reveal_portion,
+                            stripe_count,
+                            flash_color,
+                            noise_seed,
+                        } => {
+                            let noise_seed = *noise_seed;
+                            let flash_color = *flash_color;
+                            uniforms.params0[0] = (*flash_count).min(6) as f32;
+                            uniforms.params0[1] = *reveal_portion;
+                            uniforms.params0[2] = (*stripe_count).max(1) as f32;
+                            uniforms.params0[3] = noise_seed[0];
+                            uniforms.params1[0] = noise_seed[1];
+                            uniforms.params1[1] = flash_color[0].clamp(0.0, 1.0);
+                            uniforms.params1[2] = flash_color[1].clamp(0.0, 1.0);
+                            uniforms.params1[3] = flash_color[2].clamp(0.0, 1.0);
+                        }
+                        ActiveTransition::Dissolve { softness, scale } => {
+                            uniforms.params0[0] = *softness;
+                            uniforms.params0[1] = *scale;
+                        }
+                        ActiveTransition::RadialWipe {
+                            softness,
+                            shape_is_diamond,
+                            center,
+                        } => {
+                            uniforms.params0[0] = center[0];
+                            uniforms.params0[1] = center[1];
+                            uniforms.params0[2] = *softness;
+                            uniforms.params0[3] = if *shape_is_diamond { 1.0 } else { 0.0 };
+                        }
+                        ActiveTransition::VenetianBlinds {
+                            stripe_count,
+                            softness,
+                            vertical,
+                        } => {
+                            uniforms.params0[0] = (*stripe_count).max(1) as f32;
+                            uniforms.params0[1] = *softness;
+                            uniforms.params0[2] = if *vertical { 1.0 } else { 0.0 };
+                        }
+                        ActiveTransition::CrossfadeZoom {
+                            zoom,
+                            current_zooms_in,
+                            next_zooms_in,
+                        } => {
+                            uniforms.params0[0] = *zoom;
+                            uniforms.params0[1] = if *current_zooms_in { 1.0 } else { 0.0 };
+                            uniforms.params0[2] = if *next_zooms_in { 1.0 } else { 0.0 };
+                        }
+                        ActiveTransition::Iris {
+                            blades,
+                            color,
+                            petal_sheen,
+                            overlap_shadow,
+                            min_aperture,
+                            swirl,
+                        } => {
+                            // Solve the petal kinematics here so the
+                            // per-pixel shader loop is transcendental-free.
+                            // Geometry derivation: r_in circumscribes the
+                            // screen, petals are annular arcs (band r_in..
+                            // 2*r_in) with semicircular end caps, pivoting
+                            // by `psi` about the center of the trailing cap.
+                            let n = (*blades).clamp(1, 16) as usize;
+                            let t = uniforms.progress;
+                            let x = if t < 0.5 { t * 2.0 } else { 2.0 - t * 2.0 };
+                            let f = x * x * (3.0 - 2.0 * x);
+                            let r_in =
+                                1.02 * 0.5 * (screen_w * screen_w + screen_h * screen_h).sqrt();
+                            let r_mid = 1.5 * r_in;
+                            let e = f * r_in * (1.0 - min_aperture);
+                            let psi = 2.0 * (e / (2.0 * r_mid)).clamp(0.0, 1.0).asin();
+                            let spin = swirl * psi;
+                            let sigma = std::f32::consts::TAU / n as f32 + IRIS_EXTRA_WIDTH_RAD;
+                            // Photos crossfade behind the petals around full close.
+                            let swap = ((t - 0.42) / 0.16).clamp(0.0, 1.0);
+                            let swap = swap * swap * (3.0 - 2.0 * swap);
+                            uniforms.params0 = [n as f32, *petal_sheen, *overlap_shadow, swap];
+                            // Inscribed aperture radius: pixels closer to
+                            // center than this are provably petal-free.
+                            uniforms.params1 = [r_in - e, color[0], color[1], color[2]];
+                            // Petal-layer upscale factor: keeps the edge
+                            // feather at least one layer texel wide.
+                            uniforms.params3[0] = iris_layer_scale() as f32;
+                            let (s_psi, c_psi) = psi.sin_cos();
+                            for i in 0..n {
+                                let ai = std::f32::consts::TAU * i as f32 / n as f32 + spin;
+                                let (s_ai, c_ai) = ai.sin_cos();
+                                let piv = [r_mid * c_ai, r_mid * s_ai];
+                                // Annulus center after swinging about the pivot.
+                                let center = [
+                                    piv[0] - (c_psi * piv[0] - s_psi * piv[1]),
+                                    piv[1] - (s_psi * piv[0] + c_psi * piv[1]),
+                                ];
+                                let trail = ai + psi;
+                                let tip = trail + sigma;
+                                // Directional sheen: cos of the petal's facing
+                                // angle against a fixed light, constant across a
+                                // petal. Baked raw here; the shader scales it by
+                                // petal_sheen and fades it near full closure.
+                                let facing = (ai + 0.5 * sigma + psi - 2.3).cos();
+                                uniforms.petals_a[i] = [center[0], center[1], tip.cos(), tip.sin()];
+                                uniforms.petals_b[i] = [trail.cos(), trail.sin(), facing, 0.0];
+                            }
+                        }
+                    }
+                } else if have_current {
+                    should_draw_quad = true;
+                }
+
+                if should_draw_quad {
+                    let iris_active = uniforms.kind == TransitionKind::Iris.as_index();
+                    // Transitions render into the reduced-resolution
+                    // intermediate and get upsampled; resting photos
+                    // and the tail of a transition render natively so
+                    // the incoming photo settles into full sharpness.
+                    let half_target = if active_transition.is_some()
+                        && !debug_bezier
+                        && uniforms.progress < TRANSITION_FULL_RES_TAIL
+                        && transition_scale() > 1
+                    {
+                        gpu.half_target.as_ref()
+                    } else {
+                        None
+                    };
+                    gpu.queue
+                        .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+                    // Render the petals into the reduced-resolution
+                    // layer first; the main pass composites it.
+                    if iris_active && let Some(layer) = gpu.iris_layer.as_ref() {
+                        let mut lpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("iris-layer-pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &layer.view,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            occlusion_query_set: None,
+                            timestamp_writes: None,
+                        });
+                        lpass.set_pipeline(&gpu.iris_layer_pipeline);
+                        lpass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                        lpass.draw(0..6, 0..1);
+                    }
+                    let petal_bind = match gpu.iris_layer.as_ref() {
+                        Some(layer) if iris_active => &layer.bind,
+                        _ => &gpu.blank_plane.bind,
+                    };
+                    {
+                        let target_view = half_target.map(|t| &t.view).unwrap_or(&view);
+                        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("draw-pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: target_view,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(self.clear_color),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            occlusion_query_set: None,
+                            timestamp_writes: None,
+                        });
+                        rpass.set_pipeline(&gpu.pipeline);
+                        rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                        rpass.set_bind_group(1, current_bind, &[]);
+                        rpass.set_bind_group(2, next_bind, &[]);
+                        rpass.set_bind_group(3, petal_bind, &[]);
+                        rpass.draw(0..6, 0..1);
+                    }
+                    if let Some(target) = half_target {
+                        let mut bpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("upscale-pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(self.clear_color),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            occlusion_query_set: None,
+                            timestamp_writes: None,
+                        });
+                        bpass.set_pipeline(&gpu.blit_pipeline);
+                        bpass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                        bpass.set_bind_group(1, &target.bind, &[]);
+                        bpass.draw(0..6, 0..1);
+                    }
+                }
+                encoder.pop_debug_group();
+
+                if let Some(cap) = self.caption_overlay.as_mut() {
+                    // Show the most recent transition (kept after it
+                    // finishes) and the current photo's mat.
+                    let transition_kind = wake.last_transition_kind();
+                    let mat_kind = wake.current().and_then(|img| img.mat_kind);
+                    let text = scenes::showcase_caption(transition_kind, mat_kind);
+                    cap.set_text(text);
+                    let surface_size =
+                        winit::dpi::PhysicalSize::new(gpu.config.width, gpu.config.height);
+                    cap.resize(surface_size);
+                    cap.render(&mut encoder, &view);
+                }
+
+                gpu.queue.submit(Some(encoder.finish()));
+                // Wayland: frame-callback pacing; KMS: nothing (FIFO
+                // acquire is the clock). See Output::before_present.
+                if let Some(output) = self.output.as_ref() {
+                    output.before_present();
+                }
+                frame.present();
+                if let Some(cap) = self.caption_overlay.as_mut() {
+                    cap.after_submit();
+                }
+                wake.after_present();
+                self.record_frame_presented();
+                self.note_transition_frame(active_transition);
+            }
+        }
+        Ok(())
     }
 
     /// Track per-frame cadence while a transition plays; log a summary
@@ -2620,7 +3366,7 @@ impl ApplicationHandler<ViewerEvent> for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(window) = self.window.as_ref().cloned() else {
+        let Some(window) = self.output.as_ref().and_then(Output::window).cloned() else {
             return;
         };
         if window.id() != window_id {
@@ -2748,613 +3494,14 @@ impl ApplicationHandler<ViewerEvent> for App {
             WindowEvent::Occluded(true) => {
                 debug!("viewer_window_occluded_true");
             }
-            WindowEvent::RedrawRequested => {
-                let mode_kind = self.mode_kind();
-                let Some(_) = self.gpu.as_ref() else {
-                    return;
-                };
-                if !self.surface_configured {
-                    debug!("viewer_redraw_waiting_for_surface_configuration");
-                    return;
+            WindowEvent::RedrawRequested => match self.redraw() {
+                Ok(()) => {}
+                Err(RedrawError::TimeoutStreak) => self.recover_from_surface_timeouts(event_loop),
+                Err(RedrawError::Fatal(reason)) => {
+                    warn!(%reason, "viewer_redraw_failed; exiting viewer");
+                    event_loop.exit();
                 }
-                let overlay_pending = match mode_kind {
-                    ViewerModeKind::Greeting => self
-                        .mode()
-                        .greeting()
-                        .map(GreetingScene::needs_redraw)
-                        .unwrap_or(false),
-                    ViewerModeKind::Sleep => self
-                        .mode()
-                        .sleep()
-                        .map(SleepScene::needs_redraw)
-                        .unwrap_or(false),
-                    ViewerModeKind::Wake => false,
-                };
-                let (pending_redraw, queue_depth, has_transition) = {
-                    let wake = self.mode().wake();
-                    (
-                        wake.needs_redraw(),
-                        wake.pending().len(),
-                        wake.transition_state().is_some(),
-                    )
-                };
-                debug!(
-                    viewer_mode = ?mode_kind,
-                    overlay_pending,
-                    pending_redraw,
-                    queue_depth,
-                    ready_results = self.ready_results.len(),
-                    mat_inflight = self.mat_inflight,
-                    has_transition,
-                    "viewer_window_redraw_requested"
-                );
-                if matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep)
-                    && !overlay_pending
-                {
-                    return;
-                }
-                if matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep) {
-                    let size = window.inner_size();
-                    let scale_factor = window.scale_factor();
-                    let layout_ready = {
-                        let Some(mode) = self.mode.as_mut() else {
-                            return;
-                        };
-                        match mode_kind {
-                            ViewerModeKind::Greeting => {
-                                if let Some(screen) = mode.greeting_mut() {
-                                    let message = self
-                                        .full_config
-                                        .greeting_screen
-                                        .screen()
-                                        .message_or_default()
-                                        .into_owned();
-                                    screen.resize(size, scale_factor);
-                                    screen.set_message(message);
-                                    screen.ensure_layout_ready()
-                                } else {
-                                    false
-                                }
-                            }
-                            ViewerModeKind::Sleep => {
-                                if let Some(screen) = mode.sleep_mut() {
-                                    let message = self
-                                        .full_config
-                                        .sleep_screen
-                                        .screen()
-                                        .message_or_default()
-                                        .into_owned();
-                                    screen.resize(size, scale_factor);
-                                    screen.set_message(message);
-                                    screen.ensure_layout_ready()
-                                } else {
-                                    false
-                                }
-                            }
-                            ViewerModeKind::Wake => true,
-                        }
-                    };
-                    if !layout_ready {
-                        debug!(
-                            viewer_mode = ?mode_kind,
-                            width = size.width,
-                            height = size.height,
-                            "viewer_overlay_waiting_for_layout"
-                        );
-                        return;
-                    }
-                }
-
-                let mut frame = None;
-                let mut encountered_timeout = false;
-                let mut need_scene_enter = false;
-                for attempt in 0..2 {
-                    let surface_result = {
-                        let Some(gpu) = self.gpu.as_mut() else {
-                            return;
-                        };
-                        gpu.surface.get_current_texture()
-                    };
-                    match surface_result {
-                        Ok(current) => {
-                            frame = Some(current);
-                            break;
-                        }
-                        Err(err) => match err {
-                            wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
-                                let size = window.inner_size();
-                                warn!(
-                                    attempt = attempt,
-                                    error = ?err,
-                                    width = size.width,
-                                    height = size.height,
-                                    "viewer_surface_reconfigure"
-                                );
-                                if size.width == 0 || size.height == 0 {
-                                    if let Some(gpu) = self.gpu.as_mut() {
-                                        gpu.config.width = 0;
-                                        gpu.config.height = 0;
-                                    }
-                                    self.surface_gate.arm_for_initial_report();
-                                    self.update_surface_ready(
-                                        size.width,
-                                        size.height,
-                                        SurfaceReport::ConfigureEvent,
-                                    );
-                                    break;
-                                }
-                                if let Some(gpu) = self.gpu.as_mut() {
-                                    gpu.config.width = size.width;
-                                    gpu.config.height = size.height;
-                                    gpu.surface.configure(&gpu.device, &gpu.config);
-                                } else {
-                                    return;
-                                }
-                                let ready = self.update_surface_ready(
-                                    size.width,
-                                    size.height,
-                                    SurfaceReport::ConfigureEvent,
-                                );
-                                if ready && self.pending_scene_enter {
-                                    need_scene_enter = true;
-                                }
-                                if !ready {
-                                    break;
-                                }
-                                if attempt == 0 {
-                                    continue;
-                                } else {
-                                    break;
-                                }
-                            }
-                            wgpu::SurfaceError::Timeout => {
-                                warn!("viewer_surface_timeout");
-                                encountered_timeout = true;
-                                if attempt == 0 {
-                                    continue;
-                                } else {
-                                    break;
-                                }
-                            }
-                            wgpu::SurfaceError::OutOfMemory => {
-                                warn!("viewer_surface_out_of_memory");
-                                event_loop.exit();
-                                return;
-                            }
-                            wgpu::SurfaceError::Other => {
-                                warn!(?err, "viewer_surface_error");
-                                return;
-                            }
-                        },
-                    }
-                }
-                if need_scene_enter {
-                    self.pending_scene_enter = false;
-                    let _ = self.with_active_scene(|scene, ctx| {
-                        scene.enter(ctx);
-                    });
-                    if !self.surface_configured {
-                        return;
-                    }
-                }
-                let Some(frame) = frame else {
-                    if encountered_timeout {
-                        self.handle_surface_timeout(event_loop);
-                    }
-                    return;
-                };
-                let (Some(gpu), Some(mode)) = (self.gpu.as_mut(), self.mode.as_mut()) else {
-                    return;
-                };
-                let view = frame
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
-                let mut encoder =
-                    gpu.device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("draw-encoder"),
-                        });
-
-                // Greeting and Sleep draw once on demand and deliberately
-                // do not call pre_present_notify: a frame callback is only
-                // ever answered after a commit, and these scenes may redraw
-                // (re-layout, resize) without one, so gating them would
-                // risk waiting on a callback that never comes. The only
-                // callback they can inherit is from a wake frame presented
-                // just before a mode switch, which the compositor answers
-                // on its next repaint.
-                match mode_kind {
-                    ViewerModeKind::Sleep => {
-                        let Some(screen) = mode.sleep_mut() else {
-                            return;
-                        };
-                        encoder.push_debug_group("sleep-banner");
-                        let rendered = screen.render(&mut encoder, &view);
-                        encoder.pop_debug_group();
-
-                        if !rendered {
-                            debug!("sleep_banner_render_deferred");
-                            return;
-                        }
-
-                        gpu.queue.submit(Some(encoder.finish()));
-                        frame.present();
-                        screen.after_submit();
-                        self.record_frame_presented();
-                    }
-                    ViewerModeKind::Greeting => {
-                        let Some(screen) = mode.greeting_mut() else {
-                            return;
-                        };
-                        encoder.push_debug_group("greeting-banner");
-                        let rendered = screen.render(&mut encoder, &view);
-                        encoder.pop_debug_group();
-
-                        if !rendered {
-                            debug!("greeting_banner_render_deferred");
-                            return;
-                        }
-
-                        gpu.queue.submit(Some(encoder.finish()));
-                        frame.present();
-                        screen.after_submit();
-                        self.record_frame_presented();
-                    }
-                    ViewerModeKind::Wake => {
-                        let wake = mode.wake_mut();
-                        encoder.push_debug_group("wake-draw");
-                        // Created up front: later code holds immutable
-                        // borrows of gpu for the bind groups.
-                        if let Some(kind) = wake.transition_state().map(|s| s.kind()) {
-                            if transition_scale() > 1 {
-                                gpu.ensure_half_target();
-                            }
-                            if kind == TransitionKind::Iris {
-                                gpu.ensure_iris_layer();
-                            }
-                        }
-                        let screen_w = gpu.config.width as f32;
-                        let screen_h = gpu.config.height as f32;
-                        let mut uniforms = TransitionUniforms {
-                            screen_size: [screen_w, screen_h],
-                            progress: 0.0,
-                            kind: 0,
-                            current_dest: [0.0; 4],
-                            next_dest: [0.0; 4],
-                            params0: [0.0; 4],
-                            params1: [0.0; 4],
-                            params3: [0.0; 4],
-                            background: [
-                                self.clear_color.r as f32,
-                                self.clear_color.g as f32,
-                                self.clear_color.b as f32,
-                                1.0,
-                            ],
-                            petals_a: [[0.0; 4]; 16],
-                            petals_b: [[0.0; 4]; 16],
-                        };
-                        let mut current_bind = &gpu.blank_plane.bind;
-                        let mut next_bind = &gpu.blank_plane.bind;
-                        let mut have_current = false;
-                        let mut have_next = false;
-
-                        if let Some(cur) = wake.current() {
-                            let rect = compute_cover_rect(
-                                cur.plane.w,
-                                cur.plane.h,
-                                gpu.config.width,
-                                gpu.config.height,
-                            );
-                            uniforms.current_dest = rect_to_uniform(rect);
-                            current_bind = &cur.plane.bind;
-                            have_current = true;
-                        }
-                        if let Some(next) = wake.next() {
-                            let rect = compute_cover_rect(
-                                next.plane.w,
-                                next.plane.h,
-                                gpu.config.width,
-                                gpu.config.height,
-                            );
-                            uniforms.next_dest = rect_to_uniform(rect);
-                            next_bind = &next.plane.bind;
-                            have_next = true;
-                        }
-
-                        let active_transition = wake.transition_state().map(|state| state.kind());
-                        let mut should_draw_quad = false;
-                        let debug_bezier = std::env::var("PHOTOFRAME_DEBUG_BEZIER")
-                            .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
-                            .unwrap_or(false);
-
-                        if debug_bezier {
-                            // Draw current image and overlay a debug quadratic Bezier stroke.
-                            uniforms.kind = 6; // bezier overlay
-                            // Control points in UV for a gentle arc across center
-                            uniforms.params0 = [0.15, 0.60, 0.50, 0.25]; // P0.xy, P1.xy
-                            uniforms.params1[0] = 0.85; // P2.x
-                            uniforms.params1[1] = 0.60; // P2.y
-                            uniforms.params1[2] = 4.0; // stroke width px
-                            // Red stroke by default
-                            uniforms.params3 = [1.0, 0.1, 0.1, 1.0];
-                            should_draw_quad = have_current;
-                        } else if let Some(state) = wake.transition_state() {
-                            should_draw_quad = have_current || have_next;
-                            let base_progress = state.progress();
-                            let eased_progress =
-                                base_progress * base_progress * (3.0 - 2.0 * base_progress);
-                            uniforms.progress = eased_progress;
-                            uniforms.kind = state.kind().as_index();
-                            match state.variant() {
-                                ActiveTransition::Fade { through_black } => {
-                                    uniforms.params0[0] = if *through_black { 1.0 } else { 0.0 };
-                                }
-                                ActiveTransition::Wipe { normal, softness } => {
-                                    let normal = *normal;
-                                    let (min_proj, inv_span) =
-                                        compute_wipe_span(normal, screen_w, screen_h);
-                                    uniforms.params0 = [normal[0], normal[1], min_proj, inv_span];
-                                    uniforms.params1[0] = *softness;
-                                }
-                                ActiveTransition::Push { direction } => {
-                                    let direction = *direction;
-                                    let diag = (screen_w * screen_w + screen_h * screen_h).sqrt();
-                                    uniforms.params0[0] = direction[0] * diag;
-                                    uniforms.params0[1] = direction[1] * diag;
-                                }
-                                ActiveTransition::EInk {
-                                    flash_count,
-                                    reveal_portion,
-                                    stripe_count,
-                                    flash_color,
-                                    noise_seed,
-                                } => {
-                                    let noise_seed = *noise_seed;
-                                    let flash_color = *flash_color;
-                                    uniforms.params0[0] = (*flash_count).min(6) as f32;
-                                    uniforms.params0[1] = *reveal_portion;
-                                    uniforms.params0[2] = (*stripe_count).max(1) as f32;
-                                    uniforms.params0[3] = noise_seed[0];
-                                    uniforms.params1[0] = noise_seed[1];
-                                    uniforms.params1[1] = flash_color[0].clamp(0.0, 1.0);
-                                    uniforms.params1[2] = flash_color[1].clamp(0.0, 1.0);
-                                    uniforms.params1[3] = flash_color[2].clamp(0.0, 1.0);
-                                }
-                                ActiveTransition::Dissolve { softness, scale } => {
-                                    uniforms.params0[0] = *softness;
-                                    uniforms.params0[1] = *scale;
-                                }
-                                ActiveTransition::RadialWipe {
-                                    softness,
-                                    shape_is_diamond,
-                                    center,
-                                } => {
-                                    uniforms.params0[0] = center[0];
-                                    uniforms.params0[1] = center[1];
-                                    uniforms.params0[2] = *softness;
-                                    uniforms.params0[3] = if *shape_is_diamond { 1.0 } else { 0.0 };
-                                }
-                                ActiveTransition::VenetianBlinds {
-                                    stripe_count,
-                                    softness,
-                                    vertical,
-                                } => {
-                                    uniforms.params0[0] = (*stripe_count).max(1) as f32;
-                                    uniforms.params0[1] = *softness;
-                                    uniforms.params0[2] = if *vertical { 1.0 } else { 0.0 };
-                                }
-                                ActiveTransition::CrossfadeZoom {
-                                    zoom,
-                                    current_zooms_in,
-                                    next_zooms_in,
-                                } => {
-                                    uniforms.params0[0] = *zoom;
-                                    uniforms.params0[1] = if *current_zooms_in { 1.0 } else { 0.0 };
-                                    uniforms.params0[2] = if *next_zooms_in { 1.0 } else { 0.0 };
-                                }
-                                ActiveTransition::Iris {
-                                    blades,
-                                    color,
-                                    petal_sheen,
-                                    overlap_shadow,
-                                    min_aperture,
-                                    swirl,
-                                } => {
-                                    // Solve the petal kinematics here so the
-                                    // per-pixel shader loop is transcendental-free.
-                                    // Geometry derivation: r_in circumscribes the
-                                    // screen, petals are annular arcs (band r_in..
-                                    // 2*r_in) with semicircular end caps, pivoting
-                                    // by `psi` about the center of the trailing cap.
-                                    let n = (*blades).clamp(1, 16) as usize;
-                                    let t = uniforms.progress;
-                                    let x = if t < 0.5 { t * 2.0 } else { 2.0 - t * 2.0 };
-                                    let f = x * x * (3.0 - 2.0 * x);
-                                    let r_in = 1.02
-                                        * 0.5
-                                        * (screen_w * screen_w + screen_h * screen_h).sqrt();
-                                    let r_mid = 1.5 * r_in;
-                                    let e = f * r_in * (1.0 - min_aperture);
-                                    let psi = 2.0 * (e / (2.0 * r_mid)).clamp(0.0, 1.0).asin();
-                                    let spin = swirl * psi;
-                                    let sigma =
-                                        std::f32::consts::TAU / n as f32 + IRIS_EXTRA_WIDTH_RAD;
-                                    // Photos crossfade behind the petals around full close.
-                                    let swap = ((t - 0.42) / 0.16).clamp(0.0, 1.0);
-                                    let swap = swap * swap * (3.0 - 2.0 * swap);
-                                    uniforms.params0 =
-                                        [n as f32, *petal_sheen, *overlap_shadow, swap];
-                                    // Inscribed aperture radius: pixels closer to
-                                    // center than this are provably petal-free.
-                                    uniforms.params1 = [r_in - e, color[0], color[1], color[2]];
-                                    // Petal-layer upscale factor: keeps the edge
-                                    // feather at least one layer texel wide.
-                                    uniforms.params3[0] = iris_layer_scale() as f32;
-                                    let (s_psi, c_psi) = psi.sin_cos();
-                                    for i in 0..n {
-                                        let ai = std::f32::consts::TAU * i as f32 / n as f32 + spin;
-                                        let (s_ai, c_ai) = ai.sin_cos();
-                                        let piv = [r_mid * c_ai, r_mid * s_ai];
-                                        // Annulus center after swinging about the pivot.
-                                        let center = [
-                                            piv[0] - (c_psi * piv[0] - s_psi * piv[1]),
-                                            piv[1] - (s_psi * piv[0] + c_psi * piv[1]),
-                                        ];
-                                        let trail = ai + psi;
-                                        let tip = trail + sigma;
-                                        // Directional sheen: cos of the petal's facing
-                                        // angle against a fixed light, constant across a
-                                        // petal. Baked raw here; the shader scales it by
-                                        // petal_sheen and fades it near full closure.
-                                        let facing = (ai + 0.5 * sigma + psi - 2.3).cos();
-                                        uniforms.petals_a[i] =
-                                            [center[0], center[1], tip.cos(), tip.sin()];
-                                        uniforms.petals_b[i] =
-                                            [trail.cos(), trail.sin(), facing, 0.0];
-                                    }
-                                }
-                            }
-                        } else if have_current {
-                            should_draw_quad = true;
-                        }
-
-                        if should_draw_quad {
-                            let iris_active = uniforms.kind == TransitionKind::Iris.as_index();
-                            // Transitions render into the reduced-resolution
-                            // intermediate and get upsampled; resting photos
-                            // and the tail of a transition render natively so
-                            // the incoming photo settles into full sharpness.
-                            let half_target = if active_transition.is_some()
-                                && !debug_bezier
-                                && uniforms.progress < TRANSITION_FULL_RES_TAIL
-                                && transition_scale() > 1
-                            {
-                                gpu.half_target.as_ref()
-                            } else {
-                                None
-                            };
-                            gpu.queue.write_buffer(
-                                &gpu.uniform_buf,
-                                0,
-                                bytemuck::bytes_of(&uniforms),
-                            );
-                            // Render the petals into the reduced-resolution
-                            // layer first; the main pass composites it.
-                            if iris_active && let Some(layer) = gpu.iris_layer.as_ref() {
-                                let mut lpass =
-                                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                        label: Some("iris-layer-pass"),
-                                        color_attachments: &[Some(
-                                            wgpu::RenderPassColorAttachment {
-                                                view: &layer.view,
-                                                depth_slice: None,
-                                                resolve_target: None,
-                                                ops: wgpu::Operations {
-                                                    load: wgpu::LoadOp::Clear(
-                                                        wgpu::Color::TRANSPARENT,
-                                                    ),
-                                                    store: wgpu::StoreOp::Store,
-                                                },
-                                            },
-                                        )],
-                                        depth_stencil_attachment: None,
-                                        occlusion_query_set: None,
-                                        timestamp_writes: None,
-                                    });
-                                lpass.set_pipeline(&gpu.iris_layer_pipeline);
-                                lpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                                lpass.draw(0..6, 0..1);
-                            }
-                            let petal_bind = match gpu.iris_layer.as_ref() {
-                                Some(layer) if iris_active => &layer.bind,
-                                _ => &gpu.blank_plane.bind,
-                            };
-                            {
-                                let target_view = half_target.map(|t| &t.view).unwrap_or(&view);
-                                let mut rpass =
-                                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                        label: Some("draw-pass"),
-                                        color_attachments: &[Some(
-                                            wgpu::RenderPassColorAttachment {
-                                                view: target_view,
-                                                depth_slice: None,
-                                                resolve_target: None,
-                                                ops: wgpu::Operations {
-                                                    load: wgpu::LoadOp::Clear(self.clear_color),
-                                                    store: wgpu::StoreOp::Store,
-                                                },
-                                            },
-                                        )],
-                                        depth_stencil_attachment: None,
-                                        occlusion_query_set: None,
-                                        timestamp_writes: None,
-                                    });
-                                rpass.set_pipeline(&gpu.pipeline);
-                                rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                                rpass.set_bind_group(1, current_bind, &[]);
-                                rpass.set_bind_group(2, next_bind, &[]);
-                                rpass.set_bind_group(3, petal_bind, &[]);
-                                rpass.draw(0..6, 0..1);
-                            }
-                            if let Some(target) = half_target {
-                                let mut bpass =
-                                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                        label: Some("upscale-pass"),
-                                        color_attachments: &[Some(
-                                            wgpu::RenderPassColorAttachment {
-                                                view: &view,
-                                                depth_slice: None,
-                                                resolve_target: None,
-                                                ops: wgpu::Operations {
-                                                    load: wgpu::LoadOp::Clear(self.clear_color),
-                                                    store: wgpu::StoreOp::Store,
-                                                },
-                                            },
-                                        )],
-                                        depth_stencil_attachment: None,
-                                        occlusion_query_set: None,
-                                        timestamp_writes: None,
-                                    });
-                                bpass.set_pipeline(&gpu.blit_pipeline);
-                                bpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                                bpass.set_bind_group(1, &target.bind, &[]);
-                                bpass.draw(0..6, 0..1);
-                            }
-                        }
-                        encoder.pop_debug_group();
-
-                        if let Some(cap) = self.caption_overlay.as_mut() {
-                            // Show the most recent transition (kept after it
-                            // finishes) and the current photo's mat.
-                            let transition_kind = wake.last_transition_kind();
-                            let mat_kind = wake.current().and_then(|img| img.mat_kind);
-                            let text = scenes::showcase_caption(transition_kind, mat_kind);
-                            cap.set_text(text);
-                            let surface_size =
-                                winit::dpi::PhysicalSize::new(gpu.config.width, gpu.config.height);
-                            cap.resize(surface_size);
-                            cap.render(&mut encoder, &view);
-                        }
-
-                        gpu.queue.submit(Some(encoder.finish()));
-                        // Ask winit for a wl_surface.frame callback on the
-                        // commit that present() is about to make. Until the
-                        // compositor answers it (once per output refresh
-                        // under sway), winit withholds RedrawRequested, so
-                        // a transition submits exactly one frame per
-                        // refresh instead of racing mailbox. See
-                        // WakeScene::ensure_redraw_requested for the model.
-                        window.pre_present_notify();
-                        frame.present();
-                        if let Some(cap) = self.caption_overlay.as_mut() {
-                            cap.after_submit();
-                        }
-                        wake.after_present();
-                        self.record_frame_presented();
-                        self.note_transition_frame(active_transition);
-                    }
-                }
-            }
+            },
 
             other => {
                 debug!(event = ?other, "viewer_window_event_other");
@@ -3375,12 +3522,20 @@ impl ApplicationHandler<ViewerEvent> for App {
         match event {
             ViewerEvent::Tick => {
                 debug!("viewer_user_event_tick");
-                self.process_tick(event_loop);
+                if self.cancel.is_cancelled() {
+                    event_loop.exit();
+                    return;
+                }
+                self.process_tick();
             }
             ViewerEvent::Command(cmd) => {
                 debug!(command = ?cmd, "viewer_user_event_command");
                 self.handle_control_command(cmd);
-                self.process_tick(event_loop);
+                if self.cancel.is_cancelled() {
+                    event_loop.exit();
+                    return;
+                }
+                self.process_tick();
             }
             ViewerEvent::Cancelled => {
                 debug!("viewer_user_event_cancelled");
@@ -3457,7 +3612,7 @@ pub fn run_windowed(
         from_loader,
         to_manager_displayed,
         cancel,
-        window: None,
+        output: None,
         gpu: None,
         surface_configured: false,
         surface_gate: SurfaceReadyGate::default(),
