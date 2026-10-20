@@ -1951,3 +1951,32 @@ matting:
         );
     }
 }
+
+#[test]
+fn showcase_tour_visits_every_transition_and_mat_pair() {
+    use std::collections::HashSet;
+    for path in [
+        "",
+        "  fixed-image-path: \"/var/lib/photoframe/backgrounds/backdrop.jpg\"\n",
+    ] {
+        let yaml = format!("photo-library-path: \"/photos\"\nshowcase:\n  enabled: true\n{path}");
+        let cfg: Configuration = serde_yaml::from_str::<Configuration>(&yaml)
+            .unwrap()
+            .validated()
+            .unwrap();
+        let mats = cfg.matting.options().len();
+        let transitions = cfg.transition.options().len();
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut pairs = HashSet::new();
+        for _ in 0..(mats * transitions) {
+            let t = cfg.transition.select_active(&mut rng).entry.index;
+            let m = cfg.matting.select_active(&mut rng).entry.index;
+            pairs.insert((t, m));
+        }
+        assert_eq!(
+            pairs.len(),
+            mats * transitions,
+            "{mats} mats x {transitions} transitions should pair in every combination"
+        );
+    }
+}

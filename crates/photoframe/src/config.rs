@@ -265,22 +265,44 @@ where
     }
 }
 
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
 #[derive(Debug, Clone)]
 pub struct SequentialState {
     next_index: Arc<AtomicUsize>,
+    /// Shift the starting point by one each full pass over the list. Two
+    /// sequential selectors advancing in step (the showcase's mats and
+    /// transitions) would otherwise repeat the same pairs whenever their list
+    /// lengths share a factor; skewing one of them visits every pair.
+    skew_each_cycle: bool,
 }
 
 impl Default for SequentialState {
     fn default() -> Self {
         Self {
             next_index: Arc::new(AtomicUsize::new(0)),
+            skew_each_cycle: false,
         }
     }
 }
 
 impl SequentialState {
+    fn skewed() -> Self {
+        Self {
+            skew_each_cycle: true,
+            ..Self::default()
+        }
+    }
+
     fn next(&self, len: usize) -> usize {
-        self.next_index.fetch_add(1, Ordering::Relaxed) % len
+        let n = self.next_index.fetch_add(1, Ordering::Relaxed);
+        if self.skew_each_cycle {
+            (n + n / len) % len
+        } else {
+            n % len
+        }
     }
 }
 
@@ -1830,7 +1852,9 @@ impl MattingConfig {
 
     /// Build a sequential `MattingConfig` from a list of options.
     /// Used by showcase mode to replace the author-supplied matting list.
-    pub(crate) fn sequential_from(options: Vec<MattingOptions>) -> Self {
+    /// `skew` shifts the selector each pass (see `SequentialState`); showcase
+    /// sets it when the transition list length shares a factor with this one.
+    pub(crate) fn sequential_from(options: Vec<MattingOptions>, skew: bool) -> Self {
         let entries: Arc<[SelectionEntry<MattingKind>]> = options
             .iter()
             .enumerate()
@@ -1843,7 +1867,11 @@ impl MattingConfig {
         Self {
             selection: MattingSelection::Sequential {
                 entries,
-                runtime: SequentialState::default(),
+                runtime: if skew {
+                    SequentialState::skewed()
+                } else {
+                    SequentialState::default()
+                },
             },
             options,
             fill_when_fits: None,
@@ -3568,6 +3596,11 @@ impl Configuration {
         let min_pct = 6.0_f32;
         let fixed_image_path = self.showcase.fixed_image_path.clone();
 
+        let transition_options: Vec<TransitionOptions> = TransitionKind::ALL
+            .iter()
+            .map(|&kind| TransitionOptions::default_for(kind))
+            .collect();
+
         let mut matting_options: Vec<MattingOptions> = Vec::new();
         for &kind in MattingKind::ALL {
             if let Some(option) =
@@ -3592,13 +3625,11 @@ impl Configuration {
                     "showcase: fixed-image mat omitted (set showcase.fixed-image-path to include it)"
                 );
             }
-            self.matting = MattingConfig::sequential_from(matting_options);
+            // Two sequential selectors advancing in step repeat the same pairs
+            // when their lengths share a factor; skew the mat selector then.
+            let skew = gcd(matting_options.len(), transition_options.len()) > 1;
+            self.matting = MattingConfig::sequential_from(matting_options, skew);
         }
-
-        let transition_options: Vec<TransitionOptions> = TransitionKind::ALL
-            .iter()
-            .map(|&kind| TransitionOptions::default_for(kind))
-            .collect();
 
         self.transition = TransitionConfig::sequential_from(transition_options);
 
