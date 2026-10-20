@@ -1531,11 +1531,12 @@ showcase:
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     let validated = cfg.validated().expect("showcase config should be valid");
-    // 9 mat kinds - 1 (fixed-image excluded when no path provided) = 8
+    // 9 mat kinds - 1 (fixed-image excluded when no path provided) + 1 (the
+    // photo-cluster studio companion) = 9
     assert_eq!(
         validated.matting.options().len(),
-        8,
-        "showcase should have 8 mat options (all 9 kinds minus fixed-image which needs a path)"
+        9,
+        "showcase should have 9 mat options (8 kinds without fixed-image, plus the photo-cluster studio)"
     );
     // 9 transition kinds
     assert_eq!(
@@ -1568,11 +1569,12 @@ showcase:
 "#;
     let cfg: Configuration = serde_yaml::from_str(yaml).unwrap();
     let validated = cfg.validated().expect("showcase config should be valid");
-    // With fixed-image-path provided, all 9 mat kinds should appear.
+    // With fixed-image-path provided, all 9 mat kinds appear, plus the
+    // photo-cluster studio companion.
     assert_eq!(
         validated.matting.options().len(),
-        9,
-        "all 9 mat kinds should appear when fixed-image-path is provided"
+        10,
+        "all 9 mat kinds plus the photo-cluster studio should appear when fixed-image-path is provided"
     );
 }
 
@@ -1858,12 +1860,123 @@ fn shipped_showcase_yaml_validates() {
 fn example_configs_validate() {
     for (name, raw) in [
         ("minimal", include_str!("../../../examples/minimal.yaml")),
-        ("use-showcase", include_str!("../../../examples/use-showcase.yaml")),
-        ("everything", include_str!("../../../examples/everything.yaml")),
+        (
+            "use-showcase",
+            include_str!("../../../examples/use-showcase.yaml"),
+        ),
+        (
+            "everything",
+            include_str!("../../../examples/everything.yaml"),
+        ),
     ] {
         let cfg: Configuration = serde_yaml::from_str(raw)
             .unwrap_or_else(|e| panic!("examples/{name}.yaml should parse: {e}"));
         cfg.validated()
             .unwrap_or_else(|e| panic!("examples/{name}.yaml should validate: {e}"));
+    }
+}
+
+/// Parses a single-mat config and returns the colour list of the first
+/// selected slot (every mat kind that takes swatches stores them the same way).
+fn first_slot_colors(yaml_mat: &str) -> Vec<Vec<StudioMatColor>> {
+    let yaml = format!(
+        r#"
+photo-library-path: "/photos"
+matting:
+  selection: random
+  active:
+    - {yaml_mat}
+"#
+    );
+    let cfg: Configuration = serde_yaml::from_str(&yaml).unwrap();
+    cfg.matting
+        .iter_selected()
+        .map(|sel| match &sel.option.style {
+            MattingMode::Studio { colors, .. }
+            | MattingMode::PassePartout { colors, .. }
+            | MattingMode::Vignette { colors, .. }
+            | MattingMode::DropShadow { colors, .. } => colors.clone(),
+            other => panic!("unexpected mat style {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn photo_cluster_colors_list_expands_for_every_swatch_mat() {
+    for kind in ["studio", "passe-partout", "vignette", "drop-shadow"] {
+        let slots = first_slot_colors(&format!(
+            "{{kind: {kind}, colors: [[10, 20, 30], photo-average, photo-cluster]}}"
+        ));
+        assert_eq!(
+            slots,
+            vec![
+                vec![StudioMatColor::Rgb([10, 20, 30])],
+                vec![StudioMatColor::PhotoAverage],
+                vec![StudioMatColor::PhotoCluster],
+            ],
+            "{kind} should expand one slot per swatch, in order"
+        );
+    }
+}
+
+#[test]
+fn photo_cluster_singular_color_alias_for_every_swatch_mat() {
+    for kind in ["studio", "passe-partout", "vignette", "drop-shadow"] {
+        let slots = first_slot_colors(&format!("{{kind: {kind}, color: photo-cluster}}"));
+        assert_eq!(
+            slots,
+            vec![vec![StudioMatColor::PhotoCluster]],
+            "{kind} `color` alias"
+        );
+    }
+}
+
+#[test]
+fn unknown_swatch_token_still_errors() {
+    for token in ["photo-clusters", "photo-median", "Photo-Cluster"] {
+        let yaml = format!(
+            r#"
+photo-library-path: "/photos"
+matting:
+  selection: fixed
+  active:
+    - kind: studio
+      colors: [{token}]
+"#
+        );
+        let err = serde_yaml::from_str::<Configuration>(&yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("photo-cluster"),
+            "error should list the accepted tokens: {err}"
+        );
+    }
+}
+
+#[test]
+fn showcase_tour_visits_every_transition_and_mat_pair() {
+    use std::collections::HashSet;
+    for path in [
+        "",
+        "  fixed-image-path: \"/var/lib/photoframe/backgrounds/backdrop.jpg\"\n",
+    ] {
+        let yaml = format!("photo-library-path: \"/photos\"\nshowcase:\n  enabled: true\n{path}");
+        let cfg: Configuration = serde_yaml::from_str::<Configuration>(&yaml)
+            .unwrap()
+            .validated()
+            .unwrap();
+        let mats = cfg.matting.options().len();
+        let transitions = cfg.transition.options().len();
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut pairs = HashSet::new();
+        for _ in 0..(mats * transitions) {
+            let t = cfg.transition.select_active(&mut rng).entry.index;
+            let m = cfg.matting.select_active(&mut rng).entry.index;
+            pairs.insert((t, m));
+        }
+        assert_eq!(
+            pairs.len(),
+            mats * transitions,
+            "{mats} mats x {transitions} transitions should pair in every combination"
+        );
     }
 }

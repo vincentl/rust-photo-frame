@@ -12,7 +12,7 @@ use crate::events::{
     Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
 };
 use crate::processing::blur::apply_blur;
-use crate::processing::color::average_color;
+use crate::processing::color::PhotoSwatches;
 use crate::processing::layout::center_offset;
 use crate::tasks::greeting_screen::GreetingScreen;
 use crossbeam_channel::{Receiver as CbReceiver, Sender as CbSender, TrySendError, bounded};
@@ -137,7 +137,7 @@ pub(super) struct ImgTex {
     pub(super) plane: TexturePlane,
     pub(super) path: std::path::PathBuf,
     /// Mat kind that was baked for this image; `None` means full-bleed (no mat).
-    pub(super) mat_kind: Option<crate::config::MattingKind>,
+    pub(super) mat_kind: Option<crate::config::MatCaption>,
 }
 
 pub(super) struct TransitionState {
@@ -329,7 +329,7 @@ struct MatTask {
     image: PreparedImageCpu,
     params: MatParams,
     priority: bool,
-    mat_kind: Option<crate::config::MattingKind>,
+    mat_kind: Option<crate::config::MatCaption>,
 }
 
 struct ImagePlane {
@@ -342,7 +342,7 @@ struct MatResult {
     path: std::path::PathBuf,
     canvas: ImagePlane,
     priority: bool,
-    mat_kind: Option<crate::config::MattingKind>,
+    mat_kind: Option<crate::config::MatCaption>,
 }
 
 struct QueuedImage {
@@ -615,7 +615,7 @@ impl<'a> MattingBridge<'a> {
             let mat_kind = if fill_screen {
                 None
             } else {
-                Some(params.matting.kind())
+                Some(params.matting.caption())
             };
             let QueuedImage {
                 image: img,
@@ -710,7 +710,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
 
     let margin = (matting.minimum_mat_percentage / 100.0).clamp(0.0, 0.45);
     let max_upscale = max_upscale_factor.max(1.0);
-    let avg_color = average_color(&src);
+    let swatches = PhotoSwatches::new(&src);
 
     if let MattingMode::Studio {
         bevel_width_px,
@@ -721,7 +721,10 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         ..
     } = &matting.style
     {
-        let mat_color = matting.runtime.studio_color(avg_color).unwrap_or(avg_color);
+        let mat_color = matting
+            .runtime
+            .studio_color(&swatches)
+            .unwrap_or_else(|| swatches.average());
         let mut bevel_px = bevel_width_px.max(0.0);
         let margin_x = (canvas_w as f32 * margin).round();
         let margin_y = (canvas_h as f32 * margin).round();
@@ -803,8 +806,8 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
     {
         let mat_color = matting
             .runtime
-            .passe_partout_color(avg_color)
-            .unwrap_or(avg_color);
+            .passe_partout_color(&swatches)
+            .unwrap_or_else(|| swatches.average());
         let mut bevel_px = bevel_width_px.max(0.0);
         let margin_x = (canvas_w as f32 * margin).round();
         let margin_y = (canvas_h as f32 * margin).round();
@@ -889,8 +892,8 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         let color = f32_rgb_to_u8(
             matting
                 .runtime
-                .drop_shadow_color(avg_color)
-                .unwrap_or(avg_color),
+                .drop_shadow_color(&swatches)
+                .unwrap_or_else(|| swatches.average()),
         );
         let (final_w, final_h) =
             resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
@@ -1039,8 +1042,8 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         } => {
             let resolved = matting
                 .runtime
-                .vignette_color(avg_color)
-                .unwrap_or(avg_color);
+                .vignette_color(&swatches)
+                .unwrap_or_else(|| swatches.average());
             let color = f32_rgb_to_u8(resolved);
             render_vignette_canvas(canvas_w, canvas_h, color, *strength, *radius, *softness)
         }

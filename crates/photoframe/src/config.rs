@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde::de::{self, DeserializeOwned, Deserializer, MapAccess, SeqAccess, Unexpected, Visitor};
 use serde_yaml::{Mapping, Value as YamlValue};
 
+use crate::processing::color::PhotoSwatches;
 use crate::processing::fixed_image::FixedImageBackground;
 
 pub use config_model::{
@@ -264,22 +265,46 @@ where
     }
 }
 
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
 #[derive(Debug, Clone)]
 pub struct SequentialState {
     next_index: Arc<AtomicUsize>,
+    /// When set, the starting point shifts by one every `period` steps. Two
+    /// sequential selectors advancing in step (the showcase's mats and
+    /// transitions) repeat the same pairs forever when their lengths share a
+    /// factor: they only ever visit `lcm` of the `len_a * len_b` pairs. With
+    /// `period` = that lcm, each repeat of the pattern shifts the pairing into
+    /// the next residue class mod the gcd, so all pairs appear within
+    /// `len_a * len_b` steps, for any two lengths.
+    skew_period: Option<usize>,
 }
 
 impl Default for SequentialState {
     fn default() -> Self {
         Self {
             next_index: Arc::new(AtomicUsize::new(0)),
+            skew_period: None,
         }
     }
 }
 
 impl SequentialState {
+    fn skewed(period: usize) -> Self {
+        Self {
+            skew_period: Some(period.max(1)),
+            ..Self::default()
+        }
+    }
+
     fn next(&self, len: usize) -> usize {
-        self.next_index.fetch_add(1, Ordering::Relaxed) % len
+        let n = self.next_index.fetch_add(1, Ordering::Relaxed);
+        match self.skew_period {
+            Some(period) => (n + n / period) % len,
+            None => n % len,
+        }
     }
 }
 
@@ -404,21 +429,40 @@ impl PartialEq for MattingSelection {
 
 impl Eq for MattingSelection {}
 
+/// Caption label for a baked mat (showcase mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatCaption {
+    pub kind: MattingKind,
+    pub photo_cluster: bool,
+}
+
+impl fmt::Display for MatCaption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.photo_cluster {
+            write!(f, "{} (photo-cluster)", self.kind)
+        } else {
+            fmt::Display::fmt(&self.kind, f)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StudioMatColor {
     Rgb([u8; 3]),
     PhotoAverage,
+    PhotoCluster,
 }
 
 impl StudioMatColor {
-    fn resolve(self, fallback: [f32; 3]) -> [f32; 3] {
+    fn resolve(self, swatches: &PhotoSwatches) -> [f32; 3] {
         match self {
             StudioMatColor::Rgb(rgb) => [
                 (rgb[0] as f32) / 255.0,
                 (rgb[1] as f32) / 255.0,
                 (rgb[2] as f32) / 255.0,
             ],
-            StudioMatColor::PhotoAverage => fallback,
+            StudioMatColor::PhotoAverage => swatches.average(),
+            StudioMatColor::PhotoCluster => swatches.cluster(),
         }
     }
 }
@@ -434,7 +478,7 @@ impl<'de> Deserialize<'de> for StudioMatColor {
             type Value = StudioMatColor;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("an RGB triple or the string 'photo-average'")
+                formatter.write_str("an RGB triple, 'photo-average' or 'photo-cluster'")
             }
 
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
@@ -443,6 +487,7 @@ impl<'de> Deserialize<'de> for StudioMatColor {
             {
                 match value {
                     "photo-average" => Ok(StudioMatColor::PhotoAverage),
+                    "photo-cluster" => Ok(StudioMatColor::PhotoCluster),
                     other => Err(de::Error::invalid_value(Unexpected::Str(other), &self)),
                 }
             }
@@ -490,21 +535,21 @@ impl MattingRuntime {
         self.fixed_color
     }
 
-    pub fn studio_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
-        self.studio_color.map(|color| color.resolve(fallback))
+    pub fn studio_color(&self, swatches: &PhotoSwatches) -> Option<[f32; 3]> {
+        self.studio_color.map(|color| color.resolve(swatches))
     }
 
-    pub fn passe_partout_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
+    pub fn passe_partout_color(&self, swatches: &PhotoSwatches) -> Option<[f32; 3]> {
         self.passe_partout_color
-            .map(|color| color.resolve(fallback))
+            .map(|color| color.resolve(swatches))
     }
 
-    pub fn vignette_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
-        self.vignette_color.map(|color| color.resolve(fallback))
+    pub fn vignette_color(&self, swatches: &PhotoSwatches) -> Option<[f32; 3]> {
+        self.vignette_color.map(|color| color.resolve(swatches))
     }
 
-    pub fn drop_shadow_color(&self, fallback: [f32; 3]) -> Option<[f32; 3]> {
-        self.drop_shadow_color.map(|color| color.resolve(fallback))
+    pub fn drop_shadow_color(&self, swatches: &PhotoSwatches) -> Option<[f32; 3]> {
+        self.drop_shadow_color.map(|color| color.resolve(swatches))
     }
 
     pub fn fixed_image(&self) -> Option<Arc<FixedImageBackground>> {
@@ -1040,6 +1085,36 @@ impl MattingOptions {
         let mut opt = MattingOptions::with_kind(kind, builder);
         opt.minimum_mat_percentage = minimum_mat_percentage;
         Some(opt)
+    }
+
+    /// Showcase-only companion to the default `studio` slot: the same mat with
+    /// `photo-cluster`, so the two swatches can be compared on the wall.
+    pub(crate) fn studio_photo_cluster_for_showcase(minimum_mat_percentage: f32) -> Self {
+        let builder = MattingOptionBuilder {
+            minimum_mat_percentage: Some(minimum_mat_percentage),
+            studio_colors: Some(vec![StudioMatColor::PhotoCluster]),
+            ..Default::default()
+        };
+        let mut opt = MattingOptions::with_kind(MattingKind::Studio, builder);
+        opt.minimum_mat_percentage = minimum_mat_percentage;
+        opt
+    }
+
+    /// What the showcase caption says about this mat: its kind, plus the swatch
+    /// token when it is `photo-cluster` (so it reads differently from the
+    /// default `photo-average` slot of the same kind).
+    pub(crate) fn caption(&self) -> MatCaption {
+        let first = match &self.style {
+            MattingMode::Studio { colors, .. }
+            | MattingMode::Vignette { colors, .. }
+            | MattingMode::PassePartout { colors, .. }
+            | MattingMode::DropShadow { colors, .. } => colors.first().copied(),
+            _ => None,
+        };
+        MatCaption {
+            kind: self.kind(),
+            photo_cluster: first == Some(StudioMatColor::PhotoCluster),
+        }
     }
 
     pub(crate) fn kind(&self) -> MattingKind {
@@ -1779,7 +1854,12 @@ impl MattingConfig {
 
     /// Build a sequential `MattingConfig` from a list of options.
     /// Used by showcase mode to replace the author-supplied matting list.
-    pub(crate) fn sequential_from(options: Vec<MattingOptions>) -> Self {
+    /// `skew_period` skews the selector (see `SequentialState`); showcase sets
+    /// it to lcm(mat count, transition count) when those share a factor.
+    pub(crate) fn sequential_from(
+        options: Vec<MattingOptions>,
+        skew_period: Option<usize>,
+    ) -> Self {
         let entries: Arc<[SelectionEntry<MattingKind>]> = options
             .iter()
             .enumerate()
@@ -1792,7 +1872,7 @@ impl MattingConfig {
         Self {
             selection: MattingSelection::Sequential {
                 entries,
-                runtime: SequentialState::default(),
+                runtime: skew_period.map_or_else(SequentialState::default, SequentialState::skewed),
             },
             options,
             fill_when_fits: None,
@@ -3517,12 +3597,24 @@ impl Configuration {
         let min_pct = 6.0_f32;
         let fixed_image_path = self.showcase.fixed_image_path.clone();
 
-        let matting_options: Vec<MattingOptions> = MattingKind::ALL
+        let transition_options: Vec<TransitionOptions> = TransitionKind::ALL
             .iter()
-            .filter_map(|&kind| {
-                MattingOptions::default_for_showcase(kind, min_pct, fixed_image_path.clone())
-            })
+            .map(|&kind| TransitionOptions::default_for(kind))
             .collect();
+
+        let mut matting_options: Vec<MattingOptions> = Vec::new();
+        for &kind in MattingKind::ALL {
+            if let Some(option) =
+                MattingOptions::default_for_showcase(kind, min_pct, fixed_image_path.clone())
+            {
+                matting_options.push(option);
+                if kind == MattingKind::Studio {
+                    // Right after the default (`photo-average`) studio slot.
+                    matting_options
+                        .push(MattingOptions::studio_photo_cluster_for_showcase(min_pct));
+                }
+            }
+        }
 
         if matting_options.is_empty() {
             tracing::warn!("showcase mode produced zero matting options; keeping original config");
@@ -3534,13 +3626,13 @@ impl Configuration {
                     "showcase: fixed-image mat omitted (set showcase.fixed-image-path to include it)"
                 );
             }
-            self.matting = MattingConfig::sequential_from(matting_options);
+            // Two sequential selectors advancing in step repeat the same pairs
+            // when their lengths share a factor; skew the mat selector then.
+            let (mats, transitions) = (matting_options.len(), transition_options.len());
+            let g = gcd(mats, transitions);
+            let skew_period = (g > 1).then_some(mats / g * transitions);
+            self.matting = MattingConfig::sequential_from(matting_options, skew_period);
         }
-
-        let transition_options: Vec<TransitionOptions> = TransitionKind::ALL
-            .iter()
-            .map(|&kind| TransitionOptions::default_for(kind))
-            .collect();
 
         self.transition = TransitionConfig::sequential_from(transition_options);
 
@@ -3773,6 +3865,33 @@ impl Default for PlaylistOptions {
             half_life: Self::default_half_life(),
             order: PlaylistOrder::default(),
             min_spacing: Self::default_min_spacing(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SequentialState;
+    use std::collections::HashSet;
+
+    #[test]
+    fn skewed_selector_visits_every_pair_for_any_lengths() {
+        for (mats, transitions) in [(9, 9), (3, 9), (9, 27), (6, 4), (10, 9), (4, 4), (1, 5)] {
+            let g = super::gcd(mats, transitions);
+            let mat_selector = if g > 1 {
+                SequentialState::skewed(mats / g * transitions)
+            } else {
+                SequentialState::default()
+            };
+            let transition_selector = SequentialState::default();
+            let mut pairs = HashSet::new();
+            for _ in 0..(mats * transitions) {
+                pairs.insert((
+                    transition_selector.next(transitions),
+                    mat_selector.next(mats),
+                ));
+            }
+            assert_eq!(pairs.len(), mats * transitions, "{mats} x {transitions}");
         }
     }
 }

@@ -1,5 +1,5 @@
 # "Everything" config: exercises every transition and mat kind AND the parameter
-# variants within each — palettes and photo-average, multi-angle and jitter, both
+# variants within each — palettes and photo-average / photo-cluster, multi-angle and jitter, both
 # radial shapes and an off-center reveal, both blind orientations, fade with and
 # without through-black, e-ink flashes, zoom-in and zoom-out crossfades, gradients
 # in all three directions, fixed-image in all three fit modes, and the
@@ -119,14 +119,14 @@ playlist:
   order: weighted-spread
   min-spacing: 0.7
 
-# Every mat kind, plus palettes/photo-average and parameter variants.
+# Every mat kind, plus palettes/photo-average/photo-cluster and parameter variants.
 matting:
   fill-when-fits:
     maximum-crop-percentage: 5.0
     skip-matting-probability: 0.875
   selection: random
   active:
-    - kind: fixed-color # literal RGB only (no photo-average here)
+    - kind: fixed-color # literal RGB only (no photo-average / photo-cluster here)
       minimum-mat-percentage: 2.0
       colors:
         - [0, 0, 0]
@@ -144,7 +144,7 @@ matting:
       backend: cpu
     - kind: studio # woven texture
       minimum-mat-percentage: 6.0
-      colors: [[24, 24, 24], photo-average, [210, 210, 210]]
+      colors: [[24, 24, 24], photo-average, photo-cluster, [210, 210, 210]] # mean vs dominant color
       bevel-width-px: 4.0
       bevel-color: [255, 255, 255]
       texture-strength: 1.0

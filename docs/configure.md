@@ -455,7 +455,7 @@ Examples are in [Transition examples](#transition-examples).
 The `matting` block prepares the background behind each photo. During parsing the viewer normalizes the section into a canonical list:
 
 1. Read `matting.active` from top to bottom and record each entry's `kind` plus its options.
-2. Expand inline collections in place. Every swatch in a `colors` array, every `photo-average` token, and every fixed-image `path` becomes its own canonical slot while preserving the entry's order.
+2. Expand inline collections in place. Every swatch in a `colors` array, every `photo-average` or `photo-cluster` token, and every fixed-image `path` becomes its own canonical slot while preserving the entry's order.
 3. Attach the resulting slots to their underlying renderer (`fixed-color`, `blur`, `studio`, or `fixed-image`).
 
 `matting.selection` operates on that expanded list. `random` samples from every canonical slot — duplicates weight the draw — while `sequential` walks the expanded order before looping. Duplicating colors, paths, or `active` entries is the way to bias rotation; the outer `selection` controls traversal.
@@ -487,7 +487,7 @@ The remaining controls depend on `kind`:
   - **`sample-scale`** (float, default `0.125`): ratio between canvas resolution and the intermediate blur buffer. Higher values sharpen the backdrop at higher cost.
   - **`backend`** (`cpu` or `neon`, default `neon`): blur implementation. `neon` opts into the vector-accelerated path on 64-bit ARM and falls back to `cpu` when unavailable.
 - **`studio`**
-  - **`colors`** (array containing `[r, g, b]` triples and/or the string `photo-average`; default `[photo-average]`): palette entries used for the mat base. `photo-average` reuses the slide's average color. **`color`** is a convenience alias for a single entry.
+  - **`colors`** (array containing `[r, g, b]` triples and/or the strings `photo-average` and `photo-cluster`; default `[photo-average]`): palette entries used for the mat base. `photo-average` is the mean of all the photo's pixels, which for a photo with two strong opposing regions (orange sky over blue water) is a muted blend that appears nowhere in the picture; `photo-cluster` is the representative colour of the photo's largest colour region (a shaded sky is one region however far its gradient runs; the colour reported is one the photo contains; two very similar hues, closer than about 0.1 in Oklab, count as one region and report one of them). Regions are compared by how much of the photo lies within about 0.15 Oklab of them, so a sky gradient over a dark foreground wins down to roughly 65-75% of the frame for the very widest gradients (sunsets, dusk glows) and somewhat less for narrower ones; below that the foreground is the larger region and wins. **`color`** is a convenience alias for a single entry.
   - **`bevel-width-px`** (float, default `3.0`).
   - **`bevel-color`** (`[r, g, b]` array, default `[255, 255, 255]`).
   - **`texture-strength`** (float, default `1.0`): strength of the simulated paper weave (`0.0` = flat matte).
@@ -502,7 +502,7 @@ The remaining controls depend on `kind`:
   - **`direction`** (`vertical`, `horizontal`, or `radial`; default `vertical`).
   - **`angle-degrees`** (float, default `0.0`): optional rotation for linear gradients; ignored for `radial`.
 - **`vignette`** — solid color with darkened edges.
-  - **`colors`** (array of `[r, g, b]` triples and/or `photo-average`; default `[[241, 233, 210]]` (parchment)): base mat color(s). Multiple entries expand to multiple slots. **`color`** is a convenience alias for a single value (also accepts `photo-average`).
+  - **`colors`** (array of `[r, g, b]` triples and/or `photo-average` / `photo-cluster`; default `[[241, 233, 210]]` (parchment)): base mat color(s). Multiple entries expand to multiple slots. `photo-average` is the mean of all pixels; `photo-cluster` is the dominant colour actually present in the photo. **`color`** is a convenience alias for a single value (also accepts both tokens).
   - **`strength`** (float 0–1, default `0.6`): how dark the corners get.
   - **`radius`** (float 0–1, default `0.75`): where the falloff begins, as a fraction of the half-diagonal.
   - **`softness`** (float 0–1, default `0.5`): width of the falloff band.
@@ -513,11 +513,11 @@ The remaining controls depend on `kind`:
   - **`darken`** (float 0–1, default `0.35`): uniform darkening applied over the blur.
   - **`vignette-strength`** (float 0–1, default `0.5`): extra edge darkening.
 - **`passe-partout`** — clean 45° core-bevel mat board without linen weave (crisper alternative to `studio`).
-  - **`colors`** (array of `[r, g, b]` triples and/or `photo-average`; default `[photo-average]`): mat board color(s). Multiple entries expand to multiple slots. **`color`** is a convenience alias for a single entry.
+  - **`colors`** (array of `[r, g, b]` triples and/or `photo-average` / `photo-cluster`; default `[photo-average]`): mat board color(s). Multiple entries expand to multiple slots. `photo-average` is the mean of all pixels; `photo-cluster` is the dominant colour actually present in the photo. **`color`** is a convenience alias for a single entry.
   - **`bevel-width-px`** (float, default `3.0`).
   - **`bevel-color`** (`[r, g, b]`, default `[255, 255, 255]`).
 - **`drop-shadow`** — soft drop shadow under the photo on a solid mat.
-  - **`colors`** (array of `[r, g, b]` triples and/or `photo-average`; default `[[235, 235, 235]]`): mat background color(s). Multiple entries expand to multiple slots. **`color`** is a convenience alias for a single value (also accepts `photo-average`).
+  - **`colors`** (array of `[r, g, b]` triples and/or `photo-average` / `photo-cluster`; default `[[235, 235, 235]]`): mat background color(s). Multiple entries expand to multiple slots. `photo-average` is the mean of all pixels; `photo-cluster` is the dominant colour actually present in the photo. **`color`** is a convenience alias for a single value (also accepts both tokens).
   - **`shadow-color`** (`[r, g, b]`, default `[0, 0, 0]`): shadow tint.
   - **`shadow-opacity`** (float 0–1, default `0.4`): shadow strength at its darkest.
   - **`shadow-blur-px`** (float, default `24.0`): softness of the shadow edge.

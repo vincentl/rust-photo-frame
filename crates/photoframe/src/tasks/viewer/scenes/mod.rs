@@ -16,7 +16,7 @@ use wgpu::{CommandEncoder, TextureView};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::config::{Configuration, MattingKind, TransitionConfig, TransitionKind};
+use crate::config::{Configuration, MatCaption, TransitionConfig, TransitionKind};
 use crate::tasks::greeting_screen::GreetingScreen;
 
 use super::{ImgTex, TransitionState};
@@ -457,7 +457,7 @@ impl CaptionOverlay {
 /// Build the showcase caption string from the current transition and mat.
 pub(super) fn showcase_caption(
     transition_kind: Option<TransitionKind>,
-    mat_kind: Option<MattingKind>,
+    mat_kind: Option<MatCaption>,
 ) -> String {
     let t = transition_kind
         .map(|k| k.to_string())
@@ -1130,8 +1130,27 @@ impl Scene for WakeScene {
 
 #[cfg(test)]
 mod tests {
-    use super::CaptionOverlay;
+    use super::{CaptionOverlay, showcase_caption};
+    use crate::config::{MatCaption, MattingKind};
     use winit::dpi::PhysicalSize;
+
+    #[test]
+    fn showcase_caption_names_the_photo_cluster_swatch() {
+        let studio = |photo_cluster| {
+            Some(MatCaption {
+                kind: MattingKind::Studio,
+                photo_cluster,
+            })
+        };
+        assert_eq!(
+            showcase_caption(None, studio(false)),
+            "transition: none    mat: studio"
+        );
+        assert_eq!(
+            showcase_caption(None, studio(true)),
+            "transition: none    mat: studio (photo-cluster)"
+        );
+    }
 
     fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::default();
