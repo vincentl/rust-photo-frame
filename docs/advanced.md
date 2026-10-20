@@ -483,7 +483,7 @@ At startup the viewer logs `kms_probe` lines (cards, connectors, modes, the Vulk
 
 | Knob (unit `Environment=`, via `sudo systemctl edit photoframe-kms.service`) | Default |
 | --- | --- |
-| `PHOTOFRAME_DRM_CONNECTOR` (e.g. `HDMI-A-1`) | first connected connector |
+| `PHOTOFRAME_DRM_CONNECTOR` (e.g. `HDMI-A-1`; a name no card has is an error, not a wait) | first connected connector |
 | `PHOTOFRAME_DRM_MODE` (`WxH[@Hz]`, e.g. `3840x2160@60`; must exist) | `3840x2160@60` if the panel offers it (as the sway config pins), else the panel's preferred mode |
 | `PHOTOFRAME_PRESENT_MODE` | `fifo` |
 
@@ -491,7 +491,7 @@ At startup the viewer logs `kms_probe` lines (cards, connectors, modes, the Vulk
 
 **No display at startup.** If no display is connected when the unit starts, the viewer waits for one and checks once a second. This covers a power cut where the Pi boots before the TV, or a receiver in standby. The journal shows `kms_waiting_for_display` once. When the panel appears, the slideshow starts.
 
-**Display changes.** v1.2 does not adapt to a display change in place. Every time the viewer wakes from idle, it checks the connector. In each of these cases the viewer exits with an error and `Restart=always` brings it back:
+**Display changes.** v1.2 does not adapt to a display change in place. Every time the viewer wakes from idle, it checks the connector. Once per photo, at the end of the dwell, it also forces a fresh read of the panel's mode list, so a panel swapped between two checks is caught. In each of these cases the viewer exits with an error and `Restart=always` brings it back:
 
 - the panel was unplugged;
 - the panel no longer offers the mode in use;

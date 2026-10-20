@@ -213,18 +213,45 @@ A resting photo therefore costs no frames and no wakeups. The Wayland path
 still ticks every 4 ms. T5 moves it onto the same plan
 (`crates/photoframe/src/tasks/viewer/wake.rs`).
 
-**Expected `transition_frame_metric` on KMS.** For fade, wipe and push at
-native 4K the metric should read `avg_fps` ≈ 60 and
-`best_frame_ms` ≈ `worst_frame_ms` ≈ 16.7, because the stats measure the
-vblanks the frames are paced on.
+**Reading `transition_frame_metric` on KMS.** On KMS the line has one
+more field than on Wayland, `late_frames`. The fields answer two
+different questions:
 
-A `worst_frame_ms` of about 33 means the loop missed a vblank.
+- **`best_frame_ms` / `worst_frame_ms` / `avg_fps`: did the CPU loop
+  keep up?** These are the times between the vblanks the frames were
+  paced on. A `worst_frame_ms` of about 33 means the loop missed a
+  vblank.
+- **`late_frames`: did the panel show a new frame on every refresh?**
+  It counts the refreshes during the transition on which the panel
+  showed no new frame, whatever the cause: the CPU loop was late, or the
+  GPU finished a frame after the vblank it was meant for. The interval
+  fields cannot see the second case, because the CPU stays on time while
+  the panel repeats a frame.
 
-One case does not show up in this metric. If the GPU finishes a frame
-too late for its vblank, the panel repeats the previous frame once, and
-the rest of the transition is shown one refresh later. The metric does
-not see that until late frames back up into the swapchain. The phone
-slo-mo clip (`developer/display-cadence.sh`) is the check for it.
+How `late_frames` is computed: each paced frame registers a
+GPU-completion callback, and every pacing wake polls for it. The viewer
+then replays FIFO: a frame flips at the first vblank by which it is
+complete, and never before the frame ahead of it. That replay is
+optimistic by at most the microseconds between a vblank and the wake
+after it.
+
+**What to expect.** For a transition that holds 60 at native 4K:
+`avg_fps` ≈ 60, `best_frame_ms` ≈ `worst_frame_ms` ≈ 16.7, and
+`late_frames=0`.
+
+**When the field is missing.** It is absent if vblank pacing failed
+during that transition. Look for `kms_vblank_wait_failed` in the
+journal.
+
+**GPU slack.** With the explicit vblank wait, a frame has less than one
+refresh to finish. FIFO's run-ahead allowed up to two, but that
+run-ahead is what put every transition's first frames ahead of the
+display. A miss leaves one frame queued, which gives every later frame
+of that transition two refreshes. So one miss costs exactly one
+repeated refresh and does not cascade.
+
+**For T4.** The native-resolution decision should require
+`late_frames=0`, not just the interval fields.
 
 ## Root causes and fixes (June 2026)
 
