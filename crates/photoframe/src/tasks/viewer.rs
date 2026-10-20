@@ -3816,6 +3816,7 @@ mod tests {
         fill_screen: bool,
     ) -> RgbaImage {
         use crate::config::MattingOptions;
+        let matting = MattingOptions::default_for_showcase(kind, 6.0, None).expect("mat option");
         let task = MatTask {
             image: PreparedImageCpu {
                 path: path.to_path_buf(),
@@ -3830,11 +3831,11 @@ mod tests {
                 oversample,
                 max_dim: 4096,
                 max_upscale_factor: 2.0,
-                matting: MattingOptions::default_for_showcase(kind, 6.0, None).expect("mat option"),
+                matting: matting.clone(),
                 fill_screen,
             },
             priority: false,
-            mat_kind: Some(kind),
+            mat_kind: Some(matting.caption()),
         };
         let c = process_mat_task(task).expect("matted canvas").canvas;
         RgbaImage::from_raw(c.width, c.height, c.pixels).unwrap()

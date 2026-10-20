@@ -261,6 +261,7 @@ mod tests {
                 .iter()
                 .map(|&k| MattingOptions::default_for_showcase(k, 6.0, None).unwrap())
                 .collect(),
+            None,
         )
     }
 
