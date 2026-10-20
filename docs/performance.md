@@ -69,8 +69,9 @@ the startup-scanned library it is just the photo's age at first show, so filter
 to photos whose birth time is later than the `playlist_scheduler` line when
 measuring how quickly a fresh upload appears.
 
-Use `-t photoframe` (syslog identifier), not `-u` — the app runs inside the
-greetd session, not as its own systemd unit.
+Use `-t photoframe` (syslog identifier), not `-u`: on the default stack the
+app runs inside the greetd session, not as its own systemd unit. The KMS
+stack (`photoframe-kms.service`) logs under the same tag.
 
 The stats measure *submission* cadence (when `present()` returns), which
 matches what the panel displays only because transition redraws are paced
@@ -160,6 +161,42 @@ therefore carries a vendored copy of wgpu-hal 27.0.4 under
 whose `vkGetDrmDisplayEXT` resolves the connector on that fd. It is wired
 in through `[patch.crates-io]` in the root `Cargo.toml` and affects only
 this code path; remove both once the fix is upstream.
+
+### The viewer on KMS
+
+The viewer itself can present the same way: set `PHOTOFRAME_SURFACE=drm`
+(the opt-in `photoframe-kms.service` does; see
+[advanced.md › KMS stack](advanced.md#kms-stack-opt-in)). It shares the
+probe's target selection and ordering rules
+(`crates/photoframe/src/drm_display.rs`):
+- The card is opened before the wgpu instance, so the process is DRM
+  master.
+- The card is closed only after the instance is gone, because Mesa's
+  display WSI keeps polling the fd until then.
+
+**Present mode.** FIFO is the default on KMS. Page flips are
+vblank-locked, and the next swapchain acquire blocks until a buffer is
+free. That blocking acquire is the only pacing source: during a
+transition the viewer renders one frame per refresh, with no frame
+callbacks and no wall-clock floor. `PHOTOFRAME_PRESENT_MODE=mailbox` is
+honoured but has no pacing beyond what the driver does, so it stays an
+experiment.
+
+**Idle behaviour.** There is no 4 ms control tick on KMS. While nothing
+animates, the viewer sleeps until one of these happens:
+- a control command arrives;
+- a matting result arrives;
+- a decoded photo arrives while the preload queue is short;
+- the dwell deadline passes.
+
+A resting photo therefore costs no frames and no wakeups. The Wayland path
+still ticks every 4 ms. T5 moves it onto the same plan
+(`crates/photoframe/src/tasks/viewer/wake.rs`).
+
+**Expected `transition_frame_metric` on KMS.** For fade, wipe and push at
+native 4K the metric should read `avg_fps` ≈ 60 and
+`best_frame_ms` ≈ `worst_frame_ms` ≈ 16.7, because the stats measure the
+FIFO acquire cadence, which is the panel's.
 
 ## Root causes and fixes (June 2026)
 
@@ -287,15 +324,22 @@ traffic a native 4K fade generates — on a bus that is the binding
 constraint at 4K60. Two ways out: a sway/wlroots/Mesa upgrade that gets
 scanout working (`journalctl -t photoframe` with `sway -d` shows per-frame
 scan-out decisions), or no compositor at all. `frametest --drm` (above)
-measures the second option without touching the viewer.
+measures the second option without touching the viewer. The opt-in KMS
+stack is that second option for the viewer itself (see
+[The viewer on KMS](#the-viewer-on-kms)).
 
 ## Environment knobs
 
-Set in `/usr/local/bin/photoframe` (the launcher); all optional:
+Set in `/usr/local/bin/photoframe` (the launcher), or for the KMS stack in
+the unit (`sudo systemctl edit photoframe-kms.service`, `[Service]`
+`Environment=`); all optional:
 
 | Variable | Values | Default |
 | --- | --- | --- |
-| `PHOTOFRAME_PRESENT_MODE` | `fifo` / `mailbox` / `immediate` | mailbox when available |
+| `PHOTOFRAME_SURFACE` | `wayland` / `drm` | `wayland` (the KMS unit sets `drm`) |
+| `PHOTOFRAME_PRESENT_MODE` | `fifo` / `mailbox` / `immediate` | mailbox when available on Wayland; fifo on KMS |
+| `PHOTOFRAME_DRM_CONNECTOR` | e.g. `HDMI-A-1` (KMS only) | first connected connector |
+| `PHOTOFRAME_DRM_MODE` | `WxH[@Hz]` (KMS only) | the connector's preferred mode |
 | `PHOTOFRAME_TRANSITION_SCALE` | 1–4 | 2 |
 | `PHOTOFRAME_IRIS_LAYER_SCALE` | 1–8 | 4 |
 | `WGPU_BACKEND` | `vulkan` / `gl` | vulkan |
