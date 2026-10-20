@@ -272,36 +272,38 @@ fn gcd(a: usize, b: usize) -> usize {
 #[derive(Debug, Clone)]
 pub struct SequentialState {
     next_index: Arc<AtomicUsize>,
-    /// Shift the starting point by one each full pass over the list. Two
+    /// When set, the starting point shifts by one every `period` steps. Two
     /// sequential selectors advancing in step (the showcase's mats and
-    /// transitions) would otherwise repeat the same pairs whenever their list
-    /// lengths share a factor; skewing one of them visits every pair.
-    skew_each_cycle: bool,
+    /// transitions) repeat the same pairs forever when their lengths share a
+    /// factor: they only ever visit `lcm` of the `len_a * len_b` pairs. With
+    /// `period` = that lcm, each repeat of the pattern shifts the pairing into
+    /// the next residue class mod the gcd, so all pairs appear within
+    /// `len_a * len_b` steps, for any two lengths.
+    skew_period: Option<usize>,
 }
 
 impl Default for SequentialState {
     fn default() -> Self {
         Self {
             next_index: Arc::new(AtomicUsize::new(0)),
-            skew_each_cycle: false,
+            skew_period: None,
         }
     }
 }
 
 impl SequentialState {
-    fn skewed() -> Self {
+    fn skewed(period: usize) -> Self {
         Self {
-            skew_each_cycle: true,
+            skew_period: Some(period.max(1)),
             ..Self::default()
         }
     }
 
     fn next(&self, len: usize) -> usize {
         let n = self.next_index.fetch_add(1, Ordering::Relaxed);
-        if self.skew_each_cycle {
-            (n + n / len) % len
-        } else {
-            n % len
+        match self.skew_period {
+            Some(period) => (n + n / period) % len,
+            None => n % len,
         }
     }
 }
@@ -1852,9 +1854,12 @@ impl MattingConfig {
 
     /// Build a sequential `MattingConfig` from a list of options.
     /// Used by showcase mode to replace the author-supplied matting list.
-    /// `skew` shifts the selector each pass (see `SequentialState`); showcase
-    /// sets it when the transition list length shares a factor with this one.
-    pub(crate) fn sequential_from(options: Vec<MattingOptions>, skew: bool) -> Self {
+    /// `skew_period` skews the selector (see `SequentialState`); showcase sets
+    /// it to lcm(mat count, transition count) when those share a factor.
+    pub(crate) fn sequential_from(
+        options: Vec<MattingOptions>,
+        skew_period: Option<usize>,
+    ) -> Self {
         let entries: Arc<[SelectionEntry<MattingKind>]> = options
             .iter()
             .enumerate()
@@ -1867,11 +1872,7 @@ impl MattingConfig {
         Self {
             selection: MattingSelection::Sequential {
                 entries,
-                runtime: if skew {
-                    SequentialState::skewed()
-                } else {
-                    SequentialState::default()
-                },
+                runtime: skew_period.map_or_else(SequentialState::default, SequentialState::skewed),
             },
             options,
             fill_when_fits: None,
@@ -3627,8 +3628,10 @@ impl Configuration {
             }
             // Two sequential selectors advancing in step repeat the same pairs
             // when their lengths share a factor; skew the mat selector then.
-            let skew = gcd(matting_options.len(), transition_options.len()) > 1;
-            self.matting = MattingConfig::sequential_from(matting_options, skew);
+            let (mats, transitions) = (matting_options.len(), transition_options.len());
+            let g = gcd(mats, transitions);
+            let skew_period = (g > 1).then_some(mats / g * transitions);
+            self.matting = MattingConfig::sequential_from(matting_options, skew_period);
         }
 
         self.transition = TransitionConfig::sequential_from(transition_options);
@@ -3862,6 +3865,33 @@ impl Default for PlaylistOptions {
             half_life: Self::default_half_life(),
             order: PlaylistOrder::default(),
             min_spacing: Self::default_min_spacing(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SequentialState;
+    use std::collections::HashSet;
+
+    #[test]
+    fn skewed_selector_visits_every_pair_for_any_lengths() {
+        for (mats, transitions) in [(9, 9), (3, 9), (9, 27), (6, 4), (10, 9), (4, 4), (1, 5)] {
+            let g = super::gcd(mats, transitions);
+            let mat_selector = if g > 1 {
+                SequentialState::skewed(mats / g * transitions)
+            } else {
+                SequentialState::default()
+            };
+            let transition_selector = SequentialState::default();
+            let mut pairs = HashSet::new();
+            for _ in 0..(mats * transitions) {
+                pairs.insert((
+                    transition_selector.next(transitions),
+                    mat_selector.next(mats),
+                ));
+            }
+            assert_eq!(pairs.len(), mats * transitions, "{mats} x {transitions}");
         }
     }
 }
