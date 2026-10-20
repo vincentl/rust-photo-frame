@@ -18,6 +18,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo audit                          # dependency CVE scan (cargo install cargo-audit)
 make -f tests/Makefile docs-links    # markdown link check
+bash setup/tests/display-stack.test.sh   # display-stack setup logic (stubbed systemctl)
 ```
 
 `cargo audit` should report **zero vulnerabilities**. A lone `paste`

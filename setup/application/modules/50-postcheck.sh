@@ -244,6 +244,19 @@ if systemd_available && systemd_unit_exists "${KIOSK_SERVICE}"; then
     fi
 fi
 
+# On the KMS stack "active" and a bound control socket do not prove the
+# viewer runs: the socket is bound before the card is opened, and a
+# crash-looping Restart=always unit is active part of the time.
+if [[ "${KIOSK_SERVICE}" == "${DISPLAY_KMS_UNIT}" ]] && systemd_available && systemd_unit_exists "${KIOSK_SERVICE}"; then
+    log INFO "Checking that the KMS viewer reached the display and stays up"
+    if kms_health="$(display_stack_kms_healthy 30 6 2>&1)"; then
+        log INFO "${kms_health}"
+    else
+        log ERROR "${kms_health}"
+        exit 1
+    fi
+fi
+
 rustc_version=$(rustc --version 2>/dev/null || echo "rustc unavailable")
 cargo_version=$(cargo --version 2>/dev/null || echo "cargo unavailable")
 

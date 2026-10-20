@@ -5,15 +5,18 @@
 # overlay and powerctl's display sleep (both talk to sway).
 [Unit]
 Description=Photo frame viewer on DRM/KMS (no compositor)
-After=systemd-user-sessions.service greetd.service
+# plymouth (when installed) holds DRM master until it quits; display
+# managers order after plymouth-quit-wait for the same reason.
+After=systemd-user-sessions.service plymouth-quit-wait.service greetd.service
 # Only one display stack at a time: starting this unit stops greetd (and
 # starting greetd stops this unit), so nothing else holds DRM master.
 Conflicts=greetd.service
 # Skip (don't crash-loop) until the application stage installs the binary.
 ConditionPathExists=/opt/photoframe/bin/photoframe
 # StartLimit* belongs in [Unit]. A viewer that cannot start (not DRM master,
-# no connected connector) is retried 5 times in 2 minutes, then left failed
-# for the operator; there is deliberately no fallback to greetd.
+# Vulkan refused) is retried 5 times in 2 minutes, then left failed for the
+# operator; there is deliberately no fallback to greetd. A display that is
+# not connected yet is not a failure: the viewer waits for it.
 StartLimitIntervalSec=120
 StartLimitBurst=5
 

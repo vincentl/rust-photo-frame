@@ -89,11 +89,13 @@ _display_stack_enable_clean() {
 
 # display_stack_apply <kms|wayland> <start|enable-only>
 #
-# Enables the chosen stack's unit and disables the other one. With "start",
-# also stops the other stack and (re)starts the chosen one; photoframe-kms has
-# Conflicts=greetd.service, so systemd never runs both. Prints one line per
-# action on stdout; returns non-zero if the chosen unit could not be enabled
-# or started.
+# Enables the chosen stack's unit, and only once that succeeded disables the
+# other one, so a failed enable never leaves the frame with no stack enabled
+# for the next boot. With "start", the chosen unit is (re)started even if
+# enabling it failed (as the old greetd-only code did); photoframe-kms has
+# Conflicts=greetd.service, so starting either stops the other and systemd
+# never runs both. Prints one line per action; returns non-zero if any step
+# failed, after doing every step it could.
 display_stack_apply() {
     local choice="$1" mode="${2:-start}"
     local status=0
@@ -103,11 +105,13 @@ display_stack_apply() {
     fi
 
     if [[ "${choice}" == "kms" ]]; then
-        echo "display stack: kms (${DISPLAY_KMS_UNIT}); disabling ${DISPLAY_WAYLAND_UNIT}"
-        _display_stack_sudo systemctl disable "${DISPLAY_WAYLAND_UNIT}" >/dev/null 2>&1 || true
-        if ! _display_stack_enable_clean "${DISPLAY_KMS_UNIT}"; then
-            echo "display stack: failed to enable ${DISPLAY_KMS_UNIT}" >&2
-            return 1
+        echo "display stack: kms (${DISPLAY_KMS_UNIT})"
+        if _display_stack_enable_clean "${DISPLAY_KMS_UNIT}"; then
+            echo "display stack: enabled ${DISPLAY_KMS_UNIT}; disabling ${DISPLAY_WAYLAND_UNIT}"
+            _display_stack_sudo systemctl disable "${DISPLAY_WAYLAND_UNIT}" >/dev/null 2>&1 || true
+        else
+            echo "display stack: failed to enable ${DISPLAY_KMS_UNIT}; leaving ${DISPLAY_WAYLAND_UNIT} enabled for the next boot" >&2
+            status=1
         fi
         if [[ "${mode}" == "start" ]]; then
             # Clear a StartLimit failure from an earlier attempt, then
@@ -124,29 +128,35 @@ display_stack_apply() {
         return "${status}"
     fi
 
-    echo "display stack: wayland (${DISPLAY_WAYLAND_UNIT}); disabling ${DISPLAY_KMS_UNIT}"
-    if _display_stack_sudo systemctl list-unit-files "${DISPLAY_KMS_UNIT}" >/dev/null 2>&1; then
-        _display_stack_sudo systemctl disable "${DISPLAY_KMS_UNIT}" >/dev/null 2>&1 || true
-        # Release DRM master before sway needs it.
-        _display_stack_sudo systemctl stop "${DISPLAY_KMS_UNIT}" >/dev/null 2>&1 || true
-    fi
-    local greetd_state
+    echo "display stack: wayland (${DISPLAY_WAYLAND_UNIT})"
+    local greetd_state greetd_enabled=0
     greetd_state="$(_display_stack_sudo systemctl show -p UnitFileState --value "${DISPLAY_WAYLAND_UNIT}" 2>/dev/null || true)"
     case "${greetd_state}" in
         masked | masked-runtime)
-            echo "display stack: ${DISPLAY_WAYLAND_UNIT} is masked; enable it manually once unmasked" >&2
+            echo "display stack: ${DISPLAY_WAYLAND_UNIT} is masked; unmask it, then rerun. Leaving ${DISPLAY_KMS_UNIT} as it is" >&2
             return 1
             ;;
-        static) ;;
+        static)
+            greetd_enabled=1
+            ;;
         *)
-            if ! _display_stack_enable_clean "${DISPLAY_WAYLAND_UNIT}"; then
-                echo "display stack: failed to enable ${DISPLAY_WAYLAND_UNIT}" >&2
-                return 1
+            if _display_stack_enable_clean "${DISPLAY_WAYLAND_UNIT}"; then
+                greetd_enabled=1
+            else
+                echo "display stack: failed to enable ${DISPLAY_WAYLAND_UNIT}; leaving ${DISPLAY_KMS_UNIT} enabled for the next boot" >&2
+                status=1
             fi
             ;;
     esac
+    if ((greetd_enabled)) && _display_stack_sudo systemctl list-unit-files "${DISPLAY_KMS_UNIT}" >/dev/null 2>&1; then
+        echo "display stack: enabled ${DISPLAY_WAYLAND_UNIT}; disabling ${DISPLAY_KMS_UNIT}"
+        _display_stack_sudo systemctl disable "${DISPLAY_KMS_UNIT}" >/dev/null 2>&1 || true
+    fi
     if [[ "${mode}" == "start" ]]; then
-        # stop / sleep / start, never restart: see docs/operate.md.
+        # Release DRM master before sway needs it (Conflicts= would also stop
+        # it when greetd starts), then stop / sleep / start greetd, never
+        # restart: see docs/operate.md.
+        _display_stack_sudo systemctl stop "${DISPLAY_KMS_UNIT}" >/dev/null 2>&1 || true
         _display_stack_sudo systemctl reset-failed "${DISPLAY_WAYLAND_UNIT}" >/dev/null 2>&1 || true
         _display_stack_sudo systemctl stop "${DISPLAY_WAYLAND_UNIT}" >/dev/null 2>&1 || true
         sleep 1
@@ -158,4 +168,38 @@ display_stack_apply() {
         fi
     fi
     return "${status}"
+}
+
+# Postcheck for the KMS stack: the current run of photoframe-kms.service
+# reached "viewer presenting straight to KMS" and then stayed up without a
+# restart for a few seconds. "active" alone is not enough: with
+# Restart=always a crash-looping unit is active about a third of the time,
+# and the control socket is bound before the viewer opens the card.
+# Usage: display_stack_kms_healthy [timeout_sec] [settle_sec]
+display_stack_kms_healthy() {
+    local timeout_sec="${1:-30}" settle_sec="${2:-6}"
+    local waited=0 invocation="" restarts_before restarts_after
+    while ((waited < timeout_sec)); do
+        invocation="$(_display_stack_sudo systemctl show -p InvocationID --value "${DISPLAY_KMS_UNIT}" 2>/dev/null || true)"
+        if [[ -n "${invocation}" ]] &&
+            _display_stack_sudo journalctl -q -o cat "_SYSTEMD_INVOCATION_ID=${invocation}" 2>/dev/null |
+            grep -q "viewer presenting straight to KMS"; then
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if ((waited >= timeout_sec)); then
+        echo "${DISPLAY_KMS_UNIT}: the viewer did not reach the display within ${timeout_sec}s; see 'journalctl -t photoframe -b'" >&2
+        return 1
+    fi
+    restarts_before="$(_display_stack_sudo systemctl show -p NRestarts --value "${DISPLAY_KMS_UNIT}" 2>/dev/null || echo "?")"
+    sleep "${settle_sec}"
+    restarts_after="$(_display_stack_sudo systemctl show -p NRestarts --value "${DISPLAY_KMS_UNIT}" 2>/dev/null || echo "?")"
+    if [[ "${restarts_before}" != "${restarts_after}" ]] ||
+        ! _display_stack_sudo systemctl is-active --quiet "${DISPLAY_KMS_UNIT}"; then
+        echo "${DISPLAY_KMS_UNIT}: restarted or stopped while settling (NRestarts ${restarts_before} -> ${restarts_after}); see 'journalctl -t photoframe -b'" >&2
+        return 1
+    fi
+    echo "${DISPLAY_KMS_UNIT}: presenting and stable for ${settle_sec}s (NRestarts ${restarts_after})"
 }
