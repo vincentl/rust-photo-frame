@@ -97,7 +97,7 @@ for unit in "${units[@]}"; do
 done
 
 section "6. Unit state"
-for unit in photoframe-wifi-manager.service buttond.service greetd.service seatd.socket photoframe-sync.timer; do
+for unit in photoframe-wifi-manager.service buttond.service greetd.service seatd.service photoframe-sync.timer; do
     printf '%-36s enabled=%-10s active=%s\n' "${unit}" \
         "$(systemctl is-enabled "${unit}" 2>&1 || true)" "$(systemctl is-active "${unit}" 2>&1 || true)"
 done
@@ -105,7 +105,10 @@ systemctl --failed --no-pager || true
 
 section "7. setup/tools/verify.sh"
 verify_rc=0
-"${SRC_COPY}/setup/tools/verify.sh" 2>&1 | tee "${LOG_DIR}/verify.log" || verify_rc=${PIPESTATUS[0]}
+# As root: /var/lib/photoframe is 0750 kiosk:kiosk and sync.env is 0660, so as the
+# VM user verify.sh cannot see them and reports phantom "library directory
+# missing" warnings and awk "Permission denied".
+sudo "${SRC_COPY}/setup/tools/verify.sh" 2>&1 | tee "${LOG_DIR}/verify.log" || verify_rc=${PIPESTATUS[0]}
 # The ERROR lines verify.sh prints for greetd (and the status dump before them)
 # are the VM's missing display. Anything else is real.
 unexpected="$(grep 'ERROR' "${LOG_DIR}/verify.log" | grep -v 'greetd.service not active' || true)"
