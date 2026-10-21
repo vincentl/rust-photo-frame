@@ -454,6 +454,8 @@ To switch back to the default:
 PHOTOFRAME_DISPLAY=kms ./setup/system/install.sh
 ```
 
+Run it without `sudo` in front, as shown; the script elevates itself and keeps the variable. `PHOTOFRAME_DISPLAY=wayland sudo ./setup/system/install.sh` loses the variable to sudo's environment reset and silently stays on KMS. The running viewer keeps the display until the stage's last step, when the new stack starts.
+
 The compositor packages stay installed after a switch back, so a later switch to Wayland is quick. `PHOTOFRAME_DISPLAY=… ./setup/application/deploy.sh` also persists the choice and switches, but it cannot install packages: on a frame set up on KMS, `PHOTOFRAME_DISPLAY=wayland` is refused with a message that names the command above, nothing is persisted and the frame stays on KMS.
 
 Each switch:

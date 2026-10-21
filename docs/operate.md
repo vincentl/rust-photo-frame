@@ -43,13 +43,13 @@ Every control-socket command answers with one JSON line (`{"ok":true,…}`); the
 
 | What you want | Command |
 | --- | --- |
-| Restart kiosk | `sudo systemctl restart photoframe-kms.service` |
+| Restart kiosk | `sudo systemctl restart photoframe-kms.service` (if the panel was asleep it comes back on with the greeting until the next schedule boundary or button press) |
 | Edit config | `sudo nano /etc/photoframe/config.yaml` |
 | Apply config changes | restart kiosk (above) |
 | Add photos from laptop | `rsync -a -e ssh /path/to/photos/ frame@photoframe.local:/var/lib/photoframe/photos/local/` |
 | Add photos locally | `sudo cp /path/*.jpg /var/lib/photoframe/photos/local/ && sudo chown kiosk:kiosk /var/lib/photoframe/photos/local/*` |
 | Trigger manual cloud sync | `sudo systemctl start photoframe-sync.service` |
-| Update software | `git pull && ./setup/application/deploy.sh` |
+| Update software | `git pull && ./setup/application/deploy.sh` (a frame installed before v1.2 and still on Sway moves to KMS; to stay on Sway run `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` once, see below) |
 
 > **On the Wayland fallback, don't use `systemctl restart greetd`.** It can race with logind seat handoff on tty1 and leave the session in a bad state. Always stop, sleep, then start: `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service`.
 
@@ -143,6 +143,8 @@ cd ~/photoframe
 git pull
 ./setup/application/deploy.sh
 ```
+
+> **Frames installed before v1.2 run Sway.** They have no `/etc/photoframe/display.env`, so the first v1.2 deploy switches them to the KMS stack (and stops greetd). To keep Sway, run `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` for that update; the choice is remembered. If the new stack does not come up, `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` also takes you back. See [Advanced › Display stacks](advanced.md#display-stacks).
 
 `deploy.sh` builds in the background and restarts services at the end. `/etc/photoframe/config.yaml` and `/var/lib/photoframe/` are untouched. If the update includes system-level changes (new packages, unit changes), run the full installer instead:
 

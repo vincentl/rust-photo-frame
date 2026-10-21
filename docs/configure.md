@@ -8,6 +8,8 @@ After editing, restart the kiosk to apply:
 sudo systemctl restart photoframe-kms.service
 ```
 
+If the panel was asleep, the restart lights it with the greeting until the next schedule boundary or button press.
+
 (On the Wayland fallback stack, restart greetd instead: `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service`. Never `restart` it.)
 
 > Always edit `/etc/photoframe/config.yaml`, not the template at `/opt/photoframe/etc/photoframe/config.yaml` — the template gets overwritten on redeploy.
