@@ -158,12 +158,32 @@ else
   warnings=$((warnings+1))
 fi
 
-# Power helper deps
+# Power helper deps: powerctl asks the viewer through socat (KMS) and falls
+# back to swaymsg (Wayland); both parse JSON with jq.
+display_choice="$(display_stack_current)"
 if [[ -x "${BIN_POWERCTL}" ]]; then
-  have jq && have swaymsg || {
-    warn "powerctl dependencies missing (jq and/or sway); install with system stage"
-    warnings=$((warnings+1))
-  }
+  if [[ "${display_choice}" == "kms" ]]; then
+    have jq && have socat || {
+      warn "powerctl dependencies missing (jq and/or socat); install with system stage"
+      warnings=$((warnings+1))
+    }
+  else
+    have jq && have swaymsg || {
+      warn "powerctl dependencies missing (jq and/or sway); install with system stage"
+      warnings=$((warnings+1))
+    }
+  fi
+fi
+
+# KMS display: card, connector and mode, as sysfs and the viewer report them.
+if [[ "${display_choice}" == "kms" ]]; then
+  while IFS=$'\t' read -r level message; do
+    case "${level}" in
+      OK) ok "KMS display: ${message}" ;;
+      WARN) warn "KMS display: ${message}"; warnings=$((warnings+1)) ;;
+      ERROR) err "KMS display: ${message}"; failures=$((failures+1)) ;;
+    esac
+  done < <(display_stack_kms_check || true)
 fi
 
 # systemd service health
@@ -233,7 +253,6 @@ if systemd_available; then
     failures=$((failures+1))
   }
 
-  display_choice="$(display_stack_current)"
   check_unit "$(display_stack_unit "${display_choice}")" ERROR "display stack '${display_choice}' (${DISPLAY_ENV_PATH}); set via system install"
   check_seatd
   check_unit photoframe-wifi-manager.service ERROR "installed by app deploy"

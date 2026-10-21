@@ -204,3 +204,71 @@ display_stack_kms_healthy() {
     fi
     echo "${DISPLAY_KMS_UNIT}: presenting and stable for ${settle_sec}s (NRestarts ${restarts_after})"
 }
+
+# KMS display check for verify.sh: the card, connector and mode, from two
+# sources that must agree. sysfs says which connectors are connected and
+# which modes they list; the viewer (`display-power` query on its control
+# socket) says which connector and mode it actually drives and whether the
+# panel is on. Prints one finding per line as LEVEL<TAB>message, LEVEL being
+# OK, WARN or ERROR, and returns 1 when it printed an ERROR.
+#
+# A panel switched off by display-power may drop hot-plug detect, so a
+# disconnected connector is only a warning while the viewer reports it off.
+#
+# DISPLAY_SYSFS_ROOT (default /sys/class/drm) and PHOTOFRAME_CONTROL_SOCKET
+# (default /run/photoframe/control.sock) are overridable for tests.
+display_stack_kms_check() {
+    local sysfs="${DISPLAY_SYSFS_ROOT:-/sys/class/drm}"
+    local socket="${PHOTOFRAME_CONTROL_SOCKET:-/run/photoframe/control.sock}"
+    local status_file connected=()
+    for status_file in "${sysfs}"/card*-*/status; do
+        [[ -f "${status_file}" ]] || continue
+        if [[ "$(cat "${status_file}")" == "connected" ]]; then
+            connected+=("$(basename "$(dirname "${status_file}")")")
+        fi
+    done
+
+    local reply=""
+    if [[ -S "${socket}" ]] && command -v socat >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        reply="$(printf '%s' '{"command":"display-power"}' |
+            socat -t 3 - "UNIX-CONNECT:${socket}" 2>/dev/null || true)"
+    fi
+    if ! jq -e '.ok == true and (.connector | type) == "string"' >/dev/null 2>&1 <<<"${reply}"; then
+        if ((${#connected[@]} == 0)); then
+            printf 'ERROR\tno connected display connector under %s, and the viewer did not report one\n' "${sysfs}"
+            return 1
+        fi
+        printf 'WARN\tconnected: %s; the viewer did not report the display it drives (is %s running?)\n' \
+            "${connected[*]}" "${DISPLAY_KMS_UNIT}"
+        return 0
+    fi
+
+    local connector mode power entry="" size card
+    connector="$(jq -r '.connector' <<<"${reply}")"
+    mode="$(jq -r '.mode // "?"' <<<"${reply}")"
+    power="$(jq -r '.state // "?"' <<<"${reply}")"
+    for status_file in "${sysfs}"/card*-"${connector}"/status; do
+        [[ -f "${status_file}" ]] && entry="$(dirname "${status_file}")"
+    done
+    if [[ -z "${entry}" ]]; then
+        printf 'ERROR\tthe viewer drives %s, which no card under %s has\n' "${connector}" "${sysfs}"
+        return 1
+    fi
+    card="$(basename "${entry}")"
+    card="${card%%-*}"
+    if [[ "$(cat "${entry}/status")" != "connected" ]]; then
+        if [[ "${power}" == "off" ]]; then
+            printf 'WARN\t%s %s reads %s while the panel is switched off (display-power off); expected for sinks that drop hot-plug detect\n' \
+                "${card}" "${connector}" "$(cat "${entry}/status")"
+            return 0
+        fi
+        printf 'ERROR\tthe viewer drives %s %s, which reads %s\n' "${card}" "${connector}" "$(cat "${entry}/status")"
+        return 1
+    fi
+    size="${mode%@*}"
+    if ! grep -qx -- "${size}" "${entry}/modes" 2>/dev/null; then
+        printf 'ERROR\t%s %s no longer lists the mode in use (%s)\n' "${card}" "${connector}" "${mode}"
+        return 1
+    fi
+    printf 'OK\t%s %s %s power=%s\n' "${card}" "${connector}" "${mode}" "${power}"
+}
