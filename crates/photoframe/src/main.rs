@@ -594,11 +594,22 @@ async fn run_control_socket(
 
     tracing::info!(path = %socket_path.display(), "listening for control commands");
 
-    if let Err(err) =
-        run_initial_schedule_preamble(&cancel, &control, greeting_delay, schedule.as_ref()).await
-    {
-        tracing::warn!("control preamble failed: {err}");
-    }
+    // Accept at once: display power, ping and the overlay are answered and
+    // forwarded immediately, also during the greeting. Awake/asleep requests
+    // go through the state sequencer, which applies them after the startup
+    // state, in arrival order (review M1).
+    let (state_tx, state_rx) = mpsc::channel::<ViewerCommand>(16);
+    let sequencer = tokio::spawn(run_state_sequencer(
+        cancel.clone(),
+        control.clone(),
+        state_rx,
+        greeting_delay,
+        schedule,
+    ));
+    let routes = ControlRoutes {
+        viewer: control,
+        state: state_tx,
+    };
 
     loop {
         tokio::select! {
@@ -609,9 +620,9 @@ async fn run_control_socket(
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _addr)) => {
-                        let control = control.clone();
+                        let routes = routes.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = handle_control_connection(stream, control, surface).await {
+                            if let Err(err) = handle_control_connection(stream, routes, surface).await {
                                 tracing::warn!("control connection failed: {err}");
                             }
                         });
@@ -620,6 +631,7 @@ async fn run_control_socket(
                         if err.kind() == std::io::ErrorKind::Interrupted {
                             continue;
                         }
+                        sequencer.abort();
                         return Err(err).context("failed to accept control connection");
                     }
                 }
@@ -627,7 +639,53 @@ async fn run_control_socket(
         }
     }
 
+    sequencer.abort();
     Ok(())
+}
+
+/// Where a control connection sends what it accepts.
+#[cfg(unix)]
+#[derive(Clone)]
+struct ControlRoutes {
+    /// Straight to the viewer: display power and the Wi-Fi overlay.
+    viewer: mpsc::Sender<ViewerCommand>,
+    /// Awake/asleep requests, through `run_state_sequencer`.
+    state: mpsc::Sender<ViewerCommand>,
+}
+
+/// The viewer's awake/asleep requests, in one order: first the startup
+/// state (the schedule's, after the greeting), then every `set-state` and
+/// `toggle-state` in the order they arrived. A request made during the
+/// greeting is therefore applied after the startup state, not overridden
+/// by it. Before, this ordering came from the listen backlog, because the
+/// socket did not accept until the greeting was over, and no client got an
+/// answer for those seconds.
+#[cfg(unix)]
+async fn run_state_sequencer(
+    cancel: CancellationToken,
+    control: mpsc::Sender<ViewerCommand>,
+    mut requests: mpsc::Receiver<ViewerCommand>,
+    greeting_delay: Duration,
+    schedule: Option<config::AwakeScheduleConfig>,
+) {
+    if let Err(err) =
+        run_initial_schedule_preamble(&cancel, &control, greeting_delay, schedule.as_ref()).await
+    {
+        tracing::warn!("control preamble failed: {err}");
+    }
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            request = requests.recv() => match request {
+                Some(cmd) => {
+                    if control.send(cmd).await.is_err() {
+                        return;
+                    }
+                }
+                None => return,
+            },
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -751,7 +809,7 @@ const MAX_CONTROL_PAYLOAD: u64 = 64 * 1024;
 #[cfg(unix)]
 async fn handle_control_connection(
     mut stream: tokio::net::UnixStream,
-    control: mpsc::Sender<ViewerCommand>,
+    routes: ControlRoutes,
     surface: tasks::viewer::ViewerSurface,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(256);
@@ -774,7 +832,7 @@ async fn handle_control_connection(
         return Ok(());
     }
 
-    let reply = answer_control_request(&buf, &control, surface).await;
+    let reply = answer_control_request(&buf, &routes, surface).await;
     // Best effort: an old client may already have closed its end.
     let _ = stream.write_all(reply.to_line().as_bytes()).await;
     let _ = stream.shutdown().await;
@@ -786,9 +844,10 @@ async fn handle_control_connection(
 #[cfg(unix)]
 async fn answer_control_request(
     payload: &[u8],
-    control: &mpsc::Sender<ViewerCommand>,
+    routes: &ControlRoutes,
     surface: tasks::viewer::ViewerSurface,
 ) -> Reply {
+    let control = &routes.viewer;
     let request: Request = match serde_json::from_slice(payload) {
         Ok(request) => request,
         Err(err) => {
@@ -807,16 +866,25 @@ async fn answer_control_request(
             Err(_) => Reply::error(ErrorKind::Failed, "the viewer is shutting down"),
         }
     };
+    // Awake/asleep: queued behind the startup state (`run_state_sequencer`).
+    // `ok` means accepted; during the greeting it applies once the greeting
+    // ends.
+    let sequence = |cmd: ViewerCommand| async move {
+        match routes.state.send(cmd).await {
+            Ok(()) => Reply::ok(),
+            Err(_) => Reply::error(ErrorKind::Failed, "the viewer is shutting down"),
+        }
+    };
 
     match request {
         Request::ToggleState => {
             tracing::info!(command = name, "received control command");
-            forward(ViewerCommand::ToggleState).await
+            sequence(ViewerCommand::ToggleState).await
         }
         Request::SetState { state } => {
             let viewer_state: ViewerState = state.into();
             tracing::info!(command = name, ?viewer_state, "received control command");
-            forward(ViewerCommand::SetState(viewer_state)).await
+            sequence(ViewerCommand::SetState(viewer_state)).await
         }
         Request::DisplayPower { state, output } => {
             tracing::info!(
@@ -892,11 +960,16 @@ mod control_socket_tests {
         let path = dir.path().join("control.sock");
         let listener = UnixListener::bind(&path).expect("bind");
         let (tx, rx) = mpsc::channel(16);
+        // No startup state here: awake/asleep go straight to the viewer.
+        let routes = ControlRoutes {
+            viewer: tx.clone(),
+            state: tx,
+        };
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let tx = tx.clone();
+                let routes = routes.clone();
                 tokio::spawn(async move {
-                    let _ = handle_control_connection(stream, tx, surface).await;
+                    let _ = handle_control_connection(stream, routes, surface).await;
                 });
             }
         });
@@ -922,6 +995,56 @@ mod control_socket_tests {
             rx.recv().await,
             Some(ViewerCommand::SetState(ViewerState::Asleep))
         ));
+    }
+
+    /// Review M1: the socket answers during the greeting (it used to accept
+    /// nothing until the greeting was over), and an awake/asleep request
+    /// made then still applies after the startup state, not before it.
+    #[tokio::test]
+    async fn the_socket_answers_during_the_greeting_and_state_waits_for_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("control.sock");
+        let (tx, mut rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let greeting = Duration::from_secs(2);
+        let server = tokio::spawn(run_control_socket(
+            cancel.clone(),
+            tx,
+            path.clone(),
+            greeting,
+            None, // no schedule: the startup state is Awake
+            ViewerSurface::Drm,
+        ));
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let started = std::time::Instant::now();
+        assert_eq!(request(&path, r#"{"command":"ping"}"#).await, Reply::ok());
+        assert_eq!(
+            request(&path, r#"{"command":"set-state","state":"asleep"}"#).await,
+            Reply::ok()
+        );
+        assert!(started.elapsed() < greeting, "answered during the greeting");
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing applied before the startup state"
+        );
+        let first = tokio::time::timeout(greeting * 2, rx.recv())
+            .await
+            .expect("startup state");
+        assert!(matches!(
+            first,
+            Some(ViewerCommand::SetState(ViewerState::Awake))
+        ));
+        let second = tokio::time::timeout(greeting, rx.recv())
+            .await
+            .expect("the request");
+        assert!(matches!(
+            second,
+            Some(ViewerCommand::SetState(ViewerState::Asleep))
+        ));
+        cancel.cancel();
+        server.await.expect("server task").expect("server");
     }
 
     #[tokio::test]
@@ -990,8 +1113,17 @@ mod control_socket_tests {
     #[tokio::test(start_paused = true)]
     async fn a_viewer_that_never_answers_times_out() {
         let (tx, mut rx) = mpsc::channel(4);
+        let routes = ControlRoutes {
+            viewer: tx.clone(),
+            state: tx,
+        };
         let answer = tokio::spawn(async move {
-            answer_control_request(br#"{"command":"display-power"}"#, &tx, ViewerSurface::Drm).await
+            answer_control_request(
+                br#"{"command":"display-power"}"#,
+                &routes,
+                ViewerSurface::Drm,
+            )
+            .await
         });
         // Hold the reply sender without answering.
         let held = rx.recv().await;
