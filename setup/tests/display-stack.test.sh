@@ -23,6 +23,8 @@ FAIL_ENABLE=""       # unit whose `systemctl enable` fails
 FAIL_START=""        # unit whose start/restart fails
 GREETD_STATE="enabled"
 UNIT_WANTED_BY="graphical.target"  # [Install] WantedBy= that `systemctl cat` prints
+KMS_ENABLED=0       # 1: photoframe-kms.service is enabled
+GREETD_RUNNING=0     # 1: greetd is enabled and active (a Sway frame)
 GREETD_INSTALLED=1   # 0: `systemctl list-unit-files greetd.service` finds nothing
 NRESTARTS="${WORK}/nrestarts" # successive NRestarts values, one per line
 # (a file, because the library reads it from command substitutions)
@@ -38,6 +40,8 @@ systemctl() {
         enable) [[ "$2" != "${FAIL_ENABLE}" ]] ;;
         start | restart) [[ "$2" != "${FAIL_START}" ]] ;;
         cat) [[ -z "${UNIT_WANTED_BY}" ]] || printf '[Install]\nWantedBy=%s\n' "${UNIT_WANTED_BY}" ;;
+        is-active) [[ "$3" != "greetd.service" || "${GREETD_RUNNING}" -eq 1 ]] ;;
+        is-enabled) if [[ "$3" == "greetd.service" ]]; then [[ "${GREETD_RUNNING}" -eq 1 ]]; else [[ "${KMS_ENABLED}" -eq 1 ]]; fi ;;
         list-unit-files) [[ "$2" != "greetd.service" || "${GREETD_INSTALLED}" -eq 1 ]] ;;
         show)
             case "$3" in
@@ -66,6 +70,8 @@ reset_stubs() {
     FAIL_START=""
     GREETD_STATE="enabled"
     GREETD_INSTALLED=1
+    GREETD_RUNNING=0
+    KMS_ENABLED=0
     UNIT_WANTED_BY="graphical.target"
     : >"${NRESTARTS}"
     JOURNAL_LINE=""
@@ -155,6 +161,63 @@ printf 'PHOTOFRAME_DISPLAY=kms\n' >"${DISPLAY_ENV_PATH}"
 PHOTOFRAME_DISPLAY=kms display_stack_resolve >/dev/null 2>&1 || fail "kms choice refused without greetd"
 rm -f "${DISPLAY_ENV_PATH}"
 reset_stubs
+
+# --- the system stage never displaces a running Sway stack for an old viewer
+# (a v1.1 frame updated with install-all.sh or system/install.sh) ---------------
+export DISPLAY_VIEWER_BIN="${WORK}/photoframe"
+old_viewer() { printf 'ELF v1.1 viewer: WAYLAND_DISPLAY\n' >"${DISPLAY_VIEWER_BIN}"; chmod +x "${DISPLAY_VIEWER_BIN}"; }
+new_viewer() { printf 'ELF v1.2 viewer: PHOTOFRAME_SURFACE wayland drm\n' >"${DISPLAY_VIEWER_BIN}"; chmod +x "${DISPLAY_VIEWER_BIN}"; }
+no_viewer() { rm -f "${DISPLAY_VIEWER_BIN}"; }
+touched_greetd() { called "systemctl disable greetd.service" || called "systemctl stop greetd.service"; }
+
+# v1.1 Sway frame, system stage on its own (both update paths run it)
+reset_stubs; GREETD_RUNNING=1; old_viewer
+display_stack_system_apply kms start 2>/dev/null || fail "held stage reported failure"
+called "systemctl enable photoframe-kms.service" && fail "system stage enabled kms over a running Sway stack with an old viewer"
+touched_greetd && fail "system stage disabled or stopped greetd for an old viewer"
+called "photoframe-kms.service" && fail "system stage touched the kms unit for an old viewer"
+reset_stubs; GREETD_RUNNING=1; old_viewer
+display_stack_system_apply kms enable-only 2>/dev/null
+called "systemctl enable photoframe-kms.service" && fail "60-systemd path enabled kms over a running Sway stack"
+# ... the hold message says who switches
+reset_stubs; GREETD_RUNNING=1; old_viewer
+out="$(display_stack_system_apply kms start 2>&1)"
+[[ "${out}" == *"deploy.sh"* ]] || fail "hold message does not name the deploy: ${out}"
+# the same frame with no viewer installed at all is held too
+reset_stubs; GREETD_RUNNING=1; no_viewer
+display_stack_system_apply kms start >/dev/null 2>&1
+touched_greetd && fail "system stage displaced greetd with no viewer installed"
+# the deploy-only path (45-activate) switches once the new viewer is in place
+reset_stubs; GREETD_RUNNING=1; new_viewer
+display_stack_apply kms start >/dev/null || fail "deploy-time switch failed"
+called "systemctl disable greetd.service" || fail "deploy-time switch did not retire greetd"
+called "systemctl restart photoframe-kms.service" || fail "deploy-time switch did not start kms"
+out="$(display_stack_apply kms start 2>&1)"
+[[ "${out}" == *"to go back to Sway by hand"* ]] || fail "no manual way back printed: ${out}"
+# a system stage that finds a KMS-capable viewer may switch
+reset_stubs; GREETD_RUNNING=1; new_viewer
+display_stack_system_apply kms start >/dev/null 2>&1 || fail "capable viewer: switch failed"
+called "systemctl restart photoframe-kms.service" || fail "capable viewer: system stage did not start kms"
+# fresh install: enable kms, but do not start a unit with no viewer
+reset_stubs; no_viewer
+display_stack_system_apply kms start >/dev/null 2>&1 || fail "fresh install failed"
+called "systemctl enable photoframe-kms.service" || fail "fresh install did not enable kms"
+called "systemctl restart photoframe-kms.service" && fail "fresh install started kms without a viewer"
+# an explicit wayland choice is never held
+reset_stubs; GREETD_RUNNING=0; old_viewer
+display_stack_system_apply wayland start >/dev/null 2>&1 || fail "wayland system apply failed"
+called "systemctl start greetd.service" || fail "wayland choice was held"
+no_viewer
+unset DISPLAY_VIEWER_BIN
+
+# --- verify.sh: the other stack must not stay enabled -------------------------
+reset_stubs; GREETD_RUNNING=1
+[[ "$(display_stack_other_enabled kms)" == "greetd.service" ]] || fail "enabled greetd not reported on kms"
+GREETD_RUNNING=0
+[[ -z "$(display_stack_other_enabled kms)" ]] || fail "kms with greetd disabled reported something"
+[[ -z "$(display_stack_other_enabled wayland)" ]] || fail "wayland with kms disabled reported something"
+KMS_ENABLED=1
+[[ "$(display_stack_other_enabled wayland)" == "photoframe-kms.service" ]] || fail "enabled kms not reported on wayland"
 
 # --- system stage guard (deploy.sh --skip-build) -----------------------------
 # getent/id stubbed: the user exists, and only the groups in ${GROUPS_PRESENT}.

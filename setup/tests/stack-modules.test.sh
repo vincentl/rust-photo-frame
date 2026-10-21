@@ -112,6 +112,10 @@ rm -f "${DISPLAY_ENV_PATH}"
 out="$(activate)" || fail "45-activate failed on the default stack: ${out}"
 logged "seatd" && fail "45-activate touched seatd on kms"
 logged "restart photoframe-kms.service" || fail "45-activate did not restart the kms unit"
+# a v1.1 Sway frame updated by the app deploy (the viewer is installed by 30-install
+# before this module runs): this is where the switch to KMS happens
+logged "disable greetd.service" || fail "45-activate did not retire greetd on the switch to kms"
+[[ "${out}" == *"to go back to Sway by hand"* ]] || fail "45-activate printed no manual way back: ${out}"
 [[ "${out}" == *"Display stack: kms (photoframe-kms.service, default)"* ]] || fail "45-activate did not name the stack: ${out}"
 
 printf 'PHOTOFRAME_DISPLAY=wayland\n' >"${DISPLAY_ENV_PATH}"

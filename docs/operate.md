@@ -19,7 +19,7 @@ Day-to-day commands, status checks, and troubleshooting for a frame you own and 
 | Screen off (DPMS) | `sudo -u kiosk /opt/photoframe/bin/powerctl sleep` |
 | Screen on, explicit output | `sudo -u kiosk /opt/photoframe/bin/powerctl wake HDMI-A-2` |
 | Is the screen on? | `sudo -u kiosk /opt/photoframe/bin/powerctl state` |
-| Screen power, straight to the viewer | `echo '{"command":"display-power","state":"off"}' \| sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock` (`"on"`; omit `state` to query; answers `unsupported` on the Wayland fallback) |
+| Screen power, straight to the viewer | `echo '{"command":"display-power","state":"off"}' \| sudo -u kiosk socat -t 6 - UNIX-CONNECT:/run/photoframe/control.sock` (`"on"`; omit `state` to query; answers `unsupported` on the Wayland fallback) |
 | Take the Wi-Fi overlay down | `echo '{"command":"wifi-overlay-hide"}' \| sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock` (wifi-manager shows it again within 10 s while recovery lasts) |
 
 Every control-socket command answers with one JSON line (`{"ok":true,…}`); the full list is in [Advanced › Control socket protocol](advanced.md#control-socket-protocol).
@@ -143,6 +143,8 @@ cd ~/photoframe
 git pull
 ./setup/application/deploy.sh
 ```
+
+> **If the new stack does not come up after an update**, go back to Sway by hand: `sudo systemctl enable greetd.service && sudo systemctl disable photoframe-kms.service && sudo systemctl stop photoframe-kms.service && sudo systemctl start greetd.service`. The system stage (`install-all.sh`, `setup/system/install.sh`) does not switch a running Sway frame to KMS while the installed viewer predates KMS; the application deploy does, after it installs the new viewer.
 
 > **Frames installed before v1.2 run Sway.** They have no `/etc/photoframe/display.env`, so the first v1.2 deploy switches them to the KMS stack (and stops greetd). To keep Sway, run `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` for that update; the choice is remembered. If the new stack does not come up, `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` also takes you back. See [Advanced › Display stacks](advanced.md#display-stacks).
 

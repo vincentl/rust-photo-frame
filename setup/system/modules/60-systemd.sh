@@ -150,7 +150,7 @@ enable_systemd_units() {
     fi
 
     log "Enabling the ${display_choice} display stack"
-    display_stack_apply "${display_choice}" enable-only || true
+    display_stack_system_apply "${display_choice}" enable-only || true
 
     if [[ "${display_choice}" == "wayland" && -x "${session_bin}" ]]; then
         log "Verifying display-manager alias"
