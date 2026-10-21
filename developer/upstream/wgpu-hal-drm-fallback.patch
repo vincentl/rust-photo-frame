@@ -1,0 +1,64 @@
+From d045c5186299ad83061941e721a47d6ccbb55017 Mon Sep 17 00:00:00 2001
+From: Vincent Lucarelli <vincent.lucarelli@gmail.com>
+Date: Wed, 21 Oct 2026 00:43:33 -0400
+Subject: [PATCH] [hal/vulkan] Fall back to the driver when no device matches a
+ DRM fd
+
+`create_surface_from_drm` only accepts a physical device whose
+`VK_EXT_physical_device_drm` nodes match the fd's `st_rdev`. Where the GPU
+and the display controller are separate DRM devices (Raspberry Pi: `v3d`
+renders, `vc4` scans out), no device matches and surface creation fails
+with "Failed to find suitable drm device".
+
+If nothing matches, use the first physical device for which
+`vkGetDrmDisplayEXT` resolves the connector on the fd. A device matching by
+number is still preferred.
+---
+ wgpu-hal/src/vulkan/drm.rs | 20 ++++++++++++++++----
+ 1 file changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/wgpu-hal/src/vulkan/drm.rs b/wgpu-hal/src/vulkan/drm.rs
+index 9c03b04..425c78e 100644
+--- a/wgpu-hal/src/vulkan/drm.rs
++++ b/wgpu-hal/src/vulkan/drm.rs
+@@ -147,7 +147,7 @@ impl super::Instance {
+ 
+         let mut physical_device = None;
+ 
+-        for device in raw_devices {
++        for &device in &raw_devices {
+             let properties2 = vk::PhysicalDeviceProperties2KHR::default();
+ 
+             let mut drm_props = vk::PhysicalDeviceDrmPropertiesEXT::default();
+@@ -189,13 +189,25 @@ impl super::Instance {
+             }
+         }
+ 
++        let acquire_drm_display_instance =
++            ext::acquire_drm_display::Instance::new(&self.shared.entry, &self.shared.raw);
++
++        // On SoCs where rendering and scanout are separate DRM devices (e.g. the Raspberry Pi,
++        // where `v3d` renders and `vc4` drives the display), `VK_EXT_physical_device_drm` reports
++        // the render device's nodes, so no physical device matches the display fd by device
++        // number. The driver knows which device can drive the fd, so fall back to the first one
++        // that can resolve the connector on it.
++        if physical_device.is_none() {
++            physical_device = raw_devices.iter().copied().find(|&device| {
++                unsafe { acquire_drm_display_instance.get_drm_display(device, fd, connector_id) }
++                    .is_ok()
++            });
++        }
++
+         let physical_device = physical_device.ok_or(crate::InstanceError::new(
+             "Failed to find suitable drm device".to_string(),
+         ))?;
+ 
+-        let acquire_drm_display_instance =
+-            ext::acquire_drm_display::Instance::new(&self.shared.entry, &self.shared.raw);
+-
+         let display = unsafe {
+             acquire_drm_display_instance
+                 .get_drm_display(physical_device, fd, connector_id)
+-- 
+2.55.0
+
