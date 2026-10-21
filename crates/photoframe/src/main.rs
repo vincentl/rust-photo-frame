@@ -59,10 +59,10 @@ struct Args {
     /// Deterministic RNG seed for playlist shuffling (applies to dry-run and live modes)
     #[arg(long = "playlist-seed", value_name = "SEED")]
     playlist_seed: Option<u64>,
-    /// Dry run with portrait pairing: the matting canvas (screen x oversample)
-    /// pairability is judged on
-    #[arg(long = "canvas", value_name = "WxH", default_value = "3840x2160", value_parser = parse_canvas)]
-    canvas: (u32, u32),
+    /// Dry run with portrait pairing: the matting canvas pairability is judged
+    /// on [default: 3840x2160 times global-photo-settings.oversample]
+    #[arg(long = "canvas", value_name = "WxH", value_parser = parse_canvas)]
+    canvas: Option<(u32, u32)>,
 }
 
 fn parse_canvas(value: &str) -> Result<(u32, u32), String> {
@@ -355,11 +355,19 @@ fn run_playlist_dry_run(
     iterations: usize,
     now_override: Option<SystemTime>,
     seed: Option<u64>,
-    canvas: (u32, u32),
+    canvas: Option<(u32, u32)>,
 ) -> Result<()> {
     let now = now_override.unwrap_or_else(SystemTime::now);
     let mut photos = tasks::files::discover_startup_photos(cfg)?;
     let pairing = tasks::manager::pairing::PairingRules::from_config(cfg);
+    // The matting canvas is the screen times the oversample factor.
+    let canvas = canvas.unwrap_or_else(|| {
+        let oversample = f64::from(cfg.global_photo_settings.oversample);
+        (
+            (3840.0 * oversample).round().max(1.0) as u32,
+            (2160.0 * oversample).round().max(1.0) as u32,
+        )
+    });
     if pairing.is_some() {
         // The dry run reads headers inline.
         for info in &mut photos {

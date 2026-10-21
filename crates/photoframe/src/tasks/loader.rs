@@ -350,12 +350,37 @@ pub async fn run(
     let mut next_seq: u64 = 0;
     let mut reorder = ReorderBuffer::new();
     let mut pending_ready: Option<ReadyPhoto> = None;
-    let mut last_sent_path: Option<PathBuf> = None;
+    let mut last_sent_path: Option<Vec<PathBuf>> = None;
+    // Decodes per outstanding slot (1, or 2 for a pair), and a pair request
+    // waiting for room: `loader-max-concurrent-decodes` bounds decodes, not
+    // slots, so a pair takes two places.
+    let mut slot_decodes: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut waiting: Option<LoadPhoto> = None;
 
     loop {
-        // Bound outstanding work (in-flight + buffered) so a slow decode applies
-        // backpressure instead of letting the reorder buffer grow without limit.
-        let can_accept = next_seq.saturating_sub(reorder.next_emit()) < max_in_flight as u64;
+        // Bound outstanding work (in-flight + buffered decodes) so a slow decode
+        // applies backpressure instead of letting the reorder buffer grow
+        // without limit. With one decode per slot this is the slot count.
+        slot_decodes.retain(|seq, _| *seq >= reorder.next_emit());
+        let outstanding: usize = slot_decodes.values().sum();
+        if let Some(request) = waiting.take() {
+            if has_room(outstanding, request_decodes(&request), max_in_flight) {
+                start_slot(
+                    request,
+                    &mut StartSlot {
+                        in_flight: &mut in_flight,
+                        priority_inflight: &mut priority_inflight,
+                        tasks: &mut tasks,
+                        next_seq: &mut next_seq,
+                        slot_decodes: &mut slot_decodes,
+                        scaling: &scaling,
+                    },
+                );
+                continue;
+            }
+            waiting = Some(request);
+        }
+        let can_accept = waiting.is_none() && outstanding < max_in_flight;
 
         select! {
             _ = cancel.cancelled() => {
@@ -365,27 +390,8 @@ pub async fn run(
 
             // Accept new load requests while the outstanding window has room.
             Some(request) = load_rx.recv(), if can_accept => {
-                let members = admit_members(request, &mut in_flight, &mut priority_inflight);
-                // A request whose every member is already in flight is dropped
-                // (no seq used); any priority upgrade was recorded.
-                if !members.is_empty() {
-                    let seq = next_seq;
-                    next_seq += 1;
-                    let scaling = scaling.clone();
-                    // A pair slot runs its members' decodes concurrently,
-                    // joined under one reorder seq.
-                    tasks.spawn(async move {
-                        let decodes = members.into_iter().map(|path| {
-                            let target = scaling.target();
-                            async move {
-                                let p = path.clone();
-                                let res = tokio::task::spawn_blocking(move || decode_rgba8_apply_exif(&p, target)).await;
-                                (path, res.ok().and_then(|r| r.ok()))
-                            }
-                        });
-                        (seq, futures::future::join_all(decodes).await)
-                    });
-                }
+                // A pair that would exceed the decode bound waits for room.
+                waiting = Some(request);
             }
 
             // Handle completed decodes as they finish, then release in request order.
@@ -451,6 +457,55 @@ async fn send_decoded_meta(
     }
 }
 
+/// Decodes a request asks for: one per member.
+fn request_decodes(request: &LoadPhoto) -> usize {
+    1 + usize::from(request.partner.is_some())
+}
+
+/// Whether `decodes` more fit under `max` with `outstanding` decodes in
+/// flight or buffered. A request always fits an idle loader, so a pair still
+/// runs with `loader-max-concurrent-decodes: 1`.
+fn has_room(outstanding: usize, decodes: usize, max: usize) -> bool {
+    outstanding == 0 || outstanding + decodes <= max
+}
+
+struct StartSlot<'a> {
+    in_flight: &'a mut HashSet<PathBuf>,
+    priority_inflight: &'a mut HashSet<PathBuf>,
+    tasks: &'a mut JoinSet<DecodedSlot>,
+    next_seq: &'a mut u64,
+    slot_decodes: &'a mut BTreeMap<u64, usize>,
+    scaling: &'a DecodeScaling,
+}
+
+/// Admit `request`'s members (per-member dedupe) and decode them as one
+/// slot. A request whose every member is already in flight is dropped (no
+/// seq used); any priority upgrade was recorded.
+fn start_slot(request: LoadPhoto, st: &mut StartSlot<'_>) {
+    let members = admit_members(request, st.in_flight, st.priority_inflight);
+    if members.is_empty() {
+        return;
+    }
+    let seq = *st.next_seq;
+    *st.next_seq += 1;
+    st.slot_decodes.insert(seq, members.len());
+    let scaling = st.scaling.clone();
+    // A pair slot runs its members' decodes concurrently, joined under one
+    // reorder seq.
+    st.tasks.spawn(async move {
+        let decodes = members.into_iter().map(|path| {
+            let target = scaling.target();
+            async move {
+                let p = path.clone();
+                let res =
+                    tokio::task::spawn_blocking(move || decode_rgba8_apply_exif(&p, target)).await;
+                (path, res.ok().and_then(|r| r.ok()))
+            }
+        });
+        (seq, futures::future::join_all(decodes).await)
+    });
+}
+
 /// One finished slot: its reorder seq and each member's decode, in request
 /// order.
 type DecodedSlot = (u64, Vec<(PathBuf, Option<DecodedPhoto>)>);
@@ -489,8 +544,9 @@ fn ready_slot(shown: Vec<(PreparedImageCpu, bool)>) -> Option<ReadyPhoto> {
         .next()
         .map(|(prepared, priority)| LoadedPartner { prepared, priority });
     Some(ReadyPhoto {
-        // The back-to-back guard is keyed on the first member.
-        path: prepared.path.clone(),
+        members: std::iter::once(prepared.path.clone())
+            .chain(partner.as_ref().map(|p| p.prepared.path.clone()))
+            .collect(),
         event: PhotoLoaded {
             prepared,
             priority,
@@ -500,7 +556,8 @@ fn ready_slot(shown: Vec<(PreparedImageCpu, bool)>) -> Option<ReadyPhoto> {
 }
 
 struct ReadyPhoto {
-    path: PathBuf,
+    /// The slot's photos (one, or a pair's two), for the back-to-back guard.
+    members: Vec<PathBuf>,
     event: PhotoLoaded,
 }
 
@@ -542,38 +599,46 @@ impl ReorderBuffer {
     }
 }
 
+/// The back-to-back guard: a slot sharing a photo with the slot sent just
+/// before it is held back one slot (if nothing is held yet), so a photo is
+/// not on two consecutive screens. Keyed on member sets, so it also catches
+/// a pair whose second member was on the previous screen (review F5).
 async fn send_ready(
     ready: ReadyPhoto,
-    last_sent: &mut Option<PathBuf>,
+    last_sent: &mut Option<Vec<PathBuf>>,
     pending: &mut Option<ReadyPhoto>,
     to_viewer: &Sender<PhotoLoaded>,
 ) {
+    let shares = |last: &Option<Vec<PathBuf>>, members: &[PathBuf]| {
+        last.as_ref()
+            .is_some_and(|last| members.iter().any(|m| last.contains(m)))
+    };
     let mut current = Some(ready);
-    while let Some(ReadyPhoto { path, event }) = current {
-        if last_sent.as_ref() == Some(&path) {
+    while let Some(ReadyPhoto { members, event }) = current {
+        if shares(last_sent, &members) {
             if pending.is_none() {
-                *pending = Some(ReadyPhoto { path, event });
+                *pending = Some(ReadyPhoto { members, event });
             } else {
                 let _ = to_viewer.send(event).await;
-                *last_sent = Some(path);
+                *last_sent = Some(members);
             }
             return;
         } else {
             let _ = to_viewer.send(event).await;
-            *last_sent = Some(path);
+            *last_sent = Some(members);
             current = pending.take();
         }
     }
 }
 
 async fn flush_pending(
-    last_sent: &mut Option<PathBuf>,
+    last_sent: &mut Option<Vec<PathBuf>>,
     pending: &mut Option<ReadyPhoto>,
     to_viewer: &Sender<PhotoLoaded>,
 ) {
-    if let Some(ReadyPhoto { path, event }) = pending.take() {
+    if let Some(ReadyPhoto { members, event }) = pending.take() {
         let _ = to_viewer.send(event).await;
-        *last_sent = Some(path);
+        *last_sent = Some(members);
     }
 }
 
@@ -593,7 +658,7 @@ mod tests {
             pixels: vec![0, 0, 0, 0],
         };
         ReadyPhoto {
-            path: path_buf,
+            members: vec![path_buf],
             event: PhotoLoaded {
                 prepared,
                 priority: false,
@@ -644,7 +709,7 @@ mod tests {
         assert_eq!(third.prepared.path, PathBuf::from("a"));
         assert!(!third.priority);
         assert!(pending.is_none());
-        assert_eq!(last_sent, Some(PathBuf::from("a")));
+        assert_eq!(last_sent, Some(vec![PathBuf::from("a")]));
     }
 
     #[tokio::test]
@@ -665,13 +730,13 @@ mod tests {
         assert_eq!(flushed.prepared.path, PathBuf::from("a"));
         assert!(!flushed.priority);
         assert!(pending.is_none());
-        assert_eq!(last_sent, Some(PathBuf::from("a")));
+        assert_eq!(last_sent, Some(vec![PathBuf::from("a")]));
     }
 
     fn ready_paths(items: &[ReadyPhoto]) -> Vec<String> {
         items
             .iter()
-            .map(|r| r.path.to_string_lossy().into_owned())
+            .map(|r| r.members[0].to_string_lossy().into_owned())
             .collect()
     }
 
@@ -811,6 +876,10 @@ mod tests {
         image::RgbaImage::from_pixel(20, 40, image::Rgba([4, 5, 6, 255]))
             .save(&b)
             .unwrap();
+        let c = dir.path().join("c.png");
+        image::RgbaImage::from_pixel(20, 40, image::Rgba([7, 8, 9, 255]))
+            .save(&c)
+            .unwrap();
         let missing = dir.path().join("missing.jpg");
         let (load_tx, load_rx) = mpsc::channel(4);
         let (invalid_tx, mut invalid_rx) = mpsc::channel(4);
@@ -848,17 +917,112 @@ mod tests {
                 path: missing.clone(),
                 priority: false,
                 partner: Some(LoadPartner {
-                    path: b.clone(),
+                    path: c.clone(),
                     priority: false,
                 }),
             })
             .await
             .unwrap();
         let solo = recv_loaded(&mut viewer_rx).await;
-        assert_eq!(solo.prepared.path, b, "the decoded member is shown solo");
+        assert_eq!(solo.prepared.path, c, "the decoded member is shown solo");
         assert!(solo.partner.is_none());
         let InvalidPhoto(invalid) = invalid_rx.recv().await.unwrap();
         assert_eq!(invalid, missing);
+        cancel.cancel();
+        let _ = task.await;
+    }
+
+    fn ready_pair(a: &str, b: &str) -> ReadyPhoto {
+        let mut ready = ready_for(a);
+        let partner = ready_for(b);
+        ready.members.push(PathBuf::from(b));
+        ready.event.partner = Some(LoadedPartner {
+            prepared: partner.event.prepared,
+            priority: false,
+        });
+        ready
+    }
+
+    /// Review F5: the guard is keyed on member sets, so (p2, p4) then
+    /// (p4, p5) holds the second screen back, as p4, p4 is held solo.
+    #[tokio::test]
+    async fn back_to_back_guard_sees_every_member_of_a_pair() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (mut last_sent, mut pending) = (None, None);
+        send_ready(ready_pair("p2", "p4"), &mut last_sent, &mut pending, &tx).await;
+        send_ready(ready_pair("p4", "p5"), &mut last_sent, &mut pending, &tx).await;
+        assert!(pending.is_some(), "held: p4 was on the previous screen");
+        send_ready(ready_for("p6"), &mut last_sent, &mut pending, &tx).await;
+        let order: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|e| e.prepared.path)
+            .collect();
+        assert_eq!(
+            order,
+            [
+                PathBuf::from("p2"),
+                PathBuf::from("p6"),
+                PathBuf::from("p4")
+            ]
+        );
+    }
+
+    /// Review F7: `loader-max-concurrent-decodes` bounds decodes; a pair takes
+    /// two places, and an idle loader always takes a request.
+    #[test]
+    fn a_pair_counts_as_two_decodes() {
+        assert!(
+            has_room(0, 2, 1),
+            "an idle loader runs a pair even at max 1"
+        );
+        assert!(has_room(1, 1, 2));
+        assert!(!has_room(1, 2, 2), "a pair waits for a second free place");
+        assert!(has_room(2, 2, 4));
+        assert!(!has_room(3, 2, 4));
+    }
+
+    #[tokio::test]
+    async fn pairs_run_at_one_concurrent_decode_without_stalling() {
+        use crate::events::LoadPartner;
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for name in ["a", "b", "c", "d"] {
+            let path = dir.path().join(format!("{name}.png"));
+            image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]))
+                .save(&path)
+                .unwrap();
+            paths.push(path);
+        }
+        let (load_tx, load_rx) = mpsc::channel(4);
+        let (invalid_tx, _invalid_rx) = mpsc::channel(4);
+        let (viewer_tx, mut viewer_rx) = mpsc::channel(4);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run(
+            load_rx,
+            invalid_tx,
+            viewer_tx,
+            cancel.clone(),
+            1,
+            DecodeScaling::disabled(),
+            None,
+        ));
+        for pair in paths.chunks(2) {
+            load_tx
+                .send(LoadPhoto {
+                    path: pair[0].clone(),
+                    priority: false,
+                    partner: Some(LoadPartner {
+                        path: pair[1].clone(),
+                        priority: false,
+                    }),
+                })
+                .await
+                .unwrap();
+        }
+        for pair in paths.chunks(2) {
+            let loaded = recv_loaded(&mut viewer_rx).await;
+            assert_eq!(loaded.prepared.path, pair[0]);
+            assert_eq!(loaded.partner.unwrap().prepared.path, pair[1]);
+        }
         cancel.cancel();
         let _ = task.await;
     }

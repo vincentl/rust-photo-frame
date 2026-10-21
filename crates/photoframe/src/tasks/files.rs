@@ -171,7 +171,12 @@ async fn send_added(path: &Path, to_manager: &Sender<InventoryEvent>, read_heade
         // Discovered at runtime → eligible for the priority FIFO.
         runtime_added: true,
         display_size: if read_headers {
-            read_display_size(path)
+            // A header read is small but blocking; keep it off the runtime.
+            let owned = path.to_path_buf();
+            tokio::task::spawn_blocking(move || read_display_size(&owned))
+                .await
+                .ok()
+                .flatten()
         } else {
             None
         },

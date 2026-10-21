@@ -430,8 +430,9 @@ and are corrected by every decode. Nothing pairs until the viewer has reported i
 library that is 40% portraits, at `p = 1`. That formula treats the playlist as
 independent draws, so the dry run and the analyzer print the measured share beside it; in
 small libraries the two rules above refuse a few pairs and the share is slightly lower.
-`probability` lowers the share without touching the order; at `0` the frame behaves
-exactly as with pairing off.
+`probability` lowers the share without touching the order; at `0` the screens, and when
+each is sent to the loader, are exactly those of pairing off (headers are still read,
+the non-zero-mat rule still applies and the metric lines still carry the pairing fields).
 
 **One mat, two windows.** The two photos share one mat. They are drawn at the same
 height and never cropped, left to right in playlist order, with a center bar of
@@ -475,8 +476,8 @@ proportionally more often per hour; the shares stay the same.
 pairable photos, `π`, screens vs photos, the measured paired share beside
 `2πp / (1 + πp)`, how often a photo meets the same partner again, and photos on
 consecutive screens (0 in the dry run, except where the unpaired playlist itself repeats
-a photo). Pass `--canvas WxH` (default `3840x2160`) for a panel other than 4K at
-`oversample` 1. On the frame, `metrics: true` adds the pairing fields to
+a photo). Pass `--canvas WxH` for a panel other than 4K; the default is 3840x2160
+times `oversample`. On the frame, `metrics: true` adds the pairing fields to
 `photo_display_metric` (see [Performance → Measuring](performance.md#measuring)) and
 `developer/analyze-playlist-metrics.py` reports them in its `# PAIRING` section.
 
