@@ -55,6 +55,10 @@ pub(super) struct WakeInputs {
     pub(super) deferred: usize,
     /// `viewer-preload-count`.
     pub(super) preload: usize,
+    /// When the Wi-Fi overlay's lease runs out, if one is held (see
+    /// `presentation.rs`). It is a deadline in every scene: with the
+    /// slideshow paused under the overlay there is no dwell to wake for.
+    pub(super) overlay_expires_at: Option<Instant>,
 }
 
 /// What the loop does next.
@@ -93,10 +97,18 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
         _ => None,
     };
 
+    // An overlay lease that ends in the future is a deadline; one already
+    // over is taken down by the next control step, so run it now.
+    let overlay_due = inputs.overlay_expires_at.is_some_and(|at| at <= now);
+    let deadline = match (deadline, inputs.overlay_expires_at.filter(|at| *at > now)) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+
     // The step that finalized a transition ran its uploads and matting
     // refill *before* the finalize, while both were still gated off, so the
     // deferred work runs on one more step right after it.
-    let tick_now = inputs.transition_just_finished && !inputs.sleeping;
+    let tick_now = (inputs.transition_just_finished && !inputs.sleeping) || overlay_due;
 
     // Exactly when MattingBridge::queue_for_wake reads the loader (the test
     // `want_photo_matches_the_bridge_gate` in viewer.rs holds the two
@@ -206,6 +218,7 @@ mod tests {
             in_flight: 0,
             deferred: 0,
             preload: 3,
+            overlay_expires_at: None,
         }
     }
 
@@ -254,6 +267,56 @@ mod tests {
             crate::config::TransitionConfig::default(),
         );
         assert_eq!(scene.dwell(), DWELL);
+    }
+
+    #[test]
+    fn an_overlay_lease_is_a_deadline_in_every_scene() {
+        let now = Instant::now();
+        let soon = now + Duration::from_secs(5);
+        // Paused slideshow under the overlay: the lease is the only deadline.
+        let paused = WakeInputs {
+            slideshow_active: false,
+            overlay_expires_at: Some(soon),
+            ..resting(now)
+        };
+        assert_eq!(plan_wake(paused, now).deadline, Some(soon));
+        // Asleep with the overlay held: same.
+        let asleep = WakeInputs {
+            sleeping: true,
+            ..paused
+        };
+        assert_eq!(plan_wake(asleep, now).deadline, Some(soon));
+        // With a dwell running too, the earlier of the two.
+        let both = WakeInputs {
+            overlay_expires_at: Some(now + DWELL * 2),
+            ..resting(now)
+        };
+        assert_eq!(plan_wake(both, now).deadline, Some(now + DWELL));
+        let both = WakeInputs {
+            overlay_expires_at: Some(soon),
+            ..resting(now)
+        };
+        assert_eq!(plan_wake(both, now).deadline, Some(soon));
+    }
+
+    #[test]
+    fn a_lapsed_overlay_lease_ticks_now_instead_of_waiting() {
+        let now = Instant::now();
+        for lapsed in [now, now - Duration::from_secs(1)] {
+            let plan = plan_wake(
+                WakeInputs {
+                    slideshow_active: false,
+                    overlay_expires_at: Some(lapsed),
+                    ..resting(now)
+                },
+                now,
+            );
+            assert!(
+                plan.tick_now,
+                "a lapsed lease must not leave the loop asleep"
+            );
+            assert_eq!(plan.deadline, None, "and is never a deadline in the past");
+        }
     }
 
     #[test]

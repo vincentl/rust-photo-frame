@@ -7,6 +7,7 @@ mod pacing;
 #[cfg(test)]
 mod pair_canvas_tests;
 mod photo_set;
+mod presentation;
 pub mod scenes;
 mod wake;
 
@@ -2302,6 +2303,11 @@ struct App {
     /// DRM/KMS: completion flag of the transition frame just submitted,
     /// taken by the KMS loop for `pacing::FlipAudit`. Never set on Wayland.
     paced_submission: Option<Arc<AtomicBool>>,
+    /// The Wi-Fi overlay lease and panel power, and so the layer on screen
+    /// (`presentation.rs`).
+    presentation: presentation::Presentation,
+    /// The layer `sync_presentation` last applied.
+    layer: presentation::Layer,
 }
 
 impl App {
@@ -2770,6 +2776,7 @@ impl App {
             }
             ViewerCommand::ShowWifiOverlay(_) | ViewerCommand::HideWifiOverlay => {}
         }
+        self.sync_presentation();
     }
 
     /// One control step: matting results in, uploads, matting work out, and
@@ -2787,6 +2794,7 @@ impl App {
                 scene.enter(ctx);
             });
         }
+        self.sync_presentation();
 
         self.drain_mat_results();
 
@@ -3722,6 +3730,44 @@ impl App {
             caption_overlay: None,
             transition_frame_metric: None,
             paced_submission: None,
+            presentation: presentation::Presentation::default(),
+            layer: presentation::Layer::Scene(ViewerModeKind::Greeting),
+        }
+    }
+
+    /// Apply the layer the mode, the overlay lease and panel power select
+    /// (`presentation.rs`): drop a lapsed lease, pause or resume the
+    /// slideshow, and ask for a frame when what is on screen changes. Run
+    /// after every control command and at the start of every control step.
+    fn sync_presentation(&mut self) {
+        let now = Instant::now();
+        if self.presentation.expire_overlay(now) {
+            info!("wifi_overlay_expired: no refresh within its lease; hiding it");
+        }
+        let layer = self.presentation.layer(self.mode_kind(), now);
+        let visible = layer == presentation::Layer::Scene(ViewerModeKind::Wake);
+        match self.mode_mut().wake_mut().set_visible(visible) {
+            scenes::Visibility::Hidden { rewound } => {
+                if rewound {
+                    // The rewound transition never finished on screen.
+                    self.transition_frame_metric = None;
+                }
+                info!(rewound, "slideshow_paused: not on screen");
+            }
+            scenes::Visibility::Revealed => info!("slideshow_resumed: dwell restarted"),
+            scenes::Visibility::Unchanged => {}
+        }
+        if layer == self.layer {
+            return;
+        }
+        debug!(previous = ?self.layer, ?layer, "viewer_layer_changed");
+        self.layer = layer;
+        match layer {
+            presentation::Layer::Scene(_) => {
+                let _ = self.with_active_scene(|scene, ctx| scene.handle_visibility(ctx, true));
+            }
+            presentation::Layer::Overlay => (self.redraw_requester())(),
+            presentation::Layer::Nothing => {}
         }
     }
 
@@ -3742,9 +3788,12 @@ impl App {
         };
         wake::plan_wake(
             wake::WakeInputs {
-                slideshow_active: kind == ViewerModeKind::Wake,
+                // Paused while covered or dark (`sync_presentation`).
+                slideshow_active: kind == ViewerModeKind::Wake && wake.visible(),
                 sleeping: kind == ViewerModeKind::Sleep,
-                redraw_requested,
+                // A dark panel presents nothing; the request stays armed for
+                // the wake's modeset frame.
+                redraw_requested: redraw_requested && self.presentation.power().may_present(),
                 transition_active: wake.transition_state().is_some(),
                 transition_just_finished,
                 displayed_at: wake.displayed_at(),
@@ -3754,6 +3803,7 @@ impl App {
                 in_flight: self.mat_inflight,
                 deferred: self.deferred_images.len(),
                 preload: self.preload_count,
+                overlay_expires_at: self.presentation.overlay_expires_at(),
             },
             now,
         )
@@ -4399,6 +4449,7 @@ mod tests {
                                 in_flight,
                                 deferred,
                                 preload: PRELOAD,
+                                overlay_expires_at: None,
                             },
                             now,
                         );

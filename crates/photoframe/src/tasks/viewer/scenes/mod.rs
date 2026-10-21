@@ -747,6 +747,21 @@ pub(super) struct WakeScene {
     /// Rest of a pair screen: `dwell_ms × pairing.dwell-multiplier`.
     pair_dwell_ms: u64,
     transition_cfg: TransitionConfig,
+    /// The slideshow is the layer on screen (not covered by the Wi-Fi
+    /// overlay, panel not dark). While false nothing that changes what is
+    /// on screen starts; see [`WakeScene::set_visible`].
+    visible: bool,
+}
+
+/// What [`WakeScene::set_visible`] changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Visibility {
+    Unchanged,
+    /// Hidden; `rewound` when a transition in progress was undone.
+    Hidden {
+        rewound: bool,
+    },
+    Revealed,
 }
 
 impl WakeScene {
@@ -773,7 +788,47 @@ impl WakeScene {
             dwell_ms,
             pair_dwell_ms,
             transition_cfg,
+            visible: true,
         }
+    }
+
+    /// Whether the slideshow is the layer on screen.
+    pub(super) fn visible(&self) -> bool {
+        self.visible
+    }
+
+    /// Hide or reveal the slideshow (the Wi-Fi overlay covers it, or the
+    /// panel goes dark; see `viewer/presentation.rs`).
+    ///
+    /// **Hiding rewinds** a transition in progress: the photo it was
+    /// bringing in goes back to the head of the queue and the photo it was
+    /// leaving stays current, so nothing is reported displayed for a screen
+    /// that was covered. While hidden, no transition and no first image
+    /// starts. **Revealing** restarts the current photo's dwell, so it rests
+    /// its full time on screen (the rule `enter_wake` already applies).
+    pub(super) fn set_visible(&mut self, visible: bool) -> Visibility {
+        if self.visible == visible {
+            return Visibility::Unchanged;
+        }
+        self.visible = visible;
+        if visible {
+            if self.displayed_at.is_some() {
+                self.displayed_at = Some(Instant::now());
+            }
+            self.pending_redraw = true;
+            return Visibility::Revealed;
+        }
+        let rewound = self.transition_state.take().is_some();
+        if rewound && let Some(next) = self.next.take() {
+            tracing::debug!(
+                "transition_rewound path={} queue_depth={}",
+                next.path.display(),
+                self.pending.len()
+            );
+            self.pending.push_front(next);
+        }
+        self.pending_redraw = false;
+        Visibility::Hidden { rewound }
     }
 
     /// Clears all slideshow state, returning the scene to its initial idle state.
@@ -921,7 +976,7 @@ impl WakeScene {
     }
 
     fn ensure_current_image(&mut self, ctx: &mut SceneContext<'_>) {
-        if self.current.is_some() || self.transition_state().is_some() {
+        if !self.visible || self.current.is_some() || self.transition_state().is_some() {
             return;
         }
         if let Some(first) = self.pending_mut().pop_front() {
@@ -940,7 +995,7 @@ impl WakeScene {
 
     /// Starts a transition when the dwell time elapses and staged images are available.
     pub(super) fn maybe_start_transition(&mut self, rng: &mut impl Rng) {
-        if self.transition_state.is_some() {
+        if !self.visible || self.transition_state.is_some() {
             return;
         }
         let Some(shown_at) = self.displayed_at else {
@@ -1017,6 +1072,9 @@ impl WakeScene {
     /// `about_to_wait` is cheap and keeps the request armed for the moment
     /// the callback lands.
     fn ensure_redraw_requested(&mut self, ctx: &mut SceneContext<'_>) {
+        if !self.visible {
+            return;
+        }
         let pending_redraw = self.needs_redraw();
         let has_transition = self.transition_state().is_some();
         if pending_redraw {
@@ -1630,6 +1688,7 @@ mod tests {
                     in_flight: 0,
                     deferred: 0,
                     preload: 1,
+                    overlay_expires_at: None,
                 },
                 now,
             );
@@ -1642,5 +1701,77 @@ mod tests {
                 "a pair waits out its longer dwell; a solo photo moves on"
             );
         }
+    }
+
+    /// Hiding the slideshow (overlay up, panel dark) rewinds a transition in
+    /// progress and starts nothing; revealing restarts the dwell.
+    #[test]
+    fn hiding_rewinds_a_transition_and_revealing_restarts_the_dwell() {
+        use super::super::{ImgTex, TexturePlane};
+        use super::{Visibility, WakeScene};
+        use std::time::{Duration, Instant};
+        let Some((device, _queue)) = try_device() else {
+            eprintln!("skipping wake visibility test: no GPU adapter available");
+            return;
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("visibility-test-layout"),
+            entries: &[],
+        });
+        let tex = |path: &str| ImgTex {
+            plane: TexturePlane {
+                bind: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("visibility-test-bind"),
+                    layout: &layout,
+                    entries: &[],
+                }),
+                w: 1,
+                h: 1,
+            },
+            path: path.into(),
+            partner: None,
+            mat_kind: None,
+        };
+        let mut wake = WakeScene::new(8_000, 8_000, crate::config::TransitionConfig::default());
+        let long_ago = Instant::now() - Duration::from_secs(60);
+        wake.set_current(Some(tex("a")));
+        wake.set_displayed_at(Some(long_ago));
+        wake.pending_mut().push_back(tex("b"));
+        wake.pending_mut().push_back(tex("c"));
+        wake.maybe_start_transition(&mut rand::rng());
+        assert!(
+            wake.transition_state().is_some(),
+            "test premise: a transition runs"
+        );
+        assert_eq!(wake.next().map(|n| n.path.clone()), Some("b".into()));
+
+        assert_eq!(
+            wake.set_visible(false),
+            Visibility::Hidden { rewound: true }
+        );
+        assert_eq!(wake.set_visible(false), Visibility::Unchanged);
+        assert!(wake.transition_state().is_none());
+        assert!(wake.next().is_none());
+        assert_eq!(wake.current().map(|c| c.path.clone()), Some("a".into()));
+        let queue: Vec<_> = wake.pending().iter().map(|t| t.path.clone()).collect();
+        assert_eq!(queue, vec![std::path::PathBuf::from("b"), "c".into()]);
+
+        // Hidden: the dwell long since ran out, yet nothing starts.
+        wake.maybe_start_transition(&mut rand::rng());
+        assert!(wake.transition_state().is_none());
+        assert!(!wake.needs_redraw());
+
+        let before = Instant::now();
+        assert_eq!(wake.set_visible(true), Visibility::Revealed);
+        assert!(
+            wake.displayed_at().is_some_and(|at| at >= before),
+            "full dwell again"
+        );
+        assert!(wake.needs_redraw());
+        wake.maybe_start_transition(&mut rand::rng());
+        assert!(
+            wake.transition_state().is_none(),
+            "the restarted dwell holds"
+        );
     }
 }
