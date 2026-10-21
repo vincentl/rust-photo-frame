@@ -36,7 +36,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{Level, debug, info, warn};
 
@@ -793,6 +792,15 @@ impl<'a> MattingBridge<'a> {
 //    pending. Each state transition recreates the greeting resources to keep
 //    scale/format in sync.
 
+/// Wayland: the period of the control tick (`process_tick`) while it has to
+/// run on a cadence. The rule, decided by `wake::plan_wake` (`tick_fast`):
+/// tick every `CONTROL_TICK_INTERVAL` only while a transition is animating
+/// (it finalizes on a tick) or the surface-ready handshake is still polling
+/// the window's size. At any other time the viewer ticks once per event:
+/// a matting result, a decoded photo, a control command, a window event, the
+/// dwell deadline, and once more after a transition finalizes so the uploads
+/// and matting refill it held back run at once. A resting photo wakes the
+/// process a handful of times, not 250 times a second.
 const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(4);
 /// One member's pixels for matting. The loader may have decoded a JPEG at a
 /// reduced DCT scale sized for the canvas as it was then. If the canvas has
@@ -1363,50 +1371,42 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
 enum ViewerEvent {
     Tick,
     Command(ViewerCommand),
+    /// A finished matting result, taken off the channel by the driver.
+    MatResult(MatResult),
+    /// A decoded photo, taken off the loader channel by the driver.
+    Photo(PhotoLoaded),
     Cancelled,
 }
 
+/// Wayland: wait for what the viewer needs and tell the winit thread. The
+/// waiting itself is `wake::drive_forwarding`.
 async fn drive_viewer_events(
-    mut control: Receiver<ViewerCommand>,
+    control: Receiver<ViewerCommand>,
     cancel: CancellationToken,
     proxy: winit::event_loop::EventLoopProxy<ViewerEvent>,
+    mat_results: Receiver<MatResult>,
+    loader: Receiver<PhotoLoaded>,
+    published: tokio::sync::watch::Receiver<wake::Published>,
 ) {
-    let mut ticker = interval(CONTROL_TICK_INTERVAL);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    if proxy.send_event(ViewerEvent::Tick).is_err() {
-        return;
-    }
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                let _ = proxy.send_event(ViewerEvent::Cancelled);
-                break;
-            }
-            _ = ticker.tick() => {
-                if proxy.send_event(ViewerEvent::Tick).is_err() {
-                    warn!("viewer event proxy rejected tick event; stopping driver loop");
-                    break;
-                }
-            }
-            cmd = control.recv() => {
-                match cmd {
-                    Some(cmd) => {
-                        debug!(command = ?cmd, "viewer_event_forward_command");
-                        if proxy.send_event(ViewerEvent::Command(cmd)).is_err() {
-                            warn!("viewer event proxy rejected command event; stopping driver loop");
-                            break;
-                        }
-                    }
-                    None => {
-                        warn!("viewer control channel closed; stopping driver loop");
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    wake::drive_forwarding(
+        cancel,
+        control,
+        mat_results,
+        loader,
+        published,
+        CONTROL_TICK_INTERVAL,
+        |forward| {
+            let event = match forward {
+                wake::Forward::Tick => ViewerEvent::Tick,
+                wake::Forward::Command(cmd) => ViewerEvent::Command(cmd),
+                wake::Forward::MatResult(result) => ViewerEvent::MatResult(result),
+                wake::Forward::Photo(photo) => ViewerEvent::Photo(photo),
+                wake::Forward::Cancelled => ViewerEvent::Cancelled,
+            };
+            proxy.send_event(event).is_ok()
+        },
+    )
+    .await;
 }
 
 use winit::application::ApplicationHandler;
@@ -2302,6 +2302,16 @@ struct App {
     /// DRM/KMS: completion flag of the transition frame just submitted,
     /// taken by the KMS loop for `pacing::FlipAudit`. Never set on Wayland.
     paced_submission: Option<Arc<AtomicBool>>,
+    /// Wayland: where the winit thread publishes `wake::Published` after each
+    /// event batch for the driver (`wake::drive_forwarding`). `None` on KMS,
+    /// which waits in its own loop, and in tests.
+    wake_published: Option<tokio::sync::watch::Sender<wake::Published>>,
+    /// Wayland: user events handled so far; published with the plan so the
+    /// driver knows the plan includes everything it forwarded.
+    events_handled: u64,
+    /// Wayland: a window event changed what the control step sees (a resize,
+    /// a resume); the step runs at the end of the batch.
+    tick_wanted: bool,
 }
 
 impl App {
@@ -2822,6 +2832,43 @@ impl App {
             gpu.surface.configure(&gpu.device, &gpu.config);
         }
         let _ = self.update_surface_ready(size.width, size.height, SurfaceReport::ConfigureEvent);
+    }
+
+    /// One matting result handed over by the Wayland driver (it owns the
+    /// channel); same bookkeeping as `drain_mat_results`.
+    fn accept_forwarded_mat_result(&mut self, result: MatResult) {
+        self.mat_inflight = self.mat_inflight.saturating_sub(1);
+        photo_set::queue_result(&mut self.ready_results, result);
+    }
+
+    /// Wayland: end of an event batch. Run the control step a window event
+    /// asked for, plus the one a finalized transition owes (`tick_now`), then
+    /// publish the plan for the state the viewer is now in. Without this the
+    /// driver would keep waiting on the state before the batch.
+    fn publish_wake_state(&mut self) {
+        if self.wake_published.is_none() || self.cancel.is_cancelled() {
+            return;
+        }
+        if std::mem::take(&mut self.tick_wanted) {
+            self.process_tick();
+        }
+        let mut plan = self.wake_plan(Instant::now());
+        // A finalize needs at most one more step; the bound only guards a
+        // loop that cannot happen (finalizing again needs a new transition).
+        for _ in 0..3 {
+            if !plan.tick_now {
+                break;
+            }
+            self.process_tick();
+            plan = self.wake_plan(Instant::now());
+        }
+        let published = wake::Published {
+            plan,
+            handled: self.events_handled,
+        };
+        if let Some(tx) = self.wake_published.as_ref() {
+            let _ = tx.send(published);
+        }
     }
 
     fn drain_mat_results(&mut self) {
@@ -3715,13 +3762,14 @@ impl App {
             caption_overlay: None,
             transition_frame_metric: None,
             paced_submission: None,
+            wake_published: None,
+            events_handled: 0,
+            tick_wanted: false,
         }
     }
 
     /// The state `wake::plan_wake` decides from. See `wake.rs` for the
-    /// model; the DRM/KMS loop drives itself from this, and T5 applies it to
-    /// the Wayland driver.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // KMS loop; T5 for Wayland
+    /// model; the DRM/KMS loop and the Wayland driver both wait on it.
     fn wake_plan(&mut self, now: Instant) -> wake::WakePlan {
         let transition_just_finished = self.mode_mut().wake_mut().take_just_finalized();
         let kind = self.mode_kind();
@@ -3760,6 +3808,7 @@ impl ApplicationHandler<ViewerEvent> for App {
         self.log_event_loop_state("resumed_post_reset");
 
         let _ = self.ensure_gpu_ready(event_loop, "resumed");
+        self.tick_wanted = true;
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
@@ -3780,6 +3829,17 @@ impl ApplicationHandler<ViewerEvent> for App {
             return;
         }
         self.log_event_loop_state("window_event_pre");
+        // These can make queued work runnable (a surface that is now usable,
+        // a window that is visible again); the control step at the end of the
+        // batch picks it up. Redraws do not.
+        if matches!(
+            event,
+            WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Occluded(false)
+        ) {
+            self.tick_wanted = true;
+        }
         match event {
             WindowEvent::CloseRequested => {
                 debug!("viewer_window_close_requested");
@@ -3923,9 +3983,11 @@ impl ApplicationHandler<ViewerEvent> for App {
         let _ = self.with_active_scene(|scene, ctx| {
             scene.about_to_wait(ctx);
         });
+        self.publish_wake_state();
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ViewerEvent) {
+        self.events_handled = self.events_handled.wrapping_add(1);
         match event {
             ViewerEvent::Tick => {
                 debug!("viewer_user_event_tick");
@@ -3938,6 +4000,35 @@ impl ApplicationHandler<ViewerEvent> for App {
             ViewerEvent::Command(cmd) => {
                 debug!(command = ?cmd, "viewer_user_event_command");
                 self.handle_control_command(cmd);
+                if self.cancel.is_cancelled() {
+                    event_loop.exit();
+                    return;
+                }
+                self.process_tick();
+            }
+            ViewerEvent::MatResult(result) => {
+                debug!(path = %result.path.display(), "viewer_user_event_mat_result");
+                self.accept_forwarded_mat_result(result);
+                if self.cancel.is_cancelled() {
+                    event_loop.exit();
+                    return;
+                }
+                self.process_tick();
+            }
+            ViewerEvent::Photo(PhotoLoaded {
+                prepared,
+                priority,
+                partner,
+            }) => {
+                debug!(path = %prepared.path.display(), "viewer_user_event_photo");
+                // queue_for_wake (the step below) submits deferred photos
+                // before reading the loader again, which on Wayland is the
+                // driver's alone.
+                self.deferred_images.push_back(QueuedImage {
+                    image: prepared,
+                    priority,
+                    partner,
+                });
                 if self.cancel.is_cancelled() {
                     event_loop.exit();
                     return;
@@ -4046,8 +4137,29 @@ pub fn run_windowed(
             }
         })
     };
-    let control_driver = tokio::spawn(drive_viewer_events(command_rx, control_cancel, proxy));
-    let mut app = App::new(from_loader, to_manager_displayed, cancel, cfg, decode_scaling);
+    // The driver owns the loader and matting-result channels (it awaits them
+    // and forwards what arrives); the app keeps closed stand-ins, which its
+    // `try_recv` polls read as empty.
+    let (_, loader_stand_in) = tokio::sync::mpsc::channel(1);
+    let mut app = App::new(
+        loader_stand_in,
+        to_manager_displayed,
+        cancel,
+        cfg,
+        decode_scaling,
+    );
+    let (_, mat_stand_in) = tokio::sync::mpsc::channel(1);
+    let mat_results = std::mem::replace(&mut app.mat_pipeline.result_rx, mat_stand_in);
+    let (published_tx, published_rx) = tokio::sync::watch::channel(wake::Published::idle());
+    app.wake_published = Some(published_tx);
+    let control_driver = tokio::spawn(drive_viewer_events(
+        command_rx,
+        control_cancel,
+        proxy,
+        mat_results,
+        from_loader,
+        published_rx,
+    ));
     app.enter_greeting();
     event_loop.run_app(&mut app)?;
 
