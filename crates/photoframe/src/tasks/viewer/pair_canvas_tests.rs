@@ -709,3 +709,139 @@ fn an_unreadable_member_leaves_the_other_solo() {
     assert_eq!(r.path, std::path::PathBuf::from("good.png"));
     assert!(r.partner.is_none() && r.priority, "keeps its own priority");
 }
+
+/// **K3 (independent).** The union of two windows that abut casts exactly the
+/// shadow of the one rectangle covering both, so the bar casts none of its own.
+#[test]
+fn k3_abutting_windows_cast_the_shadow_of_their_union() {
+    let shadow = || DropShadowParams {
+        color: [10, 20, 30],
+        opacity: 0.8,
+        blur_px: 12.0,
+        offset_px: [5, 7],
+    };
+    let bg = || RgbaImage::from_pixel(200, 100, Rgba([230, 220, 210, 255]));
+    let left = photo_set::Window {
+        x: 30,
+        y: 20,
+        w: 60,
+        h: 50,
+    };
+    let right = photo_set::Window {
+        x: 90,
+        w: 45,
+        ..left
+    };
+    let whole = photo_set::Window { w: 105, ..left };
+    let mut pair = bg();
+    render_drop_shadow(&mut pair, &[left, right], shadow());
+    let mut one = bg();
+    render_drop_shadow(&mut one, &[whole], shadow());
+    assert!(pair == one);
+}
+
+/// The members side by side with no gap, built here independently of
+/// `PhotoSet::abutted`.
+fn side_by_side(left: &RgbaImage, right: &RgbaImage) -> RgbaImage {
+    let h = left.height().min(right.height());
+    let scale = |img: &RgbaImage| {
+        let w = (h as f32 * img.width() as f32 / img.height() as f32).round() as u32;
+        imageops::resize(img, w, h, imageops::FilterType::Triangle)
+    };
+    let (l, r) = (scale(left), scale(right));
+    let mut out = RgbaImage::new(l.width() + r.width(), h);
+    imageops::replace(&mut out, &l, 0, 0);
+    imageops::replace(&mut out, &r, l.width() as i64, 0);
+    out
+}
+
+/// **K5 (independent).** The pair's blurred background is the background of
+/// the members abutted with no gap: outside every window the pair canvas
+/// equals the solo canvas of that side-by-side image (whose background a
+/// gap-polluted build would not reproduce).
+#[test]
+fn k5_blur_background_is_the_abutted_members_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixed = fixed_background(&dir);
+    let left = bright(750, 1000, 31);
+    let right = bright(600, 1000, 32);
+    for kind in [MattingKind::Blur, MattingKind::CinematicBlur] {
+        let matting = mat_option(kind, 6.0, &fixed);
+        let pair = pair_result(&left, &right, params(matting.clone(), SCREEN, false));
+        let pair_windows = pair.windows.clone();
+        let pair = to_image(pair);
+        let solo = solo_result(&side_by_side(&left, &right), params(matting, SCREEN, false));
+        let solo_window = solo.windows[0];
+        let solo = to_image(solo);
+        let outside = |w: &photo_set::Window, x: u32, y: u32| {
+            x < w.x || x >= w.x + w.w || y < w.y || y >= w.y + w.h
+        };
+        let mut compared = 0;
+        for (x, y, px) in pair.enumerate_pixels() {
+            if pair_windows.iter().all(|w| outside(w, x, y)) && outside(&solo_window, x, y) {
+                assert_eq!(px, solo.get_pixel(x, y), "{kind:?} ({x}, {y})");
+                compared += 1;
+            }
+        }
+        assert!(compared > 100_000, "{kind:?}: {compared}");
+    }
+}
+
+/// **K2 (edges).** At the full-height threshold, with `max-upscale-factor`
+/// above 1, and with a DCT-reduced member, each window is exactly the
+/// member's solo height.
+#[test]
+fn k2_solo_height_at_the_threshold_with_upscale_and_reduced_decodes() {
+    use crate::tasks::manager::pairing::PairingRules;
+    let dir = tempfile::tempdir().unwrap();
+    let fixed = fixed_background(&dir);
+    let matting = mat_option(MattingKind::FixedColor, 2.0, &fixed);
+    let rules = |u: f64| PairingRules {
+        probability: 1.0,
+        bar_ratio: 0.618,
+        max_upscale: u,
+        m_min: 0.02,
+        m_max: 0.02,
+        bevel_max: 0.0,
+    };
+    // 540 x 0.96 = 518.4: 519 px is the shortest pairable height at u = 1,
+    // 260 px at u = 2.
+    let cases: [(f32, u32); 2] = [(1.0, 519), (2.0, 260)];
+    for (u, h) in cases {
+        let w = h * 3 / 4;
+        assert!(rules(f64::from(u)).is_pairable(Some((w, h)), Some(SCREEN)));
+        assert!(!rules(f64::from(u)).is_pairable(Some((w, h - 1)), Some(SCREEN)));
+        let left = bright(w, h, 41);
+        let right = bright(h * 3 / 5, h, 42);
+        let mut p = params(matting.clone(), SCREEN, false);
+        p.max_upscale_factor = u;
+        let pair = pair_result(&left, &right, p.clone());
+        for (index, member) in [&left, &right].into_iter().enumerate() {
+            let solo = solo_result(member, p.clone());
+            assert_eq!(pair.windows[index].h, solo.windows[0].h, "u {u} h {h}");
+        }
+    }
+    // A reduced decode: a 1500 x 2000 photo decoded at 600 x 800, enough for
+    // its 518 px solo rect, pairs at the same height as a full decode.
+    let full = bright(1500, 2000, 43);
+    let mut reduced = prepared(
+        &imageops::resize(&full, 600, 800, imageops::FilterType::Triangle),
+        "r.png",
+    );
+    reduced.source_size = (1500, 2000);
+    let right = bright(1200, 2000, 44);
+    let task = MatTask {
+        image: reduced,
+        mat_kind: None,
+        params: params(matting.clone(), SCREEN, false),
+        priority: false,
+        partner: Some(LoadedPartner {
+            prepared: prepared(&right, "right.png"),
+            priority: false,
+        }),
+    };
+    let pair = process_mat_task(task).unwrap();
+    let solo = solo_result(&full, params(matting, SCREEN, false));
+    assert_eq!(pair.windows[0].h, solo.windows[0].h);
+    assert!((pair.windows[0].w as f32 - pair.windows[0].h as f32 * 0.75).abs() <= 1.0);
+}

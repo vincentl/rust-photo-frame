@@ -1574,4 +1574,73 @@ mod tests {
             "{spills} pixels painted outside the clipped panel"
         );
     }
+
+    /// R1 with a real pair on screen (review F11): `WakeScene::dwell()` is the
+    /// current screen's, the KMS wake plan's deadline follows it, and
+    /// `maybe_start_transition` waits it out.
+    #[test]
+    fn a_pair_on_screen_rests_the_pair_dwell() {
+        use super::super::wake::{WakeInputs, plan_wake};
+        use super::super::{ImgTex, TexturePlane};
+        use super::WakeScene;
+        use std::time::{Duration, Instant};
+        let Some((device, _queue)) = try_device() else {
+            eprintln!("skipping wake dwell test: no GPU adapter available");
+            return;
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("dwell-test-layout"),
+            entries: &[],
+        });
+        let tex = |path: &str, partner: Option<&str>| ImgTex {
+            plane: TexturePlane {
+                bind: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("dwell-test-bind"),
+                    layout: &layout,
+                    entries: &[],
+                }),
+                w: 1,
+                h: 1,
+            },
+            path: path.into(),
+            partner: partner.map(Into::into),
+            mat_kind: None,
+        };
+        let (dwell, pair_dwell) = (Duration::from_secs(8), Duration::from_secs(12));
+        let scene = || WakeScene::new(8_000, 12_000, crate::config::TransitionConfig::default());
+        let now = Instant::now();
+        // 10 s on screen: past a solo dwell, inside a pair's.
+        let shown = now - Duration::from_secs(10);
+        for (current, rest) in [(tex("a", Some("b")), pair_dwell), (tex("a", None), dwell)] {
+            let mut wake = scene();
+            wake.set_current(Some(current));
+            wake.set_displayed_at(Some(shown));
+            assert_eq!(wake.dwell(), rest);
+            let plan = plan_wake(
+                WakeInputs {
+                    slideshow_active: true,
+                    sleeping: false,
+                    redraw_requested: false,
+                    transition_active: false,
+                    transition_just_finished: false,
+                    displayed_at: Some(now),
+                    dwell: wake.dwell(),
+                    surface_ready: true,
+                    pending: 1,
+                    in_flight: 0,
+                    deferred: 0,
+                    preload: 1,
+                },
+                now,
+            );
+            assert_eq!(plan.deadline, Some(now + rest));
+            wake.pending_mut().push_back(tex("c", None));
+            wake.maybe_start_transition(&mut rand::rng());
+            assert_eq!(
+                wake.transition_state().is_some(),
+                rest == dwell,
+                "a pair waits out its longer dwell; a solo photo moves on"
+            );
+        }
+    }
 }

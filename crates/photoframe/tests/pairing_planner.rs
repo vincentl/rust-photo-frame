@@ -290,23 +290,62 @@ fn s3_paired_share_matches_the_rate_model_on_a_large_library() {
     assert_eq!(ScreenStats::measure(&planned, &is_pairable).pair_screens, 0);
 }
 
-/// **S6 No consecutive repeats (I5).** Zero photos on consecutive screens
-/// over 100k appearances on the libraries where unguarded grouping repeats;
-/// S1's identity holds there too (covered by S1's library list).
+/// **S6 No consecutive repeats (I5).** A photo is on two consecutive screens
+/// only where the unpaired sequence itself has it twice in a row (Z, Z): the
+/// first screen ends with Z and the next begins with it. Over 100k
+/// appearances, several seeds and p in {0.5, 1}, on the review's libraries
+/// (where grouping without rules 4 and 5 repeats) plus FIFO libraries at
+/// f = 0, where debuts do produce Z, Z, so the exception is exercised.
 #[test]
-fn s6_no_photo_on_consecutive_screens() {
-    for lib in s6_libraries() {
+fn s6_no_photo_on_consecutive_screens_beyond_the_sequences_own_z_z() {
+    let fifo = vec![
+        Lib {
+            label: "6 portraits, 3 FIFO debuts, f=0",
+            photos: library(&specs(6, |i| Spec {
+                runtime: i >= 3,
+                weight3: i >= 3,
+                ..plain(true)
+            })),
+            f: 0.0,
+        },
+        Lib {
+            label: "12 portraits, 6 FIFO debuts, f=0",
+            photos: library(&specs(12, |i| Spec {
+                runtime: i >= 6,
+                weight3: true,
+                ..plain(true)
+            })),
+            f: 0.0,
+        },
+    ];
+    let mut z_z_seen = 0;
+    for lib in s6_libraries().into_iter().chain(fifo) {
         let pairable = pairable_set(&lib.photos);
         let is_pairable = |path: &Path| pairable.contains(path);
-        let planned = screens(&lib, Some(1.0), 100_000, 1);
-        let stats = ScreenStats::measure(&planned, &is_pairable);
-        assert_eq!(stats.consecutive_repeats, 0, "{}", lib.label);
-        assert!(stats.pair_screens > 0, "{}", lib.label);
-        // The unpaired sequence itself never repeats back to back here (no
-        // debuts), so I5 allows no exception.
-        let flat = flatten(&planned);
-        assert!(flat.windows(2).all(|w| w[0] != w[1]), "{}", lib.label);
+        for seed in 0..4 {
+            for p in [0.5, 1.0] {
+                let planned = screens(&lib, Some(p), 100_000, seed);
+                let stats = ScreenStats::measure(&planned, &is_pairable);
+                assert!(stats.pair_screens > 0, "{} seed {seed} p {p}", lib.label);
+                for w in planned.windows(2) {
+                    let shared: Vec<_> =
+                        w[1].members().filter(|m| w[0].contains(&m.path)).collect();
+                    for z in shared {
+                        let last = w[0].members().last().unwrap();
+                        assert!(
+                            last.path == z.path && w[1].primary.path == z.path,
+                            "{} seed {seed} p {p}: {:?} then {:?} is not a Z, Z",
+                            lib.label,
+                            w[0],
+                            w[1]
+                        );
+                        z_z_seen += 1;
+                    }
+                }
+            }
+        }
     }
+    assert!(z_z_seen > 0, "no library exercised the Z, Z exception");
 }
 
 /// Before the canvas is published nothing pairs, and the sequence is today's.
