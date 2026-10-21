@@ -4267,6 +4267,11 @@ pub mod testkit {
         pub fn deferred_queue_len(&self) -> usize {
             self.deferred_images.len()
         }
+
+        /// Screens handed to the matting pipeline whose result has not been drained yet.
+        pub fn matting_inflight(&self) -> usize {
+            self.mat_inflight
+        }
     }
 
     pub fn compute_canvas_size_for_test(
