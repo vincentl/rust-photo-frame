@@ -51,6 +51,26 @@ ensure_journald_persistence() {
     fi
 }
 
+# --skip-build: install a tree that was already built and staged elsewhere
+# (see developer/lima.md). Skips 10-build and 20-stage; every other module runs
+# as usual against ${STAGE_ROOT}/stage. Without the flag nothing changes.
+SKIP_BUILD=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-build) SKIP_BUILD=1 ;;
+        -h|--help)
+            echo "Usage: ${SCRIPT_NAME} [--skip-build]"
+            echo "  --skip-build  skip the build and stage modules; install the tree already at \${STAGE_ROOT}/stage"
+            exit 0
+            ;;
+        *)
+            log ERROR "Unknown argument: $1"
+            exit 2
+            ;;
+    esac
+    shift
+done
+
 trap 'log ERROR "${SCRIPT_NAME} failed on line ${LINENO}"' ERR
 
 if [[ ! -d "${MODULE_DIR}" ]]; then
@@ -89,6 +109,7 @@ else
     RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"
 fi
 
+STAGE_ROOT_FROM_ENV="${STAGE_ROOT:-}"
 STAGE_ROOT="${STAGE_ROOT:-${SCRIPT_DIR}/build}"
 export STAGE_ROOT
 
@@ -108,6 +129,46 @@ if [[ ${#modules[@]} -eq 0 ]]; then
     exit 0
 fi
 
+if (( SKIP_BUILD )); then
+    # Installing a tree nobody built from this checkout is the failure mode of
+    # this flag, so refuse early (before anything is modified) and say what is
+    # about to be installed.
+    if [[ -z "${STAGE_ROOT_FROM_ENV}" ]]; then
+        log ERROR "--skip-build needs STAGE_ROOT set explicitly (the default is the stage of the last on-device build, which is stale after a git pull)."
+        exit 1
+    fi
+    stage_dir="${STAGE_ROOT}/stage"
+    for required in photoframe wifi-manager; do
+        if [[ ! -x "${stage_dir}/bin/${required}" ]]; then
+            log ERROR "--skip-build: ${stage_dir}/bin/${required} is missing; the staged tree is incomplete."
+            exit 1
+        fi
+    done
+    if [[ ! -f "${stage_dir}/.stamp" ]]; then
+        log ERROR "--skip-build: ${stage_dir}/.stamp is missing; the tree was not staged by developer/lima/stage-to-pi.sh or the transfer did not finish."
+        exit 1
+    fi
+    log INFO "--skip-build will install the tree at ${stage_dir}, staged as:"
+    sed 's/^/    /' "${stage_dir}/.stamp"
+    for bin in "${stage_dir}"/bin/*; do
+        [[ -x "${bin}" ]] && printf '    %s  %s\n' "$(stat -c '%y' "${bin}" | cut -d. -f1)" "$(basename "${bin}")"
+    done
+    stamp_rev="$(sed -n 's/^rev=//p' "${stage_dir}/.stamp")"
+    if head_rev="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null)"; then
+        if [[ "${stamp_rev}" != "${head_rev}" && "${ALLOW_STAGE_REV_MISMATCH:-0}" != 1 ]]; then
+            log ERROR "--skip-build: staged tree is from ${stamp_rev:-unknown} but this checkout is at ${head_rev}. git pull / check out that commit, or set ALLOW_STAGE_REV_MISMATCH=1."
+            exit 1
+        fi
+    else
+        log WARN "--skip-build: ${REPO_ROOT} is not a git checkout; cannot compare it with the staged revision."
+    fi
+    # What the system stage leaves behind. Without it 05/30/45 would half-provision the device.
+    if ! id -u "${SERVICE_USER}" >/dev/null 2>&1 || ! getent group seat >/dev/null 2>&1; then
+        log ERROR "--skip-build: the system stage has not run (no ${SERVICE_USER} user or seat group). Run sudo ./setup/system/install.sh first."
+        exit 1
+    fi
+fi
+
 # Re-assert persistent journald logging before running modules so their output
 # (and any failure diagnostics) survive a reboot even after RaspberryPi OS
 # updates restore the volatile-storage drop-in.
@@ -116,6 +177,10 @@ ensure_journald_persistence
 log INFO "Executing application deployment modules as user $(id -un)"
 for module in "${modules[@]}"; do
     module_name="$(basename "${module}")"
+    if (( SKIP_BUILD )) && [[ "${module_name}" == 10-build.sh || "${module_name}" == 20-stage.sh ]]; then
+        log INFO "Skipping ${module_name} (--skip-build)"
+        continue
+    fi
     log INFO "Starting ${module_name}"
     if [[ ! -x "${module}" ]]; then
         chmod +x "${module}"
