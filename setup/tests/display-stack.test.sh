@@ -22,12 +22,13 @@ CALLS="${WORK}/calls"
 FAIL_ENABLE=""       # unit whose `systemctl enable` fails
 FAIL_START=""        # unit whose start/restart fails
 GREETD_STATE="enabled"
+UNIT_WANTED_BY="graphical.target"  # [Install] WantedBy= that `systemctl cat` prints
 GREETD_INSTALLED=1   # 0: `systemctl list-unit-files greetd.service` finds nothing
 NRESTARTS="${WORK}/nrestarts" # successive NRestarts values, one per line
 # (a file, because the library reads it from command substitutions)
 JOURNAL_LINE=""      # what journalctl prints for the current invocation
 sudo() { "$@"; }
-find() { :; }
+find() { echo "find $*" >>"${CALLS}"; }
 sleep() { :; }
 id() { if [[ "${1:-}" == "-u" ]]; then echo 1000; else command id "$@"; fi; }
 journalctl() { [[ -n "${JOURNAL_LINE}" ]] && printf '%s\n' "${JOURNAL_LINE}"; return 0; }
@@ -36,6 +37,7 @@ systemctl() {
     case "$1" in
         enable) [[ "$2" != "${FAIL_ENABLE}" ]] ;;
         start | restart) [[ "$2" != "${FAIL_START}" ]] ;;
+        cat) [[ -z "${UNIT_WANTED_BY}" ]] || printf '[Install]\nWantedBy=%s\n' "${UNIT_WANTED_BY}" ;;
         list-unit-files) [[ "$2" != "greetd.service" || "${GREETD_INSTALLED}" -eq 1 ]] ;;
         show)
             case "$3" in
@@ -64,6 +66,7 @@ reset_stubs() {
     FAIL_START=""
     GREETD_STATE="enabled"
     GREETD_INSTALLED=1
+    UNIT_WANTED_BY="graphical.target"
     : >"${NRESTARTS}"
     JOURNAL_LINE=""
 }
@@ -116,6 +119,25 @@ printf 'PHOTOFRAME_DISPLAY=bogus\n' >"${DISPLAY_ENV_PATH}"
 [[ "$(display_stack_source)" == "default" ]] || fail "invalid persisted value reported as persisted"
 rm -f "${DISPLAY_ENV_PATH}"
 
+# What the rest of a deploy sees after the refusal: one shell, resolve then
+# every later lookup (describe, unit, current) must name the running stack.
+reset_stubs
+GREETD_INSTALLED=0
+rm -f "${DISPLAY_ENV_PATH}"
+PHOTOFRAME_DISPLAY=wayland
+display_stack_refuse_unavailable 2>/dev/null
+[[ -z "${PHOTOFRAME_DISPLAY+x}" ]] || fail "refusal left PHOTOFRAME_DISPLAY set"
+[[ "$(display_stack_current)" == "kms" ]] || fail "after the refusal current is not kms"
+[[ "$(display_stack_describe)" == "kms (photoframe-kms.service, default)" ]] || fail "after the refusal describe names another stack: $(display_stack_describe)"
+[[ "$(display_stack_unit "$(display_stack_current)")" == "photoframe-kms.service" ]] || fail "after the refusal the unit is not the kms one"
+# an explicit choice that can be applied is kept
+GREETD_INSTALLED=1
+PHOTOFRAME_DISPLAY=wayland
+display_stack_refuse_unavailable
+[[ "${PHOTOFRAME_DISPLAY:-}" == "wayland" ]] || fail "an applicable wayland choice was dropped"
+unset PHOTOFRAME_DISPLAY
+reset_stubs
+
 # On a frame set up on kms (no greetd installed) an explicit wayland choice is
 # refused and not persisted: the deploy stage cannot install the packages.
 reset_stubs
@@ -156,6 +178,23 @@ FAIL_ENABLE="photoframe-kms.service"
 if display_stack_apply kms start >/dev/null 2>&1; then fail "kms: enable failure not reported"; fi
 called "systemctl disable greetd.service" && fail "kms: greetd disabled although kms enable failed"
 called "systemctl restart photoframe-kms.service" || fail "kms: start skipped after enable failure"
+
+# a rerun of the stack that is already enabled: enable first, prune stale
+# wants only after it succeeded and only outside the unit's own target
+reset_stubs
+display_stack_apply kms enable-only >/dev/null || fail "kms rerun reported failure"
+enable_kms="$(call_line "systemctl enable photoframe-kms.service")"
+prune="$(call_line "find /etc/systemd/system -type l -name photoframe-kms.service")"
+[[ -n "${enable_kms}" && -n "${prune}" && "${enable_kms}" -lt "${prune}" ]] || fail "kms: stale wants pruned before the enable"
+grep -F "find " "${CALLS}" | grep -qF -- '! -path */graphical.target.wants/*' || fail "kms: prune would delete the wants in the unit's own target"
+reset_stubs
+FAIL_ENABLE="photoframe-kms.service"
+display_stack_apply kms enable-only >/dev/null 2>&1 && fail "kms rerun: enable failure not reported"
+called "find " && fail "kms rerun: wants pruned although the enable failed (could leave no stack at boot)"
+reset_stubs
+UNIT_WANTED_BY=""
+display_stack_apply kms enable-only >/dev/null || fail "kms rerun without a readable WantedBy reported failure"
+called "find " && fail "kms: pruned wants without knowing the unit's target"
 
 # --- wayland: same order, same failure handling ------------------------
 reset_stubs
@@ -207,6 +246,16 @@ display_stack_kms_healthy 3 1 >/dev/null 2>&1 && fail "crash-looping KMS unit ju
 reset_stubs
 JOURNAL_LINE="WARN kms_viewer_exiting_with_error: not DRM master"
 display_stack_kms_healthy 3 1 >/dev/null 2>&1 && fail "KMS unit that never presented judged healthy"
+
+# the viewer is waiting for a panel: not a failure (status 2), and a viewer
+# that never logged anything still is one (status 1, above)
+reset_stubs
+JOURNAL_LINE="WARN kms_waiting_for_display"
+printf '2\n2\n' >"${NRESTARTS}"
+rc=0
+out="$(display_stack_kms_healthy 3 1 2>&1)" || rc=$?
+[[ "${rc}" == 2 ]] || fail "waiting-for-display viewer returned ${rc}, want 2: ${out}"
+[[ "${out}" == *"waiting for a display"* ]] || fail "waiting-for-display message: ${out}"
 
 # --- KMS display check (verify.sh) ---------------------------------------
 # A fake /sys/class/drm and a real Unix socket for the viewer; socat is a

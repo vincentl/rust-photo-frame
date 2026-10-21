@@ -96,6 +96,30 @@ display_stack_packages() {
     fi
 }
 
+# True when PHOTOFRAME_DISPLAY=wayland was given but greetd is not installed.
+_display_stack_wayland_unavailable() {
+    [[ "${PHOTOFRAME_DISPLAY:-}" == "wayland" ]] &&
+        ! _display_stack_sudo systemctl list-unit-files "${DISPLAY_WAYLAND_UNIT}" >/dev/null 2>&1
+}
+
+_display_stack_wayland_unavailable_message() {
+    echo "display stack: ${DISPLAY_WAYLAND_UNIT} is not installed (this frame was set up on the kms stack), so PHOTOFRAME_DISPLAY=wayland is not applied; run 'PHOTOFRAME_DISPLAY=wayland ./setup/system/install.sh' to install the compositor packages and switch" >&2
+}
+
+# Call once, at top level (not in a command substitution), before anything
+# reads the choice, in every stage that cannot install packages (the
+# application deploy): an explicit wayland choice that cannot be applied is
+# dropped from the environment, so every later display_stack_current,
+# describe and unit lookup in this process and its children agrees with the
+# stack that is actually running instead of naming one that is not installed.
+display_stack_refuse_unavailable() {
+    if _display_stack_wayland_unavailable; then
+        _display_stack_wayland_unavailable_message
+        unset PHOTOFRAME_DISPLAY
+    fi
+    return 0
+}
+
 # Resolve the stack and, when PHOTOFRAME_DISPLAY was given, persist it.
 #
 # An explicit wayland choice is refused (nothing persisted, the current
@@ -107,9 +131,8 @@ display_stack_packages() {
 display_stack_resolve() {
     local choice
     choice="$(display_stack_current)" || return 1
-    if [[ -n "${PHOTOFRAME_DISPLAY:-}" && "${choice}" == "wayland" ]] &&
-        ! _display_stack_sudo systemctl list-unit-files "${DISPLAY_WAYLAND_UNIT}" >/dev/null 2>&1; then
-        echo "display stack: ${DISPLAY_WAYLAND_UNIT} is not installed (this frame was set up on the kms stack), so PHOTOFRAME_DISPLAY=wayland is not applied; run 'PHOTOFRAME_DISPLAY=wayland ./setup/system/install.sh' to install the compositor packages and switch" >&2
+    if _display_stack_wayland_unavailable; then
+        _display_stack_wayland_unavailable_message
         PHOTOFRAME_DISPLAY="" display_stack_current
         return
     fi
@@ -134,11 +157,24 @@ display_stack_unit() {
 }
 
 # Enable a unit with only its current [Install] wants (stale *.wants links
-# from older releases removed first, as 45-activate-services does).
+# from older releases removed, but only after the enable succeeded).
 _display_stack_enable_clean() {
-    local unit="$1"
-    _display_stack_sudo find /etc/systemd/system -type l -name "${unit}" -path '*/*.wants/*' -delete 2>/dev/null || true
-    _display_stack_sudo systemctl enable "${unit}" >/dev/null 2>&1
+    local unit="$1" targets t
+    local -a keep=()
+    # Enable first: a failed enable must leave whatever wants the unit
+    # already has, or a rerun of the stack that is already the enabled one
+    # could leave the next boot with no display unit at all.
+    _display_stack_sudo systemctl enable "${unit}" >/dev/null 2>&1 || return 1
+    # Then prune wants left in targets the unit no longer names, read from
+    # its [Install] WantedBy= (when that cannot be read, prune nothing).
+    targets="$(_display_stack_sudo systemctl cat "${unit}" 2>/dev/null | sed -n 's/^WantedBy=//p' | tr '\n' ' ')"
+    for t in ${targets}; do
+        keep+=(! -path "*/${t}.wants/*")
+    done
+    if ((${#keep[@]})); then
+        _display_stack_sudo find /etc/systemd/system -type l -name "${unit}" -path '*/*.wants/*' "${keep[@]}" -delete 2>/dev/null || true
+    fi
+    return 0
 }
 
 # display_stack_apply <kms|wayland> <start|enable-only>
@@ -235,21 +271,35 @@ display_stack_apply() {
 # restart for a few seconds. "active" alone is not enough: with
 # Restart=always a crash-looping unit is active about a third of the time,
 # and the control socket is bound before the viewer opens the card.
+#
+# Returns 0 healthy, 1 unhealthy, and 2 when the viewer is running but
+# waiting for a display (no panel connected, or one in standby that has not
+# asserted hot-plug; the journal has kms_waiting_for_display and no
+# "presenting" line). That is the viewer working as designed, e.g. a frame
+# provisioned over ssh before the panel is on, so callers warn, not fail.
 # Usage: display_stack_kms_healthy [timeout_sec] [settle_sec]
 display_stack_kms_healthy() {
     local timeout_sec="${1:-30}" settle_sec="${2:-6}"
-    local waited=0 invocation="" restarts_before restarts_after
+    local waited=0 invocation="" journal="" waiting=0 restarts_before restarts_after
     while ((waited < timeout_sec)); do
         invocation="$(_display_stack_sudo systemctl show -p InvocationID --value "${DISPLAY_KMS_UNIT}" 2>/dev/null || true)"
-        if [[ -n "${invocation}" ]] &&
-            _display_stack_sudo journalctl -q -o cat "_SYSTEMD_INVOCATION_ID=${invocation}" 2>/dev/null |
-            grep -q "viewer presenting straight to KMS"; then
-            break
+        if [[ -n "${invocation}" ]]; then
+            journal="$(_display_stack_sudo journalctl -q -o cat "_SYSTEMD_INVOCATION_ID=${invocation}" 2>/dev/null || true)"
+            if grep -q "viewer presenting straight to KMS" <<<"${journal}"; then
+                break
+            fi
+            if grep -q "kms_waiting_for_display" <<<"${journal}"; then
+                waiting=1
+            fi
         fi
         sleep 1
         waited=$((waited + 1))
     done
     if ((waited >= timeout_sec)); then
+        if ((waiting)); then
+            echo "${DISPLAY_KMS_UNIT}: the viewer is waiting for a display; connect and power on the panel and the slideshow starts (journalctl -t photoframe -b shows kms_waiting_for_display)" >&2
+            return 2
+        fi
         echo "${DISPLAY_KMS_UNIT}: the viewer did not reach the display within ${timeout_sec}s; see 'journalctl -t photoframe -b'" >&2
         return 1
     fi

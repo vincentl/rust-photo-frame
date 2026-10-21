@@ -53,6 +53,16 @@ ensure_journald_persistence() {
 
 trap 'log ERROR "${SCRIPT_NAME} failed on line ${LINENO}"' ERR
 
+# The deploy cannot install the compositor packages. An explicit
+# PHOTOFRAME_DISPLAY=wayland on a frame without greetd is dropped here, once,
+# so no module (they inherit the environment) works from a stack that is not
+# installed.
+# shellcheck source=../lib/systemd.sh
+source "${SCRIPT_DIR}/../lib/systemd.sh"
+# shellcheck source=../lib/display-stack.sh
+source "${SCRIPT_DIR}/../lib/display-stack.sh"
+display_stack_refuse_unavailable
+
 if [[ ! -d "${MODULE_DIR}" ]]; then
     log ERROR "Module directory not found: ${MODULE_DIR}"
     exit 1

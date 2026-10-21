@@ -111,7 +111,7 @@ if command -v systemctl >/dev/null 2>&1; then
         log WARN "Failed to set graphical.target as default"
     fi
 
-    # greetd/sway (default) or photoframe-kms.service (PHOTOFRAME_DISPLAY=kms);
+    # photoframe-kms.service (default) or greetd/sway (PHOTOFRAME_DISPLAY=wayland);
     # enables one, disables the other, and restarts the chosen one.
     display_choice="$(display_stack_resolve)"
     log INFO "Display stack: ${display_choice}"

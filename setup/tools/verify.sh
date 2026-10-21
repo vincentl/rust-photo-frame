@@ -70,6 +70,7 @@ else
   warnings=$((warnings+1))
 fi
 
+display_stack_refuse_unavailable
 display_choice="$(display_stack_current)"
 ok "display stack: $(display_stack_describe)"
 

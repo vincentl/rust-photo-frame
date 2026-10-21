@@ -86,6 +86,9 @@ else
     log WARN "Unit source directory not found: ${UNIT_SRC_DIR}"
 fi
 
+# An explicit wayland choice that cannot be applied here (no greetd on a frame
+# set up on KMS) is dropped, so everything below names the running stack.
+display_stack_refuse_unavailable
 display_choice="$(display_stack_resolve)"
 
 # The wayland fallback's sway session takes its seat from seatd; the KMS

@@ -18,6 +18,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../../lib/systemd.sh"
 # shellcheck source=../../lib/display-stack.sh
 source "${SCRIPT_DIR}/../../lib/display-stack.sh"
+# An explicit wayland choice that cannot be applied here is dropped first, so
+# everything below checks the stack that is actually running.
+display_stack_refuse_unavailable
 # The unit that runs the viewer: greetd.service, or photoframe-kms.service when
 # the KMS stack was chosen. Never touch the other one here.
 KIOSK_SERVICE="${KIOSK_SERVICE:-$(display_stack_unit "$(display_stack_current)")}"
@@ -60,6 +63,9 @@ dump_logs_on_failure() {
     fi
     if [[ "${KIOSK_SERVICE}" == "${DISPLAY_KMS_UNIT}" ]]; then
         printf '[postcheck] HINT: stop %s and run /usr/bin/kmscube as the kiosk user to test the display without the viewer.\n' "${KIOSK_SERVICE}"
+        if systemd_available && systemd_unit_exists "${DISPLAY_WAYLAND_UNIT}"; then
+            printf '[postcheck] HINT: to go back to the Sway stack: PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh\n'
+        fi
     else
         printf '[postcheck] HINT: Temporarily set /etc/greetd/config.toml to command="/usr/bin/kmscube" for smoke tests.\n'
     fi
@@ -258,12 +264,18 @@ fi
 # crash-looping Restart=always unit is active part of the time.
 if [[ "${KIOSK_SERVICE}" == "${DISPLAY_KMS_UNIT}" ]] && systemd_available && systemd_unit_exists "${KIOSK_SERVICE}"; then
     log INFO "Checking that the KMS viewer reached the display and stays up"
-    if kms_health="$(display_stack_kms_healthy 30 6 2>&1)"; then
-        log INFO "${kms_health}"
-    else
-        log ERROR "${kms_health}"
-        exit 1
-    fi
+    kms_health_status=0
+    kms_health="$(display_stack_kms_healthy 30 6 2>&1)" || kms_health_status=$?
+    case "${kms_health_status}" in
+        0) log INFO "${kms_health}" ;;
+        # No panel connected or awake yet: the viewer waits for one by design,
+        # so a frame provisioned before the panel is on still installs.
+        2) log WARN "${kms_health}" ;;
+        *)
+            log ERROR "${kms_health}"
+            exit 1
+            ;;
+    esac
 fi
 
 rustc_version=$(rustc --version 2>/dev/null || echo "rustc unavailable")
