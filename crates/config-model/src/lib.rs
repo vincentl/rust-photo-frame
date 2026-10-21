@@ -10,6 +10,8 @@ use chrono_tz::Tz;
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 
+pub mod control;
+
 pub use awake::{AwakeScheduleConfig, AwakeScheduleRules, AwakeTimeRange};
 pub use greeting::{
     GreetingScreenColorsConfig, GreetingScreenConfig, ScreenMessageConfig, SleepScreenConfig,

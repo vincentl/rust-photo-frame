@@ -270,6 +270,23 @@ after it.
 during that transition. Look for `kms_vblank_wait_failed` in the
 journal.
 
+**Panel off (`display-power off`).** Before switching off, the viewer
+lets submitted frames reach the screen (GPU idle, then two vblanks, about
+33 ms). While the panel is dark the viewer presents nothing and waits for
+no vblank. The slideshow is paused, so the loop sleeps until a command
+arrives: no frames and no wakeups. Waits matter here because a vblank
+wait on a dark CRTC fails at once, and two failures in a row would disable
+pacing for the rest of the process. `display-power on` commits the
+modeset before any frame is presented, so the CRTC is running and every
+later frame is paced as usual (see
+[advanced.md › Display power on KMS](advanced.md#display-power-and-the-wi-fi-overlay-on-kms)). A transition that the panel
+going dark interrupts is undone and logs no `transition_frame_metric`.
+
+**The Wi-Fi overlay** costs one CPU rasterization and one texture upload
+per change of content or size (lease refreshes cost nothing), then one
+composite per redraw. It pauses the slideshow while it covers it, so no
+transition runs underneath.
+
 **GPU slack.** With the explicit vblank wait, a frame has less than one
 refresh to finish. FIFO's run-ahead allowed up to two, but that
 run-ahead is what put every transition's first frames ahead of the
@@ -343,8 +360,8 @@ repeated refresh and does not cascade.
    the rate.
 
    Side effects worth knowing: frame callbacks arrive only while the
-   surface is visible, so an occluded window (the Wi-Fi overlay) or a
-   powered-off output pauses transition rendering rather than burning the
+   surface is visible, so an occluded window (the fallback Wi-Fi overlay
+   window) or a powered-off output pauses transition rendering rather than burning the
    GPU on unseen frames; `Occluded(false)` re-arms the redraw. The greeting
    and sleep screens draw once on demand and do not request callbacks, so
    they are never left waiting for one. On non-Wayland backends

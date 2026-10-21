@@ -1,7 +1,7 @@
 use crate::config::{Config, RecoveryMode};
 use crate::hotspot;
 use crate::nm;
-use crate::overlay::{OverlayController, overlay_request};
+use crate::overlay::{Backend, OverlayController, overlay_request};
 use crate::qr;
 use crate::status::{
     AttemptRecord, ProvisionRequest, RuntimeStateRecord, now_rfc3339, read_request, redact_ssid,
@@ -483,7 +483,12 @@ async fn enter_recovery(
         warn!(error = ?err, "failed to display hotspot overlay");
     }
 
-    if config.recovery_mode == RecoveryMode::AppHandoff {
+    // The handoff exists for the sway window, which must not fight the
+    // photo app for the screen. When the viewer draws the overlay itself
+    // there is nothing to hand off: it keeps running.
+    if config.recovery_mode == RecoveryMode::AppHandoff
+        && overlay.backend() == Some(Backend::Window)
+    {
         if let Err(err) = overlay.kill_app(&config.photo_app.app_id).await {
             warn!(error = ?err, app_id = %config.photo_app.app_id, "failed to stop photo app during handoff");
         }
@@ -529,7 +534,9 @@ async fn finalize_recovery(
         warn!(error = ?err, "failed to hide recovery overlay");
     }
 
-    if config.recovery_mode == RecoveryMode::AppHandoff {
+    if config.recovery_mode == RecoveryMode::AppHandoff
+        && overlay.backend() == Some(Backend::Window)
+    {
         let app_visible = match overlay.app_present(&config.photo_app.app_id).await {
             Ok(present) => present,
             Err(err) => {

@@ -239,8 +239,7 @@ impl GreetingScreen {
         let scale = self.scale_factor.max(0.0) as f32;
         let stroke_px = (self.stroke_dip * scale).max(0.0);
         let corner_px = (self.corner_radius_dip * scale).max(0.0);
-        let inner_inset = stroke_px * 7.0;
-        self.padding_px = inner_inset.max(corner_px * 0.5);
+        self.padding_px = frame_padding_px(stroke_px, corner_px);
         self.frame_renderer.update(
             &self.queue,
             self.size,
@@ -250,6 +249,13 @@ impl GreetingScreen {
             self.background,
         );
     }
+}
+
+/// The inset inside which content clears the double-stroke frame
+/// (`FrameRenderer`): the frame occupies `7 × stroke` from the edge, and
+/// rounded corners need half their radius.
+pub(crate) fn frame_padding_px(stroke_px: f32, corner_px: f32) -> f32 {
+    (stroke_px * 7.0).max(corner_px * 0.5)
 }
 
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -276,7 +282,7 @@ impl Default for FrameUniforms {
     }
 }
 
-struct FrameRenderer {
+pub(crate) struct FrameRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
@@ -284,7 +290,7 @@ struct FrameRenderer {
 }
 
 impl FrameRenderer {
-    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("greeting-frame-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("greeting_frame.wgsl").into()),
@@ -362,7 +368,7 @@ impl FrameRenderer {
         }
     }
 
-    fn update(
+    pub(crate) fn update(
         &mut self,
         queue: &wgpu::Queue,
         size: PhysicalSize<u32>,
@@ -415,7 +421,11 @@ impl FrameRenderer {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.uniforms));
     }
 
-    fn render(&self, encoder: &mut wgpu::CommandEncoder, target_view: &wgpu::TextureView) {
+    pub(crate) fn render(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+    ) {
         if self.uniforms.resolution[0] <= 0.0 || self.uniforms.resolution[1] <= 0.0 {
             return;
         }
@@ -456,25 +466,25 @@ fn compute_font_size(message: &str, size: PhysicalSize<u32>) -> f32 {
     (scale / adjustment).clamp(24.0, 360.0)
 }
 
-fn resolve_background_colour(source: Option<&str>) -> LinSrgba<f32> {
+pub(crate) fn resolve_background_colour(source: Option<&str>) -> LinSrgba<f32> {
     source
         .and_then(parse_hex_color)
         .unwrap_or_else(default_background)
 }
 
-fn resolve_font_colour(source: Option<&str>) -> LinSrgba<f32> {
+pub(crate) fn resolve_font_colour(source: Option<&str>) -> LinSrgba<f32> {
     source
         .and_then(parse_hex_color)
         .unwrap_or_else(default_font_colour)
 }
 
-fn resolve_accent_colour(source: Option<&str>) -> LinSrgba<f32> {
+pub(crate) fn resolve_accent_colour(source: Option<&str>) -> LinSrgba<f32> {
     source
         .and_then(parse_hex_color)
         .unwrap_or_else(default_accent_colour)
 }
 
-fn initialize_font_database(db: &mut Database) {
+pub(crate) fn initialize_font_database(db: &mut Database) {
     db.load_system_fonts();
     let bundled_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/fonts");
     if bundled_path.exists() {
@@ -482,7 +492,10 @@ fn initialize_font_database(db: &mut Database) {
     }
 }
 
-fn resolve_font_family(font_system: &FontSystem, requested: Option<&str>) -> FamilyOwned {
+pub(crate) fn resolve_font_family(
+    font_system: &FontSystem,
+    requested: Option<&str>,
+) -> FamilyOwned {
     let db = font_system.db();
     if let Some(name) = requested.and_then(|value| {
         let trimmed = value.trim();
@@ -568,7 +581,7 @@ fn parse_hex_color(input: &str) -> Option<LinSrgba<f32>> {
     Some(rgba_f32.into_linear())
 }
 
-fn to_wgpu_color(color: LinSrgba<f32>) -> wgpu::Color {
+pub(crate) fn to_wgpu_color(color: LinSrgba<f32>) -> wgpu::Color {
     wgpu::Color {
         r: color.red as f64,
         g: color.green as f64,

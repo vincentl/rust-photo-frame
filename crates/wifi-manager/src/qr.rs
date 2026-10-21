@@ -24,13 +24,7 @@ pub fn generate(config: &Config) -> Result<()> {
             password_path.display()
         )
     })?;
-    let password = password.trim();
-
-    let wifi_uri = format!(
-        "WIFI:T:WPA;S:{ssid};P:{password};;",
-        ssid = escape_wifi_uri_field(&config.hotspot.ssid),
-        password = escape_wifi_uri_field(password),
-    );
+    let wifi_uri = wifi_join_payload(&config.hotspot.ssid, password.trim());
 
     let code = QrCode::new(wifi_uri.as_bytes()).context("failed to generate Wi-Fi join QR code")?;
     let image = code.render::<Luma<u8>>().min_dimensions(256, 256).build();
@@ -41,6 +35,16 @@ pub fn generate(config: &Config) -> Result<()> {
         .save(&path)
         .with_context(|| format!("failed to write Wi-Fi join QR code to {}", path.display()))?;
     Ok(())
+}
+
+/// The `WIFI:` join payload for a WPA network (also sent to the viewer,
+/// which draws the code itself).
+pub fn wifi_join_payload(ssid: &str, password: &str) -> String {
+    format!(
+        "WIFI:T:WPA;S:{ssid};P:{password};;",
+        ssid = escape_wifi_uri_field(ssid),
+        password = escape_wifi_uri_field(password),
+    )
 }
 
 /// Backslash-escape the characters that are special in a `WIFI:` URI field

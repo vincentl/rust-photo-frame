@@ -144,7 +144,7 @@ If you configured rclone as your operator user but the service runs as `kiosk`, 
 - Treats Wi-Fi as online when the interface is associated to an infrastructure SSID (link-level only — no internet reachability requirement).
 - Creates/updates the `pf-hotspot` NetworkManager profile and brings it online with a random three-word passphrase.
 - Serves an HTTP UI for SSID/password entry on `192.168.4.1:8080`, plus a QR code (`/var/lib/photoframe/wifi-qr.png`) phones can scan to jump to the portal.
-- Uses Sway IPC to present a fullscreen overlay with hotspot instructions whenever Wi-Fi needs attention. Can also stop/relaunch the photo app (`app-handoff` mode).
+- Shows the hotspot instructions full screen whenever Wi-Fi needs attention. The viewer draws them itself when it answers on its control socket, on both display stacks (see [The recovery overlay](#the-recovery-overlay)). Otherwise wifi-manager falls back to its own fullscreen window through Sway IPC, and in `app-handoff` mode stops the photo app while that window is up and relaunches it afterwards.
 - Emits structured logs for deterministic states (`Online`, `OfflineGrace`, `RecoveryHotspotActive`, `ProvisioningAttempt`, `RecoveryBackoff`).
 
 ### Subcommands
@@ -157,7 +157,7 @@ The deployed binary lives at `/opt/photoframe/bin/wifi-manager`:
 | `ui`      | Runs only the HTTP UI server (auto-spawned by `watch`; useful for debugging). |
 | `qr`      | Generates `/var/lib/photoframe/wifi-qr.png`. |
 | `nm`      | Thin wrapper around `nmcli` operations. Safe to run manually for diagnostics. |
-| `overlay` | Renders the on-device recovery overlay window. Auto-invoked by the watcher. |
+| `overlay` | Renders the recovery overlay as a window (the fallback when the viewer does not draw it). Auto-invoked by the watcher. |
 
 `--help` and `--version` are permitted as root; all other modes refuse `UID==0`.
 
@@ -194,6 +194,7 @@ overlay:
     - swaymsg
   photo-app-id: photoframe
   overlay-app-id: wifi-overlay
+  control-socket: /run/photoframe/control.sock
 ```
 
 | Key | Description |
@@ -201,7 +202,7 @@ overlay:
 | `interface` | Wireless device monitored (default `wlan0`). |
 | `check-interval-sec` | Base delay between connectivity probes; small jitter added internally. |
 | `offline-grace-sec` | Seconds offline before the hotspot activates. |
-| `recovery-mode` | `app-handoff` (default) stops/relaunches photo app; `overlay` keeps slideshow running under overlay. |
+| `recovery-mode` | Applies only when the fallback window draws the overlay: `app-handoff` (default) stops the photo app while the window is up and relaunches it afterwards; `overlay` keeps it running under the window. When the viewer draws the overlay, nothing is stopped. |
 | `recovery-reconnect-probe-sec` | Seconds between auto-reconnect probes while hotspot mode is active. |
 | `recovery-connect-timeout-sec` | Maximum wait for infrastructure association when applying credentials. |
 | `wordlist-path` | Source of the random three-word passphrase. |
@@ -211,9 +212,19 @@ overlay:
 | `hotspot.ipv4-addr` | Hotspot interface address. |
 | `ui.bind-address`, `ui.port` | HTTP UI bind. |
 | `photo-app.launch-command`, `photo-app.app-id` | Used in `app-handoff` mode. |
-| `overlay.command`, `overlay.photo-app-id`, `overlay.overlay-app-id` | Sway IPC wiring for the overlay. |
+| `overlay.command`, `overlay.photo-app-id`, `overlay.overlay-app-id` | Sway IPC wiring for the fallback window. |
+| `overlay.control-socket` | The viewer's control socket (default `/run/photoframe/control.sock`; match the viewer's `control-socket-path`). |
 
 After editing: `sudo systemctl restart photoframe-wifi-manager.service`.
+
+### The recovery overlay
+
+When wifi-manager enters recovery it sends the overlay's content to the viewer (`wifi-overlay-show`, see [Control socket protocol](#control-socket-protocol)): the hotspot SSID and password, the two QR payloads (join the hotspot, open the setup page), and the text. The viewer draws it full screen, in the greeting screen's colours, font and frame, over the greeting or the slideshow.
+
+- **The slideshow pauses while the overlay covers it.** A transition in progress is undone, so its incoming photo is shown later instead, and no photo is reported as shown while covered. When the overlay goes away, the photo on screen gets its full dwell again.
+- **Sleep wins.** While the frame is asleep (or the panel is off), the overlay is held and appears when the frame wakes.
+- **It is a lease.** wifi-manager renews it every 10 s and the viewer drops it 30 s after the last renewal. The overlay therefore comes back within 10 s of a viewer restart, and disappears on its own if wifi-manager stops. The journal shows `wifi_overlay_shown`, `wifi_overlay_hidden` and `wifi_overlay_expired`.
+- **Fallback.** A viewer that does not answer (an older build, or none running) gets the window as before. On the KMS stack there is no window to fall back to, so wifi-manager keeps offering the overlay to the viewer until it answers.
 
 ### Runtime files
 
@@ -256,7 +267,7 @@ Re-enable: `sudo systemctl unmask photoframe-wifi-manager.service && sudo system
 
 ## Power and sleep
 
-`buttond` owns wake/sleep scheduling and DPMS commands. Configuration is documented in [Configure › `buttond`](configure.md#buttond-power-button-daemon) — this section explains the model and the `powerctl` tool.
+`buttond` owns wake/sleep scheduling and decides when the panel goes off and on; `powerctl` carries that out. Configuration is documented in [Configure › `buttond`](configure.md#buttond-power-button-daemon) — this section explains the model, the `powerctl` tool and the control socket both talk to.
 
 ### Always-on vs. scheduled
 
@@ -265,17 +276,20 @@ Re-enable: `sudo systemctl unmask photoframe-wifi-manager.service && sudo system
 
 ### powerctl
 
-`/opt/photoframe/bin/powerctl` bootstraps the Wayland environment, issues `wlr-randr` DPMS requests, and falls back to `vcgencmd display_power`.
+`/opt/photoframe/bin/powerctl {sleep|wake|state} [OUTPUT]` switches the panel off (`sleep`), on (`wake`), or prints `on`/`off` (`state`).
 
-> `powerctl` must run as the `kiosk` user. It searches for a Wayland session owned by the running UID. Any other user produces "no sway process found for uid N".
+It asks the viewer first, with `display-power` on the control socket. On the KMS stack the viewer holds the display and is the only process that can switch it (see [Display power and the Wi-Fi overlay on KMS](#display-power-and-the-wi-fi-overlay-on-kms)). powerctl falls back to sway (`swaymsg output <OUTPUT> power off|on`) only when the viewer cannot help: on the Wayland stack, where the viewer answers "unsupported" because sway owns the output; when no viewer is running; or when the viewer is too old to answer. Any other refusal is the answer. powerctl prints it (for example `powerctl: the viewer refused: not-driven: this viewer drives HDMI-A-2, not HDMI-A-1`) and exits 1. A `timeout` refusal means the viewer was slow, not that it ignored the request: it may still carry it out. `PHOTOFRAME_CONTROL_SOCKET` overrides the socket path; buttond sets it to its own `control-socket-path`.
+
+> Run `powerctl` as the `kiosk` user. The sway fallback looks for a sway session owned by the running UID; any other user gets "no sway process found for uid N".
 
 ```bash
 sudo -u kiosk /opt/photoframe/bin/powerctl wake
 sudo -u kiosk /opt/photoframe/bin/powerctl sleep
 sudo -u kiosk /opt/photoframe/bin/powerctl wake HDMI-A-2   # explicit connector
+sudo -u kiosk /opt/photoframe/bin/powerctl state
 ```
 
-When `buttond.screen.display-name` is set in config, `buttond` always passes it to `powerctl`. When omitted, `powerctl` auto-detects the first connected output.
+When `buttond.screen.display-name` is set in config, `buttond` always passes it to `powerctl`. On KMS it must name the connector the viewer drives, or the viewer refuses (`not-driven`). When omitted, `powerctl` means whatever the viewer drives (KMS) or every output (sway).
 
 ### Manual overrides
 
@@ -289,11 +303,39 @@ echo '{"command":"toggle-state"}'               | sudo -u kiosk socat - UNIX-CON
 
 Manual overrides persist until the next schedule boundary — the override clears the moment the schedule's own desired state matches it, at which point the frame resumes following the schedule. Pressing again toward the opposite state agrees with the schedule and clears the override immediately (a natural "undo"). Overrides are in-memory, so a `buttond` restart resets to schedule-following.
 
+### Control socket protocol
+
+The viewer listens on `control-socket-path` (default `/run/photoframe/control.sock`, directory `kiosk:kiosk` mode `0770`). Each connection carries one request: the client writes one JSON object and closes its sending side, and the viewer answers with one JSON line and closes. Reading the answer is optional: a client that writes and disconnects (as buttond does) still has its command applied. `socat` does the half-close and waits for the answer:
+
+```bash
+echo '{"command":"display-power"}' | sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock
+```
+
+| Request | Answer |
+| --- | --- |
+| `{"command":"set-state","state":"awake"}` or `"asleep"` | `{"ok":true}` |
+| `{"command":"toggle-state"}` | `{"ok":true}` |
+| `{"command":"display-power","state":"off"}` or `"on"`; optional `"output":"HDMI-A-2"` | `{"ok":true,"state":"off","connector":"HDMI-A-2","mode":"3840x2160@60"}` |
+| `{"command":"display-power"}` (query) | same as above |
+| `{"command":"wifi-overlay-show","ttl-sec":30,"headline":"…","body":"…","ssid":"…","password":"…","join-qr":"WIFI:T:WPA;S:…;P:…;;","portal-url":"http://192.168.4.1:8080/","footer":"…"}` | `{"ok":true}` |
+| `{"command":"wifi-overlay-hide"}` | `{"ok":true}` |
+
+A refusal is `{"ok":false,"error":KIND,"detail":"…"}`, KIND being:
+
+- `unsupported`: `display-power` on the Wayland stack; sway owns the output, use `swaymsg`.
+- `ping` (`{"command":"ping"}`) is always answered `{"ok":true}`; a client uses it to check the viewer speaks this protocol before sending anything sensitive.
+- `not-driven`: `output` names a connector this viewer does not drive.
+- `invalid`: the request did not parse or is out of limits (texts up to 256 characters, QR payloads up to 512 bytes and encodable).
+- `timeout`: the viewer did not answer within 3 s.
+- `failed`: the viewer tried and the operation failed (for example, the kernel refused the atomic commit).
+
+`display-power` reports the viewer's own state, not a value read back from the kernel, and only exists on the KMS stack. `wifi-overlay-show` holds the overlay for `ttl-sec` (5–300, default 30); repeat it to keep the overlay up. The viewer never logs the overlay's content, because it carries the hotspot password. The types are defined once, in `crates/config-model/src/control.rs`.
+
 ### Pi 5 + Dell S2725QC notes
 
 - **Skip `/sys/class/backlight`** — external HDMI panels don't expose a kernel backlight; writing there is a no-op.
-- **Primary method:** `wlr-randr --output <NAME> --off|--on` via `powerctl`.
-- **Fallback:** `vcgencmd display_power 0|1` still works on Pi 5 KMS. Default `powerctl` chains both.
+- **Method:** the viewer's atomic CRTC switch on the KMS stack, `swaymsg output <NAME> power off|on` on the Wayland stack, both via `powerctl`.
+- **Manual last resort:** `vcgencmd display_power 0|1` still works on Pi 5; `powerctl` does not use it.
 - **CEC:** the Dell S2725QC does not implement HDMI-CEC. `cec-ctl` cannot power it down.
 
 ---
@@ -434,12 +476,40 @@ For deeper debug workflows (manual Sway launch, overlay tests, kiosk-shell envir
 
 With the KMS stack the viewer presents straight to the display (DRM/KMS through Vulkan's `VK_KHR_display`), with no greetd, sway or compositor in between. It exists because the compositor is the frame-rate ceiling. On Mesa 26.2 with sway 1.10, every present mode is capped near 30 fps. Without the compositor, a native-4K fade holds a vblank-locked 60 Hz. See [performance.md](performance.md#the-viewer-on-kms) for the measurements.
 
-**What KMS gives up until the next stage of this work (K2) lands.** Both features below talk to sway, so they do not work on this stack yet:
+Greeting, slideshow, sleep/wake through the control socket, transitions, mats, the showcase captions and the `metrics` log lines all behave as on the Wayland stack. So do the Wi-Fi recovery overlay and display power, which the viewer handles itself on this stack (next section).
 
-- **Wi-Fi recovery overlay.** `wifi-manager` keeps running, and it only warns when it cannot show the overlay. But the overlay (the on-screen hotspot instructions and QR code) is a sway window, so it will not appear. Whether the hotspot itself comes up without the overlay has not been verified on a device yet. Until it has, keep Ethernet or a known-good Wi-Fi when trying the KMS stack.
-- **Display power.** `powerctl` drives `swaymsg output power`, so neither the sleep schedule nor buttond's screen-off turns the panel off. Sleep still works as a viewer state (the sleep banner shows and the slideshow stops), but the panel stays lit. buttond's short press, which toggles sleep through the control socket, works as usual.
+### Display power and the Wi-Fi overlay on KMS
 
-Greeting, slideshow, sleep/wake through the control socket, transitions, mats, the showcase captions and the `metrics` log lines all behave as on the Wayland stack.
+Nothing on this stack talks to sway. The viewer draws the [Wi-Fi recovery overlay](#the-recovery-overlay) itself, and `powerctl` (so buttond's button and schedule) switches the panel through the viewer's `display-power` command.
+
+The viewer switches the panel itself with atomic modesetting, which is how the kernel expects power to be switched on drivers like the Pi's vc4: it turns the display pipe (the CRTC) off and on. It does not use the older DPMS property, which on these drivers is only a stand-in for that switch and whose read-back the kernel calls unreliable.
+
+**Off.** The viewer first lets the frames it already submitted reach the screen, then turns the CRTC off. The journal shows `kms_power_off: panel off crtc_active=Ok(false)`. While the panel is off, the viewer:
+- draws nothing and waits for no vblank;
+- pauses the slideshow, so no photo goes by unseen;
+- skips its display-change check, because a TV in standby often drops hot-plug detect, which would otherwise look like an unplugged panel.
+
+**On.** The viewer turns the CRTC back on with a full modeset: the same commit Mesa makes when it first takes the display at startup, which drives the HDMI link up from nothing. Simply re-enabling the output is not trusted to re-drive vc4's HDMI link; the picframe3 project saw TVs stay on "no signal" that way. The journal shows `kms_power_on: modeset committed crtc_active=Ok(true) vblank=Ok(())`, where the vblank proves the CRTC is running. It then shows `kms_power_on: connector reads connected after_ms=…` once the TV has re-asserted hot-plug detect. The display-change check resumes 15 s after the modeset.
+
+**Why the viewer does the modeset itself.** Mesa's display code does not know the viewer switched the CRTC off.
+- From Mesa 25.3 on, a frame presented onto the dark CRTC is refused by the kernel, and Mesa then loses the swapchain, which would restart the viewer.
+- Up to 25.2, Mesa falls back to its own modeset and lights the panel behind the viewer's back.
+
+So nothing is presented while the panel is off, and the wake commit always comes before the next frame.
+
+**A wake never leaves the panel dark with nothing left to try.** Before the wake commit, if the TV reads connected, the viewer checks that it still offers the mode in use (a different TV, or a changed EDID, while the panel was off). A failed commit is retried once. If the mode is gone or the retry fails too, `display-power on` answers `failed … the viewer restarts to light the panel`, and the viewer exits. The restart picks a mode again and lights the panel with the startup modeset.
+
+**Restarts while the panel is off.** The viewer starts by waiting for a connected display. A TV in standby may have dropped hot-plug detect and will only raise it when it sees a signal. So while waiting, the viewer still answers `display-power`:
+- **on** forces a probe of the connectors (a fresh read of hot-plug detect and the EDID) and starts on the display if that finds one;
+- otherwise the answer says no display is connected, and the TV has to be woken with its own remote or input button.
+
+Commands that arrive while waiting (sleep or wake, the Wi-Fi overlay) are applied as soon as the viewer runs.
+
+**What only your eyes can confirm.** The journal shows the display pipe running after a wake. Whether the TV shows a picture at 3840x2160@60 also depends on the HDMI link (at 4K60, the HDMI 2.0 scrambling the TV must accept). If a wake ever leaves the TV on "no signal", report it with the TV model.
+
+**Known limits:**
+- If the viewer restarts while the panel is off and the TV keeps hot-plug detect up, the panel comes back on with the greeting, while buttond still believes the frame is asleep. That matches what a sway restart does on the Wayland stack. The next schedule boundary or button press puts it right.
+- If the frame boots during sleep hours, switching the panel off can happen before the first frame is drawn. The next wake then briefly shows the boot console before the slideshow, and the TV re-syncs twice. This is cosmetic.
 
 ### Switching
 

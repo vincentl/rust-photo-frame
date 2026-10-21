@@ -199,9 +199,9 @@ impl OverlayContent {
     ) -> Self {
         let title = cli
             .title
-            .unwrap_or_else(|| "Reconnect the photo frame to Wi-Fi".to_string());
-        let subtitle = "Use another device to restore connectivity.".to_string();
-        let footer = "The slideshow resumes automatically after the frame reconnects.".to_string();
+            .unwrap_or_else(|| super::DEFAULT_TITLE.to_string());
+        let subtitle = super::BODY.to_string();
+        let footer = super::FOOTER.to_string();
         Self {
             title,
             subtitle,

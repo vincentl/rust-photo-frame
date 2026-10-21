@@ -28,3 +28,6 @@ overlay:
   photo-app-id: photoframe
   overlay-app-id: wifi-overlay
   # sway-socket: /run/user/1000/sway-ipc.1000.123.sock
+  # The viewer draws the overlay itself when it answers on its control
+  # socket (both display stacks); the sway window above is the fallback.
+  control-socket: /run/photoframe/control.sock

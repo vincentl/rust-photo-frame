@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod canvas_publish_tests;
+mod display_wait;
 mod image_ops;
 #[cfg(target_os = "linux")]
 mod kms;
@@ -7,6 +8,7 @@ mod pacing;
 #[cfg(test)]
 mod pair_canvas_tests;
 mod photo_set;
+mod presentation;
 pub mod scenes;
 mod wake;
 
@@ -1935,6 +1937,7 @@ struct GpuParts {
     greeting: GreetingScene,
     sleep: SleepScene,
     caption_overlay: Option<scenes::CaptionOverlay>,
+    wifi_overlay: scenes::wifi_overlay::WifiOverlayScreen,
 }
 
 /// Adapter, device, surface configuration (not yet applied), pipelines and
@@ -2254,6 +2257,13 @@ fn build_gpu(
 
     let caption_overlay = (cfg.showcase.enabled && cfg.showcase.caption_enabled())
         .then(|| scenes::CaptionOverlay::new(&device, &queue, format));
+    // Styled like the greeting screen (its colours, font and frame).
+    let wifi_overlay = scenes::wifi_overlay::WifiOverlayScreen::new(
+        &device,
+        &queue,
+        format,
+        cfg.greeting_screen.screen(),
+    );
     let gpu = GpuCtx {
         device,
         queue,
@@ -2276,6 +2286,7 @@ fn build_gpu(
         greeting,
         sleep,
         caption_overlay,
+        wifi_overlay,
     })
 }
 
@@ -2319,6 +2330,13 @@ struct App {
     /// DRM/KMS: completion flag of the transition frame just submitted,
     /// taken by the KMS loop for `pacing::FlipAudit`. Never set on Wayland.
     paced_submission: Option<Arc<AtomicBool>>,
+    /// The Wi-Fi overlay lease and panel power, and so the layer on screen
+    /// (`presentation.rs`).
+    presentation: presentation::Presentation,
+    /// The layer `sync_presentation` last applied.
+    layer: presentation::Layer,
+    /// Renders the Wi-Fi overlay; `None` without a GPU.
+    wifi_overlay: Option<scenes::wifi_overlay::WifiOverlayScreen>,
     /// Wayland: where the winit thread publishes `wake::Published` after each
     /// event batch for the driver (`wake::drive_forwarding`). `None` on KMS,
     /// which waits in its own loop, and in tests.
@@ -2647,8 +2665,14 @@ impl App {
             greeting,
             sleep,
             caption_overlay,
+            mut wifi_overlay,
         } = parts;
         self.caption_overlay = caption_overlay;
+        // A lease held across a GPU rebuild is drawn by the new renderer.
+        if let Some(content) = self.presentation.overlay() {
+            wifi_overlay.set_content(content);
+        }
+        self.wifi_overlay = Some(wifi_overlay);
         if let Some(mode) = self.mode.as_mut() {
             mode.set_overlays(Some(greeting), Some(sleep));
         }
@@ -2772,6 +2796,7 @@ impl App {
             }
             mode.set_overlays(None, None);
         }
+        self.wifi_overlay = None;
         self.gpu = None;
         self.max_texture_dimension = None;
         self.surface_gate.reset();
@@ -2789,7 +2814,18 @@ impl App {
                 ViewerModeKind::Sleep => self.enter_wake(),
                 ViewerModeKind::Greeting | ViewerModeKind::Wake => self.enter_sleep(),
             },
+            ViewerCommand::DisplayPower { reply, .. } => {
+                // The KMS loop handles this itself (`kms.rs`); the control
+                // task answers it on Wayland, so this is only a backstop.
+                let _ = reply.send(config_model::control::Reply::error(
+                    config_model::control::ErrorKind::Unsupported,
+                    "the compositor owns display power on this stack",
+                ));
+            }
+            ViewerCommand::ShowWifiOverlay(content) => self.show_wifi_overlay(*content),
+            ViewerCommand::HideWifiOverlay => self.hide_wifi_overlay(),
         }
+        self.sync_presentation();
     }
 
     /// One control step: matting results in, uploads, matting work out, and
@@ -2808,6 +2844,8 @@ impl App {
                 scene.enter(ctx);
             });
         }
+        self.sync_presentation();
+        self.rearm_wifi_overlay();
 
         self.drain_mat_results();
 
@@ -3047,6 +3085,24 @@ impl App {
             debug!("viewer_redraw_waiting_for_surface_configuration");
             return Ok(());
         }
+        // What is on screen (presentation.rs): nothing while the panel is
+        // dark, the Wi-Fi overlay while its lease is live (not in Sleep),
+        // the active scene otherwise.
+        let draw_wifi_overlay = match self.presentation.layer(mode_kind, Instant::now()) {
+            presentation::Layer::Nothing => return Ok(()),
+            presentation::Layer::Overlay => true,
+            presentation::Layer::Scene(_) => false,
+        };
+        if draw_wifi_overlay {
+            let (Some(output), Some(screen)) = (self.output.as_ref(), self.wifi_overlay.as_mut())
+            else {
+                return Ok(());
+            };
+            screen.resize(output.size(), output.scale_factor());
+            if !screen.needs_redraw() {
+                return Ok(());
+            }
+        }
         let overlay_pending = match mode_kind {
             ViewerModeKind::Greeting => self
                 .mode()
@@ -3078,11 +3134,15 @@ impl App {
             has_transition,
             "viewer_window_redraw_requested"
         );
-        if matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep) && !overlay_pending
+        if !draw_wifi_overlay
+            && matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep)
+            && !overlay_pending
         {
             return Ok(());
         }
-        if matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep) {
+        if !draw_wifi_overlay
+            && matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep)
+        {
             let Some(output) = self.output.as_ref() else {
                 return Ok(());
             };
@@ -3271,6 +3331,26 @@ impl App {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("draw-encoder"),
             });
+
+        if draw_wifi_overlay {
+            // Drawn once per change, like Greeting and Sleep (no
+            // pre_present_notify, for the same reason as below).
+            let Some(screen) = self.wifi_overlay.as_mut() else {
+                return Ok(());
+            };
+            encoder.push_debug_group("wifi-overlay");
+            let rendered = screen.render(&mut encoder, &view);
+            encoder.pop_debug_group();
+            if !rendered {
+                debug!("wifi_overlay_render_deferred");
+                return Ok(());
+            }
+            gpu.queue.submit(Some(encoder.finish()));
+            frame.present();
+            screen.after_submit();
+            self.record_frame_presented();
+            return Ok(());
+        }
 
         // Greeting and Sleep draw once on demand and deliberately
         // do not call pre_present_notify: a frame callback is only
@@ -3763,9 +3843,104 @@ impl App {
             caption_overlay: None,
             transition_frame_metric: None,
             paced_submission: None,
+            presentation: presentation::Presentation::default(),
+            layer: presentation::Layer::Scene(ViewerModeKind::Greeting),
+            wifi_overlay: None,
             wake_published: None,
             events_handled: 0,
             tick_wanted: false,
+        }
+    }
+
+    /// Apply the layer the mode, the overlay lease and panel power select
+    /// (`presentation.rs`): drop a lapsed lease, pause or resume the
+    /// slideshow, and ask for a frame when what is on screen changes. Run
+    /// after every control command and at the start of every control step.
+    fn sync_presentation(&mut self) {
+        let now = Instant::now();
+        if self.presentation.expire_overlay(now) {
+            info!("wifi_overlay_expired: no refresh within its lease; hiding it");
+            if let Some(screen) = self.wifi_overlay.as_mut() {
+                screen.clear();
+            }
+        }
+        let layer = self.presentation.layer(self.mode_kind(), now);
+        let visible = layer == presentation::Layer::Scene(ViewerModeKind::Wake);
+        match self.mode_mut().wake_mut().set_visible(visible) {
+            scenes::Visibility::Hidden { rewound } => {
+                if rewound {
+                    // The rewound transition never finished on screen.
+                    self.transition_frame_metric = None;
+                }
+                info!(rewound, "slideshow_paused: not on screen");
+            }
+            scenes::Visibility::Revealed => info!("slideshow_resumed: dwell restarted"),
+            scenes::Visibility::Unchanged => {}
+        }
+        if layer == self.layer {
+            return;
+        }
+        debug!(previous = ?self.layer, ?layer, "viewer_layer_changed");
+        self.layer = layer;
+        match layer {
+            presentation::Layer::Scene(_) => {
+                let _ = self.with_active_scene(|scene, ctx| scene.handle_visibility(ctx, true));
+            }
+            presentation::Layer::Overlay => {
+                if let Some(screen) = self.wifi_overlay.as_mut() {
+                    screen.mark_redraw_needed();
+                }
+                (self.redraw_requester())();
+            }
+            presentation::Layer::Nothing => {}
+        }
+    }
+
+    /// Wayland: an overlay frame that was not presented (an acquire
+    /// timeout, a deferred render) is asked for again on the next control
+    /// step, which the wake plan schedules while the overlay owes a frame
+    /// (`presentation::layer_owes_frame`). Nothing else would: the covered
+    /// slideshow requests no frames, and lease refreshes do not redraw. KMS re-arms its own request after
+    /// an acquire timeout, and re-arming there would spin the loop on a
+    /// render that cannot succeed.
+    fn rearm_wifi_overlay(&self) {
+        if self.layer == presentation::Layer::Overlay
+            && let Some(Output::Window(window)) = self.output.as_ref()
+            && self.wifi_overlay.as_ref().is_some_and(|s| s.needs_redraw())
+        {
+            window.request_redraw();
+        }
+    }
+
+    /// `wifi-overlay-show`: set or extend the lease; new content is
+    /// re-rendered, a refresh of the same content is not.
+    fn show_wifi_overlay(&mut self, content: config_model::control::WifiOverlay) {
+        let now = Instant::now();
+        match self.presentation.show_overlay(content, now) {
+            presentation::OverlayShown::Content => {
+                let content = self.presentation.overlay().expect("just shown");
+                info!(
+                    ssid = %content.ssid,
+                    lease_s = content.ttl().as_secs(),
+                    "wifi_overlay_shown"
+                );
+                if let Some(screen) = self.wifi_overlay.as_mut() {
+                    screen.set_content(content);
+                }
+                if self.layer == presentation::Layer::Overlay {
+                    (self.redraw_requester())();
+                }
+            }
+            presentation::OverlayShown::Refreshed => debug!("wifi_overlay_refreshed"),
+        }
+    }
+
+    fn hide_wifi_overlay(&mut self) {
+        if self.presentation.hide_overlay() {
+            info!("wifi_overlay_hidden");
+            if let Some(screen) = self.wifi_overlay.as_mut() {
+                screen.clear();
+            }
         }
     }
 
@@ -3784,17 +3959,26 @@ impl App {
         };
         let on_kms = matches!(self.output, Some(Output::Kms { .. }));
         let mode = self.mode();
+        // Wayland retries a frame the layer on screen still owes (T5); under
+        // the Wi-Fi overlay that is the overlay's, not the covered scene's.
         let overlay_pending = !on_kms
-            && match kind {
-                ViewerModeKind::Greeting => mode.greeting().is_some_and(|g| g.needs_redraw()),
-                ViewerModeKind::Sleep => mode.sleep().is_some_and(|s| s.needs_redraw()),
-                ViewerModeKind::Wake => false,
-            };
+            && presentation::layer_owes_frame(
+                self.layer,
+                |kind| match kind {
+                    ViewerModeKind::Greeting => mode.greeting().is_some_and(|g| g.needs_redraw()),
+                    ViewerModeKind::Sleep => mode.sleep().is_some_and(|s| s.needs_redraw()),
+                    ViewerModeKind::Wake => false,
+                },
+                self.wifi_overlay.as_ref().is_some_and(|s| s.needs_redraw()),
+            );
         wake::plan_wake(
             wake::WakeInputs {
-                slideshow_active: kind == ViewerModeKind::Wake,
+                // Paused while covered or dark (`sync_presentation`).
+                slideshow_active: kind == ViewerModeKind::Wake && wake.visible(),
                 sleeping: kind == ViewerModeKind::Sleep,
-                redraw_requested,
+                // A dark panel presents nothing; the request stays armed for
+                // the first frame after the wake.
+                redraw_requested: redraw_requested && self.presentation.power().may_present(),
                 transition_active: wake.transition_state().is_some(),
                 transition_just_finished,
                 displayed_at: wake.displayed_at(),
@@ -3804,6 +3988,7 @@ impl App {
                 in_flight: self.mat_inflight,
                 deferred: self.deferred_images.len(),
                 preload: self.preload_count,
+                overlay_expires_at: self.presentation.overlay_expires_at(),
                 surface_poll: (!on_kms).then_some(SURFACE_POLL_INTERVAL),
                 overlay_pending,
             },
@@ -4102,6 +4287,19 @@ impl ViewerSurface {
             )),
         }
     }
+}
+
+/// Whether the viewer can render this overlay: the protocol's limits, and
+/// both QR payloads encode.
+pub fn validate_wifi_overlay(overlay: &config_model::control::WifiOverlay) -> Result<(), String> {
+    overlay.validate()?;
+    for (name, payload) in [
+        ("join-qr", &overlay.join_qr),
+        ("portal-url", &overlay.portal_url),
+    ] {
+        scenes::wifi_overlay::qr_modules(payload).map_err(|err| format!("{name}: {err}"))?;
+    }
+    Ok(())
 }
 
 /// Run the viewer on DRM/KMS; see `kms.rs`.
@@ -4529,6 +4727,7 @@ mod tests {
                                 in_flight,
                                 deferred,
                                 preload: PRELOAD,
+                                overlay_expires_at: None,
                                 surface_poll: None,
                                 overlay_pending: false,
                             },

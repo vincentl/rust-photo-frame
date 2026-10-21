@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# Display power for the frame: powerctl {sleep|wake|state} [OUTPUT]
+#
+# Asks the viewer first, with `display-power` on its control socket. On the
+# KMS stack the viewer holds DRM master and is the only process that can
+# switch the panel. Falls back to sway exactly as before only when the
+# viewer cannot help: no socket, no answer (no viewer, or one too old to
+# answer), or "unsupported" (the Wayland stack, where sway owns the output).
+# Any other refusal (not-driven, failed, timeout) is the answer: it is
+# printed and powerctl exits 1.
+#
+# PHOTOFRAME_CONTROL_SOCKET overrides the socket (default
+# /run/photoframe/control.sock, the viewer's control-socket-path default).
 set -euo pipefail
 
 MODE="${1:-}"
@@ -8,9 +20,62 @@ if [[ "$MODE" != "sleep" && "$MODE" != "wake" && "$MODE" != "state" ]]; then
   exit 2
 fi
 
+CONTROL_SOCKET="${PHOTOFRAME_CONTROL_SOCKET:-/run/photoframe/control.sock}"
+
+# Send one request to the viewer. Returns 0 and prints the reply when the
+# viewer answered ok; 1 (reason on stderr) when it refused; 2 when it cannot
+# help and the caller should fall back to sway. socat half-closes after the
+# request and waits up to 6 s for the one reply line (the viewer answers
+# within 5 s, timeout included).
+viewer_request() {
+  [[ -S "$CONTROL_SOCKET" ]] || return 2
+  command -v socat >/dev/null 2>&1 || return 2
+  command -v jq >/dev/null 2>&1 || return 2
+  local reply
+  reply="$(printf '%s' "$1" | socat -t 6 - "UNIX-CONNECT:${CONTROL_SOCKET}" 2>/dev/null)" || return 2
+  jq -e 'type == "object" and has("ok")' >/dev/null 2>&1 <<<"$reply" || return 2
+  if jq -e '.ok == true' >/dev/null 2>&1 <<<"$reply"; then
+    printf '%s\n' "$reply"
+    return 0
+  fi
+  if jq -e '.error == "unsupported"' >/dev/null 2>&1 <<<"$reply"; then
+    return 2
+  fi
+  echo "powerctl: the viewer refused: $(jq -r '"\(.error // "error"): \(.detail // "no detail")"' <<<"$reply")" >&2
+  return 1
+}
+
+# display-power with an optional state (on|off; none = query), naming the
+# output unless it is "*".
+viewer_power() {
+  local request
+  request="$(jq -cn --arg state "${1:-}" --arg output "$TARGET" '
+    {command: "display-power"}
+    + (if $state == "" then {} else {state: $state} end)
+    + (if $output == "*" then {} else {output: $output} end)')" || return 1
+  viewer_request "$request"
+}
+
+status=0
+case "$MODE" in
+  sleep) viewer_power off >/dev/null || status=$? ;;
+  wake) viewer_power on >/dev/null || status=$? ;;
+  state)
+    if reply="$(viewer_power)"; then
+      jq -r '.state' <<<"$reply"
+    else
+      status=$?
+    fi
+    ;;
+esac
+# 0: done by the viewer; 1: the viewer refused (reason printed); 2: sway.
+((status == 2)) || exit "$status"
+
+# --- sway fallback ---------------------------------------------------------
+
 runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 if [[ ! -d "$runtime_dir" ]]; then
-  echo "powerctl: XDG_RUNTIME_DIR '$runtime_dir' does not exist" >&2
+  echo "powerctl: the viewer did not take the request and XDG_RUNTIME_DIR '$runtime_dir' does not exist (no sway session)" >&2
   exit 1
 fi
 

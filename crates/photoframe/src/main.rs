@@ -30,9 +30,9 @@ use tracing_subscriber::EnvFilter;
 #[cfg(unix)]
 use chrono::{DateTime, Utc};
 #[cfg(unix)]
-use serde::Deserialize;
+use config_model::control::{self, ErrorKind, Reply, Request};
 #[cfg(unix)]
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
@@ -216,6 +216,7 @@ async fn main() -> Result<()> {
                 control_socket_path,
                 greeting_delay,
                 schedule,
+                surface,
             )
             .await
             .context("control socket task failed")
@@ -522,29 +523,11 @@ fn print_paired_dry_run(
 }
 
 #[cfg(unix)]
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(tag = "command")]
-enum ControlCommand {
-    #[serde(rename = "toggle-state")]
-    ToggleState,
-    #[serde(rename = "set-state")]
-    SetState { state: ControlState },
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum ControlState {
-    Awake,
-    Asleep,
-}
-
-#[cfg(unix)]
-impl From<ControlState> for ViewerState {
-    fn from(value: ControlState) -> Self {
+impl From<control::ViewerState> for ViewerState {
+    fn from(value: control::ViewerState) -> Self {
         match value {
-            ControlState::Awake => ViewerState::Awake,
-            ControlState::Asleep => ViewerState::Asleep,
+            control::ViewerState::Awake => ViewerState::Awake,
+            control::ViewerState::Asleep => ViewerState::Asleep,
         }
     }
 }
@@ -572,6 +555,7 @@ async fn run_control_socket(
     socket_path: PathBuf,
     greeting_delay: Duration,
     schedule: Option<config::AwakeScheduleConfig>,
+    surface: tasks::viewer::ViewerSurface,
 ) -> Result<()> {
     if let Some(parent) = socket_path.parent()
         && let Err(err) = std::fs::create_dir_all(parent)
@@ -627,7 +611,7 @@ async fn run_control_socket(
                     Ok((stream, _addr)) => {
                         let control = control.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = handle_control_connection(stream, control).await {
+                            if let Err(err) = handle_control_connection(stream, control, surface).await {
                                 tracing::warn!("control connection failed: {err}");
                             }
                         });
@@ -746,116 +730,307 @@ awake-scheduled:
     }
 }
 
+/// A client gets this long to send its request and half-close.
+#[cfg(unix)]
+const CONTROL_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the control task waits for the viewer to answer a command only
+/// it can answer (display power). The viewer handles commands between
+/// frames; switching the panel off first lets submitted frames reach the
+/// screen (two refreshes, or one kernel vblank timeout of 3 s if the CRTC
+/// has stopped), then commits.
+#[cfg(unix)]
+const VIEWER_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Requests are small; anything bigger is not one.
+#[cfg(unix)]
+const MAX_CONTROL_PAYLOAD: u64 = 64 * 1024;
+
+/// One connection: read the request until the client half-closes, act on
+/// it, write one reply line (see `config_model::control` for the framing).
+/// A client that does not read the reply (buttond writes and drops) is not
+/// an error: its command has already been applied.
 #[cfg(unix)]
 async fn handle_control_connection(
     mut stream: tokio::net::UnixStream,
     control: mpsc::Sender<ViewerCommand>,
+    surface: tasks::viewer::ViewerSurface,
 ) -> Result<()> {
-    let mut buf = Vec::with_capacity(128);
-    stream
-        .read_to_end(&mut buf)
-        .await
-        .context("failed to read control command")?;
+    let mut buf = Vec::with_capacity(256);
+    let mut limited = (&mut stream).take(MAX_CONTROL_PAYLOAD);
+    let read = limited.read_to_end(&mut buf);
+    match tokio::time::timeout(CONTROL_READ_TIMEOUT, read).await {
+        Ok(result) => {
+            result.context("failed to read control command")?;
+        }
+        Err(_) => {
+            tracing::warn!(
+                "control client sent no complete request within {CONTROL_READ_TIMEOUT:?}"
+            );
+            return Ok(());
+        }
+    }
 
     if buf.is_empty() {
         tracing::debug!("ignoring empty control payload");
         return Ok(());
     }
 
-    let payload_text = String::from_utf8_lossy(&buf);
+    let reply = answer_control_request(&buf, &control, surface).await;
+    // Best effort: an old client may already have closed its end.
+    let _ = stream.write_all(reply.to_line().as_bytes()).await;
+    let _ = stream.shutdown().await;
+    Ok(())
+}
 
-    let request: ControlCommand = match serde_json::from_slice(&buf) {
-        Ok(command) => command,
+/// Parse one request, act on it, and say how it went. Never logs the
+/// payload itself: an overlay request carries the hotspot password.
+#[cfg(unix)]
+async fn answer_control_request(
+    payload: &[u8],
+    control: &mpsc::Sender<ViewerCommand>,
+    surface: tasks::viewer::ViewerSurface,
+) -> Reply {
+    let request: Request = match serde_json::from_slice(payload) {
+        Ok(request) => request,
         Err(err) => {
-            tracing::warn!(payload = %payload_text, "invalid control payload: {err}");
-            return Ok(());
+            let command = control::command_name(payload);
+            tracing::warn!(
+                command = command.as_deref().unwrap_or("?"),
+                "invalid control payload: {err}"
+            );
+            return Reply::error(ErrorKind::Invalid, err.to_string());
+        }
+    };
+    let name = request.name();
+    let forward = |cmd: ViewerCommand| async move {
+        match control.send(cmd).await {
+            Ok(()) => Reply::ok(),
+            Err(_) => Reply::error(ErrorKind::Failed, "the viewer is shutting down"),
         }
     };
 
     match request {
-        ControlCommand::ToggleState => {
-            tracing::info!(command = "toggle-state", "received control command");
-            control
-                .send(ViewerCommand::ToggleState)
-                .await
-                .context("failed to forward toggle-state command")?;
+        Request::ToggleState => {
+            tracing::info!(command = name, "received control command");
+            forward(ViewerCommand::ToggleState).await
         }
-        ControlCommand::SetState { state } => {
+        Request::SetState { state } => {
             let viewer_state: ViewerState = state.into();
+            tracing::info!(command = name, ?viewer_state, "received control command");
+            forward(ViewerCommand::SetState(viewer_state)).await
+        }
+        Request::DisplayPower { state, output } => {
             tracing::info!(
-                command = "set-state",
-                ?viewer_state,
+                command = name,
+                state = state.map_or("query", control::PowerState::as_str),
+                output = output.as_deref().unwrap_or("*"),
                 "received control command"
             );
-            control
-                .send(ViewerCommand::SetState(viewer_state))
-                .await
-                .context("failed to forward set-state command")?;
+            if surface == tasks::viewer::ViewerSurface::Wayland {
+                // The compositor owns the output; powerctl falls back to
+                // swaymsg on this answer, which is the Wayland behaviour.
+                return Reply::error(
+                    ErrorKind::Unsupported,
+                    "the compositor owns display power on this stack",
+                );
+            }
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            let sent = control
+                .send(ViewerCommand::DisplayPower {
+                    state,
+                    output,
+                    reply: reply_tx,
+                })
+                .await;
+            if sent.is_err() {
+                return Reply::error(ErrorKind::Failed, "the viewer is shutting down");
+            }
+            match tokio::time::timeout(VIEWER_REPLY_TIMEOUT, reply_rx).await {
+                Ok(Ok(reply)) => reply,
+                Ok(Err(_)) => Reply::error(ErrorKind::Failed, "the viewer dropped the request"),
+                Err(_) => Reply::error(
+                    ErrorKind::Timeout,
+                    format!(
+                        "no answer from the viewer within {VIEWER_REPLY_TIMEOUT:?}; it may still apply the command"
+                    ),
+                ),
+            }
         }
+        Request::WifiOverlayShow(overlay) => {
+            if let Err(why) = tasks::viewer::validate_wifi_overlay(&overlay) {
+                tracing::warn!(command = name, "rejected: {why}");
+                return Reply::error(ErrorKind::Invalid, why);
+            }
+            // Refreshed every few seconds while shown; the viewer logs the
+            // changes that matter.
+            tracing::debug!(command = name, ssid = %overlay.ssid, "received control command");
+            forward(ViewerCommand::ShowWifiOverlay(Box::new(overlay))).await
+        }
+        Request::WifiOverlayHide => {
+            tracing::info!(command = name, "received control command");
+            forward(ViewerCommand::HideWifiOverlay).await
+        }
+        Request::Ping => Reply::ok(),
     }
-
-    Ok(())
 }
 
-#[cfg(unix)]
-mod tests {
-    #[test]
-    fn deserialize_toggle_state_command() {
-        let cmd: super::ControlCommand = serde_json::from_str(r#"{"command":"toggle-state"}"#)
-            .expect("toggle-state should parse");
-        assert_eq!(cmd, super::ControlCommand::ToggleState);
-    }
+#[cfg(all(test, unix))]
+mod control_socket_tests {
+    use super::*;
+    use tasks::viewer::ViewerSurface;
+    use tokio::net::{UnixListener, UnixStream};
 
-    #[test]
-    fn deserialize_set_state_awake() {
-        let cmd: super::ControlCommand =
-            serde_json::from_str(r#"{"command":"set-state","state":"awake"}"#)
-                .expect("set-state should parse");
-
-        assert_eq!(
-            cmd,
-            super::ControlCommand::SetState {
-                state: super::ControlState::Awake
+    /// A listener in a temp dir that runs `handle_control_connection` for
+    /// each connection, like `run_control_socket` does.
+    async fn serve(
+        surface: ViewerSurface,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        mpsc::Receiver<ViewerCommand>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("control.sock");
+        let listener = UnixListener::bind(&path).expect("bind");
+        let (tx, rx) = mpsc::channel(16);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let _ = handle_control_connection(stream, tx, surface).await;
+                });
             }
-        );
+        });
+        (dir, path, rx)
     }
 
-    #[test]
-    fn deserialize_set_state_asleep() {
-        let cmd: super::ControlCommand =
-            serde_json::from_str(r#"{"command":"set-state","state":"asleep"}"#)
-                .expect("set-state should parse");
+    /// Write, half-close, read the reply line: what powerctl's socat does.
+    async fn request(path: &std::path::Path, payload: &str) -> Reply {
+        let mut stream = UnixStream::connect(path).await.expect("connect");
+        stream.write_all(payload.as_bytes()).await.expect("write");
+        stream.shutdown().await.expect("half-close");
+        let mut line = String::new();
+        stream.read_to_string(&mut line).await.expect("read reply");
+        serde_json::from_str(line.trim_end()).expect("reply is JSON")
+    }
 
-        assert_eq!(
-            cmd,
-            super::ControlCommand::SetState {
-                state: super::ControlState::Asleep
+    #[tokio::test]
+    async fn set_state_is_forwarded_and_answered() {
+        let (_dir, path, mut rx) = serve(ViewerSurface::Drm).await;
+        let reply = request(&path, r#"{"command":"set-state","state":"asleep"}"#).await;
+        assert_eq!(reply, Reply::ok());
+        assert!(matches!(
+            rx.recv().await,
+            Some(ViewerCommand::SetState(ViewerState::Asleep))
+        ));
+    }
+
+    #[tokio::test]
+    async fn ping_is_answered_without_reaching_the_viewer() {
+        let (_dir, path, mut rx) = serve(ViewerSurface::Drm).await;
+        assert_eq!(request(&path, r#"{"command":"ping"}"#).await, Reply::ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_client_that_writes_and_drops_still_delivers() {
+        // buttond: write_all, then drop the stream without reading.
+        let (_dir, path, mut rx) = serve(ViewerSurface::Drm).await;
+        {
+            let mut stream = UnixStream::connect(&path).await.expect("connect");
+            stream
+                .write_all(br#"{"command":"toggle-state"}"#)
+                .await
+                .expect("write");
+        }
+        assert!(matches!(rx.recv().await, Some(ViewerCommand::ToggleState)));
+    }
+
+    #[tokio::test]
+    async fn display_power_carries_the_viewer_answer() {
+        let (_dir, path, mut rx) = serve(ViewerSurface::Drm).await;
+        let viewer = tokio::spawn(async move {
+            match rx.recv().await {
+                Some(ViewerCommand::DisplayPower {
+                    state,
+                    output,
+                    reply,
+                }) => {
+                    assert_eq!(state, Some(control::PowerState::Off));
+                    assert_eq!(output.as_deref(), Some("HDMI-A-2"));
+                    let _ = reply.send(Reply::power(
+                        control::PowerState::Off,
+                        "HDMI-A-2",
+                        "3840x2160@60",
+                    ));
+                }
+                other => panic!("unexpected command {other:?}"),
             }
-        );
-    }
-
-    #[test]
-    fn deserialize_toggle_state_alias_rejected() {
-        serde_json::from_str::<super::ControlCommand>(r#"{"command":"ToggleSleep"}"#)
-            .expect_err("ToggleSleep should be rejected");
-    }
-
-    #[test]
-    fn deserialize_set_state_alias_rejected() {
-        serde_json::from_str::<super::ControlCommand>(r#"{"command":"set-state","state":"sleep"}"#)
-            .expect_err("set-state sleep alias should be rejected");
-    }
-
-    #[test]
-    fn deserialize_set_state_rejects_unknown() {
-        let err = serde_json::from_str::<super::ControlCommand>(
-            r#"{"command":"set-state","state":"invalid"}"#,
+        });
+        let reply = request(
+            &path,
+            r#"{"command":"display-power","state":"off","output":"HDMI-A-2"}"#,
         )
-        .expect_err("invalid state should fail");
+        .await;
+        viewer.await.expect("viewer task");
+        assert_eq!(
+            reply,
+            Reply::power(control::PowerState::Off, "HDMI-A-2", "3840x2160@60")
+        );
+    }
 
-        let message = err.to_string();
-        assert!(message.contains("unknown variant"));
-        assert!(message.contains("awake"));
-        assert!(message.contains("asleep"));
+    #[tokio::test]
+    async fn display_power_is_the_compositors_on_wayland() {
+        let (_dir, path, mut rx) = serve(ViewerSurface::Wayland).await;
+        let reply = request(&path, r#"{"command":"display-power","state":"off"}"#).await;
+        assert!(!reply.ok);
+        assert_eq!(reply.error, Some(ErrorKind::Unsupported));
+        assert!(rx.try_recv().is_err(), "nothing reaches the viewer");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_viewer_that_never_answers_times_out() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let answer = tokio::spawn(async move {
+            answer_control_request(br#"{"command":"display-power"}"#, &tx, ViewerSurface::Drm).await
+        });
+        // Hold the reply sender without answering.
+        let held = rx.recv().await;
+        let reply = answer.await.expect("answer task");
+        drop(held);
+        assert_eq!(reply.error, Some(ErrorKind::Timeout));
+    }
+
+    #[tokio::test]
+    async fn invalid_payloads_are_answered_not_forwarded() {
+        let (_dir, path, mut rx) = serve(ViewerSurface::Drm).await;
+        for payload in [
+            r#"{"command":"ToggleSleep"}"#,
+            r#"{"command":"set-state","state":"sleep"}"#,
+            "not json",
+        ] {
+            let reply = request(&path, payload).await;
+            assert_eq!(reply.error, Some(ErrorKind::Invalid), "{payload}");
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn an_overlay_out_of_limits_is_rejected_by_field() {
+        let (_dir, path, mut rx) = serve(ViewerSurface::Drm).await;
+        let payload = serde_json::json!({
+            "command": "wifi-overlay-show",
+            "headline": "h", "body": "b", "ssid": "s",
+            "password": "secret-words-here",
+            "join-qr": "", "portal-url": "http://192.168.4.1:8080/", "footer": "f"
+        })
+        .to_string();
+        let reply = request(&path, &payload).await;
+        assert_eq!(reply.error, Some(ErrorKind::Invalid));
+        let detail = reply.detail.unwrap_or_default();
+        assert!(
+            detail.contains("join-qr") && !detail.contains("secret"),
+            "{detail}"
+        );
+        assert!(rx.try_recv().is_err());
     }
 }

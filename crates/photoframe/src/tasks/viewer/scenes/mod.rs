@@ -20,39 +20,23 @@ use crate::tasks::greeting_screen::GreetingScreen;
 
 use super::{ImgTex, TransitionState};
 
-// ── Caption overlay ───────────────────────────────────────────────────────────
+mod panel;
+pub(super) mod wifi_overlay;
 
-/// Uniform for compositing the cached caption texture (must match caption_composite.wgsl).
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(C)]
-struct CompositeUniforms {
-    resolution: [f32; 2],
-    _pad0: [f32; 2],
-    rect: [f32; 4],
-}
+// ── Caption overlay ───────────────────────────────────────────────────────────
 
 /// Lightweight text overlay rendered on top of the live photo via `LoadOp::Load`.
 /// Draws a single short line in the bottom-left corner, on a solid backing panel
 /// so it stays legible over any mat (light, dark, or busy).
 pub(super) struct CaptionOverlay {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
     // Text is shaped (cosmic-text) and rasterized to a CPU buffer (swash), then
-    // uploaded as one plain texture. We deliberately do NOT use glyphon's GPU
-    // glyph atlas: its eviction/growth corrupts glyphs on the Pi's V3D driver.
+    // uploaded as one plain texture (`panel.rs`).
     text_buffer: Buffer,
     font_system: FontSystem,
     swash_cache: SwashCache,
     // The finished caption (backing + text), rebuilt only on text/size change and
     // composited as a single scissored triangle every frame.
-    cache_texture: Option<wgpu::Texture>,
-    cache_view: Option<wgpu::TextureView>,
-    cache_dims: (u32, u32),
-    composite_pipeline: wgpu::RenderPipeline,
-    composite_layout: wgpu::BindGroupLayout,
-    composite_sampler: wgpu::Sampler,
-    composite_uniform_buffer: wgpu::Buffer,
-    composite_bind_group: Option<wgpu::BindGroup>,
+    panel: panel::PanelCompositor,
     text: String,
     size: PhysicalSize<u32>,
     dirty: bool,
@@ -68,107 +52,21 @@ impl CaptionOverlay {
         let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(28.0, 34.0));
         text_buffer.set_wrap(&mut font_system, Wrap::None);
         let swash_cache = SwashCache::new();
-
-        // Composite pipeline: samples the cached caption texture and draws it as
-        // one premultiplied-alpha triangle, scissored to the panel rect in pixel
-        // space (caption_composite.wgsl explains why it must not be a quad).
-        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("caption-composite-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("caption_composite.wgsl").into()),
-        });
-        let composite_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("caption-composite-uniforms"),
-            size: std::mem::size_of::<CompositeUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("caption-composite-sampler"),
-            // 1:1 blit (cache rendered at exact panel pixel size) keeps text crisp.
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-        let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("caption-composite-bind-layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<CompositeUniforms>() as u64,
-                        ),
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let composite_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("caption-composite-pipeline-layout"),
-                bind_group_layouts: &[&composite_layout],
-                push_constant_ranges: &[],
-            });
-        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("caption-composite-pipeline"),
-            layout: Some(&composite_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &composite_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &composite_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    // Cache holds premultiplied alpha: src + dst * (1 - src.a).
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        // Linear (non-sRGB): the premultiplied bytes we upload are sampled
+        // and blended as-is.
+        let panel = panel::PanelCompositor::new(
+            device,
+            queue,
+            format,
+            wgpu::TextureFormat::Rgba8Unorm,
+            "caption-composite",
+        );
 
         Self {
-            device: device.clone(),
-            queue: queue.clone(),
             text_buffer,
             font_system,
             swash_cache,
-            cache_texture: None,
-            cache_view: None,
-            cache_dims: (0, 0),
-            composite_pipeline,
-            composite_layout,
-            composite_sampler,
-            composite_uniform_buffer,
-            composite_bind_group: None,
+            panel,
             text: String::new(),
             size: PhysicalSize::new(0, 0),
             dirty: false,
@@ -200,16 +98,12 @@ impl CaptionOverlay {
         }
 
         // Rebuild the cached caption only when the text or surface changed.
-        if self.dirty || self.cache_texture.is_none() {
+        if self.dirty || self.panel.texture.is_none() {
             if !self.rebuild_cache() {
                 return false;
             }
             self.dirty = false;
         }
-
-        let Some(bind_group) = self.composite_bind_group.as_ref() else {
-            return false;
-        };
 
         // Place the cached panel at the bottom-left of the current surface.
         let margin = 20.0_f32;
@@ -219,66 +113,19 @@ impl CaptionOverlay {
         let top = (self.size.height as f32 - line_h - margin).max(0.0);
         let rect_x = (margin - pad_x).max(0.0).floor();
         let rect_y = (top - pad_y).max(0.0).floor();
-        let (cw, ch) = self.cache_dims;
-
-        // The scissor, not the geometry, bounds the panel (the shader emits one
-        // oversized triangle — see caption_composite.wgsl for the V3D tile-binner
-        // bug this works around). Clamp to the surface: wgpu rejects a scissor
-        // that hangs past the attachment, and a caption wider than a small
-        // surface would otherwise panic instead of rendering partially.
-        let scissor_x = rect_x as u32;
-        let scissor_y = rect_y as u32;
-        let scissor_w = cw.min(self.size.width.saturating_sub(scissor_x));
-        let scissor_h = ch.min(self.size.height.saturating_sub(scissor_y));
-        if scissor_w == 0 || scissor_h == 0 {
-            return false;
-        }
-
-        let uniforms = CompositeUniforms {
-            resolution: [self.size.width as f32, self.size.height as f32],
-            _pad0: [0.0, 0.0],
-            rect: [rect_x, rect_y, cw as f32, ch as f32],
-        };
-        self.queue.write_buffer(
-            &self.composite_uniform_buffer,
-            0,
-            bytemuck::bytes_of(&uniforms),
-        );
-
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("caption-composite"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            occlusion_query_set: None,
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.composite_pipeline);
-        pass.set_bind_group(0, bind_group, &[]);
-        pass.set_scissor_rect(scissor_x, scissor_y, scissor_w, scissor_h);
-        pass.draw(0..3, 0..1);
-        true
+        self.panel.composite(
+            encoder,
+            target_view,
+            (self.size.width, self.size.height),
+            rect_x as u32,
+            rect_y as u32,
+        )
     }
 
     /// Shape the caption and rasterize it (dark backing + text) to a CPU buffer,
     /// then upload it as one plain texture. No GPU glyph atlas is involved, so the
     /// result can't be corrupted by atlas eviction/growth on any driver.
     fn rebuild_cache(&mut self) -> bool {
-        fn srgb_to_linear(c: f32) -> f32 {
-            if c <= 0.04045 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        }
-
         let pad_x = 14.0_f32;
         let pad_y = 8.0_f32;
         let line_h = 34.0_f32;
@@ -312,51 +159,6 @@ impl CaptionOverlay {
         let cw = (text_w + 2.0 * pad_x).ceil().max(1.0) as u32;
         let ch = (line_h + 2.0 * pad_y).ceil().max(1.0) as u32;
 
-        // (Re)allocate the cache texture + composite bind group on size change.
-        if self.cache_texture.is_none() || self.cache_dims != (cw, ch) {
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("caption-cache-texture"),
-                size: wgpu::Extent3d {
-                    width: cw,
-                    height: ch,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                // Linear (non-sRGB): the premultiplied bytes we upload are sampled
-                // and blended as-is. COPY_DST for the upload; COPY_SRC for tests.
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST
-                    | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("caption-composite-bind-group"),
-                layout: &self.composite_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.composite_uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.composite_sampler),
-                    },
-                ],
-            });
-            self.cache_texture = Some(texture);
-            self.cache_view = Some(view);
-            self.composite_bind_group = Some(bind_group);
-            self.cache_dims = (cw, ch);
-        }
-
         // CPU pixel buffer in premultiplied-linear RGBA. Fill with the dark,
         // OPAQUE backing panel, then blend the glyphs on top. The panel is
         // composited over the live photo; at <100% alpha the un-antialiased scene
@@ -364,7 +166,7 @@ impl CaptionOverlay {
         // staircase *inside* the caption (the panel's own geometry is pixel-exact).
         // Keeping the backing opaque is what removes that bleed-through.
         let panel_a = 1.0_f32;
-        let panel = [
+        let backing = [
             0u8,
             (0.04 * panel_a * 255.0).round() as u8,
             (0.06 * panel_a * 255.0).round() as u8,
@@ -372,75 +174,21 @@ impl CaptionOverlay {
         ];
         let mut buf = vec![0u8; (cw * ch * 4) as usize];
         for px in buf.chunks_exact_mut(4) {
-            px.copy_from_slice(&panel);
+            px.copy_from_slice(&backing);
         }
 
-        let base_x = pad_x as i32;
-        let base_y = pad_y as i32;
-        let cw_i = cw as i32;
-        let ch_i = ch as i32;
-        let text_color = GlyphonColor::rgb(170, 244, 244);
-        self.text_buffer.draw(
+        panel::blend_glyphs(
+            &self.text_buffer,
             &mut self.font_system,
             &mut self.swash_cache,
-            text_color,
-            |gx, gy, gw, gh, color| {
-                let a = color.a() as f32 / 255.0;
-                if a <= 0.0 {
-                    return;
-                }
-                // Premultiplied-linear source.
-                let sr = srgb_to_linear(color.r() as f32 / 255.0) * a;
-                let sg = srgb_to_linear(color.g() as f32 / 255.0) * a;
-                let sb = srgb_to_linear(color.b() as f32 / 255.0) * a;
-                let inv = 1.0 - a;
-                for row in 0..gh as i32 {
-                    let py = base_y + gy + row;
-                    if py < 0 || py >= ch_i {
-                        continue;
-                    }
-                    for col in 0..gw as i32 {
-                        let pxx = base_x + gx + col;
-                        if pxx < 0 || pxx >= cw_i {
-                            continue;
-                        }
-                        let idx = ((py * cw_i + pxx) * 4) as usize;
-                        let dr = buf[idx] as f32 / 255.0;
-                        let dg = buf[idx + 1] as f32 / 255.0;
-                        let db = buf[idx + 2] as f32 / 255.0;
-                        let da = buf[idx + 3] as f32 / 255.0;
-                        buf[idx] = ((sr + dr * inv) * 255.0).round().clamp(0.0, 255.0) as u8;
-                        buf[idx + 1] = ((sg + dg * inv) * 255.0).round().clamp(0.0, 255.0) as u8;
-                        buf[idx + 2] = ((sb + db * inv) * 255.0).round().clamp(0.0, 255.0) as u8;
-                        buf[idx + 3] = ((a + da * inv) * 255.0).round().clamp(0.0, 255.0) as u8;
-                    }
-                }
-            },
+            GlyphonColor::rgb(170, 244, 244),
+            &mut buf,
+            cw,
+            (pad_x as i32, pad_y as i32),
+            (0, 0, cw as i32, ch as i32),
+            panel::Encoding::LinearPremultiplied,
         );
-
-        let texture = self
-            .cache_texture
-            .as_ref()
-            .expect("cache texture created above");
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &buf,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(cw * 4),
-                rows_per_image: Some(ch),
-            },
-            wgpu::Extent3d {
-                width: cw,
-                height: ch,
-                depth_or_array_layers: 1,
-            },
-        );
+        self.panel.upload(cw, ch, &buf);
         true
     }
 
@@ -449,7 +197,7 @@ impl CaptionOverlay {
         // winit event loop on full GPU completion. This runs on every showcase
         // slideshow frame, so blocking here (wait_indefinitely) serialized the
         // event loop on the GPU and defeated AutoVsync pacing.
-        let _ = self.device.poll(wgpu::PollType::Poll);
+        let _ = self.panel.poll();
     }
 }
 
@@ -747,6 +495,21 @@ pub(super) struct WakeScene {
     /// Rest of a pair screen: `dwell_ms × pairing.dwell-multiplier`.
     pair_dwell_ms: u64,
     transition_cfg: TransitionConfig,
+    /// The slideshow is the layer on screen (not covered by the Wi-Fi
+    /// overlay, panel not dark). While false nothing that changes what is
+    /// on screen starts; see [`WakeScene::set_visible`].
+    visible: bool,
+}
+
+/// What [`WakeScene::set_visible`] changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Visibility {
+    Unchanged,
+    /// Hidden; `rewound` when a transition in progress was undone.
+    Hidden {
+        rewound: bool,
+    },
+    Revealed,
 }
 
 impl WakeScene {
@@ -773,7 +536,47 @@ impl WakeScene {
             dwell_ms,
             pair_dwell_ms,
             transition_cfg,
+            visible: true,
         }
+    }
+
+    /// Whether the slideshow is the layer on screen.
+    pub(super) fn visible(&self) -> bool {
+        self.visible
+    }
+
+    /// Hide or reveal the slideshow (the Wi-Fi overlay covers it, or the
+    /// panel goes dark; see `viewer/presentation.rs`).
+    ///
+    /// **Hiding rewinds** a transition in progress: the photo it was
+    /// bringing in goes back to the head of the queue and the photo it was
+    /// leaving stays current, so nothing is reported displayed for a screen
+    /// that was covered. While hidden, no transition and no first image
+    /// starts. **Revealing** restarts the current photo's dwell, so it rests
+    /// its full time on screen (the rule `enter_wake` already applies).
+    pub(super) fn set_visible(&mut self, visible: bool) -> Visibility {
+        if self.visible == visible {
+            return Visibility::Unchanged;
+        }
+        self.visible = visible;
+        if visible {
+            if self.displayed_at.is_some() {
+                self.displayed_at = Some(Instant::now());
+            }
+            self.pending_redraw = true;
+            return Visibility::Revealed;
+        }
+        let rewound = self.transition_state.take().is_some();
+        if rewound && let Some(next) = self.next.take() {
+            tracing::debug!(
+                "transition_rewound path={} queue_depth={}",
+                next.path.display(),
+                self.pending.len()
+            );
+            self.pending.push_front(next);
+        }
+        self.pending_redraw = false;
+        Visibility::Hidden { rewound }
     }
 
     /// Clears all slideshow state, returning the scene to its initial idle state.
@@ -920,7 +723,7 @@ impl WakeScene {
     }
 
     fn ensure_current_image(&mut self, ctx: &mut SceneContext<'_>) {
-        if self.current.is_some() || self.transition_state().is_some() {
+        if !self.visible || self.current.is_some() || self.transition_state().is_some() {
             return;
         }
         if let Some(first) = self.pending_mut().pop_front() {
@@ -939,7 +742,7 @@ impl WakeScene {
 
     /// Starts a transition when the dwell time elapses and staged images are available.
     pub(super) fn maybe_start_transition(&mut self, rng: &mut impl Rng) {
-        if self.transition_state.is_some() {
+        if !self.visible || self.transition_state.is_some() {
             return;
         }
         let Some(shown_at) = self.displayed_at else {
@@ -1016,6 +819,9 @@ impl WakeScene {
     /// `about_to_wait` is cheap and keeps the request armed for the moment
     /// the callback lands.
     fn ensure_redraw_requested(&mut self, ctx: &mut SceneContext<'_>) {
+        if !self.visible {
+            return;
+        }
         let pending_redraw = self.needs_redraw();
         let has_transition = self.transition_state().is_some();
         if pending_redraw {
@@ -1334,14 +1140,15 @@ mod tests {
             timeout: None,
         });
 
-        let (cw, ch) = overlay.cache_dims;
+        let (cw, ch) = overlay.panel.dims;
         assert!(
             cw > 300 && ch > 0,
             "cache should size to the full caption (got {cw}x{ch})"
         );
 
         let cache = overlay
-            .cache_texture
+            .panel
+            .texture
             .as_ref()
             .expect("cache texture should exist after render");
         let pixels = read_texture_rgba(&device, &queue, cache, cw, ch);
@@ -1396,11 +1203,11 @@ mod tests {
             submission_index: None,
             timeout: None,
         });
-        let (cw, ch) = overlay.cache_dims;
+        let (cw, ch) = overlay.panel.dims;
         let pixels = read_texture_rgba(
             device,
             queue,
-            overlay.cache_texture.as_ref().expect("cache texture"),
+            overlay.panel.texture.as_ref().expect("cache texture"),
             cw,
             ch,
         );
@@ -1513,7 +1320,7 @@ mod tests {
         // Mirror render()'s placement: margin 20, pad 14/8, line height 34.
         let rect_x = 6u32;
         let rect_y = height - 34 - 20 - 8;
-        let (cw, ch) = overlay.cache_dims;
+        let (cw, ch) = overlay.panel.dims;
         let mut holes = 0usize;
         let mut spills = 0usize;
         for y in 0..height {
@@ -1547,7 +1354,7 @@ mod tests {
         overlay.resize(PhysicalSize::new(width, height));
         let pixels = composite_to_target(&device, &queue, &mut overlay, format, width, height);
 
-        let (cw, ch) = overlay.cache_dims;
+        let (cw, ch) = overlay.panel.dims;
         assert!(cw > width, "test premise: caption wider than the surface");
         let rect_x = 6u32;
         let rect_y = height - 34 - 20 - 8;
@@ -1629,6 +1436,7 @@ mod tests {
                     in_flight: 0,
                     deferred: 0,
                     preload: 1,
+                    overlay_expires_at: None,
                     surface_poll: None,
                     overlay_pending: false,
                 },
@@ -1643,5 +1451,77 @@ mod tests {
                 "a pair waits out its longer dwell; a solo photo moves on"
             );
         }
+    }
+
+    /// Hiding the slideshow (overlay up, panel dark) rewinds a transition in
+    /// progress and starts nothing; revealing restarts the dwell.
+    #[test]
+    fn hiding_rewinds_a_transition_and_revealing_restarts_the_dwell() {
+        use super::super::{ImgTex, TexturePlane};
+        use super::{Visibility, WakeScene};
+        use std::time::{Duration, Instant};
+        let Some((device, _queue)) = try_device() else {
+            eprintln!("skipping wake visibility test: no GPU adapter available");
+            return;
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("visibility-test-layout"),
+            entries: &[],
+        });
+        let tex = |path: &str| ImgTex {
+            plane: TexturePlane {
+                bind: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("visibility-test-bind"),
+                    layout: &layout,
+                    entries: &[],
+                }),
+                w: 1,
+                h: 1,
+            },
+            path: path.into(),
+            partner: None,
+            mat_kind: None,
+        };
+        let mut wake = WakeScene::new(8_000, 8_000, crate::config::TransitionConfig::default());
+        let long_ago = Instant::now() - Duration::from_secs(60);
+        wake.set_current(Some(tex("a")));
+        wake.set_displayed_at(Some(long_ago));
+        wake.pending_mut().push_back(tex("b"));
+        wake.pending_mut().push_back(tex("c"));
+        wake.maybe_start_transition(&mut rand::rng());
+        assert!(
+            wake.transition_state().is_some(),
+            "test premise: a transition runs"
+        );
+        assert_eq!(wake.next().map(|n| n.path.clone()), Some("b".into()));
+
+        assert_eq!(
+            wake.set_visible(false),
+            Visibility::Hidden { rewound: true }
+        );
+        assert_eq!(wake.set_visible(false), Visibility::Unchanged);
+        assert!(wake.transition_state().is_none());
+        assert!(wake.next().is_none());
+        assert_eq!(wake.current().map(|c| c.path.clone()), Some("a".into()));
+        let queue: Vec<_> = wake.pending().iter().map(|t| t.path.clone()).collect();
+        assert_eq!(queue, vec![std::path::PathBuf::from("b"), "c".into()]);
+
+        // Hidden: the dwell long since ran out, yet nothing starts.
+        wake.maybe_start_transition(&mut rand::rng());
+        assert!(wake.transition_state().is_none());
+        assert!(!wake.needs_redraw());
+
+        let before = Instant::now();
+        assert_eq!(wake.set_visible(true), Visibility::Revealed);
+        assert!(
+            wake.displayed_at().is_some_and(|at| at >= before),
+            "full dwell again"
+        );
+        assert!(wake.needs_redraw());
+        wake.maybe_start_transition(&mut rand::rng());
+        assert!(
+            wake.transition_state().is_none(),
+            "the restarted dwell holds"
+        );
     }
 }

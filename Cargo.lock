@@ -538,6 +538,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "serde",
+ "serde_json",
  "serde_yaml",
 ]
 
@@ -2427,6 +2428,7 @@ dependencies = [
  "notify",
  "palette",
  "pollster",
+ "qrcode",
  "rand 0.9.4",
  "serde",
  "serde_json",
@@ -4035,6 +4037,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "config-model",
  "fontdb",
  "image",
  "libc",

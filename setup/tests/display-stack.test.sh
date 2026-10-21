@@ -138,6 +138,49 @@ reset_stubs
 JOURNAL_LINE="WARN kms_viewer_exiting_with_error: not DRM master"
 display_stack_kms_healthy 3 1 >/dev/null 2>&1 && fail "KMS unit that never presented judged healthy"
 
+# --- KMS display check (verify.sh) ---------------------------------------
+# A fake /sys/class/drm and a real Unix socket for the viewer; socat is a
+# function that answers with ${VIEWER_REPLY}.
+SYSFS="${WORK}/drm"
+mkdir -p "${SYSFS}/card1-HDMI-A-1" "${SYSFS}/card1-HDMI-A-2" "${SYSFS}/card0-Writeback-1"
+echo disconnected >"${SYSFS}/card1-HDMI-A-1/status"
+echo connected >"${SYSFS}/card1-HDMI-A-2/status"
+printf '3840x2160\n1920x1080\n' >"${SYSFS}/card1-HDMI-A-2/modes"
+echo unknown >"${SYSFS}/card0-Writeback-1/status"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "${WORK}/control.sock"
+export DISPLAY_SYSFS_ROOT="${SYSFS}" PHOTOFRAME_CONTROL_SOCKET="${WORK}/control.sock"
+VIEWER_REPLY=""
+socat() { cat >/dev/null; printf '%s\n' "${VIEWER_REPLY}"; }
+kms_check() { display_stack_kms_check 2>&1; }
+
+VIEWER_REPLY='{"ok":true,"state":"on","connector":"HDMI-A-2","mode":"3840x2160@60"}'
+out="$(kms_check)" || fail "healthy KMS display judged failing: ${out}"
+[[ "${out}" == $'OK\tcard1 HDMI-A-2 3840x2160@60 power=on' ]] || fail "KMS check line: ${out}"
+
+VIEWER_REPLY='{"ok":true,"state":"on","connector":"HDMI-A-1","mode":"3840x2160@60"}'
+out="$(kms_check)" && fail "a disconnected driven connector passed: ${out}"
+[[ "${out}" == ERROR* ]] || fail "disconnected connector not an ERROR: ${out}"
+
+VIEWER_REPLY='{"ok":true,"state":"off","connector":"HDMI-A-1","mode":"3840x2160@60"}'
+out="$(kms_check)" || fail "a switched-off panel that dropped HPD failed: ${out}"
+[[ "${out}" == WARN* ]] || fail "switched-off panel not a WARN: ${out}"
+
+VIEWER_REPLY='{"ok":true,"state":"on","connector":"HDMI-A-2","mode":"2560x1440@60"}'
+out="$(kms_check)" && fail "a mode the panel no longer lists passed: ${out}"
+[[ "${out}" == *"no longer lists"* ]] || fail "missing mode message: ${out}"
+
+VIEWER_REPLY='{"ok":true,"state":"on","connector":"DP-1","mode":"3840x2160@60"}'
+out="$(kms_check)" && fail "an unknown connector passed: ${out}"
+
+VIEWER_REPLY='{"ok":false,"error":"unsupported","detail":"the compositor owns display power on this stack"}'
+out="$(kms_check)" || fail "an unanswered query is not an error: ${out}"
+[[ "${out}" == WARN*"HDMI-A-2"* ]] || fail "unanswered query should warn and list the connected connector: ${out}"
+
+echo disconnected >"${SYSFS}/card1-HDMI-A-2/status"
+out="$(kms_check)" && fail "no connected connector and no viewer passed: ${out}"
+[[ "${out}" == ERROR* ]] || fail "nothing connected not an ERROR: ${out}"
+unset -f socat
+
 if ((failures)); then
     echo "display-stack tests: ${failures} failure(s)" >&2
     exit 1

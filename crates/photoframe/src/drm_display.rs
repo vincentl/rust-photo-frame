@@ -333,6 +333,10 @@ mod device {
         pub prefer_mode: Option<ModeRequest>,
         /// Vulkan display plane index.
         pub plane: Option<u32>,
+        /// Force a probe of each connector (the kernel re-reads hot-plug
+        /// detect and the EDID over DDC; tens of ms each) instead of reading
+        /// the cached state.
+        pub force_probe: bool,
     }
 
     /// The chosen card, connector and mode. Owns the card fd.
@@ -403,7 +407,7 @@ mod device {
             ));
             let mut infos = Vec::new();
             for handle in res.connectors() {
-                let Ok(info) = card.get_connector(*handle, false) else {
+                let Ok(info) = card.get_connector(*handle, request.force_probe) else {
                     continue;
                 };
                 trace(&format!(
@@ -525,6 +529,7 @@ mod device {
     pub struct KmsDisplay {
         card: Card,
         connector_id: u32,
+        connector_name: String,
         width: u32,
         height: u32,
         vrefresh_hz: u32,
@@ -532,6 +537,9 @@ mod device {
         /// ioctl addresses); resolved lazily because Mesa picks the CRTC at
         /// its first modeset.
         pipe: Option<u32>,
+        /// The CRTC itself, cached at the first power change (it is resolved
+        /// while lit and stays the connector's CRTC while inactive).
+        crtc_handle: Option<drm::control::crtc::Handle>,
     }
 
     impl KmsTarget {
@@ -544,10 +552,12 @@ mod device {
             Ok(KmsDisplay {
                 card: Card(file),
                 connector_id: self.connector_id,
+                connector_name: self.connector_name.clone(),
                 width: self.width,
                 height: self.height,
                 vrefresh_hz: self.vrefresh_hz,
                 pipe: None,
+                crtc_handle: None,
             })
         }
     }
@@ -567,17 +577,20 @@ mod device {
                 })
         }
 
-        fn resolve_pipe(&self) -> Result<u32, KmsError> {
+        fn crtc(&self) -> Result<drm::control::crtc::Handle, KmsError> {
             let info = self.connector(false)?;
             let encoder = info
                 .current_encoder()
                 .ok_or_else(|| KmsError::failed("connector has no active encoder yet"))?;
-            let crtc = self
-                .card
+            self.card
                 .get_encoder(encoder)
                 .map_err(|e| KmsError::failed(format!("query encoder: {e}")))?
                 .crtc()
-                .ok_or_else(|| KmsError::failed("encoder drives no CRTC yet"))?;
+                .ok_or_else(|| KmsError::failed("encoder drives no CRTC yet"))
+        }
+
+        fn resolve_pipe(&self) -> Result<u32, KmsError> {
+            let crtc = self.crtc()?;
             let res = self
                 .card
                 .resource_handles()
@@ -622,6 +635,164 @@ mod device {
                 sequence: reply.frame(),
                 monotonic,
             })
+        }
+
+        /// The connector this display drives, e.g. `HDMI-A-2`.
+        pub fn connector_name(&self) -> &str {
+            &self.connector_name
+        }
+
+        /// The mode in use, `WxH@Hz`.
+        pub fn mode_label(&self) -> String {
+            format!("{}x{}@{}", self.width, self.height, self.vrefresh_hz)
+        }
+
+        /// Switch the panel off (`on = false`) or back on with a full
+        /// modeset (`on = true`), as one blocking atomic commit on the CRTC
+        /// driving the connector.
+        ///
+        /// Atomic `ACTIVE` is the kernel's power switch on atomic drivers
+        /// (vc4 is one); the legacy DPMS property only maps onto it, and the
+        /// kernel documents its read-back as unreliable. Off commits
+        /// `ACTIVE = 0`. On commits what Mesa's display WSI commits when it
+        /// first takes the display: a fresh `MODE_ID` blob of the mode in
+        /// use, the connector's `CRTC_ID` and `ACTIVE = 1`, with
+        /// `ALLOW_MODESET`. That is the startup modeset, the one that drives
+        /// the HDMI link up from nothing. The plane keeps Mesa's last
+        /// framebuffer; Mesa's next present is an ordinary flip on a running
+        /// CRTC. Mesa never learns the CRTC was off: it would fail that
+        /// flip and lose the swapchain (25.3+), or fall back to its own
+        /// modeset (25.2-) and light the panel behind the viewer's back, so
+        /// the caller must present nothing while the CRTC is off.
+        pub fn set_active(&mut self, on: bool) -> Result<(), KmsError> {
+            use drm::control::AtomicCommitFlags;
+            use drm::control::atomic::AtomicModeReq;
+            use drm::control::property::Value;
+            // Mesa's WSI already made this open file an atomic client; say
+            // so ourselves too, so this works against any Mesa.
+            self.card
+                .set_client_capability(drm::ClientCapability::Atomic, true)
+                .map_err(|e| KmsError::failed(format!("enable atomic modesetting: {e}")))?;
+            let crtc = self.cached_crtc()?;
+            let connector = self.connector_handle()?;
+            let mut req = AtomicModeReq::new();
+            let mut blob = None;
+            if on {
+                let mode = self.mode_in_use(crtc)?;
+                let Value::Blob(id) = self
+                    .card
+                    .create_property_blob(&mode)
+                    .map_err(|e| KmsError::failed(format!("create mode blob: {e}")))?
+                else {
+                    return Err(KmsError::failed("mode blob is not a blob"));
+                };
+                blob = Some(id);
+                req.add_property(crtc, self.property(crtc, "MODE_ID")?.0, Value::Blob(id));
+                req.add_property(
+                    connector,
+                    self.property(connector, "CRTC_ID")?.0,
+                    Value::CRTC(Some(crtc)),
+                );
+            }
+            req.add_property(crtc, self.property(crtc, "ACTIVE")?.0, Value::Boolean(on));
+            let result = self
+                .card
+                .atomic_commit(AtomicCommitFlags::ALLOW_MODESET, req)
+                .map_err(|e| {
+                    KmsError::failed(format!(
+                        "atomic commit ACTIVE={} on CRTC {} ({}): {e}",
+                        u8::from(on),
+                        u32::from(crtc),
+                        self.connector_name
+                    ))
+                });
+            if let Some(id) = blob {
+                // The committed state holds its own reference.
+                let _ = self.card.destroy_property_blob(id);
+            }
+            result
+        }
+
+        /// The CRTC's atomic `ACTIVE` property as the kernel holds it now
+        /// (a read-back that, unlike legacy DPMS, reflects the state).
+        pub fn crtc_active(&mut self) -> Result<bool, KmsError> {
+            let crtc = self.cached_crtc()?;
+            Ok(self.property(crtc, "ACTIVE")?.1 != 0)
+        }
+
+        fn cached_crtc(&mut self) -> Result<drm::control::crtc::Handle, KmsError> {
+            if let Some(crtc) = self.crtc_handle {
+                return Ok(crtc);
+            }
+            let crtc = self.crtc()?;
+            self.crtc_handle = Some(crtc);
+            Ok(crtc)
+        }
+
+        fn connector_handle(&self) -> Result<connector::Handle, KmsError> {
+            Ok(connector::Handle::from(
+                drm::control::RawResourceHandle::new(self.connector_id)
+                    .ok_or_else(|| KmsError::failed("connector id 0"))?,
+            ))
+        }
+
+        /// The mode the CRTC holds (it keeps it while inactive), else the
+        /// connector's entry for the mode this process chose.
+        fn mode_in_use(
+            &self,
+            crtc: drm::control::crtc::Handle,
+        ) -> Result<drm::control::Mode, KmsError> {
+            let matches = |m: &drm::control::Mode| {
+                let (w, h) = m.size();
+                u32::from(w) == self.width
+                    && u32::from(h) == self.height
+                    && m.vrefresh() == self.vrefresh_hz
+            };
+            if let Ok(info) = self.card.get_crtc(crtc)
+                && let Some(mode) = info.mode()
+                && matches(&mode)
+            {
+                return Ok(mode);
+            }
+            self.connector(false)?
+                .modes()
+                .iter()
+                .copied()
+                .find(matches)
+                .ok_or_else(|| {
+                    KmsError::failed(format!(
+                        "{} no longer offers {}",
+                        self.connector_name,
+                        self.mode_label()
+                    ))
+                })
+        }
+
+        /// A property's handle and current value on an object, by name.
+        fn property<H: drm::control::ResourceHandle>(
+            &self,
+            handle: H,
+            name: &str,
+        ) -> Result<(drm::control::property::Handle, u64), KmsError> {
+            let props = self
+                .card
+                .get_properties(handle)
+                .map_err(|e| KmsError::failed(format!("query properties: {e}")))?;
+            let (ids, values) = props.as_props_and_values();
+            for (id, value) in ids.iter().zip(values) {
+                if let Ok(info) = self.card.get_property(*id)
+                    && info.name().to_bytes() == name.as_bytes()
+                {
+                    return Ok((*id, *value));
+                }
+            }
+            Err(KmsError::failed(format!("no {name} property")))
+        }
+
+        /// The connector reads connected (kernel's cached state; no probe).
+        pub fn is_connected(&self) -> bool {
+            self.connector(false)
+                .is_ok_and(|info| info.state() == connector::State::Connected)
         }
 
         /// The display this process was started for is still there: the

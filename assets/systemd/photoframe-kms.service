@@ -1,8 +1,9 @@
 # Managed by setup (setup/lib/display-stack.sh). Opt-in alternative to the
 # greetd -> sway kiosk session: the viewer presents straight to DRM/KMS with
 # no compositor. Enabled only when PHOTOFRAME_DISPLAY=kms was chosen at setup;
-# otherwise installed but disabled. Until K2 it gives up the Wi-Fi recovery
-# overlay and powerctl's display sleep (both talk to sway).
+# otherwise installed but disabled. The viewer draws the Wi-Fi recovery
+# overlay itself and owns display power (powerctl reaches it through the
+# control socket), so nothing here needs sway.
 [Unit]
 Description=Photo frame viewer on DRM/KMS (no compositor)
 # plymouth (when installed) holds DRM master until it quits; display

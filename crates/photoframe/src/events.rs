@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+
+use config_model::control::{PowerState, Reply, WifiOverlay};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -180,8 +182,21 @@ pub struct Displayed {
     pub partner: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+/// A control-socket request the viewer itself has to act on (the control
+/// task answers the rest; see `run_control_socket` in main.rs).
+#[derive(Debug)]
 pub enum ViewerCommand {
     SetState(ViewerState),
     ToggleState,
+    /// DRM/KMS display power: switch it (`state: Some`) or report it
+    /// (`None`). The viewer answers on `reply`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // read by the KMS loop
+    DisplayPower {
+        state: Option<PowerState>,
+        output: Option<String>,
+        reply: tokio::sync::oneshot::Sender<Reply>,
+    },
+    /// Show or refresh the Wi-Fi recovery overlay (content already validated).
+    ShowWifiOverlay(Box<WifiOverlay>),
+    HideWifiOverlay,
 }

@@ -84,6 +84,10 @@ pub struct OverlayConfig {
     pub overlay_app_id: String,
     #[serde(default)]
     pub sway_socket: Option<PathBuf>,
+    /// The viewer's control socket. The overlay is drawn by the viewer when
+    /// it answers there; the sway window above is the fallback.
+    #[serde(default = "default_control_socket")]
+    pub control_socket: PathBuf,
 }
 
 impl Config {
@@ -131,6 +135,7 @@ impl Default for OverlayConfig {
             photo_app_id: default_photo_app_id(),
             overlay_app_id: default_overlay_app_id(),
             sway_socket: None,
+            control_socket: default_control_socket(),
         }
     }
 }
@@ -205,6 +210,10 @@ fn default_photo_app_id() -> String {
 
 fn default_overlay_app_id() -> String {
     "wifi-overlay".to_string()
+}
+
+fn default_control_socket() -> PathBuf {
+    PathBuf::from(config_model::control::DEFAULT_SOCKET_PATH)
 }
 
 #[cfg(test)]

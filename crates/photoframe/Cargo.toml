@@ -44,6 +44,8 @@ winit = "0.30.12"
 glyphon = { git = "https://github.com/grovesNL/glyphon.git", rev = "de4b5b8d4e52310be8df56d82a759593920acc04" }
 fontdb = "0.23.0"
 palette = "0.7.6"
+# The Wi-Fi overlay draws its QR codes itself (no PNG, no image feature).
+qrcode = { version = "0.14", default-features = false }
 config-model = { path = "../config-model" }
 
 # DRM/KMS surface mode for frametest (`--drm`): connector/mode enumeration and

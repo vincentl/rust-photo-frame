@@ -54,6 +54,10 @@ pub(super) struct WakeInputs {
     pub(super) deferred: usize,
     /// `viewer-preload-count`.
     pub(super) preload: usize,
+    /// When the Wi-Fi overlay's lease runs out, if one is held (see
+    /// `presentation.rs`). It is a deadline in every scene: with the
+    /// slideshow paused under the overlay there is no dwell to wake for.
+    pub(super) overlay_expires_at: Option<Instant>,
     /// Wayland only: how often to look at the window's size while the
     /// surface is ready and the viewer is awake. Sway can change the output
     /// mode or scale without winit reporting it, and each control step
@@ -143,11 +147,19 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
     {
         sooner(now + REFILL_RETRY);
     }
+    // The Wi-Fi overlay's lease (presentation.rs): one that ends in the
+    // future is a deadline in every scene (with the slideshow paused under
+    // the overlay there is no dwell to wake for); one already over is taken
+    // down by the next control step, so run it now.
+    let overlay_due = inputs.overlay_expires_at.is_some_and(|at| at <= now);
+    if let Some(at) = inputs.overlay_expires_at.filter(|at| *at > now) {
+        sooner(at);
+    }
 
     // The step that finalized a transition ran its uploads and matting
     // refill *before* the finalize, while both were still gated off, so the
     // deferred work runs on one more step right after it.
-    let tick_now = inputs.transition_just_finished && !inputs.sleeping;
+    let tick_now = (inputs.transition_just_finished && !inputs.sleeping) || overlay_due;
 
     // Exactly when MattingBridge::queue_for_wake reads the loader (the test
     // `want_photo_matches_the_bridge_gate` in viewer.rs holds the two
@@ -466,6 +478,7 @@ mod tests {
             in_flight: 0,
             deferred: 0,
             preload: 3,
+            overlay_expires_at: None,
             surface_poll: None,
             overlay_pending: false,
         }
@@ -517,6 +530,82 @@ mod tests {
             crate::config::TransitionConfig::default(),
         );
         assert_eq!(scene.dwell(), DWELL);
+    }
+
+    #[test]
+    fn an_overlay_lease_is_a_deadline_in_every_scene() {
+        let now = Instant::now();
+        let soon = now + Duration::from_secs(5);
+        // Paused slideshow under the overlay: the lease is the only deadline.
+        let paused = WakeInputs {
+            slideshow_active: false,
+            overlay_expires_at: Some(soon),
+            ..resting(now)
+        };
+        assert_eq!(plan_wake(paused, now).deadline, Some(soon));
+        // Asleep with the overlay held: same.
+        let asleep = WakeInputs {
+            sleeping: true,
+            ..paused
+        };
+        assert_eq!(plan_wake(asleep, now).deadline, Some(soon));
+        // With a dwell running too, the earlier of the two.
+        let both = WakeInputs {
+            overlay_expires_at: Some(now + DWELL * 2),
+            ..resting(now)
+        };
+        assert_eq!(plan_wake(both, now).deadline, Some(now + DWELL));
+        let both = WakeInputs {
+            overlay_expires_at: Some(soon),
+            ..resting(now)
+        };
+        assert_eq!(plan_wake(both, now).deadline, Some(soon));
+    }
+
+    /// Review F3 under T5: a Wi-Fi overlay frame that was not presented is
+    /// owed by the layer on screen, so the plan schedules a control step
+    /// within OVERLAY_RETRY (that step runs `App::rearm_wifi_overlay`,
+    /// which asks winit for the frame), without fast ticking. The covered
+    /// greeting's stale request does not count (F9).
+    #[test]
+    fn an_owed_overlay_frame_gets_a_step_within_the_retry_period() {
+        use super::super::ViewerModeKind;
+        use super::super::presentation::{Layer, layer_owes_frame};
+        let now = Instant::now();
+        let covered = |overlay_owes| WakeInputs {
+            slideshow_active: false,
+            overlay_pending: layer_owes_frame(
+                Layer::Overlay,
+                |kind| kind == ViewerModeKind::Greeting,
+                overlay_owes,
+            ),
+            ..resting(now)
+        };
+        let plan = plan_wake(covered(true), now);
+        assert_eq!(plan.deadline, Some(now + OVERLAY_RETRY));
+        assert!(!plan.tick_fast && !plan.redraw_now);
+        let plan = plan_wake(covered(false), now);
+        assert_eq!(plan.deadline, None, "nothing owed: sleep on events");
+    }
+
+    #[test]
+    fn a_lapsed_overlay_lease_ticks_now_instead_of_waiting() {
+        let now = Instant::now();
+        for lapsed in [now, now - Duration::from_secs(1)] {
+            let plan = plan_wake(
+                WakeInputs {
+                    slideshow_active: false,
+                    overlay_expires_at: Some(lapsed),
+                    ..resting(now)
+                },
+                now,
+            );
+            assert!(
+                plan.tick_now,
+                "a lapsed lease must not leave the loop asleep"
+            );
+            assert_eq!(plan.deadline, None, "and is never a deadline in the past");
+        }
     }
 
     #[test]
@@ -1369,6 +1458,7 @@ mod tests {
                     preload: PRELOAD,
                     surface_poll: None,
                     overlay_pending: false,
+                    overlay_expires_at: None,
                 },
                 now,
             )
