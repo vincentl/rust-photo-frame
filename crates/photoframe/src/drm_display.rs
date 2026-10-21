@@ -713,6 +713,13 @@ mod device {
             result
         }
 
+        /// Whether a CRTC drives the connector (resolved and cached). Before
+        /// Mesa's first present this is whatever the console left: none when
+        /// the console never lit this connector.
+        pub fn crtc_routed(&mut self) -> bool {
+            self.cached_crtc().is_ok()
+        }
+
         /// The CRTC's atomic `ACTIVE` property as the kernel holds it now
         /// (a read-back that, unlike legacy DPMS, reflects the state).
         pub fn crtc_active(&mut self) -> Result<bool, KmsError> {

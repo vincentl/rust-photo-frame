@@ -503,13 +503,13 @@ So nothing is presented while the panel is off, and the wake commit always comes
 - **on** forces a probe of the connectors (a fresh read of hot-plug detect and the EDID) and starts on the display if that finds one;
 - otherwise the answer says no display is connected, and the TV has to be woken with its own remote or input button.
 
-Commands that arrive while waiting (sleep or wake, the Wi-Fi overlay) are applied as soon as the viewer runs.
+Commands that arrive while waiting (sleep or wake, the Wi-Fi overlay) are applied as soon as the viewer runs. A `display-power off` received while waiting is remembered: if the display appears later on its own, the viewer starts with the panel off.
 
 **What only your eyes can confirm.** The journal shows the display pipe running after a wake. Whether the TV shows a picture at 3840x2160@60 also depends on the HDMI link (at 4K60, the HDMI 2.0 scrambling the TV must accept). If a wake ever leaves the TV on "no signal", report it with the TV model.
 
 **Known limits:**
 - If the viewer restarts while the panel is off and the TV keeps hot-plug detect up, the panel comes back on with the greeting, while buttond still believes the frame is asleep. That matches what a sway restart does on the Wayland stack. The next schedule boundary or button press puts it right.
-- If the frame boots during sleep hours, switching the panel off can happen before the first frame is drawn. The next wake then briefly shows the boot console before the slideshow, and the TV re-syncs twice. This is cosmetic.
+- If a wake fails twice, the viewer restarts to light the panel. During scheduled sleep hours the restart comes back to the sleep banner (the schedule decides the startup state), and buttond, which saw the wake fail, still counts the frame as asleep. The next button press brings both back in step.
 
 ### Switching
 

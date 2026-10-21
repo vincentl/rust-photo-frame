@@ -156,6 +156,30 @@ pub(super) fn layer_owes_frame(
     }
 }
 
+/// What a power change commits, given whether Mesa has presented on this
+/// display yet (reviews N3 and D1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PowerCommit {
+    /// `ACTIVE = 0`. Before Mesa's first present this switches off what
+    /// the console left lit (if the console routed the connector at all).
+    Off,
+    /// The viewer's wake modeset (`MODE_ID` + `ACTIVE = 1`).
+    OnModeset,
+    /// Nothing: Mesa has not taken the display yet, and its first present
+    /// is its own full modeset (it starts with the connector inactive).
+    /// Committing one here would light the console's framebuffer first and
+    /// retrain HDMI twice.
+    MesaFirstPresent,
+}
+
+pub(super) fn power_commit(on: bool, mesa_has_presented: bool) -> PowerCommit {
+    match (on, mesa_has_presented) {
+        (false, _) => PowerCommit::Off,
+        (true, true) => PowerCommit::OnModeset,
+        (true, false) => PowerCommit::MesaFirstPresent,
+    }
+}
+
 /// Why a wake could not light the panel in this process.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum WakeFailure<E> {
@@ -373,6 +397,14 @@ mod tests {
         assert!(!layer_owes_frame(Layer::Scene(Sleep), greeting_owes, true));
         assert!(!layer_owes_frame(Layer::Scene(Wake), |_| true, true));
         assert!(!layer_owes_frame(Layer::Nothing, |_| true, true));
+    }
+
+    #[test]
+    fn a_wake_before_mesa_presented_leaves_the_modeset_to_mesa() {
+        assert_eq!(power_commit(true, false), PowerCommit::MesaFirstPresent);
+        assert_eq!(power_commit(true, true), PowerCommit::OnModeset);
+        assert_eq!(power_commit(false, false), PowerCommit::Off);
+        assert_eq!(power_commit(false, true), PowerCommit::Off);
     }
 
     #[test]
