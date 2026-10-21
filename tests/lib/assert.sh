@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# The unit that runs the viewer on this frame: photoframe-kms.service (the
+# default) or greetd.service when the Wayland fallback is persisted in
+# /etc/photoframe/display.env (setup/lib/display-stack.sh). Scripts use it as
+# the default for PHOTO_SERVICE. Needs REPO_ROOT.
+default_photo_service() {
+  (
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/setup/lib/systemd.sh"
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/setup/lib/display-stack.sh"
+    display_stack_unit "$(display_stack_current)"
+  )
+}
+
 section() {
   printf '\n==== %s ====\n' "$1"
 }

@@ -168,7 +168,7 @@ hotspot_interface_ipv4() {
 
 main() {
   local wifi_service="${WIFI_SERVICE:-photoframe-wifi-manager.service}"
-  local photo_service="${PHOTO_SERVICE:-greetd.service}"
+  local photo_service="${PHOTO_SERVICE:-$(default_photo_service)}"
   local wifi_interface="${WIFI_INTERFACE:-}"
   local hotspot_id="${HOTSPOT_ID:-pf-hotspot}"
   local hotspot_ssid="${HOTSPOT_SSID:-PhotoFrame-Setup}"

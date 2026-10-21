@@ -5,8 +5,10 @@ The active configuration on an installed system is `/etc/photoframe/config.yaml`
 After editing, restart the kiosk to apply:
 
 ```bash
-sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service
+sudo systemctl restart photoframe-kms.service
 ```
+
+(On the Wayland fallback stack, restart greetd instead: `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service`. Never `restart` it.)
 
 > Always edit `/etc/photoframe/config.yaml`, not the template at `/opt/photoframe/etc/photoframe/config.yaml` — the template gets overwritten on redeploy.
 
@@ -229,7 +231,7 @@ buttond:
     args: [poweroff]
   screen:
     off-delay-ms: 3500
-    display-name: HDMI-A-2          # wlr-randr output name; null = auto-detect
+    display-name: HDMI-A-2          # connector name (the viewer's `connector`); null = auto-detect
     on-command:
       program: /opt/photoframe/bin/powerctl
       args: [wake]
@@ -240,10 +242,15 @@ buttond:
 
 Pair the block with a top-level `awake-schedule` to describe the desired wake windows.
 
-**`buttond.screen.display-name` discovery.** The connector name must be queried inside the kiosk Wayland session:
+**`buttond.screen.display-name` discovery.** Ask the viewer which connector it drives; the answer's `connector` is the name:
 
 ```bash
-# display is usually wayland-1; find it with: sudo ls /run/user/$(id -u kiosk)/wayland-*
+echo '{"command":"display-power"}' | sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock
+```
+
+On the Wayland fallback the viewer cannot answer (`unsupported`); query the kiosk Sway session instead. The display is usually `wayland-1`; find it with `sudo ls /run/user/$(id -u kiosk)/wayland-*`:
+
+```bash
 sudo -u kiosk env XDG_RUNTIME_DIR=/run/user/$(id -u kiosk) WAYLAND_DISPLAY=wayland-1 wlr-randr
 ```
 
@@ -253,13 +260,13 @@ Common values: `HDMI-A-1`, `HDMI-A-2`. Setting `display-name` explicitly avoids 
 
 **Runtime behavior:**
 
-- **Single press:** resolves the current screen state and sends the appropriate `set-state` command to the control socket, then toggles the screen. If the display was off it immediately runs the wake command; if on, it delays for `off-delay-ms` (so the sleep card renders) before running the sleep command. The daemon inspects `wlr-randr` on each press, so restarts and manual overrides stay in sync.
+- **Single press:** resolves the current screen state and sends the appropriate `set-state` command to the control socket, then toggles the screen. If the display was off it immediately runs the wake command; if on, it delays for `off-delay-ms` (so the sleep card renders) before running the sleep command. The daemon asks `powerctl state` on each press (the viewer on KMS, sway on the Wayland fallback), so restarts and manual overrides stay in sync.
 - **Double press:** executes `shutdown-command`. Polkit allows `kiosk` to issue the request without prompting.
 - **Long press:** bypassed so Pi 5 firmware can force power-off.
 - **Scheduled transitions:** when `awake-schedule` is present, `buttond` waits for the greeting delay, applies the schedule's current state, then drives transitions using `set-state`.
 - **Manual override:** a single press overrides the schedule until the next scheduled wake/sleep boundary, then the frame resumes following the schedule automatically. Press again to undo immediately. For example, pressing to sleep during a wake window keeps the frame asleep until that window ends; pressing to wake during a sleep window keeps it awake until the next scheduled wake.
 
-`buttond` auto-derives `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` for its `wlr-randr`/sway probes. Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. Set `buttond.device` if the wrong input is chosen. Provisioning pins `HandlePowerKey=ignore` in `/etc/systemd/logind.conf` so logind doesn't interpret presses as shutdown requests; only `buttond` reacts.
+On the Wayland fallback `buttond` auto-derives `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` for its sway probes; on KMS there is no Wayland session and it talks to the viewer's control socket instead. Auto-detection scans `/dev/input/by-path/*power*` before falling back to `/dev/input/event*`. Set `buttond.device` if the wrong input is chosen. Provisioning pins `HandlePowerKey=ignore` in `/etc/systemd/logind.conf` so logind doesn't interpret presses as shutdown requests; only `buttond` reacts.
 
 ### `matting`
 

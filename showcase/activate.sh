@@ -5,6 +5,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=../setup/lib/systemd.sh
+source "${REPO_ROOT}/setup/lib/systemd.sh"
+# shellcheck source=../setup/lib/display-stack.sh
+source "${REPO_ROOT}/setup/lib/display-stack.sh"
 SHOWCASE_YAML="${SCRIPT_DIR}/showcase.yaml"
 
 CONFIG="/etc/photoframe/config.yaml"
@@ -48,13 +53,18 @@ fi
 log "Installing showcase config to ${CONFIG}"
 sudo install -m 0644 "${SHOWCASE_YAML}" "${CONFIG}"
 
-log "Restarting greetd to launch the showcase (stop/sleep/start; see docs/operate.md)"
-# Use stop/sleep/start, not `systemctl restart greetd`: a plain restart can race
-# the logind seat handoff on tty1 and leave the old kiosk session (old binary)
-# running — which masks freshly deployed builds.
-sudo systemctl stop greetd
-sleep 1
-sudo systemctl start greetd
+display_unit="$(display_stack_unit "$(display_stack_current)")"
+log "Restarting ${display_unit} to launch the showcase"
+if [[ "${display_unit}" == "${DISPLAY_WAYLAND_UNIT}" ]]; then
+    # Wayland fallback: use stop/sleep/start, not `systemctl restart greetd`: a
+    # plain restart can race the logind seat handoff on tty1 and leave the old
+    # kiosk session (old binary) running — which masks freshly deployed builds.
+    sudo systemctl stop greetd
+    sleep 1
+    sudo systemctl start greetd
+else
+    sudo systemctl restart "${display_unit}"
+fi
 
 log "Showcase active. Watch it with:  journalctl -t photoframe -f"
 log "Restore your normal config with: ${SCRIPT_DIR}/deactivate.sh"
