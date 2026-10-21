@@ -4819,8 +4819,16 @@ mod tests {
         }
         let m = metric.unwrap();
         let ms = period.as_secs_f32() * 1000.0;
-        assert!((m.best_frame_ms - ms).abs() < 0.01, "best {}", m.best_frame_ms);
-        assert!((m.worst_frame_ms - ms).abs() < 0.01, "worst {}", m.worst_frame_ms);
+        assert!(
+            (m.best_frame_ms - ms).abs() < 0.01,
+            "best {}",
+            m.best_frame_ms
+        );
+        assert!(
+            (m.worst_frame_ms - ms).abs() < 0.01,
+            "worst {}",
+            m.worst_frame_ms
+        );
         // Re-anchoring is one-shot: a later frame time does not restart it.
         let last = *frames.last().unwrap();
         state.anchor_once(last + period);
@@ -4997,7 +5005,7 @@ mod tests {
     #[test]
     fn matted_canvas_from_scaled_decode_matches_full_decode() {
         use crate::config::MattingKind;
-        use crate::tasks::loader::{DecodeTarget, decode_rgba8_apply_exif};
+        use crate::tasks::loader::{CoverNeed, DecodeTarget, decode_rgba8_apply_exif};
 
         let (screen_w, screen_h) = (240u32, 135u32);
         let dir = tempfile::tempdir().unwrap();
@@ -5020,7 +5028,11 @@ mod tests {
                         let target = DecodeTarget {
                             canvas_w,
                             canvas_h,
-                            cover: fill_screen,
+                            cover: if fill_screen {
+                                CoverNeed::Always
+                            } else {
+                                CoverNeed::Never
+                            },
                             bg_sample_scale: Some(0.125),
                         };
                         let scaled = decode_rgba8_apply_exif(&path, Some(target)).unwrap();
@@ -5055,7 +5067,7 @@ mod tests {
     #[test]
     fn matting_worker_redecodes_when_canvas_outgrows_reduced_decode() {
         use crate::config::MattingKind;
-        use crate::tasks::loader::{DecodeTarget, decode_rgba8_apply_exif};
+        use crate::tasks::loader::{CoverNeed, DecodeTarget, decode_rgba8_apply_exif};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("photo.jpg");
@@ -5063,7 +5075,7 @@ mod tests {
         let small = DecodeTarget {
             canvas_w: 240,
             canvas_h: 135,
-            cover: false,
+            cover: CoverNeed::Never,
             bg_sample_scale: None,
         };
         let reduced = decode_rgba8_apply_exif(&path, Some(small)).unwrap();
@@ -5088,7 +5100,7 @@ mod tests {
     #[test]
     fn fill_when_fits_uses_source_size_of_reduced_decode() {
         use crate::config::MattingConfig;
-        use crate::tasks::loader::{DecodeTarget, decode_rgba8_apply_exif};
+        use crate::tasks::loader::{CoverNeed, DecodeTarget, decode_rgba8_apply_exif};
 
         let matting: MattingConfig = serde_yaml::from_str(
             "fill-when-fits:\n  maximum-crop-percentage: 5.0\n  skip-matting-probability: 1.0\n\
@@ -5104,7 +5116,7 @@ mod tests {
         let target = DecodeTarget {
             canvas_w: 960,
             canvas_h: 540,
-            cover: true,
+            cover: CoverNeed::Always,
             bg_sample_scale: None,
         };
         let photo = decode_rgba8_apply_exif(&path, Some(target)).unwrap();

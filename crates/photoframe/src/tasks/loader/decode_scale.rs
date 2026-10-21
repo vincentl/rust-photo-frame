@@ -13,7 +13,7 @@
 //! published, or when scaling would change what the viewer sees, the loader
 //! decodes at full size exactly as before.
 
-use crate::config::{Configuration, MattingConfig, MattingMode};
+use crate::config::{Configuration, FillWhenFits, MattingConfig, MattingMode};
 use crate::events::CanvasShape;
 use std::sync::{Arc, Mutex};
 
@@ -21,14 +21,48 @@ use std::sync::{Arc, Mutex};
 /// (smallest first). `8` is a full-size decode.
 const IDCT_SIZES: [u8; 4] = [1, 2, 4, 8];
 
+/// Whether a decode must cover the cover-crop rect (`fill-when-fits` draws the
+/// photo edge to edge, so a photo that will fill needs pixels for the whole
+/// canvas, not just its contained fit).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CoverNeed {
+    /// The photo never fills.
+    Never,
+    /// Always size for the cover rect (the matting worker's check, and tests).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Always,
+    /// Size for the cover rect only for photos `fill-when-fits` could fill:
+    /// those whose crop fraction against the canvas is within its maximum.
+    /// Any other photo can never fill (the viewer applies the same rule to the
+    /// original size), so it is sized for its contained fit.
+    WhenFillable(FillWhenFits),
+}
+
+impl CoverNeed {
+    /// Whether a `disp_w` x `disp_h` photo (displayed orientation) must be
+    /// decoded to cover a `canvas_w` x `canvas_h` canvas.
+    fn applies(self, disp_w: u32, disp_h: u32, canvas_w: u32, canvas_h: u32) -> bool {
+        match self {
+            CoverNeed::Never => false,
+            CoverNeed::Always => true,
+            CoverNeed::WhenFillable(fill) => {
+                // The viewer judges the screen's aspect; the canvas is the
+                // screen times the oversample, rounded to whole pixels (and
+                // possibly clamped to the texture limit), so its aspect can
+                // differ by up to ~1/min(side) per axis. Allow twice that.
+                let slack = 2.0 / canvas_w.min(canvas_h).max(1) as f32;
+                fill.may_fill(disp_w, disp_h, canvas_w, canvas_h, slack)
+            }
+        }
+    }
+}
+
 /// Static requirements derived from configuration: which renderings of a photo
 /// the viewer may produce besides the plain contained photo.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DecodeNeeds {
-    /// `fill-when-fits` is configured: a photo may be cover-cropped to the full
-    /// canvas, and the eligibility check reads the decoded dimensions, so the
-    /// decode must cover the cover rect to leave both unchanged.
-    cover: bool,
+    /// See [`CoverNeed`].
+    cover: CoverNeed,
     /// Largest fraction of the canvas that a blurred background samples its
     /// cover-cropped copy of the photo at (1.0 when a background is not
     /// downsampled before blurring). `None` when no mat draws one.
@@ -72,7 +106,10 @@ impl DecodeNeeds {
             .filter_map(|option| bg_sample_scale(&option.style))
             .reduce(f32::max);
         Self {
-            cover: matting.fill_when_fits().is_some(),
+            cover: match matting.fill_when_fits() {
+                Some(fill) if fill.skip_matting_probability > 0.0 => CoverNeed::WhenFillable(*fill),
+                _ => CoverNeed::Never,
+            },
             bg_sample_scale: bg,
         }
     }
@@ -84,8 +121,20 @@ impl DecodeNeeds {
 pub struct DecodeTarget {
     pub canvas_w: u32,
     pub canvas_h: u32,
-    pub cover: bool,
+    pub cover: CoverNeed,
     pub bg_sample_scale: Option<f32>,
+}
+
+impl DecodeTarget {
+    /// The target for a portrait-pair member: pairs never fill the screen, so
+    /// no cover rect is needed (the matting worker re-decodes if a member
+    /// ends up drawn solo and filling after all).
+    pub fn for_pair_member(self) -> Self {
+        Self {
+            cover: CoverNeed::Never,
+            ..self
+        }
+    }
 }
 
 /// Shared between the viewer (which knows the canvas) and the loader (which
@@ -163,23 +212,29 @@ pub fn orientation_swaps_axes(orientation: u16) -> bool {
 }
 
 /// The smallest rect, in the displayed orientation, that every rendering of a
-/// `disp_w` x `disp_h` photo draws into without upscaling.
-pub fn required_size(disp_w: u32, disp_h: u32, target: &DecodeTarget) -> (u32, u32) {
+/// `disp_w` x `disp_h` photo draws into without upscaling: contained in the
+/// canvas (mat margins only shrink it), or cover-cropped to it when `cover`,
+/// and a blurred background's sample when `bg_sample_scale` is set.
+pub fn required_size(
+    disp_w: u32,
+    disp_h: u32,
+    canvas: (u32, u32),
+    cover: bool,
+    bg_sample_scale: Option<f32>,
+) -> (u32, u32) {
     let sw = disp_w.max(1) as f64;
     let sh = disp_h.max(1) as f64;
-    let cw = target.canvas_w.max(1) as f64;
-    let ch = target.canvas_h.max(1) as f64;
+    let cw = canvas.0.max(1) as f64;
+    let ch = canvas.1.max(1) as f64;
 
-    // The photo itself: contained in the canvas (mat margins only shrink it),
-    // or cover-cropped to it for `fill-when-fits`.
-    let mut scale = if target.cover {
+    let mut scale = if cover {
         (cw / sw).max(ch / sh)
     } else {
         (cw / sw).min(ch / sh)
     };
     // A blurred background cover-crops the photo to the canvas aspect and then
     // shrinks it to the sample size, which needs the source to cover that.
-    if let Some(k) = target.bg_sample_scale {
+    if let Some(k) = bg_sample_scale {
         let k = k as f64;
         scale = scale.max((cw * k / sw).max(ch * k / sh));
     }
@@ -229,16 +284,7 @@ pub fn decoded_suffices(
     if decoded == source {
         return true;
     }
-    let (need_w, need_h) = required_size(
-        source.0,
-        source.1,
-        &DecodeTarget {
-            canvas_w: canvas.0,
-            canvas_h: canvas.1,
-            cover,
-            bg_sample_scale,
-        },
-    );
+    let (need_w, need_h) = required_size(source.0, source.1, canvas, cover, bg_sample_scale);
     decoded.0 >= need_w && decoded.1 >= need_h
 }
 
@@ -251,7 +297,9 @@ pub fn plan(file_w: u16, file_h: u16, orientation: u16, target: &DecodeTarget) -
     } else {
         (file_w as u32, file_h as u32)
     };
-    let (need_dw, need_dh) = required_size(disp_w, disp_h, target);
+    let canvas = (target.canvas_w, target.canvas_h);
+    let cover = target.cover.applies(disp_w, disp_h, canvas.0, canvas.1);
+    let (need_dw, need_dh) = required_size(disp_w, disp_h, canvas, cover, target.bg_sample_scale);
     let (need_w, need_h) = if orientation_swaps_axes(orientation) {
         (need_dh, need_dw)
     } else {
@@ -286,7 +334,7 @@ mod tests {
         assert_eq!(
             plain,
             DecodeNeeds {
-                cover: false,
+                cover: CoverNeed::Never,
                 bg_sample_scale: None
             }
         );
@@ -303,7 +351,7 @@ mod tests {
     fn target_needs_published_canvas() {
         let scaling = DecodeScaling {
             needs: Some(DecodeNeeds {
-                cover: false,
+                cover: CoverNeed::Never,
                 bg_sample_scale: None,
             }),
             canvas: Arc::default(),

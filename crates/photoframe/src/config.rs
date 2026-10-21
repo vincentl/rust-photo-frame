@@ -70,7 +70,7 @@ pub struct MattingConfig {
 /// Opt-in behavior that renders photos whose aspect ratio is already close to
 /// the display's edge-to-edge (full-bleed, cover-cropped) instead of matting
 /// them. Evaluated per photo *before* mat selection.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct FillWhenFits {
     /// A photo is eligible when filling the screen crops less than this
@@ -92,6 +92,54 @@ impl FillWhenFits {
         1.0
     }
 
+    /// Fraction of the overflowing axis that a cover-crop of an
+    /// `img_w` x `img_h` photo trims on a `screen_w` x `screen_h` screen.
+    pub fn crop_fraction(img_w: u32, img_h: u32, screen_w: u32, screen_h: u32) -> f32 {
+        let aspect_img = img_w.max(1) as f32 / img_h.max(1) as f32;
+        let aspect_screen = screen_w.max(1) as f32 / screen_h.max(1) as f32;
+        let (lo, hi) = if aspect_img <= aspect_screen {
+            (aspect_img, aspect_screen)
+        } else {
+            (aspect_screen, aspect_img)
+        };
+        if hi <= 0.0 {
+            return f32::INFINITY;
+        }
+        1.0 - lo / hi
+    }
+
+    /// The crop-fraction half of [`Self::should_fill`]: whether the cover-crop
+    /// trims no more than `maximum_crop_percentage`, with `slack` (a crop
+    /// fraction) of tolerance. `should_fill` uses zero slack; the loader's
+    /// scaled-decode planning, which sees the canvas rather than the screen,
+    /// passes the rounding tolerance between them, so both decide from this one
+    /// rule.
+    pub fn crop_eligible(
+        &self,
+        img_w: u32,
+        img_h: u32,
+        screen_w: u32,
+        screen_h: u32,
+        slack: f32,
+    ) -> bool {
+        let max_crop = (self.maximum_crop_percentage / 100.0).max(0.0);
+        Self::crop_fraction(img_w, img_h, screen_w, screen_h) <= max_crop + slack
+    }
+
+    /// Whether this photo could ever be filled: crop-eligible (within `slack`)
+    /// and a non-zero skip probability.
+    pub fn may_fill(
+        &self,
+        img_w: u32,
+        img_h: u32,
+        screen_w: u32,
+        screen_h: u32,
+        slack: f32,
+    ) -> bool {
+        self.skip_matting_probability > 0.0
+            && self.crop_eligible(img_w, img_h, screen_w, screen_h, slack)
+    }
+
     /// Returns true when the photo should be rendered full-bleed (no mat).
     ///
     /// Eligibility requires both that the cover-crop trims less than
@@ -108,27 +156,14 @@ impl FillWhenFits {
         max_upscale: f32,
         rng: &mut R,
     ) -> bool {
+        if !self.crop_eligible(img_w, img_h, screen_w, screen_h, 0.0) {
+            return false;
+        }
+
         let iw = img_w.max(1) as f32;
         let ih = img_h.max(1) as f32;
         let sw = screen_w.max(1) as f32;
         let sh = screen_h.max(1) as f32;
-
-        let aspect_img = iw / ih;
-        let aspect_screen = sw / sh;
-        let (lo, hi) = if aspect_img <= aspect_screen {
-            (aspect_img, aspect_screen)
-        } else {
-            (aspect_screen, aspect_img)
-        };
-        if hi <= 0.0 {
-            return false;
-        }
-        let crop_fraction = 1.0 - lo / hi;
-        let max_crop = (self.maximum_crop_percentage / 100.0).max(0.0);
-        if crop_fraction > max_crop {
-            return false;
-        }
-
         let cover_scale = (sw / iw).max(sh / ih);
         if cover_scale > max_upscale.max(1.0) {
             return false;
