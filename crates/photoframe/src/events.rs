@@ -123,8 +123,20 @@ pub struct PhotoInfo {
     pub display_size: Option<(u32, u32)>,
 }
 
-#[derive(Debug, Clone)]
+/// A load request: one screen. `path` is the first appearance (drawn on the
+/// left of a pair).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadPhoto {
+    pub path: PathBuf,
+    pub priority: bool,
+    /// Portrait pairing: the screen's second member; `None` for a solo screen.
+    pub partner: Option<LoadPartner>,
+}
+
+/// The second member of a pair screen, with its own priority (design B2: a
+/// screen is priority iff any member is).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadPartner {
     pub path: PathBuf,
     pub priority: bool,
 }
@@ -147,14 +159,26 @@ pub struct PreparedImageCpu {
 pub struct PhotoLoaded {
     pub prepared: PreparedImageCpu,
     pub priority: bool,
+    /// Portrait pairing: the decoded second member of a pair screen.
+    pub partner: Option<LoadedPartner>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedPartner {
+    pub prepared: PreparedImageCpu,
+    pub priority: bool,
 }
 
 #[derive(Debug)]
 pub struct InvalidPhoto(pub PathBuf);
 
-/// Emitted by the viewer after a photo is shown (for now, immediately).
-#[derive(Debug)]
-pub struct Displayed(pub PathBuf);
+/// Emitted by the viewer when a screen is shown: its first photo and, for a
+/// pair screen, the second.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Displayed {
+    pub path: PathBuf,
+    pub partner: Option<PathBuf>,
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ViewerCommand {

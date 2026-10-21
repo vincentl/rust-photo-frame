@@ -59,6 +59,17 @@ impl PlannedScreen {
     pub fn contains(&self, path: &Path) -> bool {
         self.members().any(|member| member.path.as_path() == path)
     }
+    /// Remove `path` from the screen (design B4): a pair degrades to its other
+    /// member, keeping the surviving order. `None` when the screen is emptied.
+    pub fn without(self, path: &Path) -> Option<Self> {
+        let PlannedScreen { primary, partner } = self;
+        match (primary.path.as_path() == path, partner) {
+            (false, Some(partner)) if partner.path.as_path() == path => Some(Self::solo(primary)),
+            (false, partner) => Some(Self { primary, partner }),
+            (true, Some(partner)) if partner.path.as_path() != path => Some(Self::solo(partner)),
+            (true, _) => None,
+        }
+    }
 }
 
 /// What [`ScreenPlanner::plan`] produced.
@@ -216,6 +227,27 @@ impl ScreenPlanner {
         self.previous = screen.members().map(|m| Arc::clone(&m.path)).collect();
     }
 
+    /// **What invalidates H (step 6, B7):** only `PhotoAdded` and
+    /// `PhotoRemoved`; the next plan re-peeks, as today's loop re-peeks.
+    /// `PhotoMeta` and `CanvasShape` change no scheduling state and do not.
+    pub fn invalidate_held(&mut self) {
+        self.held = None;
+    }
+
+    /// **Removal (step 7, B4):** a removed photo held as C is dropped; the
+    /// surviving appearances keep their order. (The caller degrades a
+    /// planned, unsent screen with [`PlannedScreen::without`].)
+    pub fn on_removed(&mut self, path: &Path) {
+        if self
+            .committed
+            .as_ref()
+            .is_some_and(|c| c.path.as_path() == path)
+        {
+            self.committed = None;
+        }
+        self.invalidate_held();
+    }
+
     /// Whether a held peek is outstanding (for tests of B7/B9).
     #[cfg(test)]
     pub fn holds_peek(&self) -> bool {
@@ -297,24 +329,27 @@ impl ScreenStats {
     }
 }
 
+/// A scheduler that plays a fixed appearance sequence and logs every call,
+/// so the planner's peek/commit order is visible to tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod scripted {
+    use super::super::PlaylistScheduler;
     use crate::events::{CreatedSource, PhotoInfo};
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
 
-    /// A scheduler that plays a fixed appearance sequence and logs every call,
-    /// so the planner's peek/commit order is visible.
-    struct Scripted {
+    pub(crate) type Log = Arc<Mutex<Vec<String>>>;
+
+    pub(crate) struct Scripted {
         seq: Vec<Arc<PathBuf>>,
         next: usize,
-        log: Rc<RefCell<Vec<String>>>,
+        log: Log,
     }
 
     impl Scripted {
-        fn new(names: &str) -> (Self, Rc<RefCell<Vec<String>>>) {
-            let log = Rc::new(RefCell::new(Vec::new()));
+        /// Appearances named by `names` (whitespace-separated), plus the log.
+        pub(crate) fn new(names: &str) -> (Self, Log) {
+            let log = Log::default();
             let seq = names
                 .split_whitespace()
                 .map(|n| Arc::new(PathBuf::from(n)))
@@ -323,7 +358,7 @@ mod tests {
                 Self {
                     seq,
                     next: 0,
-                    log: Rc::clone(&log),
+                    log: Arc::clone(&log),
                 },
                 log,
             )
@@ -331,11 +366,21 @@ mod tests {
     }
 
     impl PlaylistScheduler for Scripted {
-        fn record_add(&mut self, _info: PhotoInfo) {}
-        fn record_remove(&mut self, _path: &Path) {}
+        fn record_add(&mut self, info: PhotoInfo) {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("add {}", info.path.display()));
+        }
+        fn record_remove(&mut self, path: &Path) {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("remove {}", path.display()));
+        }
         fn peek_next(&mut self) -> Option<(Arc<PathBuf>, bool)> {
             let front = self.seq.get(self.next).cloned();
-            self.log.borrow_mut().push(format!(
+            self.log.lock().unwrap().push(format!(
                 "peek {}",
                 front
                     .as_ref()
@@ -345,7 +390,8 @@ mod tests {
         }
         fn commit_shown(&mut self) {
             self.log
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .push(format!("commit {}", self.seq[self.next].display()));
             self.next += 1;
         }
@@ -362,6 +408,12 @@ mod tests {
             None
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scripted::Scripted;
+    use super::*;
 
     fn names(screen: &PlannedScreen) -> String {
         screen
@@ -422,16 +474,16 @@ mod tests {
         assert!(matches!(plan, Plan::Committed(_)));
         // Commit before send: P, then X, each committed before the next peek.
         assert_eq!(
-            *log.borrow(),
+            *log.lock().unwrap(),
             ["peek a", "commit a", "peek b", "commit b", "peek c"]
         );
         assert!(planner.holds_peek(), "Y = c is held");
         planner.record_sent(&plan.screen());
         // c is the held peek: used as is, not redrawn.
-        log.borrow_mut().clear();
+        log.lock().unwrap().clear();
         let plan = planner.plan(&mut sched, Some(&all)).unwrap();
         assert_eq!(names(&plan.screen()), "c");
-        assert_eq!(*log.borrow(), ["commit c", "peek -"]);
+        assert_eq!(*log.lock().unwrap(), ["commit c", "peek -"]);
     }
 
     /// **S8 (B9).** With pairing enabled and p = 0 the planner takes today's
@@ -441,7 +493,7 @@ mod tests {
         let (mut sched, log) = Scripted::new("a b c d");
         let mut planner = ScreenPlanner::new(0.0, Some(3));
         for expected in ["a", "b", "c", "d"] {
-            log.borrow_mut().clear();
+            log.lock().unwrap().clear();
             let plan = planner.plan(&mut sched, Some(&all)).unwrap();
             assert_eq!(
                 plan,
@@ -452,7 +504,7 @@ mod tests {
             );
             assert!(!planner.holds_peek());
             assert_eq!(
-                *log.borrow(),
+                *log.lock().unwrap(),
                 [format!("peek {expected}")],
                 "no commit before send"
             );
@@ -465,7 +517,7 @@ mod tests {
         let mut planner = ScreenPlanner::new(1.0, Some(3));
         let plan = planner.plan(&mut sched, None).unwrap();
         assert!(matches!(plan, Plan::SendThenCommit(_)));
-        assert_eq!(*log.borrow(), ["peek a"]);
+        assert_eq!(*log.lock().unwrap(), ["peek a"]);
         let none = |_: &Path| false;
         planner.commit_after_send(&mut sched);
         let plan = planner.plan(&mut sched, Some(&none)).unwrap();

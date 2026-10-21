@@ -56,6 +56,15 @@ uploaded photos debut via the priority FIFO.
                  at the display rate (~batch_size * dwell), so large pushes take
                  tens of minutes to fully surface. That's the frame's one-photo-
                  per-dwell limit, not a scheduler fault.
+   PAIRING       (only with playlist.pairing enabled) screens vs appearances; the
+                 measured paired share next to the 2*pi*p/(1+pi*p) approximation;
+                 the repeat-partner rate; photos on consecutive screens, each
+                 attributed to its cause (a debut's own Z, Z; a removal between
+                 planning and display; a sleep/wake gap; a skipped screen). Only
+                 UNATTRIBUTED repeats are failures (design invariant I5): good is 0.
+                 The mean gap by weight x pairable should match across pairable
+                 and non-pairable photos at equal weight (an end-to-end check; the
+                 appearance sequence is the unpaired scheduler's).
 """
 
 import argparse
@@ -162,6 +171,13 @@ def main():
             seen[key] = s
         for order, ms, mult, hl in seen:
             print(f"  order={order} min_spacing={ms} new_multiplicity={mult} half_life_secs={hl}")
+        for s in schedulers:
+            if s.get("pairing") is not None:
+                print(
+                    f"  pairing={s.get('pairing')} probability={s.get('pairing_probability')} "
+                    f"bar_ratio={s.get('pairing_bar_ratio')} dwell_multiplier={s.get('pairing_dwell_multiplier')}"
+                )
+                break
         if min_spacing is None:
             last = list(seen)[-1][1]
             min_spacing = float(last) if last is not None else 0.7
@@ -260,6 +276,8 @@ def main():
                 c = sum(1 for x in fresh if x < thr)
                 print(f"    under {lbl:3s}: {c:4d} ({100 * c / len(fresh):.0f}%)")
 
+    pairing_section(displays, schedulers)
+
     # --- inventory growth (upload events) ---
     print("\n# INVENTORY GROWTH  (upload events, step >= 5)")
     prev = None
@@ -269,6 +287,105 @@ def main():
             print(f"  {d['dt']}  {prev} -> {inv}  (+{inv - prev})")
         if inv is not None:
             prev = inv
+
+
+def pairing_section(displays, schedulers):
+    """# PAIRING: portrait pairing's screens, from the per-appearance lines'
+    screen=, pair=, partner=, pairable=, sent= and removed= fields."""
+    rows = [d for d in displays if "pair" in d and "screen" in d]
+    if not rows:
+        return
+    probability = 1.0
+    for s in schedulers:
+        if s.get("pairing_probability") is not None:
+            probability = float(s["pairing_probability"])
+
+    # Screens per session (screen= counts per process).
+    sessions = OrderedDict()
+    for d in rows:
+        sessions.setdefault(d["pid"], OrderedDict()).setdefault(d["screen"], []).append(d)
+    screens = [list(sc.values()) for sc in sessions.values()]
+    n_screens = sum(len(s) for s in screens)
+    appearances = len(rows)
+    pairable_apps = sum(1 for d in rows if d.get("pairable") == "true")
+    paired_apps = sum(1 for d in rows if d.get("pair") in ("first", "second"))
+    pi = pairable_apps / appearances
+    share = paired_apps / max(1, pairable_apps)
+    predicted = 2 * pi * probability / (1 + pi * probability)
+
+    print("\n# PAIRING  (good: unattributed consecutive repeats = 0; equal gaps for pairable and not)")
+    print(f"  screens={n_screens} appearances={appearances} pair screens={paired_apps // 2}")
+    print(
+        f"  pi (pairable share of appearances)={pi:.3f}  paired share={share:.3f}  "
+        f"2*pi*p/(1+pi*p)={predicted:.3f} (p={probability:g}; an approximation)"
+    )
+
+    last, rep, tot = {}, 0, 0
+    for session in screens:
+        for screen in session:
+            if len(screen) == 2:
+                a, b = screen[0]["path"], screen[1]["path"]
+                for u, v in ((a, b), (b, a)):
+                    if u in last:
+                        tot += 1
+                        rep += last[u] == v
+                    last[u] = v
+    print(f"  repeat-partner rate={rep / max(1, tot):.3f}")
+
+    causes = Counter()
+    examples = []
+    for session in screens:
+        times = [s[0]["dt"] for s in session if s[0]["dt"]]
+        steps = sorted((b - a).total_seconds() for a, b in zip(times, times[1:]))
+        typical = steps[len(steps) // 2] if steps else 0
+        for prev, cur in zip(session, session[1:]):
+            shared = {d["path"] for d in prev} & {d["path"] for d in cur}
+            if not shared:
+                continue
+            sent_prev, sent_cur = as_int(prev[0], "sent"), as_int(cur[0], "sent")
+            gap_secs = (
+                (cur[0]["dt"] - prev[0]["dt"]).total_seconds()
+                if cur[0]["dt"] and prev[0]["dt"]
+                else 0
+            )
+            if any(d["path"] in shared and as_int(d, "shown_count") == 1 for d in prev):
+                cause = "debut (the unpaired sequence's own Z, Z)"
+            elif any((as_int(d, "removed") or 0) > 0 for d in cur):
+                cause = "removal between planning and display"
+            elif typical and gap_secs > max(120, 10 * typical):
+                cause = "sleep/wake gap"
+            elif sent_prev is not None and sent_cur is not None and sent_prev >= 0 and sent_cur >= 0 and sent_cur - sent_prev != 1:
+                cause = "skipped screen (failed decode, purge, reset)"
+            else:
+                cause = "UNATTRIBUTED"
+                if len(examples) < 5:
+                    examples.append((prev[0]["dt"], sorted(shared)))
+            causes[cause] += 1
+    total = sum(causes.values())
+    print(f"  photos on consecutive screens: {total}")
+    for cause, n in causes.most_common():
+        print(f"    {n:5d}  {cause}")
+    for dt, paths in examples:
+        print(f"      unattributed at {dt}: {', '.join(p for p in paths if p)}")
+
+    buckets = [("~1.0", 0, 1.25), ("1.25-2", 1.25, 2), ("2-2.75", 2, 2.75), (">=2.75", 2.75, 1e9)]
+    by = defaultdict(list)
+    for d in rows:
+        gp, w = as_int(d, "gap"), as_float(d, "weight")
+        if not gp or gp <= 0 or w is None:
+            continue
+        for name, lo, hi in buckets:
+            if lo <= w < hi:
+                by[(name, d.get("pairable"))].append(gp)
+                break
+    print("  mean recurrence gap (appearances) by weight x pairable:")
+    for name, _, _ in buckets:
+        cells = []
+        for flag in ("true", "false"):
+            g = by.get((name, flag))
+            cells.append(f"pairable={flag}: " + (f"n={len(g):5d} mean={statistics.mean(g):7.1f}" if g else "-"))
+        if any(by.get((name, f)) for f in ("true", "false")):
+            print(f"    w {name:8s}  " + "   ".join(cells))
 
 
 if __name__ == "__main__":

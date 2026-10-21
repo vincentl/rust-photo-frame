@@ -1842,6 +1842,45 @@ impl MattingConfig {
         SelectedOption { entry, option }
     }
 
+    /// Mat selection for a **pair screen** (portrait pairing): the configured
+    /// distribution conditioned on a non-zero mat. Random selection draws from
+    /// the non-zero entries with their relative weights unchanged; sequential
+    /// selection takes the next non-zero entry in order, and the zero-margin
+    /// entries it skips count as consumed. Validation guarantees one exists
+    /// when pairing is enabled; `None` only if none is configured.
+    pub fn select_active_nonzero<R: Rng + ?Sized>(
+        &self,
+        rng: &mut R,
+    ) -> Option<SelectedMatting<'_>> {
+        let nonzero = |entry: &SelectionEntry<MattingKind>| {
+            self.options
+                .get(entry.index)
+                .is_some_and(MattingOptions::has_nonzero_mat)
+        };
+        let entry = match self.selection() {
+            MattingSelection::Fixed(entry) => Some(*entry).filter(nonzero),
+            MattingSelection::Random(entries) => entries
+                .iter()
+                .filter(|entry| nonzero(entry))
+                .choose(rng)
+                .copied(),
+            MattingSelection::Sequential { entries, runtime } => {
+                if entries.iter().any(nonzero) {
+                    loop {
+                        let entry = entries[runtime.next(entries.len())];
+                        if nonzero(&entry) {
+                            break Some(entry);
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+        }?;
+        let option = self.options.get(entry.index)?;
+        Some(SelectedOption { entry, option })
+    }
+
     /// `(m_min, m_max)`: the smallest and largest margin fraction among the
     /// selectable options with a non-zero mat, the only mats a pair screen
     /// can get. `None` when every selectable option is zero-margin.

@@ -57,26 +57,20 @@ async fn run_with_effects(
         select! {
             _ = cancel.cancelled() => break,
             maybe_loaded = from_loader.recv() => {
-                let Some(PhotoLoaded { mut prepared, priority }) = maybe_loaded else {
+                let Some(PhotoLoaded { mut prepared, priority, mut partner }) = maybe_loaded else {
                     break;
                 };
 
+                // One option per screen: a pair's two members get the same effect.
                 if let Some(option) = config.choose_option(&mut rng) {
-                    if let Some(mut image) = reconstruct_image(&mut prepared) {
-                        apply_effect(&mut image, &option);
-                        prepared.pixels = image.into_raw();
-                    } else {
-                        warn!(
-                            path = %prepared.path.display(),
-                            width = prepared.width,
-                            height = prepared.height,
-                            "failed to reconstruct RGBA image for photo effect"
-                        );
+                    apply_to_prepared(&mut prepared, &option);
+                    if let Some(partner) = partner.as_mut() {
+                        apply_to_prepared(&mut partner.prepared, &option);
                     }
                 }
 
                 if to_viewer
-                    .send(PhotoLoaded { prepared, priority })
+                    .send(PhotoLoaded { prepared, priority, partner })
                     .await
                     .is_err()
                 {
@@ -87,6 +81,20 @@ async fn run_with_effects(
     }
 
     Ok(())
+}
+
+fn apply_to_prepared(prepared: &mut crate::events::PreparedImageCpu, option: &PhotoEffectOptions) {
+    if let Some(mut image) = reconstruct_image(prepared) {
+        apply_effect(&mut image, option);
+        prepared.pixels = image.into_raw();
+    } else {
+        warn!(
+            path = %prepared.path.display(),
+            width = prepared.width,
+            height = prepared.height,
+            "failed to reconstruct RGBA image for photo effect"
+        );
+    }
 }
 
 fn reconstruct_image(prepared: &mut crate::events::PreparedImageCpu) -> Option<RgbaImage> {
@@ -137,6 +145,7 @@ mod tests {
                     pixels: vec![10, 20, 30, 255],
                 },
                 priority: false,
+                partner: None,
             })
             .await
             .unwrap();
@@ -147,7 +156,9 @@ mod tests {
             .unwrap();
 
         let received = rx_out.try_recv().unwrap();
-        let PhotoLoaded { prepared, priority } = received;
+        let PhotoLoaded {
+            prepared, priority, ..
+        } = received;
         assert_eq!(prepared.pixels, vec![10, 20, 30, 255]);
         assert!(!priority);
     }
@@ -184,6 +195,7 @@ active:
                     pixels: vec![10, 20, 30, 255, 200, 150, 100, 255],
                 },
                 priority: false,
+                partner: None,
             })
             .await
             .unwrap();
@@ -191,8 +203,58 @@ active:
 
         run(rx_in, tx_out, cancel, config).await.unwrap();
 
-        let PhotoLoaded { prepared, priority } = rx_out.try_recv().unwrap();
+        let PhotoLoaded {
+            prepared, priority, ..
+        } = rx_out.try_recv().unwrap();
         assert_eq!(prepared.pixels, expected_pixels);
         assert!(!priority);
+    }
+
+    #[tokio::test]
+    async fn one_effect_per_screen_applies_to_both_members() {
+        use crate::events::LoadedPartner;
+        let yaml = r#"
+selection: random
+active:
+  - kind: print-simulation
+    relief-strength: 1.0
+    sheen-strength: 0.5
+"#;
+        let config: PhotoEffectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.is_enabled());
+        let member = |name: &str| PreparedImageCpu {
+            path: std::path::PathBuf::from(name),
+            width: 2,
+            height: 1,
+            source_size: (2, 1),
+            pixels: vec![10, 20, 30, 255, 200, 150, 100, 255],
+        };
+        let (tx_in, rx_in) = mpsc::channel(1);
+        let (tx_out, mut rx_out) = mpsc::channel(1);
+        tx_in
+            .send(PhotoLoaded {
+                prepared: member("a"),
+                priority: false,
+                partner: Some(LoadedPartner {
+                    prepared: member("b"),
+                    priority: true,
+                }),
+            })
+            .await
+            .unwrap();
+        drop(tx_in);
+        run(rx_in, tx_out, CancellationToken::new(), config)
+            .await
+            .unwrap();
+        let PhotoLoaded {
+            prepared, partner, ..
+        } = rx_out.try_recv().unwrap();
+        let partner = partner.expect("the pair stays a pair");
+        assert!(partner.priority);
+        assert_ne!(prepared.pixels, member("a").pixels, "effect applied");
+        assert_eq!(
+            prepared.pixels, partner.prepared.pixels,
+            "same effect on both"
+        );
     }
 }

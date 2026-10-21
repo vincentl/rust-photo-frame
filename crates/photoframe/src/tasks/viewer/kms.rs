@@ -265,11 +265,7 @@ impl App {
     /// `drain_mat_results`.
     fn accept_mat_result(&mut self, result: MatResult) {
         self.mat_inflight = self.mat_inflight.saturating_sub(1);
-        if result.priority {
-            self.ready_results
-                .retain(|existing| existing.path != result.path);
-        }
-        self.ready_results.push_back(result);
+        super::photo_set::queue_result(&mut self.ready_results, result);
     }
 }
 
@@ -467,12 +463,17 @@ async fn drive(
             WakeEvent::MatClosed => {
                 anyhow::bail!("all matting workers exited; no photo can be prepared")
             }
-            WakeEvent::Photo(PhotoLoaded { prepared, priority }) => {
+            WakeEvent::Photo(PhotoLoaded {
+                prepared,
+                priority,
+                partner,
+            }) => {
                 // queue_for_wake (next process_tick) submits deferred
                 // photos before reading the loader again.
                 app.deferred_images.push_back(QueuedImage {
                     image: prepared,
                     priority,
+                    partner,
                 });
             }
             WakeEvent::LoaderClosed => {

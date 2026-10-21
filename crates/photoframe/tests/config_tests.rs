@@ -2057,3 +2057,110 @@ fn pairing_enabled_requires_a_nonzero_mat() {
     )
     .expect("pairing off");
 }
+
+// ── Mats for pair screens (`select_active_nonzero`) ─────────────────────────
+
+/// Entries: a zero-margin fixed-color palette of three (three slots), a 3.5%
+/// blur, and a 6% studio listed twice (weight 2).
+const MIXED_MATS: &str = r#"
+photo-library-path: "/photos"
+matting:
+  selection: SELECTION
+  active:
+    - kind: fixed-color
+      minimum-mat-percentage: 0
+      colors: [[0, 0, 0], [10, 10, 10], [20, 20, 20]]
+    - kind: blur
+      minimum-mat-percentage: 3.5
+    - kind: studio
+      minimum-mat-percentage: 6
+    - kind: studio
+      minimum-mat-percentage: 6
+"#;
+
+fn mixed_mats(selection: &str) -> Configuration {
+    let cfg: Configuration =
+        serde_yaml::from_str(&MIXED_MATS.replace("SELECTION", selection)).unwrap();
+    cfg.validated().unwrap()
+}
+
+#[test]
+fn pair_screens_never_get_a_zero_margin_mat_random() {
+    let cfg = mixed_mats("random");
+    let mut rng = StdRng::seed_from_u64(17);
+    let mut counts = std::collections::HashMap::<usize, usize>::new();
+    let draws = 30_000;
+    for _ in 0..draws {
+        let selected = cfg
+            .matting
+            .select_active_nonzero(&mut rng)
+            .expect("non-zero");
+        assert!(selected.option.minimum_mat_percentage > 0.0);
+        *counts.entry(selected.entry.index).or_default() += 1;
+    }
+    // The configured distribution conditioned on a non-zero mat: the three
+    // non-zero entries equally (blur 1/3, studio 2/3 over its two slots).
+    let nonzero: Vec<usize> = cfg
+        .matting
+        .iter_selected()
+        .filter(|s| s.option.minimum_mat_percentage > 0.0)
+        .map(|s| s.entry.index)
+        .collect();
+    assert_eq!(nonzero.len(), 3);
+    let expected = draws as f64 / nonzero.len() as f64;
+    let chi2: f64 = nonzero
+        .iter()
+        .map(|i| {
+            let observed = *counts.get(i).unwrap_or(&0) as f64;
+            (observed - expected).powi(2) / expected
+        })
+        .sum();
+    // 2 degrees of freedom: chi-square 0.999 quantile is 13.8.
+    assert!(chi2 < 13.8, "chi2 {chi2:.2}: {counts:?}");
+}
+
+#[test]
+fn pair_screens_never_get_a_zero_margin_mat_sequential() {
+    let cfg = mixed_mats("sequential");
+    let mut rng = StdRng::seed_from_u64(1);
+    // Sequential: the next non-zero entry in order; skipped zero-margin
+    // entries count as consumed.
+    let picks: Vec<usize> = (0..6)
+        .map(|_| {
+            cfg.matting
+                .select_active_nonzero(&mut rng)
+                .unwrap()
+                .entry
+                .index
+        })
+        .collect();
+    let blur = cfg
+        .matting
+        .iter_selected()
+        .find(|s| s.entry.kind == MattingKind::Blur)
+        .unwrap()
+        .entry
+        .index;
+    assert_eq!(picks, [blur, blur + 1, blur + 2, blur, blur + 1, blur + 2]);
+    // A solo screen after them continues from where the pairs left the
+    // shared selector: the zero-margin slots were consumed.
+    let solo = cfg.matting.select_active(&mut rng).entry.index;
+    assert_eq!(solo, 0);
+}
+
+#[test]
+fn solo_screens_keep_every_mat() {
+    let cfg = mixed_mats("random");
+    let mut rng = StdRng::seed_from_u64(3);
+    let zero_margin = (0..3_000)
+        .filter(|_| {
+            cfg.matting
+                .select_active(&mut rng)
+                .option
+                .minimum_mat_percentage
+                == 0.0
+        })
+        .count();
+    // Three of six slots are zero-margin.
+    assert!((1_300..1_700).contains(&zero_margin), "{zero_margin}");
+}

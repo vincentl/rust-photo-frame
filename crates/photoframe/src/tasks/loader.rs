@@ -1,8 +1,9 @@
 use crate::events::{
-    InvalidPhoto, InventoryEvent, LoadPhoto, MetaSource, PhotoLoaded, PreparedImageCpu,
+    InvalidPhoto, InventoryEvent, LoadPhoto, LoadedPartner, MetaSource, PhotoLoaded,
+    PreparedImageCpu,
 };
 use anyhow::Result;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Seek};
 use std::path::{Path, PathBuf};
@@ -342,9 +343,10 @@ pub async fn run(
         std::collections::HashSet::new();
     let mut priority_inflight: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
-    // Each decode carries the sequence number it was requested in, so results can
-    // be emitted in request order even though they finish out of order.
-    let mut tasks: JoinSet<(u64, std::path::PathBuf, Option<DecodedPhoto>)> = JoinSet::new();
+    // Each slot (one screen: a photo, or a pair's two decodes joined) carries
+    // the sequence number it was requested in, so results can be emitted in
+    // request order even though they finish out of order.
+    let mut tasks: JoinSet<DecodedSlot> = JoinSet::new();
     let mut next_seq: u64 = 0;
     let mut reorder = ReorderBuffer::new();
     let mut pending_ready: Option<ReadyPhoto> = None;
@@ -362,48 +364,54 @@ pub async fn run(
             },
 
             // Accept new load requests while the outstanding window has room.
-            Some(LoadPhoto { path, priority }) = load_rx.recv(), if can_accept => {
-                if priority {
-                    priority_inflight.insert(path.clone());
-                }
-                if in_flight.insert(path.clone()) {
+            Some(request) = load_rx.recv(), if can_accept => {
+                let members = admit_members(request, &mut in_flight, &mut priority_inflight);
+                // A request whose every member is already in flight is dropped
+                // (no seq used); any priority upgrade was recorded.
+                if !members.is_empty() {
                     let seq = next_seq;
                     next_seq += 1;
-                    tasks.spawn({
-                        let p = path.clone();
-                        let scaling = scaling.clone();
-                        async move {
+                    let scaling = scaling.clone();
+                    // A pair slot runs its members' decodes concurrently,
+                    // joined under one reorder seq.
+                    tasks.spawn(async move {
+                        let decodes = members.into_iter().map(|path| {
                             let target = scaling.target();
-                            let res = tokio::task::spawn_blocking(move || decode_rgba8_apply_exif(&p, target)).await;
-                            (seq, path, res.ok().and_then(|r| r.ok()))
-                        }
+                            async move {
+                                let p = path.clone();
+                                let res = tokio::task::spawn_blocking(move || decode_rgba8_apply_exif(&p, target)).await;
+                                (path, res.ok().and_then(|r| r.ok()))
+                            }
+                        });
+                        (seq, futures::future::join_all(decodes).await)
                     });
                 }
-                // A duplicate of an already in-flight path is dropped (no seq used);
-                // any priority upgrade was recorded above.
             }
 
             // Handle completed decodes as they finish, then release in request order.
             Some(join_res) = tasks.join_next() => {
-                if let Ok((seq, path, maybe_img)) = join_res {
-                    in_flight.remove(&path);
-                    let priority = priority_inflight.remove(&path);
-                    match maybe_img {
-                        Some(DecodedPhoto { image: rgba8, source_size }) => {
-                            debug!("loaded (rgba8): {}", path.display());
-                            send_decoded_meta(meta_tx.as_ref(), &path, source_size).await;
-                            let (width, height) = rgba8.dimensions();
-                            let prepared = PreparedImageCpu { path: path.clone(), width, height, source_size, pixels: rgba8.into_raw() };
-                            let event = PhotoLoaded { prepared, priority };
-                            reorder.insert(seq, Some(ReadyPhoto { path, event }));
-                        }
-                        None => {
-                            debug!("invalid photo {}", path.display());
-                            let _ = invalid_tx.send(InvalidPhoto(path)).await;
-                            // Mark the slot done so emission can advance past it.
-                            reorder.insert(seq, None);
+                if let Ok((seq, decoded)) = join_res {
+                    let mut shown = Vec::with_capacity(decoded.len());
+                    for (path, maybe_img) in decoded {
+                        in_flight.remove(&path);
+                        let priority = priority_inflight.remove(&path);
+                        match maybe_img {
+                            Some(DecodedPhoto { image: rgba8, source_size }) => {
+                                debug!("loaded (rgba8): {}", path.display());
+                                send_decoded_meta(meta_tx.as_ref(), &path, source_size).await;
+                                let (width, height) = rgba8.dimensions();
+                                let prepared = PreparedImageCpu { path, width, height, source_size, pixels: rgba8.into_raw() };
+                                shown.push((prepared, priority));
+                            }
+                            None => {
+                                debug!("invalid photo {}", path.display());
+                                let _ = invalid_tx.send(InvalidPhoto(path)).await;
+                            }
                         }
                     }
+                    // A failed member is dropped and the other is shown solo; an
+                    // empty slot is marked done so emission can advance past it.
+                    reorder.insert(seq, ready_slot(shown));
                     for ready in reorder.drain_ready() {
                         send_ready(ready, &mut last_sent_path, &mut pending_ready, &to_viewer).await;
                     }
@@ -441,6 +449,54 @@ async fn send_decoded_meta(
             })
             .await;
     }
+}
+
+/// One finished slot: its reorder seq and each member's decode, in request
+/// order.
+type DecodedSlot = (u64, Vec<(PathBuf, Option<DecodedPhoto>)>);
+
+/// **Loader dedupe (B8), per member.** Record each member's priority, and
+/// keep the members whose path is not already being decoded: a pair whose
+/// member is in flight degrades to the other member, and is never dropped
+/// whole. Today's solo dedupe is the case of one member.
+fn admit_members(
+    request: LoadPhoto,
+    in_flight: &mut HashSet<PathBuf>,
+    priority_inflight: &mut HashSet<PathBuf>,
+) -> Vec<PathBuf> {
+    let LoadPhoto {
+        path,
+        priority,
+        partner,
+    } = request;
+    std::iter::once((path, priority))
+        .chain(partner.map(|partner| (partner.path, partner.priority)))
+        .filter_map(|(path, priority)| {
+            if priority {
+                priority_inflight.insert(path.clone());
+            }
+            in_flight.insert(path.clone()).then_some(path)
+        })
+        .collect()
+}
+
+/// The viewer event for one slot's decoded members, in request order: the
+/// first (left), and a partner when both decoded. `None` when none did.
+fn ready_slot(shown: Vec<(PreparedImageCpu, bool)>) -> Option<ReadyPhoto> {
+    let mut shown = shown.into_iter();
+    let (prepared, priority) = shown.next()?;
+    let partner = shown
+        .next()
+        .map(|(prepared, priority)| LoadedPartner { prepared, priority });
+    Some(ReadyPhoto {
+        // The back-to-back guard is keyed on the first member.
+        path: prepared.path.clone(),
+        event: PhotoLoaded {
+            prepared,
+            priority,
+            partner,
+        },
+    })
 }
 
 struct ReadyPhoto {
@@ -541,6 +597,7 @@ mod tests {
             event: PhotoLoaded {
                 prepared,
                 priority: false,
+                partner: None,
             },
         }
     }
@@ -667,6 +724,7 @@ mod tests {
             .send(LoadPhoto {
                 path: path.clone(),
                 priority: false,
+                partner: None,
             })
             .await
             .unwrap();
@@ -703,5 +761,105 @@ mod tests {
         }
         let (_, metas) = load_once(false).await;
         assert!(metas.is_empty(), "{metas:?}");
+    }
+
+    #[test]
+    fn b8_dedupe_is_per_member_and_degrades_a_pair() {
+        use crate::events::LoadPartner;
+        let mut in_flight = HashSet::new();
+        let mut priority = HashSet::new();
+        let pair = |a: &str, b: &str, b_priority: bool| LoadPhoto {
+            path: PathBuf::from(a),
+            priority: false,
+            partner: Some(LoadPartner {
+                path: PathBuf::from(b),
+                priority: b_priority,
+            }),
+        };
+        // b is already being decoded: the pair (a, b) decodes as a alone.
+        in_flight.insert(PathBuf::from("b"));
+        let members = admit_members(pair("a", "b", true), &mut in_flight, &mut priority);
+        assert_eq!(members, [PathBuf::from("a")]);
+        // The in-flight member's priority upgrade is still recorded.
+        assert!(priority.contains(Path::new("b")));
+        // Its first member in flight: (a, c) decodes as c alone.
+        let members = admit_members(pair("a", "c", false), &mut in_flight, &mut priority);
+        assert_eq!(members, [PathBuf::from("c")]);
+        // Both in flight: nothing to decode, no slot.
+        assert!(admit_members(pair("a", "c", false), &mut in_flight, &mut priority).is_empty());
+        // A fresh pair keeps its order.
+        let members = admit_members(pair("d", "e", false), &mut in_flight, &mut priority);
+        assert_eq!(members, [PathBuf::from("d"), PathBuf::from("e")]);
+    }
+
+    async fn recv_loaded(rx: &mut mpsc::Receiver<PhotoLoaded>) -> PhotoLoaded {
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_pair_decodes_into_one_slot_and_a_failed_member_leaves_the_other_solo() {
+        use crate::events::LoadPartner;
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.png");
+        let b = dir.path().join("b.png");
+        image::RgbaImage::from_pixel(30, 40, image::Rgba([1, 2, 3, 255]))
+            .save(&a)
+            .unwrap();
+        image::RgbaImage::from_pixel(20, 40, image::Rgba([4, 5, 6, 255]))
+            .save(&b)
+            .unwrap();
+        let missing = dir.path().join("missing.jpg");
+        let (load_tx, load_rx) = mpsc::channel(4);
+        let (invalid_tx, mut invalid_rx) = mpsc::channel(4);
+        let (viewer_tx, mut viewer_rx) = mpsc::channel(4);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run(
+            load_rx,
+            invalid_tx,
+            viewer_tx,
+            cancel.clone(),
+            4,
+            DecodeScaling::disabled(),
+            None,
+        ));
+        load_tx
+            .send(LoadPhoto {
+                path: a.clone(),
+                priority: false,
+                partner: Some(LoadPartner {
+                    path: b.clone(),
+                    priority: true,
+                }),
+            })
+            .await
+            .unwrap();
+        let pair = recv_loaded(&mut viewer_rx).await;
+        assert_eq!(pair.prepared.path, a);
+        assert!(!pair.priority);
+        let partner = pair.partner.expect("both members decoded");
+        assert_eq!(partner.prepared.path, b);
+        assert!(partner.priority, "each member keeps its own priority");
+
+        load_tx
+            .send(LoadPhoto {
+                path: missing.clone(),
+                priority: false,
+                partner: Some(LoadPartner {
+                    path: b.clone(),
+                    priority: false,
+                }),
+            })
+            .await
+            .unwrap();
+        let solo = recv_loaded(&mut viewer_rx).await;
+        assert_eq!(solo.prepared.path, b, "the decoded member is shown solo");
+        assert!(solo.partner.is_none());
+        let InvalidPhoto(invalid) = invalid_rx.recv().await.unwrap();
+        assert_eq!(invalid, missing);
+        cancel.cancel();
+        let _ = task.await;
     }
 }

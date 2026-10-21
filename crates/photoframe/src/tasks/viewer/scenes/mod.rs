@@ -3,7 +3,6 @@
 //! This module will house the logic for state-specific viewer behaviour.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,6 +15,7 @@ use wgpu::{CommandEncoder, TextureView};
 use winit::dpi::PhysicalSize;
 
 use crate::config::{Configuration, MatCaption, TransitionConfig, TransitionKind};
+use crate::events::Displayed;
 use crate::tasks::greeting_screen::GreetingScreen;
 
 use super::{ImgTex, TransitionState};
@@ -457,6 +457,7 @@ impl CaptionOverlay {
 pub(super) fn showcase_caption(
     transition_kind: Option<TransitionKind>,
     mat_kind: Option<MatCaption>,
+    pair: bool,
 ) -> String {
     let t = transition_kind
         .map(|k| k.to_string())
@@ -464,7 +465,19 @@ pub(super) fn showcase_caption(
     let m = mat_kind
         .map(|k| k.to_string())
         .unwrap_or_else(|| "full-bleed".to_string());
-    format!("transition: {t}    mat: {m}")
+    let pair = if pair { " · pair" } else { "" };
+    format!("transition: {t}    mat: {m}{pair}")
+}
+
+/// `dwell-ms × pairing.dwell-multiplier`, the rest of a pair screen (§4).
+pub(super) fn pair_dwell_ms(dwell_ms: u64, dwell_multiplier: f32) -> u64 {
+    (dwell_ms as f64 * f64::from(dwell_multiplier)).round() as u64
+}
+
+/// **Dwell is a property of the screen (§4, R1):** a pair screen rests
+/// `pair_dwell_ms`, a solo screen `dwell_ms`.
+pub(super) fn screen_dwell(dwell_ms: u64, pair_dwell_ms: u64, pair: bool) -> std::time::Duration {
+    std::time::Duration::from_millis(if pair { pair_dwell_ms } else { dwell_ms })
 }
 
 struct OverlayScene {
@@ -731,12 +744,14 @@ pub(super) struct WakeScene {
     /// right after it instead of waiting for the next event.
     just_finalized: bool,
     dwell_ms: u64,
+    /// Rest of a pair screen: `dwell_ms × pairing.dwell-multiplier`.
+    pair_dwell_ms: u64,
     transition_cfg: TransitionConfig,
 }
 
 impl WakeScene {
     /// Creates a new [`WakeScene`] configured with the slideshow dwell and transition settings.
-    pub(super) fn new(dwell_ms: u64, transition_cfg: TransitionConfig) -> Self {
+    pub(super) fn new(dwell_ms: u64, pair_dwell_ms: u64, transition_cfg: TransitionConfig) -> Self {
         if let Some(selected) = transition_cfg.primary_selected() {
             tracing::debug!(
                 transition_index = selected.entry.index,
@@ -756,6 +771,7 @@ impl WakeScene {
             pending_redraw: false,
             just_finalized: false,
             dwell_ms,
+            pair_dwell_ms,
             transition_cfg,
         }
     }
@@ -827,10 +843,14 @@ impl WakeScene {
         let _ = self.take_redraw_needed();
     }
 
-    /// How long a photo rests on screen before the next transition.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // read by the KMS wake plan
+    /// How long the current screen rests before the next transition (a pair
+    /// screen rests longer; see [`screen_dwell`]). The single source for
+    /// both `maybe_start_transition` and the KMS wake plan (R1), so the KMS
+    /// deadline is `displayed_at + dwell·m` for a pair and the slideshow
+    /// cannot stall on one.
     pub(super) fn dwell(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.dwell_ms)
+        let pair = self.current.as_ref().is_some_and(|c| c.partner.is_some());
+        screen_dwell(self.dwell_ms, self.pair_dwell_ms, pair)
     }
 
     /// Returns the timestamp when the current image started displaying.
@@ -885,17 +905,17 @@ impl WakeScene {
                 .expect("transition state should exist when complete");
             self.just_finalized = true;
             if let Some(next) = self.next.take() {
-                let path = next.path.clone();
+                let displayed = next.displayed();
                 tracing::debug!(
                     "transition_end kind={} path={} queue_depth={}",
                     state.kind(),
-                    path.display(),
+                    displayed.path.display(),
                     self.pending.len()
                 );
                 self.current = Some(next);
                 self.pending_redraw = true;
                 self.displayed_at = Some(Instant::now());
-                ctx.notify_displayed(path);
+                ctx.notify_displayed(displayed);
             }
         }
     }
@@ -905,16 +925,16 @@ impl WakeScene {
             return;
         }
         if let Some(first) = self.pending_mut().pop_front() {
-            let path = first.path.clone();
+            let displayed = first.displayed();
             tracing::info!(
                 "first_image path={} queue_depth={}",
-                path.display(),
+                displayed.path.display(),
                 self.pending.len()
             );
             self.current = Some(first);
             self.pending_redraw = true;
             self.displayed_at = Some(Instant::now());
-            ctx.notify_displayed(path);
+            ctx.notify_displayed(displayed);
         }
     }
 
@@ -926,7 +946,7 @@ impl WakeScene {
         let Some(shown_at) = self.displayed_at else {
             return;
         };
-        if shown_at.elapsed() < std::time::Duration::from_millis(self.dwell_ms) {
+        if shown_at.elapsed() < self.dwell() {
             return;
         }
         if self.next.is_none()
@@ -1028,7 +1048,7 @@ pub(super) struct SceneContext<'a> {
     redraw: &'a mut dyn FnMut(),
     config: Arc<Configuration>,
     rng: &'a mut rand::rngs::ThreadRng,
-    notify_displayed: &'a mut dyn FnMut(PathBuf),
+    notify_displayed: &'a mut dyn FnMut(Displayed),
     enqueue_matting: &'a mut dyn FnMut(&mut WakeScene),
 }
 
@@ -1039,7 +1059,7 @@ impl<'a> SceneContext<'a> {
         redraw: &'a mut dyn FnMut(),
         config: Arc<Configuration>,
         rng: &'a mut rand::rngs::ThreadRng,
-        notify_displayed: &'a mut dyn FnMut(PathBuf),
+        notify_displayed: &'a mut dyn FnMut(Displayed),
         enqueue_matting: &'a mut dyn FnMut(&mut WakeScene),
     ) -> Self {
         Self {
@@ -1072,9 +1092,9 @@ impl<'a> SceneContext<'a> {
         self.rng
     }
 
-    /// Notifies the manager that a new image has been displayed.
-    pub(super) fn notify_displayed(&mut self, path: PathBuf) {
-        (self.notify_displayed)(path);
+    /// Notifies the manager that a new screen has been displayed.
+    pub(super) fn notify_displayed(&mut self, displayed: Displayed) {
+        (self.notify_displayed)(displayed);
     }
 
     /// Requests additional matting work for the wake scene.
@@ -1168,6 +1188,16 @@ mod tests {
     use winit::dpi::PhysicalSize;
 
     #[test]
+    fn showcase_caption_marks_a_pair_screen() {
+        let mat = Some(MatCaption {
+            kind: MattingKind::Studio,
+            photo_cluster: false,
+        });
+        assert!(showcase_caption(None, mat, true).ends_with(" · pair"));
+        assert!(!showcase_caption(None, mat, false).contains("pair"));
+    }
+
+    #[test]
     fn showcase_caption_names_the_photo_cluster_swatch() {
         let studio = |photo_cluster| {
             Some(MatCaption {
@@ -1176,11 +1206,11 @@ mod tests {
             })
         };
         assert_eq!(
-            showcase_caption(None, studio(false)),
+            showcase_caption(None, studio(false), false),
             "transition: none    mat: studio"
         );
         assert_eq!(
-            showcase_caption(None, studio(true)),
+            showcase_caption(None, studio(true), false),
             "transition: none    mat: studio (photo-cluster)"
         );
     }
