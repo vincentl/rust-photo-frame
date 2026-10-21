@@ -214,7 +214,10 @@ therefore carries a vendored copy of wgpu-hal 27.0.4 under
 `PHOTOFRAME PATCH`): when no device matches by number, use the first one
 whose `vkGetDrmDisplayEXT` resolves the connector on that fd. It is wired
 in through `[patch.crates-io]` in the root `Cargo.toml` and affects only
-this code path; remove both once the fix is upstream.
+this code path; remove both once the fix is upstream. The vendored copy also
+carries one unrelated change, a lifetime lint fix in `src/gles/egl.rs:425`
+(`MappedMutexGuard<'_, ..>`), so a mechanical diff against the published
+27.0.4 shows two files: `drm.rs` (the patch) and `egl.rs` (the lint).
 
 ### The viewer on KMS
 
