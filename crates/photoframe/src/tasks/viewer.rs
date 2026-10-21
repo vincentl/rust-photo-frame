@@ -2762,6 +2762,13 @@ impl App {
                 ViewerModeKind::Sleep => self.enter_wake(),
                 ViewerModeKind::Greeting | ViewerModeKind::Wake => self.enter_sleep(),
             },
+            ViewerCommand::DisplayPower { reply, .. } => {
+                let _ = reply.send(config_model::control::Reply::error(
+                    config_model::control::ErrorKind::Unsupported,
+                    "display power is not implemented yet",
+                ));
+            }
+            ViewerCommand::ShowWifiOverlay(_) | ViewerCommand::HideWifiOverlay => {}
         }
     }
 
@@ -3986,6 +3993,11 @@ impl ViewerSurface {
             )),
         }
     }
+}
+
+/// Whether the viewer can render this overlay: the protocol's limits.
+pub fn validate_wifi_overlay(overlay: &config_model::control::WifiOverlay) -> Result<(), String> {
+    overlay.validate()
 }
 
 /// Run the viewer on DRM/KMS; see `kms.rs`.
