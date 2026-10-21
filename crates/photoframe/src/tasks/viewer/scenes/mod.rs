@@ -879,7 +879,6 @@ impl WakeScene {
     }
 
     /// Whether a transition finalized since the last call.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // read by the KMS wake plan
     pub(super) fn take_just_finalized(&mut self) -> bool {
         std::mem::take(&mut self.just_finalized)
     }
@@ -1630,6 +1629,8 @@ mod tests {
                     in_flight: 0,
                     deferred: 0,
                     preload: 1,
+                    surface_poll: None,
+                    overlay_pending: false,
                 },
                 now,
             );

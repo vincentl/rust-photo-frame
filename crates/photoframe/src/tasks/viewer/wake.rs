@@ -16,19 +16,18 @@
 //!   the viewer sleeps: zero frames and zero wakeups while a photo rests.
 //!
 //! The DRM/KMS loop (`kms.rs`) drives itself from [`plan_wake`] and
-//! [`next_wake_event`]. T5 applies the same plan to the Wayland driver
-//! (`drive_viewer_events`), replacing its unconditional 4 ms tick: fast
-//! ticks only while `redraw_now`, otherwise the same event sources.
-
-// Driven by the KMS loop, which only builds on Linux; T5 brings the Wayland
-// driver onto it on every platform.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+//! [`next_wake_event`]. The Wayland driver ([`drive_forwarding`]) waits on
+//! the same plan: it owns the control, matting-result and loader channels,
+//! forwards what arrives to the winit thread as user events, and ticks the
+//! winit thread fast only while [`WakePlan::tick_fast`], so a resting photo
+//! costs no wakeups there either.
 
 use super::MatResult;
 use crate::events::{PhotoLoaded, ViewerCommand};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::{mpsc::Receiver, watch};
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, warn};
 
 /// The viewer state [`plan_wake`] depends on.
 #[derive(Clone, Copy, Debug)]
@@ -55,7 +54,27 @@ pub(super) struct WakeInputs {
     pub(super) deferred: usize,
     /// `viewer-preload-count`.
     pub(super) preload: usize,
+    /// Wayland only: how often to look at the window's size while the
+    /// surface is ready and the viewer is awake. Sway can change the output
+    /// mode or scale without winit reporting it, and each control step
+    /// re-reads the size, so a bounded poll replaces the unbounded 4 ms one
+    /// (at most one wakeup per period). `None` on KMS, whose mode never
+    /// changes at runtime.
+    pub(super) surface_poll: Option<Duration>,
+    /// Wayland only: the Greeting or Sleep overlay asked for a frame that
+    /// has not been presented (a failed present leaves the request set).
+    /// KMS re-arms its own requests.
+    pub(super) overlay_pending: bool,
 }
+
+/// How soon a pending overlay redraw is retried. Slow enough to cost nothing,
+/// fast enough that repeated acquire timeouts still reach the viewer's
+/// recovery (`MAX_CONSECUTIVE_SURFACE_TIMEOUTS`) in seconds.
+const OVERLAY_RETRY: Duration = Duration::from_millis(250);
+
+/// How soon a deferred photo that could not be submitted (the matting queue
+/// was full) is tried again when no matting result is due to wake the loop.
+const REFILL_RETRY: Duration = Duration::from_millis(250);
 
 /// What the loop does next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +84,13 @@ pub(super) struct WakePlan {
     /// Run the control step again without waiting. One-shot (its input is
     /// taken), so it cannot keep the loop awake.
     pub(super) tick_now: bool,
+    /// Wayland: keep ticking the control step on the fast cadence
+    /// (`CONTROL_TICK_INTERVAL`) because something advances with each tick
+    /// rather than on an event: a transition is animating, or the surface
+    /// handshake is still counting its repeated size reports. False while a
+    /// photo rests, so the wait is for events and the dwell deadline only.
+    /// KMS renders back to back (`redraw_now`) and has no handshake.
+    pub(super) tick_fast: bool,
     /// Wake at this instant even if no event arrives: the dwell of the photo
     /// on screen ends. Always in the future when set, so a wait on it can
     /// never spin.
@@ -86,12 +112,37 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
     // screen. Once it has run out, starting the transition needs a staged
     // photo, which arrives as an event (matting result or loader); until
     // then there is nothing to wait for but events.
-    let deadline = match inputs.displayed_at {
+    let mut deadline = match inputs.displayed_at {
         Some(shown) if inputs.slideshow_active && !inputs.transition_active => {
             Some(shown + inputs.dwell).filter(|deadline| *deadline > now)
         }
         _ => None,
     };
+
+    // Bounded polls and retries. Each is "wake no later than": the loop still
+    // sleeps on events, and none of them applies to the other's state.
+    let mut sooner = |at: Instant| deadline = Some(deadline.map_or(at, |d| d.min(at)));
+    if inputs.surface_ready
+        && !inputs.sleeping
+        && let Some(period) = inputs.surface_poll
+    {
+        sooner(now + period);
+    }
+    if !inputs.slideshow_active && inputs.overlay_pending {
+        sooner(now + OVERLAY_RETRY);
+    }
+    // A photo waiting to be submitted that no step has taken: with the queue
+    // short and nothing animating, the step that ran last should have
+    // submitted it, so its submit failed (queue full). If no matting result
+    // is coming to wake the loop, ask again.
+    if inputs.surface_ready
+        && !inputs.sleeping
+        && !inputs.transition_active
+        && inputs.deferred > 0
+        && inputs.pending + inputs.in_flight < inputs.preload
+    {
+        sooner(now + REFILL_RETRY);
+    }
 
     // The step that finalized a transition ran its uploads and matting
     // refill *before* the finalize, while both were still gated off, so the
@@ -113,9 +164,15 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
             inputs.deferred == 0 && queued < inputs.preload
         };
 
+    // The surface-ready handshake needs two identical size reports 120 ms
+    // apart, and each control step is a report (it polls the window's size),
+    // so the steps must keep coming until the surface is ready.
+    let tick_fast = redraw_now || !inputs.surface_ready;
+
     WakePlan {
         redraw_now,
         tick_now,
+        tick_fast,
         deadline,
         want_photo,
     }
@@ -182,11 +239,214 @@ pub(super) async fn next_wake_event(
     }
 }
 
+/// What the winit thread publishes after every event batch: the plan for the
+/// state it is now in, and how many of the driver's forwarded events it has
+/// handled. The count is how the driver knows the plan describes a state
+/// that includes everything it forwarded (see [`drive_forwarding`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Published {
+    pub(super) plan: WakePlan,
+    pub(super) handled: u64,
+}
+
+impl Published {
+    /// Before the winit thread has published anything.
+    pub(super) fn idle() -> Self {
+        Self {
+            plan: WakePlan::IDLE,
+            handled: 0,
+        }
+    }
+}
+
+impl WakePlan {
+    /// Wait for events only.
+    const IDLE: WakePlan = WakePlan {
+        redraw_now: false,
+        tick_now: false,
+        tick_fast: false,
+        deadline: None,
+        want_photo: false,
+    };
+}
+
+/// The winit thread's side of the end of an event batch, so the sequence in
+/// [`end_of_batch`] can run (and be tested) without a window or GPU.
+pub(super) trait BatchHost {
+    /// One control step (`App::process_tick`).
+    fn step(&mut self);
+    /// The plan for the state now (`App::wake_plan`); takes the one-shot
+    /// `tick_now` input.
+    fn plan(&mut self, now: Instant) -> WakePlan;
+}
+
+/// Steps a finalized transition can owe after a batch. One in practice (the
+/// refill that was gated off while it animated); the bound only guards a
+/// loop that cannot happen, since finalizing again needs a new transition.
+const MAX_OWED_STEPS: usize = 3;
+
+/// End of a winit event batch (`about_to_wait`): run the step a window event
+/// asked for, then the extra step a finalized transition owes (`tick_now`),
+/// and return what to publish for the driver. Without the second step the
+/// uploads and matting refill held back during the animation would wait for
+/// the next event or dwell.
+pub(super) fn end_of_batch(
+    host: &mut impl BatchHost,
+    step_wanted: bool,
+    handled: u64,
+    mut now: impl FnMut() -> Instant,
+) -> Published {
+    if step_wanted {
+        host.step();
+    }
+    let mut plan = host.plan(now());
+    for _ in 0..MAX_OWED_STEPS {
+        if !plan.tick_now {
+            break;
+        }
+        host.step();
+        plan = host.plan(now());
+    }
+    Published { plan, handled }
+}
+
+/// What the Wayland driver hands to the winit thread.
+#[derive(Debug)]
+pub(super) enum Forward {
+    /// Run the control step.
+    Tick,
+    Command(ViewerCommand),
+    MatResult(MatResult),
+    Photo(PhotoLoaded),
+    /// Stop the event loop.
+    Cancelled,
+}
+
+/// If forwarded events stay unhandled this long, send a tick: the winit
+/// thread publishes after every batch it handles, so this only fires if a
+/// publication was somehow missed, and it keeps that from freezing the
+/// slideshow.
+const UNHANDLED_RECHECK: Duration = Duration::from_secs(1);
+
+/// The Wayland counterpart of the KMS loop's wait: owns the control,
+/// matting-result and loader channels (the winit thread cannot await them),
+/// sleeps in [`next_wake_event`] on the plan the winit thread last
+/// published, and forwards each event to it.
+///
+/// The plan is trusted only while `published.handled` equals the number of
+/// events forwarded. Between forwarding an event and the winit thread
+/// handling it, the plan describes the state before the event: its deadline
+/// may already have fired (re-sending it would spin) and its `want_photo`
+/// would read the loader past the preload bound. Until the next publication
+/// the driver therefore waits on events only.
+///
+/// The fast cadence is `tick_interval` after the previous tick, never
+/// queued: a slow tick delays the next one instead of stacking behind it.
+/// `forward` returns false when the winit thread is gone.
+pub(super) async fn drive_forwarding(
+    cancel: CancellationToken,
+    mut control: Receiver<ViewerCommand>,
+    mut mat_results: Receiver<MatResult>,
+    loader: Receiver<PhotoLoaded>,
+    mut published: watch::Receiver<Published>,
+    tick_interval: Duration,
+    mut forward: impl FnMut(Forward) -> bool,
+) {
+    let now = || tokio::time::Instant::now().into_std();
+    let mut loader = Some(loader);
+    let mut sent: u64 = 0;
+    let mut last_forward = now();
+    let mut last_tick = last_forward;
+
+    // The winit thread starts its first control step as soon as it runs.
+    if !forward(Forward::Tick) {
+        return;
+    }
+    sent += 1;
+
+    loop {
+        let seen = *published.borrow_and_update();
+        let plan = if seen.handled == sent {
+            let mut plan = seen.plan;
+            // `plan_wake` never publishes a deadline that has passed; if one
+            // ever arrived, firing on it again after the tick it already
+            // caused would spin, so a deadline at or before the last tick is
+            // taken as served.
+            plan.deadline = plan.deadline.filter(|deadline| *deadline > last_tick);
+            if plan.tick_fast {
+                let due = last_tick + tick_interval;
+                plan.deadline = Some(plan.deadline.map_or(due, |d| d.min(due)));
+            }
+            plan
+        } else {
+            WakePlan {
+                deadline: Some(last_forward + UNHANDLED_RECHECK),
+                ..WakePlan::IDLE
+            }
+        };
+
+        let event = tokio::select! {
+            biased;
+            changed = published.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                continue;
+            }
+            event = next_wake_event(
+                &plan,
+                &cancel,
+                &mut control,
+                &mut mat_results,
+                loader.as_mut(),
+            ) => event,
+        };
+        let out = match event {
+            WakeEvent::Cancelled => {
+                let _ = forward(Forward::Cancelled);
+                return;
+            }
+            WakeEvent::Command(cmd) => {
+                debug!(command = ?cmd, "viewer_event_forward_command");
+                Forward::Command(cmd)
+            }
+            WakeEvent::ControlClosed => {
+                warn!("viewer control channel closed; stopping driver loop");
+                return;
+            }
+            WakeEvent::MatResult(result) => Forward::MatResult(result),
+            WakeEvent::MatClosed => {
+                warn!("all matting workers exited; stopping the viewer");
+                let _ = forward(Forward::Cancelled);
+                return;
+            }
+            WakeEvent::Photo(photo) => Forward::Photo(photo),
+            WakeEvent::LoaderClosed => {
+                debug!("viewer_loader_closed");
+                loader = None;
+                continue;
+            }
+            WakeEvent::DwellElapsed => {
+                last_tick = now();
+                Forward::Tick
+            }
+        };
+        if !forward(out) {
+            warn!("viewer event proxy rejected an event; stopping driver loop");
+            return;
+        }
+        sent += 1;
+        last_forward = now();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::ImagePlane;
     use super::*;
     use crate::events::{PreparedImageCpu, ViewerState};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
 
     const DWELL: Duration = Duration::from_secs(8);
@@ -206,6 +466,8 @@ mod tests {
             in_flight: 0,
             deferred: 0,
             preload: 3,
+            surface_poll: None,
+            overlay_pending: false,
         }
     }
 
@@ -218,6 +480,7 @@ mod tests {
             WakePlan {
                 redraw_now: false,
                 tick_now: false,
+                tick_fast: false,
                 deadline: Some(now + DWELL),
                 want_photo: false,
             }
@@ -322,6 +585,7 @@ mod tests {
             WakePlan {
                 redraw_now: false,
                 tick_now: false,
+                tick_fast: false,
                 deadline: None,
                 want_photo: false,
             }
@@ -439,6 +703,7 @@ mod tests {
         WakePlan {
             redraw_now: false,
             tick_now: false,
+            tick_fast: false,
             deadline: None,
             want_photo: false,
         }
@@ -591,5 +856,570 @@ mod tests {
         )
         .await;
         assert!(matches!(event, WakeEvent::Cancelled), "{event:?}");
+    }
+
+    #[test]
+    fn fast_ticks_only_while_something_advances_per_tick() {
+        let now = Instant::now();
+        // A photo at rest, even with a full queue and a pending deadline.
+        assert!(!plan_wake(resting(now), now).tick_fast);
+        // A transition animating.
+        let animating = WakeInputs {
+            transition_active: true,
+            ..resting(now)
+        };
+        assert!(plan_wake(animating, now).tick_fast);
+        // A scene's own redraw request.
+        let requested = WakeInputs {
+            redraw_requested: true,
+            ..resting(now)
+        };
+        assert!(plan_wake(requested, now).tick_fast);
+        // The surface handshake polls the window size once per step.
+        let handshake = WakeInputs {
+            surface_ready: false,
+            slideshow_active: false,
+            displayed_at: None,
+            pending: 0,
+            ..resting(now)
+        };
+        assert!(plan_wake(handshake, now).tick_fast);
+        // A transition left behind by a switch to Sleep animates nothing.
+        let asleep = WakeInputs {
+            slideshow_active: false,
+            sleeping: true,
+            transition_active: true,
+            ..resting(now)
+        };
+        assert!(!plan_wake(asleep, now).tick_fast);
+        // The one-shot post-finalize step is not a cadence.
+        let finished = WakeInputs {
+            transition_just_finished: true,
+            ..resting(now)
+        };
+        let plan = plan_wake(finished, now);
+        assert!(plan.tick_now && !plan.tick_fast);
+    }
+
+    /// A stand-in for the winit thread: handles each forwarded event, bumps
+    /// the handled count and publishes the plan for the state it is in. The
+    /// test steers that state with `set_plan`.
+    struct Rig {
+        events: Arc<Mutex<Vec<(Duration, &'static str)>>>,
+        plan: Arc<Mutex<WakePlan>>,
+        published: watch::Sender<Published>,
+        handled: Arc<AtomicU64>,
+        photo_over_read: Arc<AtomicBool>,
+        start: tokio::time::Instant,
+        control_tx: mpsc::Sender<ViewerCommand>,
+        mat_tx: Option<mpsc::Sender<MatResult>>,
+        loader_tx: mpsc::Sender<PhotoLoaded>,
+    }
+
+    const TICK: Duration = Duration::from_millis(4);
+
+    /// Start the driver against a [`Rig`]. With `ack` false the stand-in
+    /// never publishes (a winit thread that lost its publication).
+    fn rig(ack: bool) -> Rig {
+        let plan = Arc::new(Mutex::new(idle_plan()));
+        let for_app = Arc::clone(&plan);
+        rig_with(plan, move |_kind, handled| {
+            ack.then(|| Published {
+                plan: *for_app.lock().unwrap(),
+                handled,
+            })
+        })
+    }
+
+    /// As [`rig`], but `app` decides what the winit thread publishes after
+    /// handling each forwarded event (`None`: nothing).
+    fn rig_with(
+        plan: Arc<Mutex<WakePlan>>,
+        mut app: impl FnMut(&'static str, u64) -> Option<Published> + Send + 'static,
+    ) -> Rig {
+        let start = tokio::time::Instant::now();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let handled = Arc::new(AtomicU64::new(0));
+        let forwarded = Arc::new(AtomicU64::new(0));
+        let photo_over_read = Arc::new(AtomicBool::new(false));
+        let (published, published_rx) = watch::channel(Published::idle());
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<&'static str>();
+        let (control_tx, control) = mpsc::channel(4);
+        let (mat_tx, mat) = mpsc::channel(4);
+        let (loader_tx, loader) = mpsc::channel(4);
+
+        // The winit thread.
+        {
+            let (events, handled, published) =
+                (Arc::clone(&events), Arc::clone(&handled), published.clone());
+            tokio::spawn(async move {
+                while let Some(kind) = out_rx.recv().await {
+                    events.lock().unwrap().push((start.elapsed(), kind));
+                    // `handled` counts only events the app published for, as
+                    // a silent winit thread never advances it.
+                    if let Some(next) = app(kind, handled.load(Ordering::SeqCst) + 1) {
+                        handled.store(next.handled, Ordering::SeqCst);
+                        let _ = published.send(next);
+                    }
+                }
+            });
+        }
+        // The driver.
+        {
+            let (handled, over_read) = (Arc::clone(&handled), Arc::clone(&photo_over_read));
+            tokio::spawn(drive_forwarding(
+                CancellationToken::new(),
+                control,
+                mat,
+                loader,
+                published_rx,
+                TICK,
+                move |forward| {
+                    let before = forwarded.fetch_add(1, Ordering::SeqCst);
+                    let kind = match forward {
+                        Forward::Tick => "tick",
+                        Forward::Command(_) => "command",
+                        Forward::MatResult(_) => "mat",
+                        Forward::Photo(_) => {
+                            // A photo is read only when the plan includes
+                            // every event forwarded before it.
+                            if handled.load(Ordering::SeqCst) != before {
+                                over_read.store(true, Ordering::SeqCst);
+                            }
+                            "photo"
+                        }
+                        Forward::Cancelled => "cancelled",
+                    };
+                    out_tx.send(kind).is_ok()
+                },
+            ));
+        }
+        Rig {
+            events,
+            plan,
+            published,
+            handled,
+            photo_over_read,
+            start,
+            control_tx,
+            mat_tx: Some(mat_tx),
+            loader_tx,
+        }
+    }
+
+    impl Rig {
+        fn count(&self, kind: &str) -> usize {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, k)| *k == kind)
+                .count()
+        }
+
+        fn set_plan(&self, plan: WakePlan) {
+            *self.plan.lock().unwrap() = plan;
+            // The state the winit thread publishes at the end of a batch.
+            let handled = self.handled.load(Ordering::SeqCst);
+            self.published.send(Published { plan, handled }).unwrap();
+        }
+    }
+
+    fn dwelling(rig: &Rig) -> WakePlan {
+        WakePlan {
+            deadline: Some(rig.start.into_std() + DWELL),
+            ..idle_plan()
+        }
+    }
+
+    fn animating() -> WakePlan {
+        WakePlan {
+            redraw_now: true,
+            tick_fast: true,
+            ..idle_plan()
+        }
+    }
+
+    /// The point of T5: during an 8 s dwell with nothing pending, the driver
+    /// wakes the winit thread once at the start and once at the deadline.
+    /// (The 4 ms ticker sent 2000 in the same time.)
+    #[tokio::test(start_paused = true)]
+    async fn ticker_is_idle_during_a_dwell_with_no_pending_work() {
+        let r = rig(true);
+        tokio::task::yield_now().await;
+        r.set_plan(dwelling(&r));
+        tokio::time::sleep(DWELL - Duration::from_millis(1)).await;
+        assert_eq!(r.count("tick"), 1, "{:?}", r.events.lock().unwrap());
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        // The deadline: one tick, and no more until the state changes (the
+        // rig's plan still has the now-past deadline, as the real one would
+        // before the winit thread re-plans).
+        r.set_plan(WakePlan {
+            deadline: None,
+            ..idle_plan()
+        });
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert_eq!(r.count("tick"), 2, "{:?}", r.events.lock().unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ticker_resumes_while_a_transition_animates_then_goes_quiet() {
+        let r = rig(true);
+        tokio::task::yield_now().await;
+        r.set_plan(dwelling(&r));
+        tokio::time::sleep(DWELL + Duration::from_millis(1)).await;
+        assert_eq!(r.count("tick"), 2);
+        // The tick at the deadline started a transition.
+        r.set_plan(animating());
+        let before = r.count("tick");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let during = r.count("tick") - before;
+        assert!(
+            (95..=101).contains(&during),
+            "expected one tick per 4 ms for 400 ms, got {during}"
+        );
+        // The transition finalized: back to waiting for the next dwell.
+        r.set_plan(WakePlan {
+            deadline: Some(tokio::time::Instant::now().into_std() + DWELL),
+            ..idle_plan()
+        });
+        let settled = r.count("tick");
+        tokio::time::sleep(DWELL - Duration::from_millis(1)).await;
+        assert_eq!(r.count("tick"), settled, "ticks while resting");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ticker_resumes_on_a_matting_result_and_a_command() {
+        let r = rig(true);
+        tokio::task::yield_now().await;
+        r.set_plan(dwelling(&r));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(r.count("tick"), 1);
+        let at = r.start.elapsed();
+        r.mat_tx
+            .as_ref()
+            .unwrap()
+            .send(mat_result("d.jpg"))
+            .await
+            .unwrap();
+        r.control_tx.send(ViewerCommand::ToggleState).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        {
+            let events = r.events.lock().unwrap();
+            let kinds: Vec<_> = events.iter().map(|(_, k)| *k).collect();
+            assert_eq!(kinds, ["tick", "command", "mat"], "{events:?}");
+            // Delivered the instant they arrived, not on a later tick. (The
+            // control channel is polled first, as in the KMS loop.)
+            assert!(events[1..].iter().all(|(t, _)| *t == at), "{events:?}");
+        }
+        // And nothing else follows them.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(r.count("tick"), 1);
+    }
+
+    /// The handshake polls on the fast cadence until the surface is ready,
+    /// then stops, and the deferred photo is taken one at a time.
+    #[tokio::test(start_paused = true)]
+    async fn photos_are_read_one_per_handled_event() {
+        let r = rig(true);
+        tokio::task::yield_now().await;
+        for name in ["1.jpg", "2.jpg", "3.jpg"] {
+            r.loader_tx.send(photo(name)).await.unwrap();
+        }
+        r.set_plan(WakePlan {
+            want_photo: true,
+            ..idle_plan()
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(r.count("photo"), 3);
+        assert!(
+            !r.photo_over_read.load(Ordering::SeqCst),
+            "a photo was read before the previous event was handled"
+        );
+    }
+
+    /// A winit thread that never publishes cannot freeze or spin the driver:
+    /// it pokes it once a second.
+    #[tokio::test(start_paused = true)]
+    async fn unhandled_events_are_rechecked_once_a_second() {
+        let r = rig(false);
+        tokio::time::sleep(Duration::from_millis(5500)).await;
+        assert_eq!(r.count("tick"), 6, "{:?}", r.events.lock().unwrap());
+    }
+
+    /// A published deadline that has already passed is served by the tick it
+    /// caused; it must not turn the wait into a spin.
+    #[tokio::test(start_paused = true)]
+    async fn a_served_deadline_cannot_spin_the_driver() {
+        let r = rig(true);
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        r.set_plan(WakePlan {
+            deadline: Some(r.start.into_std()),
+            ..idle_plan()
+        });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(r.count("tick"), 1, "{:?}", r.events.lock().unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_closed_matting_channel_stops_the_viewer() {
+        let mut r = rig(true);
+        tokio::task::yield_now().await;
+        drop(r.mat_tx.take());
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(r.count("cancelled"), 1);
+    }
+
+    #[test]
+    fn bounded_polls_and_retries_wake_the_loop_sooner() {
+        let now = Instant::now();
+        let second = Duration::from_secs(1);
+        // Wayland, awake, a photo resting: the size poll beats the dwell.
+        let polled = WakeInputs {
+            surface_poll: Some(second),
+            ..resting(now)
+        };
+        assert_eq!(plan_wake(polled, now).deadline, Some(now + second));
+        // A dwell closer than the poll still wins.
+        let near = WakeInputs {
+            displayed_at: Some(now - DWELL + Duration::from_millis(300)),
+            ..polled
+        };
+        assert_eq!(
+            plan_wake(near, now).deadline,
+            Some(now + Duration::from_millis(300))
+        );
+        // KMS passes no poll; asleep and not-yet-ready surfaces do not poll.
+        assert_eq!(plan_wake(resting(now), now).deadline, Some(now + DWELL));
+        let asleep = WakeInputs {
+            slideshow_active: false,
+            sleeping: true,
+            displayed_at: None,
+            ..polled
+        };
+        assert_eq!(plan_wake(asleep, now).deadline, None);
+        let settling = WakeInputs {
+            surface_ready: false,
+            ..polled
+        };
+        assert_eq!(plan_wake(settling, now).deadline, Some(now + DWELL));
+
+        // An overlay whose frame was not presented is asked for again.
+        for sleeping in [false, true] {
+            let overlay = WakeInputs {
+                slideshow_active: false,
+                sleeping,
+                displayed_at: None,
+                overlay_pending: true,
+                ..resting(now)
+            };
+            assert_eq!(
+                plan_wake(overlay, now).deadline,
+                Some(now + OVERLAY_RETRY),
+                "sleeping={sleeping}"
+            );
+            let presented = WakeInputs {
+                overlay_pending: false,
+                ..overlay
+            };
+            assert_eq!(plan_wake(presented, now).deadline, None);
+        }
+        // The slideshow's own redraws are not this retry's business.
+        let wake = WakeInputs {
+            overlay_pending: true,
+            ..resting(now)
+        };
+        assert_eq!(plan_wake(wake, now).deadline, Some(now + DWELL));
+
+        // A deferred photo the last step could not submit is retried; one a
+        // transition or a full queue is holding back is not.
+        let stuck = WakeInputs {
+            deferred: 1,
+            pending: 1,
+            ..resting(now)
+        };
+        assert_eq!(plan_wake(stuck, now).deadline, Some(now + REFILL_RETRY));
+        for held in [
+            WakeInputs {
+                transition_active: true,
+                ..stuck
+            },
+            WakeInputs {
+                pending: 3,
+                ..stuck
+            },
+            WakeInputs {
+                slideshow_active: false,
+                sleeping: true,
+                ..stuck
+            },
+        ] {
+            assert_ne!(plan_wake(held, now).deadline, Some(now + REFILL_RETRY));
+        }
+    }
+
+    struct Host {
+        steps: usize,
+        /// `tick_now` for the next plans, taken one per call.
+        owed: Vec<bool>,
+    }
+
+    impl BatchHost for Host {
+        fn step(&mut self) {
+            self.steps += 1;
+        }
+        fn plan(&mut self, _now: Instant) -> WakePlan {
+            WakePlan {
+                tick_now: self.owed.pop().unwrap_or(false),
+                ..idle_plan()
+            }
+        }
+    }
+
+    #[test]
+    fn a_batch_that_finalized_a_transition_runs_one_more_step() {
+        let mut host = Host {
+            steps: 0,
+            owed: vec![false, true],
+        };
+        let published = end_of_batch(&mut host, false, 7, Instant::now);
+        assert_eq!(host.steps, 1, "the refill the finalize owes");
+        assert!(!published.plan.tick_now, "published plans are never owed");
+        assert_eq!(published.handled, 7);
+    }
+
+    #[test]
+    fn a_batch_without_work_runs_no_step_and_a_window_event_runs_one() {
+        let mut host = Host {
+            steps: 0,
+            owed: vec![],
+        };
+        end_of_batch(&mut host, false, 0, Instant::now);
+        assert_eq!(host.steps, 0);
+        end_of_batch(&mut host, true, 0, Instant::now);
+        assert_eq!(host.steps, 1);
+    }
+
+    #[test]
+    fn owed_steps_are_bounded() {
+        let mut host = Host {
+            steps: 0,
+            owed: vec![true; 50],
+        };
+        end_of_batch(&mut host, false, 0, Instant::now);
+        assert_eq!(host.steps, MAX_OWED_STEPS);
+    }
+
+    /// A viewer state machine in miniature, planned by the real `plan_wake`
+    /// and stepped through `end_of_batch`: dwell, transition, finalize,
+    /// refill. The refill is gated off while the transition animates, as the
+    /// real uploads and matting are, so it needs the step a finalize owes.
+    struct Sim {
+        displayed_at: Instant,
+        transition_started: Option<Instant>,
+        just_finished: bool,
+        pending: usize,
+        starts: Vec<Instant>,
+    }
+
+    const TRANSITION: Duration = Duration::from_millis(600);
+    const PRELOAD: usize = 3;
+
+    fn clock() -> Instant {
+        tokio::time::Instant::now().into_std()
+    }
+
+    impl BatchHost for Sim {
+        fn step(&mut self) {
+            let now = clock();
+            // Refill first, like the real step, and not during a transition.
+            if self.transition_started.is_none() {
+                self.pending = PRELOAD;
+            }
+            match self.transition_started {
+                Some(at) if now >= at + TRANSITION => {
+                    self.transition_started = None;
+                    self.displayed_at = now;
+                    self.just_finished = true;
+                }
+                None if now >= self.displayed_at + DWELL && self.pending > 0 => {
+                    self.transition_started = Some(now);
+                    self.pending -= 1;
+                    self.starts.push(now);
+                }
+                _ => {}
+            }
+        }
+
+        fn plan(&mut self, now: Instant) -> WakePlan {
+            plan_wake(
+                WakeInputs {
+                    slideshow_active: true,
+                    sleeping: false,
+                    redraw_requested: false,
+                    transition_active: self.transition_started.is_some(),
+                    transition_just_finished: std::mem::take(&mut self.just_finished),
+                    displayed_at: Some(self.displayed_at),
+                    dwell: DWELL,
+                    surface_ready: true,
+                    pending: self.pending,
+                    in_flight: 0,
+                    deferred: 0,
+                    preload: PRELOAD,
+                    surface_poll: None,
+                    overlay_pending: false,
+                },
+                now,
+            )
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resting_slideshow_keeps_its_deadlines_and_refills_after_each_transition() {
+        let sim = Arc::new(Mutex::new(Sim {
+            displayed_at: clock(),
+            transition_started: None,
+            just_finished: false,
+            pending: PRELOAD,
+            starts: Vec::new(),
+        }));
+        let app = Arc::clone(&sim);
+        let r = rig_with(Arc::new(Mutex::new(idle_plan())), move |_kind, handled| {
+            let mut sim = app.lock().unwrap();
+            // user_event runs the step; about_to_wait ends the batch.
+            sim.step();
+            Some(end_of_batch(&mut *sim, false, handled, clock))
+        });
+        let mut ticks_before = 0;
+        for cycle in 1..=3 {
+            tokio::time::sleep(DWELL + TRANSITION + Duration::from_millis(50)).await;
+            let sim = sim.lock().unwrap();
+            assert_eq!(sim.starts.len(), cycle, "transition {cycle} started");
+            assert!(sim.transition_started.is_none(), "cycle {cycle} finalized");
+            assert_eq!(
+                sim.pending, PRELOAD,
+                "cycle {cycle}: refilled by the owed step"
+            );
+            drop(sim);
+            let ticks = r.count("tick");
+            // Per cycle: the dwell tick, ~150 fast ticks while animating, and
+            // nothing while resting.
+            assert!(
+                ticks - ticks_before <= 160,
+                "{} ticks",
+                ticks - ticks_before
+            );
+            ticks_before = ticks;
+        }
+        let sim = sim.lock().unwrap();
+        for pair in sim.starts.windows(2) {
+            let gap = pair[1] - pair[0];
+            let ideal = DWELL + TRANSITION;
+            assert!(
+                gap >= ideal && gap <= ideal + Duration::from_millis(20),
+                "transition gap {gap:?}, ideal {ideal:?}"
+            );
+        }
     }
 }
