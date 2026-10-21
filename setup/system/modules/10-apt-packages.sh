@@ -74,10 +74,8 @@ apt-get update
 # started once at the end of install.sh. Skipped when a policy-rc.d already
 # exists, and removed again on exit.
 POLICY_RC="${POLICY_RC_PATH:-/usr/sbin/policy-rc.d}"
-POLICY_RC_INSTALLED=0
 if [[ "${DISPLAY_CHOICE}" == "wayland" && ! -e "${POLICY_RC}" && -d "$(dirname "${POLICY_RC}")" ]]; then
     if printf '#!/bin/sh\n[ "$1" = greetd ] && exit 101\nexit 0\n' >"${POLICY_RC}" && chmod 0755 "${POLICY_RC}"; then
-        POLICY_RC_INSTALLED=1
         trap 'rm -f "${POLICY_RC}"' EXIT
     else
         log "Could not write ${POLICY_RC}; greetd may start before it is configured"
