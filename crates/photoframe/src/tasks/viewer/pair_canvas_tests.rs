@@ -556,7 +556,7 @@ fn k5_blur_background_is_continuous_across_the_bar() {
 #[test]
 fn k6_scaled_decodes_match_full_decodes_for_pairs() {
     use crate::tasks::loader::scaled_decode_tests::{Flavor, photo_jpeg, psnr_rgb};
-    use crate::tasks::loader::{DecodeTarget, decode_rgba8_apply_exif};
+    use crate::tasks::loader::{CoverNeed, DecodeTarget, decode_rgba8_apply_exif};
 
     let dir = tempfile::tempdir().unwrap();
     let fixed = fixed_background(&dir);
@@ -572,7 +572,7 @@ fn k6_scaled_decodes_match_full_decodes_for_pairs() {
         let target = scaled.then_some(DecodeTarget {
             canvas_w,
             canvas_h,
-            cover: false,
+            cover: CoverNeed::Never,
             bg_sample_scale: Some(0.125),
         });
         let d = decode_rgba8_apply_exif(path, target).unwrap();

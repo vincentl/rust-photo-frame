@@ -4,7 +4,7 @@
 //! pixels involved). Decode tests keep the same source-to-canvas ratios at 1/8
 //! of the linear size so that they run quickly in a debug build.
 
-use super::decode_scale::{self, DecodeTarget};
+use super::decode_scale::{self, CoverNeed, DecodeTarget};
 use super::*;
 use image::{ImageEncoder, RgbImage};
 
@@ -62,7 +62,7 @@ fn target_4k() -> DecodeTarget {
     DecodeTarget {
         canvas_w: 3840,
         canvas_h: 2160,
-        cover: false,
+        cover: CoverNeed::Never,
         bg_sample_scale: None,
     }
 }
@@ -83,7 +83,7 @@ fn chosen_scale_never_undershoots_the_photo_rect() {
     let targets = [
         target_4k(),
         DecodeTarget {
-            cover: true,
+            cover: CoverNeed::Always,
             ..target_4k()
         },
         DecodeTarget {
@@ -92,7 +92,7 @@ fn chosen_scale_never_undershoots_the_photo_rect() {
         },
         DecodeTarget {
             bg_sample_scale: Some(1.0),
-            cover: true,
+            cover: CoverNeed::Always,
             ..target_4k()
         },
     ];
@@ -173,22 +173,104 @@ fn fill_when_fits_and_sharp_backgrounds_ask_for_more() {
         fh,
         1,
         &DecodeTarget {
-            cover: true,
+            cover: CoverNeed::Always,
             ..target_4k()
         },
     )
     .0;
     assert!(contain < 8);
     assert!(cover >= contain);
-    let (need_w, _) = decode_scale::required_size(
-        fw as u32,
-        fh as u32,
-        &DecodeTarget {
-            cover: true,
-            ..target_4k()
-        },
-    );
+    let (need_w, _) = decode_scale::required_size(fw as u32, fh as u32, (3840, 2160), true, None);
     assert!(need_w >= 3840.min(fw as u32));
+}
+
+fn fill_cfg(max_crop: f32, prob: f32) -> crate::config::FillWhenFits {
+    serde_yaml::from_str(&format!(
+        "maximum-crop-percentage: {max_crop}\nskip-matting-probability: {prob}\n"
+    ))
+    .unwrap()
+}
+
+fn fillable_4k(max_crop: f32) -> DecodeTarget {
+    DecodeTarget {
+        cover: CoverNeed::WhenFillable(fill_cfg(max_crop, 1.0)),
+        ..target_4k()
+    }
+}
+
+#[test]
+fn cover_is_sized_only_for_photos_that_could_fill() {
+    // 24 MP 3:2 portrait (3266x4899) on a 3840x2160 canvas: a cover-crop would
+    // trim 62% of it, so with the shipped 5% maximum it can never fill and is
+    // sized for its contained fit (1440x2160), which 1/2 covers.
+    let (fw, fh) = (3266u16, 4899u16);
+    for (w, h, orientation) in [(fw, fh, 1u16), (fh, fw, 6), (fh, fw, 8)] {
+        let (idct, ..) = decode_scale::plan(w, h, orientation, &fillable_4k(5.0));
+        assert_eq!(idct, 4, "default max-crop, orientation {orientation}");
+        // ... exactly as if fill-when-fits were not configured.
+        assert_eq!(idct, decode_scale::plan(w, h, orientation, &target_4k()).0);
+
+        // A maximum that admits it (62.5% crop) means it may fill, so it is
+        // decoded for the cover rect (3840 wide: more than the source has).
+        let target = fillable_4k(80.0);
+        let (idct, ..) = decode_scale::plan(w, h, orientation, &target);
+        assert_eq!(idct, 8, "permissive max-crop, orientation {orientation}");
+        // The cover rect (3840 px wide) is more than the source has, so the
+        // requirement is the whole source.
+        let (_, need_w, need_h) = decode_scale::plan(w, h, orientation, &target);
+        assert_eq!(
+            (need_w, need_h),
+            (w as u32, h as u32),
+            "orientation {orientation}"
+        );
+        assert_eq!(
+            idct,
+            decode_scale::plan(
+                w,
+                h,
+                orientation,
+                &DecodeTarget {
+                    cover: CoverNeed::Always,
+                    ..target_4k()
+                }
+            )
+            .0
+        );
+    }
+
+    // The boundary follows the same rule as `should_fill`: a 16:9 48 MP photo
+    // is fillable at 5% and sized for the canvas, which 1/2 covers.
+    let (idct, ..) = decode_scale::plan(9243, 5199, 1, &fillable_4k(5.0));
+    assert_eq!(idct, 4);
+    // And one just beyond the maximum (crop 6% > 5%) is not.
+    let (w, h) = (8000u16, 5000u16); // 16:10
+    let crop = crate::config::FillWhenFits::crop_fraction(w as u32, h as u32, 3840, 2160);
+    assert!(crop > 0.05 && crop < 0.15);
+    assert_eq!(
+        decode_scale::plan(w, h, 1, &fillable_4k(5.0)).0,
+        decode_scale::plan(w, h, 1, &target_4k()).0
+    );
+    // A zero skip probability can never fill.
+    let never = DecodeTarget {
+        cover: CoverNeed::WhenFillable(fill_cfg(100.0, 0.0)),
+        ..target_4k()
+    };
+    assert_eq!(
+        decode_scale::plan(fw, fh, 1, &never).0,
+        decode_scale::plan(fw, fh, 1, &target_4k()).0
+    );
+}
+
+#[test]
+fn pair_members_are_sized_for_contain_even_when_they_could_fill() {
+    // The same portrait with a permissive maximum: solo needs full, but a pair
+    // member (pairs never fill) is sized for its contained fit.
+    let target = fillable_4k(80.0);
+    assert_eq!(decode_scale::plan(3266, 4899, 1, &target).0, 8);
+    assert_eq!(
+        decode_scale::plan(3266, 4899, 1, &target.for_pair_member()).0,
+        4
+    );
 }
 
 #[test]
@@ -212,7 +294,7 @@ fn small_target() -> DecodeTarget {
     DecodeTarget {
         canvas_w: 480,
         canvas_h: 270,
-        cover: false,
+        cover: CoverNeed::Never,
         bg_sample_scale: None,
     }
 }
@@ -380,7 +462,7 @@ fn jpeg_rejected_by_scaled_path_falls_back_to_image_crate() {
     let target = DecodeTarget {
         canvas_w: 8,
         canvas_h: 8,
-        cover: false,
+        cover: CoverNeed::Never,
         bg_sample_scale: None,
     };
     // The scaled path declines it ...
@@ -499,7 +581,7 @@ fn small_canvas_target(canvas: (u32, u32)) -> DecodeTarget {
     DecodeTarget {
         canvas_w: canvas.0,
         canvas_h: canvas.1,
-        cover: false,
+        cover: CoverNeed::Never,
         bg_sample_scale: None,
     }
 }

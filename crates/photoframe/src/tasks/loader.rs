@@ -16,8 +16,10 @@ use tracing::debug;
 mod decode_scale;
 #[cfg(test)]
 pub(crate) mod scaled_decode_tests;
+#[allow(unused_imports)] // `CoverNeed` is used by tests and the lib build only
 pub use decode_scale::{
-    DecodeScaling, DecodeTarget, bg_sample_scale, decoded_suffices, orientation_swaps_axes,
+    CoverNeed, DecodeScaling, DecodeTarget, bg_sample_scale, decoded_suffices,
+    orientation_swaps_axes,
 };
 
 /// Upper bound on peak allocation while decoding a single image. On a
@@ -204,8 +206,9 @@ fn decode_jpeg_scaled<R: std::io::Read>(
 // of the 1/8, 1/4, 1/2 and full scales whose output still covers the largest
 // rect the photo can be drawn into, on *both* axes, measured in the displayed
 // orientation (EXIF rotations of 90/270 swap the axes first). The covering
-// rect is the contained fit, or the cover fit when `fill-when-fits` is
-// configured, or the blurred-background sample, whichever is largest (see
+// rect is the contained fit, or the cover fit for a photo `fill-when-fits`
+// could fill (crop fraction within its maximum; never for pair members), or
+// the blurred-background sample, whichever is largest (see
 // `decode_scale`). jpeg-decoder pads its output to whole blocks, so when the
 // scaled extent (`len * n / 8`) is fractional the buffer is resampled, near
 // 1:1, to its rounded length so that it spans exactly the photo: the viewer
@@ -490,11 +493,15 @@ fn start_slot(request: LoadPhoto, st: &mut StartSlot<'_>) {
     *st.next_seq += 1;
     st.slot_decodes.insert(seq, members.len());
     let scaling = st.scaling.clone();
+    let is_pair = members.len() > 1;
     // A pair slot runs its members' decodes concurrently, joined under one
     // reorder seq.
     st.tasks.spawn(async move {
         let decodes = members.into_iter().map(|path| {
-            let target = scaling.target();
+            // Pairs never fill, so their members are sized for contain only.
+            let target = scaling
+                .target()
+                .map(|t| if is_pair { t.for_pair_member() } else { t });
             async move {
                 let p = path.clone();
                 let res =
