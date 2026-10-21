@@ -5,6 +5,7 @@ any dev machine, the on-device test plan, and the release gate.
 
 - Day-to-day operator commands → [docs/operate.md](../docs/operate.md)
 - How the kiosk stack is built and debugged → [architecture.md](architecture.md)
+- The two display stacks (KMS by default, Wayland fallback) → [docs/advanced.md › Display stacks](../docs/advanced.md#display-stacks)
 
 ---
 
@@ -18,7 +19,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo audit                          # dependency CVE scan (cargo install cargo-audit)
 make -f tests/Makefile docs-links    # markdown link check
-bash setup/tests/display-stack.test.sh   # display-stack setup logic (stubbed systemctl)
+for t in setup/tests/*.test.sh; do bash "$t"; done   # display-stack logic (stubbed systemctl), stack-dependent modules (stubbed apt-get), powerctl
 ```
 
 `cargo audit` should report **zero vulnerabilities**. A lone `paste`
@@ -53,7 +54,8 @@ sudo ./setup/system/tools/diagnostics.sh
 ```bash
 vcgencmd measure_temp
 grep -H . /sys/class/hwmon/hwmon*/fan1_input 2>/dev/null   # fan RPM (non-zero under load)
-sudo -u kiosk env XDG_RUNTIME_DIR=/run/user/$(id -u kiosk) WAYLAND_DISPLAY=wayland-1 wlr-randr
+echo '{"command":"display-power"}' | sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock   # connector, mode, power the viewer drives (KMS)
+# Wayland fallback instead: sudo -u kiosk env XDG_RUNTIME_DIR=/run/user/$(id -u kiosk) WAYLAND_DISPLAY=wayland-1 wlr-randr
 tests/collect_logs.sh        # baseline log capture
 ```
 
@@ -80,27 +82,28 @@ most releases; the rest are worth doing before a big change.
 | Scenario | Why it matters |
 |----------|----------------|
 | **Large library** (1–3k photos) over Wi-Fi | Decode/render/memory pressure (see [Advanced › Memory tuning](../docs/advanced.md#memory-tuning)) |
-| **Update + rollback** — `git checkout <tag>`, redeploy, restart greetd | A redeploy doesn't break a running unit |
+| **Update + rollback** — `git checkout <tag>`, redeploy, restart `photoframe-kms.service` | A redeploy doesn't break a running unit |
+| **Both display stacks** — the manual checklist below on KMS (the default), then once on the Wayland fallback | The fallback is kept for one release; confirm it still works. Switch with `PHOTOFRAME_DISPLAY=wayland ./setup/system/install.sh` and back with `PHOTOFRAME_DISPLAY=kms ./setup/system/install.sh` ([Advanced › Switching](../docs/advanced.md#switching)) |
 
 ---
 
 ## Manual phase checklist
 
-- **Blank-Pi install** — Flash latest Trixie 64-bit, boot, network up, `XDG_SESSION_TYPE=wayland` after first graphical login.
+- **Blank-Pi install** — Flash latest Trixie 64-bit, boot, network up. A fresh `install-all.sh` must come up on KMS with no compositor packages installed (`dpkg -s sway` fails, `./setup/tools/verify.sh | grep 'display stack'` says `kms (… default)`).
 - **Project setup** — clone repo; `sudo ./setup/system/install.sh`; `./setup/application/deploy.sh`; customize `/etc/photoframe/config.yaml`; populate library.
-- **Kiosk autostart** — `systemctl status greetd photoframe-wifi-manager photoframe-sync.timer`; reboot; confirm greetd claims tty1 and the app launches full-screen. Confirm the `kiosk` user can reach seatd: `id -nG kiosk` must include the group that owns `/run/seatd.sock` (`stat -c '%G' /run/seatd.sock`, normally `seat`). A missing membership fails every session at the wrapper's seatd check.
-- **Display & frame rate** — the kiosk `wlr-randr` (pre-flight command above) shows the target mode (4K@60 preferred); short phone video documents smoothness; note tearing/flicker.
+- **Kiosk autostart** — `systemctl status photoframe-kms photoframe-wifi-manager photoframe-sync.timer`; reboot; confirm the viewer launches full-screen and `greetd` is not enabled (`systemctl is-enabled greetd` fails or says disabled). **Wayland fallback run:** `systemctl status greetd …`; confirm greetd claims tty1 and the app launches full-screen, and that the `kiosk` user can reach seatd: `id -nG kiosk` must include the group that owns `/run/seatd.sock` (`stat -c '%G' /run/seatd.sock`, normally `seat`). A missing membership fails every session at the wrapper's seatd check.
+- **Display & frame rate** — the pre-flight `display-power` query shows the target mode (4K@60 preferred) and `verify.sh` agrees; with `metrics: true`, `transition_frame_metric` reads `avg_fps` ≈ 60, `best_frame_ms` ≈ `worst_frame_ms` ≈ 16.7 and `late_frames=0` on KMS (about 32 fps is the known cap on the Wayland fallback); short phone video documents smoothness; note tearing/flicker. Run the [frametest ladder](../docs/performance.md#measuring) for the stack under test.
 - **Button & power** — `sudo evtest` to identify input device; single press toggles **both** directions — test the round trip (awake → sleep, then sleep → wake); double press clean shutdown; long hold is bypassed for the Pi 5 firmware force-off (don't actually trigger it if there's risk of corruption).
 - **Sleep schedule** — set a near-future window, restart kiosk, observe transitions; manual `set-state`/`toggle-state` over the control socket works. Exercise a wrap-past-midnight window (start later than end, e.g. `["21:00","07:00"]`).
 - **Wi-Fi provisioning** — `make -f tests/Makefile wifi-recovery`; phone joins `PhotoFrame-Setup`, submits credentials, frame reconnects. Also exercise LAN-up/Internet-down (slideshow keeps advancing) and full Wi-Fi outage with later restoration (auto-reconnect).
 - **Library ingest** — tiny library validates EXIF/mat/transitions; medium library run for 10–15 min with `top -H -p $(pidof photoframe)` and `vcgencmd measure_temp`. During the burn-in confirm the fan ramps under load (`grep -H . /sys/class/hwmon/hwmon*/fan1_input`) and the temperature holds under ~80 °C.
-- **Updates & rollback** — `git checkout <release-tag>`, rebuild, restart greetd; rollback to previous tag; confirm unit files unchanged via `systemctl cat greetd.service`.
+- **Updates & rollback** — `git checkout <release-tag>`, rebuild, restart `photoframe-kms.service`; rollback to previous tag; confirm unit files unchanged via `systemctl cat photoframe-kms.service`. Also confirm the update keeps the display stack: `/etc/photoframe/display.env` is untouched and a frame on the Wayland fallback stays on it.
 - **Power loss** — momentarily cut power; confirm auto-boot, kiosk service startup, slideshow resume; check `journalctl -b | grep -i fsck` and `dmesg | grep -i error`.
 - **Diagnostics bundle** — `tests/collect_logs.sh`; verify artifact at `artifacts/FRAME-logs-*.tar.gz`.
 
 ### Acceptance criteria
 
-- Cold boot to slideshow ready in ≤ 45 s after greetd starts.
+- Cold boot to slideshow ready in ≤ 45 s after the display unit (`photoframe-kms.service`, or greetd on the fallback) starts.
 - Display locked to desired mode with no sustained tearing.
 - Button behaviors reliable (single-press sleep toggle, double-press shutdown).
 - Sleep schedule respects configured windows; reacts to manual `toggle-state` immediately.
@@ -113,7 +116,7 @@ most releases; the rest are worth doing before a big change.
 ### Recovery & rollback notes
 
 - **Bad config.yaml:** restore from a known-good backup (keep one before editing); validate YAML (`python3 -c "import yaml,sys; yaml.safe_load(open('/etc/photoframe/config.yaml'))"`); restart kiosk.
-- **Service won't start:** `journalctl -u greetd.service -b` and `journalctl -u photoframe-wifi-manager.service -b`; rebuild binary; `sudo systemctl daemon-reload`.
+- **Service won't start:** `journalctl -t photoframe -b` (and `journalctl -u greetd.service -b` on the Wayland fallback) and `journalctl -u photoframe-wifi-manager.service -b`; rebuild binary; `sudo systemctl daemon-reload`.
 - **Failed update:** `git checkout <previous-good>`; rebuild + restart; if binary corrupted, `rm -rf target/` and rebuild.
 - **Network stuck offline:** `nmcli connection show`; `sudo systemctl restart NetworkManager`; collect logs.
 

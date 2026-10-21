@@ -27,11 +27,12 @@ sudo ./setup/system/install.sh
 
 Run before building so toolchain and kiosk dependencies are ready. `install.sh` executes numbered modules under `setup/system/modules/`:
 
-- `10-apt-packages.sh` — graphics stack, NetworkManager, Sway, build tools.
+- `10-apt-packages.sh` — graphics stack, NetworkManager, build tools; plus the compositor packages (Sway, greetd, seatd, …) only when the Wayland fallback stack is chosen.
 - `20-rust.sh` — system-wide Rust toolchain under `/usr/local/cargo`.
 - `40-kiosk-user.sh` — locked `kiosk` user, runtime directories, polkit rule.
-- `50-greetd.sh` — Sway session wrapper greetd launches on tty1.
-- `60-systemd.sh` — `photoframe-wifi-manager.service`, `buttond.service`, `photoframe-sync.timer`.
+- `45-launcher.sh` — `/usr/local/bin/photoframe`, the launcher both display stacks run.
+- `50-greetd.sh` — Wayland fallback only: greetd config, Sway config and the session wrapper greetd launches on tty1. Skipped on the default KMS stack.
+- `60-systemd.sh` — `photoframe-wifi-manager.service`, `buttond.service`, `photoframe-sync.timer`, and the chosen display stack's unit (`photoframe-kms.service` by default, `greetd.service` for the fallback). The stack is chosen by `PHOTOFRAME_DISPLAY` and persisted in `/etc/photoframe/display.env`; the logic lives in `setup/lib/display-stack.sh`.
 
 Plus `dtoverlay=vc4-kms-v3d-pi5,cma-512` boot config for GPU CMA, swapfile replaced with `systemd-zram-generator` (half-RAM zram), Pi 5 firmware tweaks (`ENABLE_4K_BOOT=0` to skip the 4K60 profile).
 
@@ -53,7 +54,7 @@ Compiles the workspace, stages binaries and documentation under `setup/applicati
 sudo ./setup/system/tools/diagnostics.sh
 ```
 
-Inspects the greetd session, kiosk user, and display-manager wiring. Run from the device when display login fails or the kiosk session won't start.
+Names the display stack, then inspects `photoframe-kms.service` (default) or the greetd session and Sway config (fallback), and the kiosk user. Run from the device when the viewer won't start.
 
 ### Shared systemd helper library
 
@@ -77,11 +78,11 @@ Helper groups:
 
 ## Debugging the kiosk stack
 
-For developer-only debugging on a live Pi when normal operator runbooks aren't enough.
+For developer-only debugging on a live Pi when normal operator runbooks aren't enough. The Sway-based recipes below apply to the Wayland fallback stack (`PHOTOFRAME_DISPLAY=wayland`). On the default KMS stack the viewer is an ordinary systemd unit: `sudo systemctl stop photoframe-kms.service`, then run `sudo -u kiosk env PHOTOFRAME_SURFACE=drm PHOTOFRAME_LOG=stdout RUST_LOG='photoframe::tasks::viewer=debug,info' /usr/local/bin/photoframe /etc/photoframe/config.yaml` and start the unit again afterwards.
 
 ### Manual debug launch (advanced)
 
-In normal operation `photoframe` is started by greetd via `/usr/local/bin/photoframe-session`. For low-level debugging you can run a standalone Sway session as `kiosk`.
+On the Wayland fallback `photoframe` is started by greetd via `/usr/local/bin/photoframe-session`. For low-level debugging you can run a standalone Sway session as `kiosk`.
 
 Prerequisite (one-time):
 

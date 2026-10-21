@@ -129,7 +129,7 @@ flowchart LR
 - **PhotoManager** — schedules photos on a virtual timeline. A half-life _weight_ favors newly added photos and fades them toward parity over a configurable period. Photos copied in while the frame is running debut within a few slides via a priority queue (it wins against the rotation at odds equal to its weight), so a just-added album appears almost immediately, then settles into the spaced rotation. A refractory _minimum-spacing_ rule keeps that rotation even — a photo can't return until a configurable fraction of the library has played — which avoids clumps and starvation _without changing how often each photo appears_ (set `playlist.order: weighted-random` for plain independent sampling). Weighting-preserving and offline-simulatable via `--playlist-dry-run`. Optional _portrait pairing_ shows two back-to-back full-height portraits side by side on one screen without changing the playlist order
 - **PhotoLoader** — decodes JPEG/PNG in parallel (configurable concurrency) to RGBA pixel buffers
 - **PhotoEffect** — optionally applies print-simulation effects (paper texture, gallery lighting)
-- **PhotoViewer** — GPU-accelerated rendering with configurable matting and transitions via WGPU/Wayland
+- **PhotoViewer** — GPU-accelerated rendering with configurable matting and transitions via WGPU. By default it presents straight to the display through DRM/KMS with no compositor (vblank-locked 60 fps at 4K); a Wayland/Sway stack remains as a fallback ([Advanced › Display stacks](docs/advanced.md#display-stacks))
 - **Control socket** (Unix) — accepts `set-state` / `toggle-state` commands from `buttond` (hardware button and wake/sleep schedule) or the CLI, and forwards them to the viewer
 
 ---
