@@ -1,17 +1,17 @@
 use crate::config::{PhotoEffectConfig, PhotoEffectOptions};
 use crate::events::PhotoLoaded;
+use crate::tasks::photo_channel::{PhotoReceiver, PhotoSender};
 use anyhow::Result;
 use image::RgbaImage;
 use rand::{SeedableRng, rngs::StdRng};
 use tokio::select;
-use tokio::sync::mpsc::{Receiver, Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 /// Applies optional photo effects to decoded images before they reach the viewer.
 pub async fn run(
-    from_loader: Receiver<PhotoLoaded>,
-    to_viewer: Sender<PhotoLoaded>,
+    from_loader: PhotoReceiver,
+    to_viewer: PhotoSender,
     cancel: CancellationToken,
     config: PhotoEffectConfig,
 ) -> Result<()> {
@@ -23,8 +23,8 @@ pub async fn run(
 }
 
 async fn forward_only(
-    mut from_loader: Receiver<PhotoLoaded>,
-    to_viewer: Sender<PhotoLoaded>,
+    mut from_loader: PhotoReceiver,
+    to_viewer: PhotoSender,
     cancel: CancellationToken,
 ) -> Result<()> {
     loop {
@@ -46,8 +46,8 @@ async fn forward_only(
 }
 
 async fn run_with_effects(
-    mut from_loader: Receiver<PhotoLoaded>,
-    to_viewer: Sender<PhotoLoaded>,
+    mut from_loader: PhotoReceiver,
+    to_viewer: PhotoSender,
     cancel: CancellationToken,
     config: PhotoEffectConfig,
 ) -> Result<()> {
@@ -126,13 +126,12 @@ mod tests {
     use crate::events::PreparedImageCpu;
     use image::RgbaImage;
     use rand::{SeedableRng, rngs::StdRng};
-    use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn forwards_without_effect_when_disabled() {
-        let (tx_in, rx_in) = mpsc::channel(1);
-        let (tx_out, mut rx_out) = mpsc::channel(1);
+        let (tx_in, rx_in) = crate::tasks::photo_channel::photo_channel(1);
+        let (tx_out, mut rx_out) = crate::tasks::photo_channel::photo_channel(1);
         let cancel = CancellationToken::new();
 
         tx_in
@@ -181,8 +180,8 @@ active:
         apply_effect(&mut expected_image, &option);
         let expected_pixels = expected_image.into_raw();
 
-        let (tx_in, rx_in) = mpsc::channel(1);
-        let (tx_out, mut rx_out) = mpsc::channel(1);
+        let (tx_in, rx_in) = crate::tasks::photo_channel::photo_channel(1);
+        let (tx_out, mut rx_out) = crate::tasks::photo_channel::photo_channel(1);
         let cancel = CancellationToken::new();
 
         tx_in
@@ -229,8 +228,8 @@ active:
             source_size: (2, 1),
             pixels: vec![10, 20, 30, 255, 200, 150, 100, 255],
         };
-        let (tx_in, rx_in) = mpsc::channel(1);
-        let (tx_out, mut rx_out) = mpsc::channel(1);
+        let (tx_in, rx_in) = crate::tasks::photo_channel::photo_channel(1);
+        let (tx_out, mut rx_out) = crate::tasks::photo_channel::photo_channel(1);
         tx_in
             .send(PhotoLoaded {
                 prepared: member("a"),

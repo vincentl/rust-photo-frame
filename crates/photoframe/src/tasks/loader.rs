@@ -2,6 +2,7 @@ use crate::events::{
     InvalidPhoto, InventoryEvent, LoadPhoto, LoadedPartner, MetaSource, PhotoLoaded,
     PreparedImageCpu,
 };
+use crate::tasks::photo_channel::PhotoSender;
 use anyhow::Result;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
@@ -336,7 +337,7 @@ pub(crate) fn decode_rgba8_apply_exif(
 pub async fn run(
     mut load_rx: Receiver<LoadPhoto>,
     invalid_tx: Sender<InvalidPhoto>,
-    to_viewer: Sender<PhotoLoaded>,
+    to_viewer: PhotoSender,
     cancel: CancellationToken,
     max_in_flight: usize,
     scaling: DecodeScaling,
@@ -614,7 +615,7 @@ async fn send_ready(
     ready: ReadyPhoto,
     last_sent: &mut Option<Vec<PathBuf>>,
     pending: &mut Option<ReadyPhoto>,
-    to_viewer: &Sender<PhotoLoaded>,
+    to_viewer: &PhotoSender,
 ) {
     let shares = |last: &Option<Vec<PathBuf>>, members: &[PathBuf]| {
         last.as_ref()
@@ -641,7 +642,7 @@ async fn send_ready(
 async fn flush_pending(
     last_sent: &mut Option<Vec<PathBuf>>,
     pending: &mut Option<ReadyPhoto>,
-    to_viewer: &Sender<PhotoLoaded>,
+    to_viewer: &PhotoSender,
 ) {
     if let Some(ReadyPhoto { members, event }) = pending.take() {
         let _ = to_viewer.send(event).await;
@@ -652,6 +653,7 @@ async fn flush_pending(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tasks::photo_channel::PhotoReceiver;
     use base64::Engine;
     use tokio::sync::mpsc;
 
@@ -694,7 +696,7 @@ mod tests {
 
     #[tokio::test]
     async fn reorders_single_repeat_when_possible() {
-        let (tx, mut rx) = mpsc::channel(4);
+        let (tx, mut rx) = crate::tasks::photo_channel::photo_channel(4);
         let mut last_sent = None;
         let mut pending = None;
 
@@ -721,7 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn flushes_pending_when_nothing_else_arrives() {
-        let (tx, mut rx) = mpsc::channel(4);
+        let (tx, mut rx) = crate::tasks::photo_channel::photo_channel(4);
         let mut last_sent = None;
         let mut pending = None;
 
@@ -780,7 +782,7 @@ mod tests {
             .unwrap();
         let (load_tx, load_rx) = mpsc::channel(4);
         let (invalid_tx, _invalid_rx) = mpsc::channel(4);
-        let (viewer_tx, mut viewer_rx) = mpsc::channel(4);
+        let (viewer_tx, mut viewer_rx) = crate::tasks::photo_channel::photo_channel(4);
         let (meta_tx, mut meta_rx) = mpsc::channel(4);
         let cancel = CancellationToken::new();
         let task = tokio::spawn(run(
@@ -864,7 +866,7 @@ mod tests {
         assert_eq!(members, [PathBuf::from("d"), PathBuf::from("e")]);
     }
 
-    async fn recv_loaded(rx: &mut mpsc::Receiver<PhotoLoaded>) -> PhotoLoaded {
+    async fn recv_loaded(rx: &mut PhotoReceiver) -> PhotoLoaded {
         tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .unwrap()
@@ -890,7 +892,7 @@ mod tests {
         let missing = dir.path().join("missing.jpg");
         let (load_tx, load_rx) = mpsc::channel(4);
         let (invalid_tx, mut invalid_rx) = mpsc::channel(4);
-        let (viewer_tx, mut viewer_rx) = mpsc::channel(4);
+        let (viewer_tx, mut viewer_rx) = crate::tasks::photo_channel::photo_channel(4);
         let cancel = CancellationToken::new();
         let task = tokio::spawn(run(
             load_rx,
@@ -954,7 +956,8 @@ mod tests {
     /// (p4, p5) holds the second screen back, as p4, p4 is held solo.
     #[tokio::test]
     async fn back_to_back_guard_sees_every_member_of_a_pair() {
-        let (tx, mut rx) = mpsc::channel(4);
+        // Room for all five photos: nothing reads until the end.
+        let (tx, mut rx) = crate::tasks::photo_channel::photo_channel(8);
         let (mut last_sent, mut pending) = (None, None);
         send_ready(ready_pair("p2", "p4"), &mut last_sent, &mut pending, &tx).await;
         send_ready(ready_pair("p4", "p5"), &mut last_sent, &mut pending, &tx).await;
@@ -1001,7 +1004,7 @@ mod tests {
         }
         let (load_tx, load_rx) = mpsc::channel(4);
         let (invalid_tx, _invalid_rx) = mpsc::channel(4);
-        let (viewer_tx, mut viewer_rx) = mpsc::channel(4);
+        let (viewer_tx, mut viewer_rx) = crate::tasks::photo_channel::photo_channel(4);
         let cancel = CancellationToken::new();
         let task = tokio::spawn(run(
             load_rx,
