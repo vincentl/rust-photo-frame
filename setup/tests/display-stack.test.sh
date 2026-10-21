@@ -211,13 +211,26 @@ no_viewer
 unset DISPLAY_VIEWER_BIN
 
 # --- verify.sh: the other stack must not stay enabled -------------------------
-reset_stubs; GREETD_RUNNING=1
+reset_stubs; GREETD_RUNNING=1; KMS_ENABLED=1
 [[ "$(display_stack_other_enabled kms)" == "greetd.service" ]] || fail "enabled greetd not reported on kms"
 GREETD_RUNNING=0
 [[ -z "$(display_stack_other_enabled kms)" ]] || fail "kms with greetd disabled reported something"
 [[ -z "$(display_stack_other_enabled wayland)" ]] || fail "wayland with kms disabled reported something"
-KMS_ENABLED=1
+KMS_ENABLED=1; GREETD_RUNNING=1
 [[ "$(display_stack_other_enabled wayland)" == "photoframe-kms.service" ]] || fail "enabled kms not reported on wayland"
+
+# a v1.1 frame held on Sway after a failed build: kms chosen but not enabled,
+# greetd running, old viewer. Nothing may tell the operator to disable greetd.
+export DISPLAY_VIEWER_BIN="${WORK}/photoframe"
+reset_stubs; GREETD_RUNNING=1; KMS_ENABLED=0; old_viewer
+[[ -z "$(display_stack_other_enabled kms)" ]] || fail "held frame: greetd reported as the leftover stack"
+display_stack_hold_for_deploy kms || fail "held frame not recognised as held"
+# once the deploy installed the viewer and enabled kms, greetd left enabled is the conflict
+new_viewer; KMS_ENABLED=1
+[[ "$(display_stack_other_enabled kms)" == "greetd.service" ]] || fail "both enabled not reported"
+display_stack_hold_for_deploy kms && fail "a KMS-capable viewer still reads as held"
+no_viewer
+unset DISPLAY_VIEWER_BIN
 
 # --- system stage guard (deploy.sh --skip-build) -----------------------------
 # getent/id stubbed: the user exists, and only the groups in ${GROUPS_PRESENT}.
