@@ -125,16 +125,11 @@
 //!   only when an acquire finds no idle image. Until then a frame queued
 //!   before the off can stay booked as flipping, so after the wake an older
 //!   frame may show for a moment until the image pool cycles.
-//!   **Not fixed here (review D3):** a wake that fails twice restarts the
-//!   viewer, and the restart re-runs the schedule preamble. A manual wake
-//!   in scheduled sleep hours therefore comes back as the sleep banner on a
-//!   lit panel, while buttond, which saw the wake fail, still tracks the
-//!   frame as asleep; the next press converges both. Awake/asleep is
-//!   buttond's state, not the viewer's. The fix is on that side: retry a
-//!   failed power-on with backoff, as buttond already does for power-off,
-//!   so the retry after the restart succeeds and sends `set-state awake`.
-//!   It needs two consecutive commit failures, so it is left for a
-//!   buttond change of its own.
+//!   A wake that fails twice restarts the viewer, whose startup state is
+//!   the schedule's (asleep in sleep hours). buttond treats the failed
+//!   power-on like a failed power-off: it retries with backoff, and once
+//!   the panel is on it sends `set-state awake` again, which the restarted
+//!   viewer applies after its startup state (reviews D3, M2).
 //! * **Shutdown.** Every exit (SIGTERM/SIGINT/stdin via the cancel token,
 //!   the control or matting channel closing, a fatal surface error) returns
 //!   through `run_kms`, which tears down in the only safe order: GPU objects

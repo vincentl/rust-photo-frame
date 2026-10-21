@@ -31,7 +31,8 @@
 //! If that outlasts the control task's 5 s, the caller gets `timeout`
 //! (whose detail says the viewer may still apply it) while the viewer then
 //! starts lit. That is the request carried out late, not a wrong state:
-//! buttond's next check reads `on` and agrees. Answering before probing
+//! buttond treats the timeout as a failed power-on, has already woken the
+//! viewer, and its power-on retry then finds the panel on. Answering before probing
 //! would only trade it for a reply that cannot say whether the panel lit.
 //!
 //! Every other command (set-state, the Wi-Fi overlay) is held, in order,

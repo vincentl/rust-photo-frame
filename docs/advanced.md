@@ -574,7 +574,7 @@ Commands that arrive while waiting (sleep or wake, the Wi-Fi overlay) are applie
 
 **Known limits:**
 - If the viewer restarts while the panel is off and the TV keeps hot-plug detect up, the panel comes back on with the greeting, while buttond still believes the frame is asleep. A sway restart does the same on the Wayland stack. The next schedule boundary or button press puts it right.
-- If a wake fails twice, the viewer restarts to light the panel. During scheduled sleep hours the restart comes back to the sleep banner (the schedule decides the startup state), and buttond, which saw the wake fail, still counts the frame as asleep. The next button press brings both back in step.
+- If a wake fails twice, the viewer restarts to light the panel and comes back in the schedule's state. buttond retries a failed screen power-on with backoff, as it does a failed power-off, and repeats its wake once the panel is on, so a manual wake in sleep hours ends on the slideshow within a few seconds rather than on the sleep banner.
 
 ### How it runs
 
