@@ -55,7 +55,7 @@ section "2. System stage: sudo setup/system/install.sh"
 # (cloud-init) network interface, or it can drop the ssh connection.
 sudo install -d -m 0755 /etc/NetworkManager/conf.d
 printf '[keyfile]\nunmanaged-devices=*\n' | sudo tee /etc/NetworkManager/conf.d/10-lima-unmanaged.conf >/dev/null
-if (cd "${SRC_COPY}" && sudo ./setup/system/install.sh) 2>&1 | tee "${LOG_DIR}/system-install.log"; then
+if (cd "${SRC_COPY}" && sudo --preserve-env=PHOTOFRAME_DISPLAY ./setup/system/install.sh) 2>&1 | tee "${LOG_DIR}/system-install.log"; then
     pass "setup/system/install.sh"
 else
     fail "setup/system/install.sh (log: ${LOG_DIR}/system-install.log)"
