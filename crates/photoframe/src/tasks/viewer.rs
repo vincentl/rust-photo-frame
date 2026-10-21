@@ -3897,8 +3897,9 @@ impl App {
 
     /// Wayland: an overlay frame that was not presented (an acquire
     /// timeout, a deferred render) is asked for again on the next control
-    /// step. Nothing else would: the covered slideshow requests no frames,
-    /// and lease refreshes do not redraw. KMS re-arms its own request after
+    /// step, which the wake plan schedules while the overlay owes a frame
+    /// (`presentation::layer_owes_frame`). Nothing else would: the covered
+    /// slideshow requests no frames, and lease refreshes do not redraw. KMS re-arms its own request after
     /// an acquire timeout, and re-arming there would spin the loop on a
     /// render that cannot succeed.
     fn rearm_wifi_overlay(&self) {
@@ -3957,12 +3958,18 @@ impl App {
         };
         let on_kms = matches!(self.output, Some(Output::Kms { .. }));
         let mode = self.mode();
+        // Wayland retries a frame the layer on screen still owes (T5); under
+        // the Wi-Fi overlay that is the overlay's, not the covered scene's.
         let overlay_pending = !on_kms
-            && match kind {
-                ViewerModeKind::Greeting => mode.greeting().is_some_and(|g| g.needs_redraw()),
-                ViewerModeKind::Sleep => mode.sleep().is_some_and(|s| s.needs_redraw()),
-                ViewerModeKind::Wake => false,
-            };
+            && presentation::layer_owes_frame(
+                self.layer,
+                |kind| match kind {
+                    ViewerModeKind::Greeting => mode.greeting().is_some_and(|g| g.needs_redraw()),
+                    ViewerModeKind::Sleep => mode.sleep().is_some_and(|s| s.needs_redraw()),
+                    ViewerModeKind::Wake => false,
+                },
+                self.wifi_overlay.as_ref().is_some_and(|s| s.needs_redraw()),
+            );
         wake::plan_wake(
             wake::WakeInputs {
                 // Paused while covered or dark (`sync_presentation`).

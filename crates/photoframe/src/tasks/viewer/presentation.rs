@@ -137,6 +137,25 @@ impl Presentation {
     }
 }
 
+/// Wayland: whether the layer on screen still owes a frame that was not
+/// presented (an acquire timeout, a deferred render). The wake plan retries
+/// it on a bounded tick (`wake::OVERLAY_RETRY`). Only the layer on screen
+/// counts: a Greeting covered by the Wi-Fi overlay never renders, so its
+/// request stays set, and following it would wake the loop for nothing
+/// until the greeting ends. The slideshow paces itself and owes nothing
+/// here; a dark panel owes nothing.
+pub(super) fn layer_owes_frame(
+    layer: Layer,
+    scene_owes: impl Fn(ViewerModeKind) -> bool,
+    overlay_owes: bool,
+) -> bool {
+    match layer {
+        Layer::Overlay => overlay_owes,
+        Layer::Scene(kind @ (ViewerModeKind::Greeting | ViewerModeKind::Sleep)) => scene_owes(kind),
+        Layer::Scene(ViewerModeKind::Wake) | Layer::Nothing => false,
+    }
+}
+
 /// The panel's power on DRM/KMS.
 ///
 /// ```text
@@ -304,6 +323,24 @@ mod tests {
         }
         p.power_mut().set_lit(now);
         assert_eq!(p.layer(Wake, now), Layer::Overlay, "appears once lit");
+    }
+
+    /// Review F9: under the overlay only the overlay's frame counts, never
+    /// the covered greeting's (which stays requested for as long as it is
+    /// covered).
+    #[test]
+    fn only_the_layer_on_screen_owes_a_frame() {
+        let greeting_owes = |kind| kind == Greeting;
+        assert!(!layer_owes_frame(Layer::Overlay, greeting_owes, false));
+        assert!(layer_owes_frame(Layer::Overlay, greeting_owes, true));
+        assert!(layer_owes_frame(
+            Layer::Scene(Greeting),
+            greeting_owes,
+            false
+        ));
+        assert!(!layer_owes_frame(Layer::Scene(Sleep), greeting_owes, true));
+        assert!(!layer_owes_frame(Layer::Scene(Wake), |_| true, true));
+        assert!(!layer_owes_frame(Layer::Nothing, |_| true, true));
     }
 
     #[test]
