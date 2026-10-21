@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod canvas_publish_tests;
 mod image_ops;
 #[cfg(target_os = "linux")]
 mod kms;
@@ -2232,6 +2234,9 @@ struct App {
     surface_timeout_streak: u32,
     // Last surface size that we considered "configured" and stabilized
     configured_surface_size: Option<(u32, u32)>,
+    /// The installed GPU's texture limit (bounds the canvas); `None` without
+    /// a GPU.
+    max_texture_dimension: Option<u32>,
     /// Shared with the loader: the canvas size it should decode towards
     /// (published once the surface is configured; see `publish_canvas`).
     decode_scaling: super::loader::DecodeScaling,
@@ -2299,17 +2304,34 @@ impl App {
 
     /// Publish the canvas the matting worker renders into (the surface times
     /// the oversample factor, within the texture limit); the loader sizes
-    /// JPEG decodes against it. Called wherever the surface becomes ready.
+    /// JPEG decodes against it, and portrait pairing judges pairability on
+    /// it. Called wherever the surface becomes ready: the Wayland configure
+    /// handshake (`update_surface_ready`) and KMS (`configure_fixed_surface`).
     fn publish_canvas(&self) {
-        if let Some(surface) = self.active_surface() {
-            let (canvas_w, canvas_h) = compute_canvas_size(
-                surface.width.max(1),
-                surface.height.max(1),
-                self.oversample,
-                surface.max_texture_dimension,
-            );
+        if let (true, Some((width, height)), Some(max_dim)) = (
+            self.surface_configured,
+            self.configured_surface_size,
+            self.max_texture_dimension,
+        ) {
+            let (canvas_w, canvas_h) =
+                compute_canvas_size(width.max(1), height.max(1), self.oversample, max_dim);
             self.decode_scaling.publish_canvas(canvas_w, canvas_h);
         }
+    }
+
+    /// KMS: apply the surface configuration once and mark it ready. The mode
+    /// never changes for this process (a change is a restart, see
+    /// `viewer/kms.rs`), so there is no configure handshake to wait for.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // the KMS viewer
+    fn configure_fixed_surface(&mut self, size: PhysicalSize<u32>) {
+        if let Some(gpu) = self.gpu.as_ref() {
+            gpu.surface.configure(&gpu.device, &gpu.config);
+        }
+        let _ = self.surface_gate.set_ready(true);
+        self.surface_gate.awaiting = false;
+        self.surface_configured = true;
+        self.configured_surface_size = Some((size.width, size.height));
+        self.publish_canvas();
     }
 
     fn on_surface_size_settled(&mut self) {
@@ -2546,6 +2568,7 @@ impl App {
         if let Some(mode) = self.mode.as_mut() {
             mode.set_overlays(Some(greeting), Some(sleep));
         }
+        self.max_texture_dimension = Some(gpu.limits.max_texture_dimension_2d);
         self.gpu = Some(gpu);
         self.surface_gate.reset();
         self.surface_gate.arm_for_initial_report();
@@ -2666,6 +2689,7 @@ impl App {
             mode.set_overlays(None, None);
         }
         self.gpu = None;
+        self.max_texture_dimension = None;
         self.surface_gate.reset();
         self.surface_configured = false;
         self.pending_scene_enter = true;
@@ -3626,6 +3650,7 @@ impl App {
             full_config: cfg,
             surface_timeout_streak: 0,
             configured_surface_size: None,
+            max_texture_dimension: None,
             decode_scaling,
             caption_overlay: None,
             transition_frame_metric: None,
