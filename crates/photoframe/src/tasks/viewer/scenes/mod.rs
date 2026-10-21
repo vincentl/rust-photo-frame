@@ -1629,6 +1629,8 @@ mod tests {
                     in_flight: 0,
                     deferred: 0,
                     preload: 1,
+                    surface_poll: None,
+                    overlay_pending: false,
                 },
                 now,
             );

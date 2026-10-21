@@ -236,8 +236,9 @@ animates, the viewer sleeps until one of these happens:
 A resting photo therefore costs no frames and no wakeups. The Wayland path
 waits on the same plan (`crates/photoframe/src/tasks/viewer/wake.rs`): it
 ticks every 4 ms only while a transition is animating or the window's size
-is still settling at startup, and otherwise wakes just for those events, a
-handful of times per photo instead of 250 times a second.
+is still settling at startup, and otherwise wakes for those events plus a
+once-a-second look at the window's size (sway can change the output mode
+without telling winit), instead of 250 times a second.
 
 **Reading `transition_frame_metric` on KMS.** On KMS the line has one
 more field than on Wayland, `late_frames`. The fields answer two

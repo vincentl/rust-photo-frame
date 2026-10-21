@@ -798,10 +798,17 @@ impl<'a> MattingBridge<'a> {
 /// (it finalizes on a tick) or the surface-ready handshake is still polling
 /// the window's size. At any other time the viewer ticks once per event:
 /// a matting result, a decoded photo, a control command, a window event, the
-/// dwell deadline, and once more after a transition finalizes so the uploads
-/// and matting refill it held back run at once. A resting photo wakes the
-/// process a handful of times, not 250 times a second.
+/// dwell deadline, the bounded size poll (`SURFACE_POLL_INTERVAL`), and once
+/// more after a transition finalizes so the uploads and matting refill it held
+/// back run at once. A resting photo wakes the process about once a second,
+/// not 250 times.
 const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(4);
+
+/// Wayland: with the surface ready and the viewer awake, the window's size is
+/// re-read at least this often. Sway can change the output mode or scale
+/// without winit delivering `Resized`; the 4 ms tick used to catch that, and
+/// a bounded poll (one wakeup a second at most) replaces the unbounded one.
+const SURFACE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// One member's pixels for matting. The loader may have decoded a JPEG at a
 /// reduced DCT scale sized for the canvas as it was then. If the canvas has
 /// since grown (rotation, a new output) so that those pixels no longer cover
@@ -1365,6 +1372,16 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         windows,
         mat_kind,
     }))
+}
+
+/// A finished matting result arrives: one fewer in flight, one more to upload.
+fn accept_mat_result(
+    mat_inflight: &mut usize,
+    ready_results: &mut VecDeque<MatResult>,
+    result: MatResult,
+) {
+    *mat_inflight = mat_inflight.saturating_sub(1);
+    photo_set::queue_result(ready_results, result);
 }
 
 #[derive(Debug)]
@@ -2777,8 +2794,9 @@ impl App {
 
     /// One control step: matting results in, uploads, matting work out, and
     /// the active scene's tick (dwell, transition start/finish, redraw
-    /// requests). Driven by the 4 ms ticker on Wayland and once per loop
-    /// iteration on KMS. Cancellation is the driver's job.
+    /// requests). Run per event and, while a transition animates or the
+    /// surface is settling, every 4 ms on Wayland (`wake::drive_forwarding`);
+    /// once per loop iteration on KMS. Cancellation is the driver's job.
     fn process_tick(&mut self) {
         self.log_event_loop_state("process_tick_start");
         // Keep surface configuration and readiness in sync even if winit
@@ -2837,35 +2855,19 @@ impl App {
     /// One matting result handed over by the Wayland driver (it owns the
     /// channel); same bookkeeping as `drain_mat_results`.
     fn accept_forwarded_mat_result(&mut self, result: MatResult) {
-        self.mat_inflight = self.mat_inflight.saturating_sub(1);
-        photo_set::queue_result(&mut self.ready_results, result);
+        accept_mat_result(&mut self.mat_inflight, &mut self.ready_results, result);
     }
 
-    /// Wayland: end of an event batch. Run the control step a window event
-    /// asked for, plus the one a finalized transition owes (`tick_now`), then
-    /// publish the plan for the state the viewer is now in. Without this the
-    /// driver would keep waiting on the state before the batch.
+    /// Wayland: end of an event batch; see `wake::end_of_batch`. Publishes
+    /// the plan for the state the viewer is now in, without which the driver
+    /// would keep waiting on the state before the batch.
     fn publish_wake_state(&mut self) {
         if self.wake_published.is_none() || self.cancel.is_cancelled() {
             return;
         }
-        if std::mem::take(&mut self.tick_wanted) {
-            self.process_tick();
-        }
-        let mut plan = self.wake_plan(Instant::now());
-        // A finalize needs at most one more step; the bound only guards a
-        // loop that cannot happen (finalizing again needs a new transition).
-        for _ in 0..3 {
-            if !plan.tick_now {
-                break;
-            }
-            self.process_tick();
-            plan = self.wake_plan(Instant::now());
-        }
-        let published = wake::Published {
-            plan,
-            handled: self.events_handled,
-        };
+        let step_wanted = std::mem::take(&mut self.tick_wanted);
+        let handled = self.events_handled;
+        let published = wake::end_of_batch(self, step_wanted, handled, Instant::now);
         if let Some(tx) = self.wake_published.as_ref() {
             let _ = tx.send(published);
         }
@@ -2873,8 +2875,7 @@ impl App {
 
     fn drain_mat_results(&mut self) {
         while let Some(result) = self.mat_pipeline.try_recv() {
-            self.mat_inflight = self.mat_inflight.saturating_sub(1);
-            photo_set::queue_result(&mut self.ready_results, result);
+            accept_mat_result(&mut self.mat_inflight, &mut self.ready_results, result);
         }
     }
 
@@ -3781,6 +3782,14 @@ impl App {
             // winit owns the request on Wayland.
             _ => false,
         };
+        let on_kms = matches!(self.output, Some(Output::Kms { .. }));
+        let mode = self.mode();
+        let overlay_pending = !on_kms
+            && match kind {
+                ViewerModeKind::Greeting => mode.greeting().is_some_and(|g| g.needs_redraw()),
+                ViewerModeKind::Sleep => mode.sleep().is_some_and(|s| s.needs_redraw()),
+                ViewerModeKind::Wake => false,
+            };
         wake::plan_wake(
             wake::WakeInputs {
                 slideshow_active: kind == ViewerModeKind::Wake,
@@ -3795,9 +3804,33 @@ impl App {
                 in_flight: self.mat_inflight,
                 deferred: self.deferred_images.len(),
                 preload: self.preload_count,
+                surface_poll: (!on_kms).then_some(SURFACE_POLL_INTERVAL),
+                overlay_pending,
             },
             now,
         )
+    }
+}
+
+/// Window events after which queued work may have become runnable (a surface
+/// that is now usable, a window that is visible again): the control step runs
+/// at the end of the batch. Redraws do not.
+fn window_event_wants_step(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::Resized(_)
+            | WindowEvent::ScaleFactorChanged { .. }
+            | WindowEvent::Occluded(false)
+    )
+}
+
+impl wake::BatchHost for App {
+    fn step(&mut self) {
+        self.process_tick();
+    }
+
+    fn plan(&mut self, now: Instant) -> wake::WakePlan {
+        self.wake_plan(now)
     }
 }
 
@@ -3829,15 +3862,7 @@ impl ApplicationHandler<ViewerEvent> for App {
             return;
         }
         self.log_event_loop_state("window_event_pre");
-        // These can make queued work runnable (a surface that is now usable,
-        // a window that is visible again); the control step at the end of the
-        // batch picks it up. Redraws do not.
-        if matches!(
-            event,
-            WindowEvent::Resized(_)
-                | WindowEvent::ScaleFactorChanged { .. }
-                | WindowEvent::Occluded(false)
-        ) {
+        if window_event_wants_step(&event) {
             self.tick_wanted = true;
         }
         match event {
@@ -4499,6 +4524,8 @@ mod tests {
                                 in_flight,
                                 deferred,
                                 preload: PRELOAD,
+                                surface_poll: None,
+                                overlay_pending: false,
                             },
                             now,
                         );
@@ -4511,6 +4538,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_forwarded_matting_result_is_accounted_like_a_polled_one() {
+        let mut inflight = 2usize;
+        let mut ready = VecDeque::new();
+        let result = |name: &str| MatResult {
+            path: name.into(),
+            canvas: ImagePlane {
+                width: 1,
+                height: 1,
+                pixels: vec![0; 4],
+            },
+            priority: false,
+            partner: None,
+            windows: Vec::new(),
+            mat_kind: None,
+        };
+        accept_mat_result(&mut inflight, &mut ready, result("a.jpg"));
+        assert_eq!((inflight, ready.len()), (1, 1));
+        accept_mat_result(&mut inflight, &mut ready, result("b.jpg"));
+        // After a resume zeroed the count, stragglers do not underflow it.
+        accept_mat_result(&mut inflight, &mut ready, result("c.jpg"));
+        assert_eq!((inflight, ready.len()), (0, 3));
+    }
+
+    #[test]
+    fn window_events_that_free_queued_work_ask_for_a_step() {
+        use winit::dpi::PhysicalSize;
+        assert!(window_event_wants_step(&WindowEvent::Resized(
+            PhysicalSize::new(800, 600)
+        )));
+        assert!(window_event_wants_step(&WindowEvent::Occluded(false)));
+        assert!(!window_event_wants_step(&WindowEvent::Occluded(true)));
+        assert!(!window_event_wants_step(&WindowEvent::RedrawRequested));
     }
 
     #[test]
