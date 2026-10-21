@@ -18,6 +18,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../../lib/systemd.sh"
 # shellcheck source=../../lib/display-stack.sh
 source "${SCRIPT_DIR}/../../lib/display-stack.sh"
+# An explicit wayland choice that cannot be applied here is dropped first, so
+# everything below checks the stack that is actually running.
+display_stack_refuse_unavailable
 # The unit that runs the viewer: greetd.service, or photoframe-kms.service when
 # the KMS stack was chosen. Never touch the other one here.
 KIOSK_SERVICE="${KIOSK_SERVICE:-$(display_stack_unit "$(display_stack_current)")}"
@@ -58,7 +61,14 @@ dump_logs_on_failure() {
     else
         log WARN "journalctl unavailable; cannot show photoframe logs"
     fi
-    printf '[postcheck] HINT: Temporarily set /etc/greetd/config.toml to command="/usr/bin/kmscube" for smoke tests.\n'
+    if [[ "${KIOSK_SERVICE}" == "${DISPLAY_KMS_UNIT}" ]]; then
+        printf '[postcheck] HINT: stop %s and run /usr/bin/kmscube as the kiosk user to test the display without the viewer.\n' "${KIOSK_SERVICE}"
+        if systemd_available && systemd_unit_exists "${DISPLAY_WAYLAND_UNIT}"; then
+            printf '[postcheck] HINT: to go back to the Sway stack: PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh\n'
+        fi
+    else
+        printf '[postcheck] HINT: Temporarily set /etc/greetd/config.toml to command="/usr/bin/kmscube" for smoke tests.\n'
+    fi
 }
 
 trap 'dump_logs_on_failure $?' EXIT
@@ -196,12 +206,17 @@ if systemd_available; then
 
     kiosk_hint="run 'sudo ./setup/system/install.sh' to provision kiosk services"
     seatd_hint="install seatd and rerun system provisioning"
+    # seatd feeds the sway session; only the wayland fallback needs it.
+    check_seatd_unit=false
+    [[ "${KIOSK_SERVICE}" == "${DISPLAY_WAYLAND_UNIT}" ]] && check_seatd_unit=true
 
     check_service "${KIOSK_SERVICE}" "ERROR" "${kiosk_hint}"
     check_enabled "${KIOSK_SERVICE}" "${kiosk_hint}"
 
-    check_service "${SEATD_SERVICE}" "ERROR" "${seatd_hint}"
-    check_enabled "${SEATD_SERVICE}" "${seatd_hint}"
+    if [[ "${check_seatd_unit}" == true ]]; then
+        check_service "${SEATD_SERVICE}" "ERROR" "${seatd_hint}"
+        check_enabled "${SEATD_SERVICE}" "${seatd_hint}"
+    fi
 
     check_service "${WIFI_SERVICE}" "ERROR" "${kiosk_hint}"
     check_enabled "${WIFI_SERVICE}" "${kiosk_hint}"
@@ -249,12 +264,18 @@ fi
 # crash-looping Restart=always unit is active part of the time.
 if [[ "${KIOSK_SERVICE}" == "${DISPLAY_KMS_UNIT}" ]] && systemd_available && systemd_unit_exists "${KIOSK_SERVICE}"; then
     log INFO "Checking that the KMS viewer reached the display and stays up"
-    if kms_health="$(display_stack_kms_healthy 30 6 2>&1)"; then
-        log INFO "${kms_health}"
-    else
-        log ERROR "${kms_health}"
-        exit 1
-    fi
+    kms_health_status=0
+    kms_health="$(display_stack_kms_healthy 30 6 2>&1)" || kms_health_status=$?
+    case "${kms_health_status}" in
+        0) log INFO "${kms_health}" ;;
+        # No panel connected or awake yet: the viewer waits for one by design,
+        # so a frame provisioned before the panel is on still installs.
+        2) log WARN "${kms_health}" ;;
+        *)
+            log ERROR "${kms_health}"
+            exit 1
+            ;;
+    esac
 fi
 
 rustc_version=$(rustc --version 2>/dev/null || echo "rustc unavailable")
@@ -274,6 +295,10 @@ else
     seatd_status="not checked (systemctl unavailable)"
 fi
 
+if [[ "${KIOSK_SERVICE}" != "${DISPLAY_WAYLAND_UNIT}" ]]; then
+    seatd_status="not used (kms stack)"
+fi
+
 if sync_is_configured "${SYNC_ENV_PATH}"; then
     sync_config_status="configured (${SYNC_ENV_PATH})"
 else
@@ -286,6 +311,7 @@ cat <<SUMMARY
 Install root : ${INSTALL_ROOT}
 Service user : ${SERVICE_USER}
 Service group: ${SERVICE_GROUP}
+Display stack: $(display_stack_describe)
 Binary       : ${BIN_PATH}
 Config (template): ${CONFIG_TEMPLATE}
 Config (active)  : ${SYSTEM_CONFIG}

@@ -18,7 +18,7 @@ Copy it over the active config and restart the kiosk, e.g. on the frame:
 
 ```bash
 sudo cp examples/minimal.yaml /etc/photoframe/config.yaml
-sudo systemctl restart greetd   # or your kiosk unit
+sudo systemctl restart photoframe-kms.service   # on the Wayland fallback: stop greetd, sleep 1, start it
 ```
 
 Validate any edit without opening the render window:

@@ -70,13 +70,27 @@ else
   warnings=$((warnings+1))
 fi
 
-# GPU stack: without the Mesa GL drivers sway cannot create a GPU renderer
-# and silently composites every frame on the CPU (pixman).
-if dpkg -s libgl1-mesa-dri >/dev/null 2>&1; then
-  ok "libgl1-mesa-dri installed (sway composites on the GPU)"
+display_stack_refuse_unavailable
+display_choice="$(display_stack_current)"
+ok "display stack: $(display_stack_describe)"
+
+# GPU stack. The viewer renders through Vulkan; on the KMS stack that is all
+# it needs. The wayland fallback also needs the Mesa GL drivers: without them
+# sway cannot create a GPU renderer and silently composites every frame on
+# the CPU (pixman).
+if dpkg -s mesa-vulkan-drivers >/dev/null 2>&1; then
+  ok "mesa-vulkan-drivers installed (the viewer renders through Vulkan)"
 else
-  err "libgl1-mesa-dri missing: sway will composite frames on the CPU"
+  err "mesa-vulkan-drivers missing: the viewer cannot create a Vulkan device"
   failures=$((failures+1))
+fi
+if [[ "${display_choice}" == "wayland" ]]; then
+  if dpkg -s libgl1-mesa-dri >/dev/null 2>&1; then
+    ok "libgl1-mesa-dri installed (sway composites on the GPU)"
+  else
+    err "libgl1-mesa-dri missing: sway will composite frames on the CPU"
+    failures=$((failures+1))
+  fi
 fi
 
 # Bootloader EEPROM: Pi 5 bootloaders v2025.01.22..v2025.10.x cut GPU memory
@@ -160,7 +174,6 @@ fi
 
 # Power helper deps: powerctl asks the viewer through socat (KMS) and falls
 # back to swaymsg (Wayland); both parse JSON with jq.
-display_choice="$(display_stack_current)"
 if [[ -x "${BIN_POWERCTL}" ]]; then
   if [[ "${display_choice}" == "kms" ]]; then
     have jq && have socat || {
@@ -254,7 +267,10 @@ if systemd_available; then
   }
 
   check_unit "$(display_stack_unit "${display_choice}")" ERROR "display stack '${display_choice}' (${DISPLAY_ENV_PATH}); set via system install"
-  check_seatd
+  # seatd feeds the sway session; the KMS stack does not use it.
+  if [[ "${display_choice}" == "wayland" ]]; then
+    check_seatd
+  fi
   check_unit photoframe-wifi-manager.service ERROR "installed by app deploy"
   check_unit buttond.service WARN "optional, installed by app deploy"
   if sync_is_configured "${SYNC_ENV_PATH}"; then
@@ -272,12 +288,15 @@ if systemd_available; then
     fi
   fi
 
-  # display-manager alias (informational)
-  if systemctl status display-manager.service --no-pager >/dev/null 2>&1; then
-    ok "display-manager alias present"
-  else
-    warn "display-manager alias missing or inactive"
-    warnings=$((warnings+1))
+  # display-manager alias (informational; greetd provides it on the
+  # wayland fallback, the KMS stack has no display manager)
+  if [[ "${display_choice}" == "wayland" ]]; then
+    if systemctl status display-manager.service --no-pager >/dev/null 2>&1; then
+      ok "display-manager alias present"
+    else
+      warn "display-manager alias missing or inactive"
+      warnings=$((warnings+1))
+    fi
   fi
 else
   warn "systemctl unavailable; skipping service checks"

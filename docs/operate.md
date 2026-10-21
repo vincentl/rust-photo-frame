@@ -2,7 +2,7 @@
 
 Day-to-day commands, status checks, and troubleshooting for a frame you own and maintain.
 
-> Run commands from your operator SSH session unless noted. `sudo -u kiosk` is required for anything that touches the Wayland session (`powerctl`, `socat` to the control socket from a root shell).
+> Run commands from your operator SSH session unless noted. `sudo -u kiosk` is required for anything that talks to the viewer's control socket (`powerctl`, `socat`). The commands below are for the default KMS stack; where the Wayland fallback differs, the difference is called out. See [Advanced › Display stacks](advanced.md#display-stacks) for how to tell which stack you have.
 
 ---
 
@@ -19,7 +19,7 @@ Day-to-day commands, status checks, and troubleshooting for a frame you own and 
 | Screen off (DPMS) | `sudo -u kiosk /opt/photoframe/bin/powerctl sleep` |
 | Screen on, explicit output | `sudo -u kiosk /opt/photoframe/bin/powerctl wake HDMI-A-2` |
 | Is the screen on? | `sudo -u kiosk /opt/photoframe/bin/powerctl state` |
-| Screen power, straight to the viewer (KMS stack) | `echo '{"command":"display-power","state":"off"}' \| sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock` (`"on"`; omit `state` to query) |
+| Screen power, straight to the viewer | `echo '{"command":"display-power","state":"off"}' \| sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock` (`"on"`; omit `state` to query; answers `unsupported` on the Wayland fallback) |
 | Take the Wi-Fi overlay down | `echo '{"command":"wifi-overlay-hide"}' \| sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock` (wifi-manager shows it again within 10 s while recovery lasts) |
 
 Every control-socket command answers with one JSON line (`{"ok":true,…}`); the full list is in [Advanced › Control socket protocol](advanced.md#control-socket-protocol).
@@ -33,24 +33,25 @@ Every control-socket command answers with one JSON line (`{"ok":true,…}`); the
 | Live photo logs | `sudo journalctl -t photoframe -f` |
 | Wi-Fi manager logs | `sudo journalctl -u photoframe-wifi-manager.service -f` |
 | Button daemon logs | `sudo journalctl -u buttond.service -f` |
-| All service status | `sudo systemctl status greetd photoframe-wifi-manager buttond` |
+| All service status | `sudo systemctl status photoframe-kms photoframe-wifi-manager buttond` |
+| Which display stack | `./setup/tools/verify.sh \| grep 'display stack'` (or the `Display stack:` line of `print-status.sh`) |
 | Count photos in library | `find /var/lib/photoframe/photos -type f \| wc -l` |
-| List display outputs | `sudo -u kiosk env XDG_RUNTIME_DIR=/run/user/$(id -u kiosk) WAYLAND_DISPLAY=wayland-1 wlr-randr` |
+| Which display the viewer drives (connector, mode, power) | `echo '{"command":"display-power"}' \| sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock` |
 | Check control socket | `sudo ls -l /run/photoframe/control.sock` |
 
 ### Manage
 
 | What you want | Command |
 | --- | --- |
-| Restart kiosk (reliable) | `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service` |
+| Restart kiosk | `sudo systemctl restart photoframe-kms.service` (if the panel was asleep it comes back on with the greeting until the next schedule boundary or button press) |
 | Edit config | `sudo nano /etc/photoframe/config.yaml` |
 | Apply config changes | restart kiosk (above) |
 | Add photos from laptop | `rsync -a -e ssh /path/to/photos/ frame@photoframe.local:/var/lib/photoframe/photos/local/` |
 | Add photos locally | `sudo cp /path/*.jpg /var/lib/photoframe/photos/local/ && sudo chown kiosk:kiosk /var/lib/photoframe/photos/local/*` |
 | Trigger manual cloud sync | `sudo systemctl start photoframe-sync.service` |
-| Update software | `git pull && ./setup/application/deploy.sh` |
+| Update software | `git pull && ./setup/application/deploy.sh` (a frame installed before v1.2 and still on Sway moves to KMS; to stay on Sway run `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` once, see below) |
 
-> **Don't use `systemctl restart greetd`** — it can race with logind seat handoff on tty1 and leave the session in a bad state. Always stop, sleep, then start.
+> **On the Wayland fallback, don't use `systemctl restart greetd`.** It can race with logind seat handoff on tty1 and leave the session in a bad state. Always stop, sleep, then start: `sudo systemctl stop greetd.service && sleep 1 && sudo systemctl start greetd.service`.
 
 ### Diagnose
 
@@ -92,7 +93,7 @@ journalctl -t photoframe -f          # watch the tour
 ```bash
 ./setup/tools/verify.sh
 /opt/photoframe/bin/print-status.sh
-sudo systemctl status greetd photoframe-wifi-manager buttond
+sudo systemctl status photoframe-kms photoframe-wifi-manager buttond
 ```
 
 Expected: all three services `active (running)`, `print-status.sh` exits cleanly.
@@ -142,6 +143,8 @@ cd ~/photoframe
 git pull
 ./setup/application/deploy.sh
 ```
+
+> **Frames installed before v1.2 run Sway.** They have no `/etc/photoframe/display.env`, so the first v1.2 deploy switches them to the KMS stack (and stops greetd). To keep Sway, run `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` for that update; the choice is remembered. If the new stack does not come up, `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` also takes you back. See [Advanced › Display stacks](advanced.md#display-stacks).
 
 `deploy.sh` builds in the background and restarts services at the end. `/etc/photoframe/config.yaml` and `/var/lib/photoframe/` are untouched. If the update includes system-level changes (new packages, unit changes), run the full installer instead:
 
@@ -196,7 +199,7 @@ If you have an `awake-schedule` configured, also check that the current local ti
 
 ### `powerctl wake` returns "no sway process found for uid N"
 
-On the Wayland stack `powerctl` falls back to sway and looks for a sway session owned by the running UID. The kiosk session belongs to `kiosk`, not your operator account. Always run with `sudo -u kiosk`:
+This only happens on the Wayland fallback, where `powerctl` falls back to sway and looks for a sway session owned by the running UID. The kiosk session belongs to `kiosk`, not your operator account. Always run with `sudo -u kiosk` (on KMS it is also what reaches the control socket):
 
 ```bash
 sudo -u kiosk /opt/photoframe/bin/powerctl wake
@@ -210,14 +213,16 @@ sudo -u kiosk /opt/photoframe/bin/powerctl wake
 
 ### Black screen from the start — no greeting ever appears
 
-The kiosk session (greetd + Sway) didn't start.
+The viewer didn't reach the display.
 
 ```bash
-sudo systemctl status greetd.service
-sudo journalctl -u greetd.service -b --no-pager | tail -40
+sudo systemctl status photoframe-kms.service
+sudo journalctl -t photoframe -b --no-pager | tail -40
 ```
 
-Re-run the deploy: `./setup/application/deploy.sh`. greetd may not fully initialize without an active HDMI signal — confirm the display is connected and powered on before booting.
+If the viewer is waiting for a display the journal says `kms_waiting_for_display`: confirm the panel is connected and powered on; the slideshow starts when it appears. If the journal says "not DRM master", something else holds the display (a greetd/Sway session left from the Wayland fallback, or plymouth): `sudo systemctl stop greetd.service; sudo systemctl reset-failed photoframe-kms.service; sudo systemctl start photoframe-kms.service`. Re-run the deploy if the unit is missing: `./setup/application/deploy.sh`. See [Advanced › KMS stack](advanced.md#when-it-stops).
+
+On the Wayland fallback the kiosk session (greetd + Sway) didn't start: `sudo systemctl status greetd.service` and `sudo journalctl -u greetd.service -b --no-pager | tail -40`. greetd may not fully initialize without an active HDMI signal.
 
 ### Frame wakes or sleeps at the wrong time
 
@@ -277,10 +282,11 @@ When recovery is stuck, gather artifacts before changing anything:
    nmcli dev status
    nmcli connection show --active
    ```
-4. Confirm Sway socket exists for kiosk:
+4. Confirm the viewer answers on its control socket (the overlay is drawn by the viewer on KMS):
    ```bash
-   sudo sh -lc 'uid=$(id -u kiosk); ls "/run/user/$uid"/sway-ipc.*.sock'
+   echo '{"command":"display-power"}' | sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock
    ```
+   On the Wayland fallback the overlay is a Sway window instead: `sudo sh -lc 'uid=$(id -u kiosk); ls "/run/user/$uid"/sway-ipc.*.sock'`.
 5. Try the manual credential apply path:
    ```bash
    sudo -u kiosk /opt/photoframe/bin/wifi-manager nm add --ssid "<ssid>" --psk "<password>"
@@ -320,7 +326,7 @@ global-photo-settings:
   oversample: 0.75         # was 1.0
 ```
 
-Restart the kiosk after editing. See [Advanced › Memory tuning](advanced.md#memory-tuning) for a full budget breakdown.
+Restart the kiosk after editing (`sudo systemctl restart photoframe-kms.service`). See [Advanced › Memory tuning](advanced.md#memory-tuning) for a full budget breakdown.
 
 ### Display power commands run but the monitor stays on
 
@@ -330,14 +336,14 @@ First see which path `powerctl` took:
 echo '{"command":"display-power"}' | sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock
 ```
 
-- **KMS stack** (the answer has `"ok":true` and a `connector`): the viewer switches the panel. After `powerctl sleep` the journal shows `kms_power_off: panel off`. A refusal is printed by powerctl itself (`powerctl: the viewer refused: …`):
+- **KMS stack, the default** (the answer has `"ok":true` and a `connector`): the viewer switches the panel. After `powerctl sleep` the journal shows `kms_power_off: panel off`. A refusal is printed by powerctl itself (`powerctl: the viewer refused: …`):
 
   ```bash
   sudo journalctl -t photoframe -b | grep -E "kms_power_off|kms_power_on"
   ```
 
   If `buttond.screen.display-name` names a different connector than the answer's `connector`, the viewer refuses with `not-driven`. Fix the name, or remove the key so powerctl means whatever the viewer drives.
-- **Wayland stack** (the answer is `"error":"unsupported"`): sway switches the panel, and the usual cause is an output name mismatch. Find the connector:
+- **Wayland fallback** (the answer is `"error":"unsupported"`): sway switches the panel, and the usual cause is an output name mismatch. Find the connector:
 
   ```bash
   # wlr-randr must run in the kiosk Wayland session (display is usually wayland-1;
@@ -368,9 +374,9 @@ systemctl show -p NRestarts photoframe-kms.service
 sudo apt install -y socat
 ```
 
-### `verify.sh` reports warnings about greetd
+### `verify.sh` reports warnings about the display stack
 
-On a first deploy, `verify.sh` may warn about greetd if system provisioning was not yet complete. Re-run both stages:
+On a first deploy, `verify.sh` may warn that `photoframe-kms.service` (or `greetd` on the Wayland fallback) is missing or not active if system provisioning was not yet complete. Re-run both stages:
 
 ```bash
 sudo ./setup/system/install.sh

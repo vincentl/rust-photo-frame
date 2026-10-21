@@ -6,7 +6,7 @@ source "$REPO_ROOT/tests/lib/assert.sh"
 
 main() {
   local install_root="${INSTALL_ROOT:-/opt/photoframe}"
-  local photo_service="${PHOTO_SERVICE:-greetd.service}"
+  local photo_service="${PHOTO_SERVICE:-$(default_photo_service)}"
   local wifi_service="${WIFI_SERVICE:-photoframe-wifi-manager.service}"
   local sync_service="${SYNC_SERVICE:-photoframe-sync.service}"
   local sync_timer="${SYNC_TIMER:-photoframe-sync.timer}"

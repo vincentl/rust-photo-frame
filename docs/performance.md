@@ -7,6 +7,28 @@ is that **not one of the root causes was a slow shader** — they were
 firmware, a missing driver package, the presentation mode, and CPU/GPU
 contention. Measure the whole pipeline before optimizing any pass.
 
+## Why the default stack has no compositor
+
+The viewer runs on DRM/KMS by default (`photoframe-kms.service`, see
+[advanced.md › Display stacks](advanced.md#display-stacks)) because the
+compositor, not the app, was the frame-rate ceiling. Measured with
+`frametest` on 2026-10-19, 4K at 60 Hz, after the Pi's Mesa moved from
+25.0.7 to 26.2.2 (sway stayed at 1.10.1 on wlroots 0.18):
+
+| Stack | Run | Result |
+| --- | --- | --- |
+| sway (Wayland) | `solid mailbox`, `solid mailbox` with four frames of latency, `solid immediate` | about 31–32 fps in every present mode; best 0.3 ms, worst 63 ms (two submissions back to back, then a two-refresh wait for the compositor to release a buffer) |
+| KMS (no compositor) | `solid fifo --drm` | 60.0 fps, every interval 16.5–16.9 ms |
+| KMS | `fade fifo --drm`, `fade mailbox --drm` | 60 Hz, intervals 16.3–17.0 ms; a native-4K two-texture pass holds the refresh rate |
+
+Even `immediate`, which ignores vsync, was capped on sway, so no present mode or
+pacing in the viewer could fix it. The ceiling sits in the compositor path
+(sway 1.10 with Mesa 26's Wayland WSI), and the same `solid` workload with the
+compositor gone is vblank-locked at 60. The Wayland stack remains as a
+fallback for one release; its ladder is below. Mesa 25.0 under sway reached
+60 with mailbox in June, so a newer sway or Mesa may lift the cap, but the KMS
+stack does not depend on either.
+
 ## Measuring
 
 Two built-in tools, no extra software required:
@@ -93,13 +115,15 @@ the startup-scanned library it is just the photo's age at first show, so filter
 to photos whose birth time is later than the `playlist_scheduler` line when
 measuring how quickly a fresh upload appears.
 
-Use `-t photoframe` (syslog identifier), not `-u`: on the default stack the
-app runs inside the greetd session, not as its own systemd unit. The KMS
-stack (`photoframe-kms.service`) logs under the same tag.
+Use `-t photoframe` (syslog identifier), not `-u`: both stacks log under that
+tag, and on the Wayland fallback the app runs inside the greetd session, not
+as its own systemd unit.
 
-The stats measure *submission* cadence (when `present()` returns), which
-matches what the panel displays only because transition redraws are paced
-to the compositor's frame callbacks (one per output refresh). If
+The stats measure *submission* cadence (when `present()` returns). On the
+Wayland fallback that matches what the panel displays only because transition
+redraws are paced to the compositor's frame callbacks (one per output refresh);
+on KMS the viewer waits for each vblank itself (see
+[The viewer on KMS](#the-viewer-on-kms)). If
 `best_frame_ms` ever drops well below a vsync (e.g. 0.4ms), frames are
 being submitted back-to-back and mailbox is discarding some unseen — the
 displayed motion is then worse than the numbers suggest. The metric also
@@ -119,7 +143,9 @@ that separates pacing problems from animation-content problems.
 (a clear, zero memory traffic), `tex` (one full-screen texture), `fade`
 (two textures mixed, the cheapest real transition) — under a selectable
 present mode (`fifo|mailbox|immediate`) and frame latency, printing cadence
-once per second. Run it inside the kiosk session:
+once per second. There are two ladders, one per stack. On the default KMS
+stack run it with `--drm` (next section). On the Wayland fallback run it
+inside the kiosk session:
 
 ```bash
 sudo -u kiosk env XDG_RUNTIME_DIR=/run/user/$(id -u kiosk) WAYLAND_DISPLAY=wayland-1 \
@@ -145,17 +171,21 @@ callback is not throttling (the probe is racing mailbox); a `worst` near
 opens the DRM card, becomes DRM master, and presents through Vulkan's
 `VK_KHR_display` + `VK_EXT_acquire_drm_display` (wgpu's
 `SurfaceTargetUnsafe::Drm`), so every frame goes straight to a KMS page
-flip. This is the feasibility probe for running the viewer without sway
-(see the direct-scanout note below). The kiosk session must be stopped
-first, because sway holds DRM master while it runs:
+flip. This is the probe that showed the viewer could run without sway (see the
+direct-scanout note below), and the KMS ladder. The viewer must be stopped
+first, because whichever process holds DRM master (the viewer unit, or sway
+on the fallback) blocks it:
 
 ```bash
-sudo systemctl stop greetd.service
+sudo systemctl stop photoframe-kms.service
 sudo -u kiosk /opt/photoframe/bin/frametest solid fifo --drm --seconds 15
 sudo -u kiosk /opt/photoframe/bin/frametest fade fifo --drm --seconds 15
 sudo -u kiosk /opt/photoframe/bin/frametest fade mailbox --drm --seconds 15
-sudo systemctl start greetd.service
+sudo systemctl start photoframe-kms.service
 ```
+
+(On the Wayland fallback, stop and start `greetd.service` instead, with a
+`sleep 1` between the two, never `restart`.)
 
 It prints what KMS reports (cards, connectors, modes), what Vulkan reports
 (display modes, planes), then the usual per-second cadence line. Flags:
@@ -164,8 +194,8 @@ connector — on a Pi 5 that is the `vc4` card, not the render-only `v3d`
 one), `--connector HDMI-A-1`, `--mode 3840x2160@60` (default: the
 connector's preferred mode), `--plane N` (default: the Vulkan plane that
 reports the display), `--seconds N` (default: run until Ctrl-C). When it
-exits the screen goes dark until greetd restarts sway. Read the ladder the
-same way as on Wayland, with one addition: `solid fifo --drm` at a locked
+exits the screen goes dark until the viewer unit (or greetd) is started again.
+Read the ladder the same way as on Wayland, with one addition: `solid fifo --drm` at a locked
 60.0 fps with best ≈ worst ≈ 16.7 ms means page flips are vblank-locked
 with no compositor handshake, which is what FIFO cannot deliver under
 sway 1.10. If the probe fails before the first cadence line it says which
@@ -189,8 +219,8 @@ this code path; remove both once the fix is upstream.
 ### The viewer on KMS
 
 The viewer itself can present the same way: set `PHOTOFRAME_SURFACE=drm`
-(the opt-in `photoframe-kms.service` does; see
-[advanced.md › KMS stack](advanced.md#kms-stack-opt-in)). It shares the
+(`photoframe-kms.service`, the default stack, does; see
+[advanced.md › KMS stack](advanced.md#kms-stack-default)). It shares the
 probe's target selection and ordering rules
 (`crates/photoframe/src/drm_display.rs`):
 - The card is opened before the wgpu instance, so the process is DRM
@@ -312,14 +342,16 @@ repeated refresh and does not cascade.
    create a GPU renderer and silently falls back to pixman, compositing
    every 4K frame on the CPU (~30+ ms each). Symptoms: all transitions cost
    the same regardless of shader weight; `sway -d` logs show no GLES2
-   renderer. The package is now explicit in the apt list and checked by
-   `verify.sh`.
+   renderer. This applies to the Wayland fallback stack. The package is explicit
+   in the apt list on both stacks (`kmscube` needs it too) and `verify.sh`
+   checks it when the Wayland stack is chosen.
 
 3. **FIFO presentation costs two vsyncs per frame.** Vulkan FIFO emulated
    over Wayland frame callbacks serializes against the compositor on stacks
    without the `wp_fifo_v1` protocol (sway 1.10 / wlroots 0.18): `frametest
    solid fifo` locks at a metronomic 33.3 ms on a 60 Hz output. The viewer
-   therefore defaults to **mailbox** presentation, which latches the newest
+   therefore defaults to **mailbox** presentation on the Wayland fallback (KMS
+   defaults to FIFO, which is vblank-locked there), which latches the newest
    complete frame each vsync — measured 62.9 fps average on a 4K radial
    wipe.
 
@@ -423,22 +455,14 @@ traffic a native 4K fade generates — on a bus that is the binding
 constraint at 4K60. Two ways out: a sway/wlroots/Mesa upgrade that gets
 scanout working (`journalctl -t photoframe` with `sway -d` shows per-frame
 scan-out decisions), or no compositor at all. `frametest --drm` (above)
-measures the second option without touching the viewer. The opt-in KMS
-stack is that second option for the viewer itself (see
+measures the second option without touching the viewer. The KMS stack, the
+default, is that second option for the viewer itself (see
 [The viewer on KMS](#the-viewer-on-kms)).
 
 ## Environment knobs
 
-Set in `/usr/local/bin/photoframe` (the launcher), or for the KMS stack in
-the unit (`sudo systemctl edit photoframe-kms.service`, `[Service]`
-`Environment=`); all optional:
-
-| Variable | Values | Default |
-| --- | --- | --- |
-| `PHOTOFRAME_SURFACE` | `wayland` / `drm` | `wayland` (the KMS unit sets `drm`) |
-| `PHOTOFRAME_PRESENT_MODE` | `fifo` / `mailbox` / `immediate` | mailbox when available on Wayland; fifo on KMS |
-| `PHOTOFRAME_DRM_CONNECTOR` | e.g. `HDMI-A-1` (KMS only) | first connected connector |
-| `PHOTOFRAME_DRM_MODE` | `WxH[@Hz]` (KMS only; must exist) | `3840x2160@60` if offered, else the connector's preferred mode |
-| `PHOTOFRAME_TRANSITION_SCALE` | 1–4 | 2 |
-| `PHOTOFRAME_IRIS_LAYER_SCALE` | 1–8 | 4 |
-| `WGPU_BACKEND` | `vulkan` / `gl` | vulkan |
+The variables the viewer reads (`PHOTOFRAME_SURFACE`, `PHOTOFRAME_PRESENT_MODE`,
+`PHOTOFRAME_TRANSITION_SCALE`, `PHOTOFRAME_IRIS_LAYER_SCALE`,
+`PHOTOFRAME_DRM_CONNECTOR`, `PHOTOFRAME_DRM_MODE`, `WGPU_BACKEND`), their
+defaults and how to set them on each stack are listed in one place:
+[advanced.md › The launcher and its environment](advanced.md#the-launcher-and-its-environment).

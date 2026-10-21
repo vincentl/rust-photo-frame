@@ -16,6 +16,14 @@
 # Anything else that fails is a real finding.
 set -euo pipefail
 
+# The expectations above and below are for the Wayland fallback stack (greetd
+# is what fails in the VM). KMS is the default install since v1.2, so pin the
+# stack unless the caller chose one; the system installer and the deploy both
+# read the variable. PHOTOFRAME_DISPLAY=kms makes the other expectations apply
+# (photoframe-kms.service, whose postcheck now warns, not fails, while the
+# viewer waits for a display); they are not asserted here.
+export PHOTOFRAME_DISPLAY="${PHOTOFRAME_DISPLAY:-wayland}"
+
 # shellcheck source=./common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
@@ -47,7 +55,7 @@ section "2. System stage: sudo setup/system/install.sh"
 # (cloud-init) network interface, or it can drop the ssh connection.
 sudo install -d -m 0755 /etc/NetworkManager/conf.d
 printf '[keyfile]\nunmanaged-devices=*\n' | sudo tee /etc/NetworkManager/conf.d/10-lima-unmanaged.conf >/dev/null
-if (cd "${SRC_COPY}" && sudo ./setup/system/install.sh) 2>&1 | tee "${LOG_DIR}/system-install.log"; then
+if (cd "${SRC_COPY}" && sudo --preserve-env=PHOTOFRAME_DISPLAY ./setup/system/install.sh) 2>&1 | tee "${LOG_DIR}/system-install.log"; then
     pass "setup/system/install.sh"
 else
     fail "setup/system/install.sh (log: ${LOG_DIR}/system-install.log)"

@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=../lib/systemd.sh
 source "${SCRIPT_DIR}/../lib/systemd.sh"
+# shellcheck source=../../lib/display-stack.sh
+source "${SCRIPT_DIR}/../../lib/display-stack.sh"
 
 require_root() {
     if [[ $(id -u) -ne 0 ]]; then
@@ -230,17 +232,18 @@ END {
 }
 
 ensure_kiosk_packages() {
+    # socat: powerctl and verify.sh talk to the viewer's control socket.
     local packages=(
-        greetd
         mesa-vulkan-drivers
         socat
-        sway
-        swaybg
-        swayidle
-        swaylock
         vulkan-tools
-        wayland-protocols
     )
+    # The compositor set (greetd, seatd, sway, ...) only for the wayland
+    # fallback; see setup/lib/display-stack.sh.
+    local stack_package
+    while IFS= read -r stack_package; do
+        packages+=("${stack_package}")
+    done < <(display_stack_packages "${DISPLAY_CHOICE}")
     local missing=()
     local pkg
     for pkg in "${packages[@]}"; do
@@ -274,10 +277,14 @@ ensure_kiosk_user() {
         fi
     fi
 
-    # 'seat' is required so the kiosk session can access /run/seatd.sock — the
-    # photoframe-session wrapper hard-fails the greetd session without it.
-    local group
-    for group in render video input seat; do
+    # 'seat' is required on the wayland stack so the kiosk session can access
+    # /run/seatd.sock; the photoframe-session wrapper hard-fails without it.
+    # The KMS unit opens /dev/dri directly through the video and render groups.
+    local group groups=(render video input)
+    if [[ "${DISPLAY_CHOICE}" == "wayland" ]]; then
+        groups+=(seat)
+    fi
+    for group in "${groups[@]}"; do
         if ! getent group "${group}" >/dev/null 2>&1; then
             log "Creating group ${group}"
             groupadd "${group}"
@@ -383,7 +390,8 @@ enable_systemd_units() {
         systemd_mask_unit getty@tty1.service >/dev/null 2>&1 || true
     fi
 
-    # greetd, photoframe-wifi-manager, and buttond are enabled/started by
+    # The display stack (photoframe-kms.service, or greetd on the wayland
+    # fallback), photoframe-wifi-manager, and buttond are enabled/started by
     # 60-systemd.sh *after* their configs (50-greetd.sh) and the application
     # binaries are installed. Starting greetd here would launch it against a
     # not-yet-written session config (leaving it failed until a later restart),
@@ -429,6 +437,8 @@ ensure_persistent_journald() {
 }
 
 main() {
+    # Resolved once: PHOTOFRAME_DISPLAY, else the persisted choice, else kms.
+    DISPLAY_CHOICE="$(display_stack_current)"
     require_root
     require_trixie
     require_commands
@@ -443,7 +453,11 @@ main() {
     ensure_persistent_journald
     enable_systemd_units
 
-    log "Kiosk provisioning complete. greetd will launch sway on tty1 as kiosk."
+    if [[ "${DISPLAY_CHOICE}" == "wayland" ]]; then
+        log "Kiosk provisioning complete. greetd will launch sway on tty1 as kiosk."
+    else
+        log "Kiosk provisioning complete. photoframe-kms.service will present straight to the display as kiosk."
+    fi
 }
 
 main "$@"

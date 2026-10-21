@@ -1,6 +1,6 @@
 # Advanced
 
-Optional and deeper-dive topics: cloud sync, Wi-Fi recovery internals, power/sleep model, memory tuning, and the kiosk stack.
+Optional and deeper-dive topics: cloud sync, Wi-Fi recovery internals, power/sleep model, memory tuning, and the display stacks (KMS by default, Wayland as a fallback).
 
 ---
 
@@ -278,9 +278,9 @@ Re-enable: `sudo systemctl unmask photoframe-wifi-manager.service && sudo system
 
 `/opt/photoframe/bin/powerctl {sleep|wake|state} [OUTPUT]` switches the panel off (`sleep`), on (`wake`), or prints `on`/`off` (`state`).
 
-It asks the viewer first, with `display-power` on the control socket. On the KMS stack the viewer holds the display and is the only process that can switch it (see [Display power and the Wi-Fi overlay on KMS](#display-power-and-the-wi-fi-overlay-on-kms)). powerctl falls back to sway (`swaymsg output <OUTPUT> power off|on`) only when the viewer cannot help: on the Wayland stack, where the viewer answers "unsupported" because sway owns the output; when no viewer is running; or when the viewer is too old to answer. Any other refusal is the answer. powerctl prints it (for example `powerctl: the viewer refused: not-driven: this viewer drives HDMI-A-2, not HDMI-A-1`) and exits 1. A `timeout` refusal means the viewer was slow, not that it ignored the request: it may still carry it out. `PHOTOFRAME_CONTROL_SOCKET` overrides the socket path; buttond sets it to its own `control-socket-path`.
+It asks the viewer first, with `display-power` on the control socket. On the default KMS stack the viewer holds the display and is the only process that can switch it (see [Display power and the Wi-Fi overlay on KMS](#display-power-and-the-wi-fi-overlay-on-kms)). powerctl falls back to sway (`swaymsg output <OUTPUT> power off|on`) only when the viewer cannot help: on the Wayland fallback, where the viewer answers "unsupported" because sway owns the output; when no viewer is running; or when the viewer is too old to answer. Any other refusal is the answer. powerctl prints it (for example `powerctl: the viewer refused: not-driven: this viewer drives HDMI-A-2, not HDMI-A-1`) and exits 1. A `timeout` refusal means the viewer was slow, not that it ignored the request: it may still carry it out. `PHOTOFRAME_CONTROL_SOCKET` overrides the socket path; buttond sets it to its own `control-socket-path`.
 
-> Run `powerctl` as the `kiosk` user. The sway fallback looks for a sway session owned by the running UID; any other user gets "no sway process found for uid N".
+> Run `powerctl` as the `kiosk` user. The control socket's directory is `kiosk:kiosk` mode `0770`, and the sway fallback looks for a sway session owned by the running UID; any other user gets "no sway process found for uid N".
 
 ```bash
 sudo -u kiosk /opt/photoframe/bin/powerctl wake
@@ -322,7 +322,7 @@ echo '{"command":"display-power"}' | sudo -u kiosk socat -t 3 - UNIX-CONNECT:/ru
 
 A refusal is `{"ok":false,"error":KIND,"detail":"…"}`, KIND being:
 
-- `unsupported`: `display-power` on the Wayland stack; sway owns the output, use `swaymsg`.
+- `unsupported`: `display-power` on the Wayland fallback; sway owns the output, use `swaymsg`.
 - `ping` (`{"command":"ping"}`) is always answered `{"ok":true}`; a client uses it to check the viewer speaks this protocol before sending anything sensitive.
 - `not-driven`: `output` names a connector this viewer does not drive.
 - `invalid`: the request did not parse or is out of limits (texts up to 256 characters, QR payloads up to 512 bytes and encodable).
@@ -408,7 +408,7 @@ The footprint stabilizes after the first few transitions. Take a steady-state re
 
 ### What happens when memory runs out
 
-The Linux OOM killer terminates processes. `photoframe` is not always the first target — `wireplumber` and others may go first. Signs of OOM: photos stop updating; `photoframe` exits and greetd restarts the session (greeting reappears); `dmesg` shows "Out of memory: Kill process".
+The Linux OOM killer terminates processes. `photoframe` is not always the first target — `wireplumber` and others may go first. Signs of OOM: photos stop updating; `photoframe` exits and systemd restarts it (greeting reappears); `dmesg` shows "Out of memory: Kill process".
 
 ```bash
 sudo dmesg | grep -i "oom\|killed" | tail -20
@@ -417,9 +417,104 @@ sudo journalctl -t photoframe -n 100 | grep -i "killed\|error"
 
 ---
 
-## Kiosk stack
+## Display stacks
 
-The frame boots straight into the Wayland app via greetd on Debian 13 (Trixie). greetd launches a dedicated Sway session on tty1 and runs the photo frame as the `kiosk` user — no display manager shims or PAM templates. This is the default; an opt-in stack that runs the viewer without any compositor is described in [KMS stack (opt-in)](#kms-stack-opt-in).
+The frame runs the viewer on one of two display stacks. Exactly one is enabled at a time.
+
+| | **KMS** (default) | **Wayland** (fallback) |
+| --- | --- | --- |
+| Unit | `photoframe-kms.service` | `greetd.service` |
+| What runs | the viewer alone, presenting to DRM/KMS | `greetd → photoframe-session → sway → viewer` |
+| Extra packages | none | `greetd`, `seatd`, `sway`, `swaybg`, `swayidle`, `swaylock`, `wayland-protocols` |
+| 4K frame rate | vblank-locked 60 fps | about 32 fps (the compositor's ceiling on Mesa 26) |
+| Display power | the viewer, over the control socket | `swaymsg` |
+| Wi-Fi recovery overlay | drawn by the viewer | a separate fullscreen window |
+
+KMS is the default because the compositor is the frame-rate ceiling: on Mesa 26.2 with sway 1.10 every present mode is capped near 32 fps at 4K, while the viewer on KMS holds 60. See [performance.md](performance.md#the-viewer-on-kms) for the measurements. The Wayland stack stays for one release (v1.2) as a fallback; expect it to be removed after that.
+
+Which stack is running:
+
+```bash
+./setup/tools/verify.sh | grep 'display stack'   # "display stack: kms (photoframe-kms.service, default)"
+cat /etc/photoframe/display.env              # the persisted choice, if any
+```
+
+### Switching
+
+`PHOTOFRAME_DISPLAY` (`kms` or `wayland`) chooses the stack at setup. With nothing given and nothing persisted, the stack is `kms`. An explicit choice is written to `/etc/photoframe/display.env`, and every later `install-all.sh`, `system/install.sh` or `deploy.sh` keeps it until you give another.
+
+To switch to the Wayland fallback, run the system stage with the choice. It installs the compositor packages and the greetd and sway files, enables `greetd.service`, disables `photoframe-kms.service` and starts the new stack:
+
+```bash
+PHOTOFRAME_DISPLAY=wayland ./setup/system/install.sh
+```
+
+To switch back to the default:
+
+```bash
+PHOTOFRAME_DISPLAY=kms ./setup/system/install.sh
+```
+
+Run it without `sudo` in front, as shown; the script elevates itself and keeps the variable. `PHOTOFRAME_DISPLAY=wayland sudo ./setup/system/install.sh` loses the variable to sudo's environment reset and silently stays on KMS. The running viewer keeps the display until the stage's last step, when the new stack starts.
+
+The compositor packages stay installed after a switch back, so a later switch to Wayland is quick. `PHOTOFRAME_DISPLAY=… ./setup/application/deploy.sh` also persists the choice and switches, but it cannot install packages: on a frame set up on KMS, `PHOTOFRAME_DISPLAY=wayland` is refused with a message that names the command above, nothing is persisted and the frame stays on KMS.
+
+Each switch:
+
+- enables the chosen unit before it disables the other, so a failed enable never leaves the frame without a stack at the next boot;
+- restarts the chosen unit (the two units conflict, so starting one stops the other and releases the display);
+- makes `postcheck`, `verify.sh` and `print-status` check the chosen unit.
+
+> **Updating a frame installed before v1.2.** It has no `/etc/photoframe/display.env`, so the first install or deploy of v1.2 moves it to KMS. To stay on Sway through the update, run `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` (greetd is already installed there) and the choice is remembered.
+
+To try the other stack once without changing the persisted choice, start its unit; the next boot returns to the enabled stack:
+
+```bash
+sudo systemctl start photoframe-kms.service
+sudo systemctl start greetd.service            # only where the Wayland stack is installed
+```
+
+### The launcher and its environment
+
+Both stacks start the viewer through one script, `/usr/local/bin/photoframe` (installed by the system stage, `setup/system/modules/45-launcher.sh`). It checks that `/opt/photoframe/bin/photoframe` exists, exports `WINIT_APP_ID`, sends the viewer's output to the journal under the tag `photoframe` (or elsewhere, per `PHOTOFRAME_LOG`) and passes its arguments (the config path) through. `photoframe-kms.service` runs it directly and sets `PHOTOFRAME_SURFACE=drm`; on the Wayland stack sway's config `exec`s it.
+
+The viewer reads these variables. They are environment, not `config.yaml` keys, because they describe how the process is launched:
+
+| Variable | Values | Default |
+| --- | --- | --- |
+| `PHOTOFRAME_SURFACE` | `drm` or `wayland` | `wayland` when unset; the KMS unit sets `drm` |
+| `PHOTOFRAME_PRESENT_MODE` | `fifo`, `mailbox`, `immediate` | `fifo` on KMS; `mailbox` (else the driver's vsync mode) on Wayland |
+| `PHOTOFRAME_TRANSITION_SCALE` | `1`–`4`; the linear downscale of the buffer transitions render into, `1` is native resolution | `2` |
+| `PHOTOFRAME_IRIS_LAYER_SCALE` | `1`–`8`; the same for the iris petal layer | `4` |
+| `PHOTOFRAME_DRM_CONNECTOR` | e.g. `HDMI-A-1` (KMS only; a name no card has is an error) | first connected connector |
+| `PHOTOFRAME_DRM_MODE` | `WxH[@Hz]` (KMS only; must exist) | `3840x2160@60` if offered, else the panel's preferred mode |
+| `PHOTOFRAME_LOG` | `journal`, `stdout`, `file:/path` (read by the launcher) | `journal` |
+| `WGPU_BACKEND` | `vulkan` or `gl` (wgpu's own override) | Vulkan |
+| `PHOTOFRAME_CONTROL_SOCKET` | path (read by `powerctl`, not the viewer) | `/run/photoframe/control.sock` |
+
+A value the viewer cannot parse is logged and ignored, except `PHOTOFRAME_SURFACE`, where it is an error. Setup also reads `PHOTOFRAME_DISPLAY` (above), which is a setup choice and never reaches the viewer.
+
+**Setting them on KMS.** Add a drop-in; it survives deploys, which rewrite the unit file:
+
+```bash
+sudo systemctl edit photoframe-kms.service
+```
+
+```ini
+[Service]
+Environment=PHOTOFRAME_TRANSITION_SCALE=1
+Environment=PHOTOFRAME_DRM_CONNECTOR=HDMI-A-2
+```
+
+Then `sudo systemctl restart photoframe-kms.service`. The journal shows `viewer_scale_override` and the other overrides at startup.
+
+**Setting them on Wayland.** Export the variable in `/usr/local/bin/photoframe` (the file has a commented block for it) or prefix the `exec` line in `/usr/local/share/photoframe/sway/config`. Both files are rewritten by the system stage, so reapply the edit after rerunning it.
+
+---
+
+## KMS stack (default)
+
+With the KMS stack the viewer presents straight to the display (DRM/KMS through Vulkan's `VK_KHR_display`), with no greetd, sway or compositor in between. Greeting, slideshow, sleep/wake through the control socket, transitions, mats, the showcase captions and the `metrics` log lines all behave as on the Wayland stack. So do the Wi-Fi recovery overlay and display power, which the viewer handles itself on this stack (next section).
 
 ### Provisioning
 
@@ -427,56 +522,26 @@ The frame boots straight into the Wayland app via greetd on Debian 13 (Trixie). 
 
 - Verifies `/etc/os-release` reports `VERSION_CODENAME=trixie`.
 - Applies Pi 5 boot tweaks (set `ENABLE_4K_BOOT=0` to skip the 4K60 profile).
-- Installs Wayland/kiosk dependencies: `greetd`, `sway`, `swaybg`, `swayidle`, `swaylock`, `wayland-protocols`, `dbus`, `dbus-user-session`.
-- Creates the locked `kiosk` user with `video`, `render`, `input`, and `seat` group membership (`seat` is required to access `/run/seatd.sock`).
+- Creates the locked `kiosk` user with `video`, `render` and `input` group membership. The unit opens `/dev/dri` through those groups; there is no login session and no seat manager.
 - Provisions `/run/photoframe` as `kiosk:kiosk` mode `0770` plus a tmpfiles entry for boot-time creation.
-- Installs `/usr/local/bin/photoframe-session`.
-- Writes `/etc/greetd/config.toml` so tty1 runs `photoframe-session` as `kiosk`.
-- Disables competing display managers (`gdm3`, `sddm`, `lightdm`), enables `greetd` as `display-manager`, and masks `getty@tty1.service`.
-- Deploys the `photoframe-wifi-manager.service`, `buttond.service`, and `photoframe-sync.timer` units.
-
-### Expected state
-
-`/etc/greetd/config.toml`:
-
-```toml
-[terminal]
-vt = 1
-
-[default_session]
-command = "/usr/local/bin/photoframe-session"
-user = "kiosk"
-```
-
-- The wrapper launches Sway via `dbus-run-session`; `seatd.service` provides seat management (Sway connects to `/run/seatd.sock`).
-- Sway config: `/usr/local/share/photoframe/sway/config`.
-- `greetd` owns tty1; no autologin hacks.
-- Launch chain: `greetd → photoframe-session → dbus-run-session → sway` (with `seatd.service` providing seat access via `/run/seatd.sock`).
+- Installs the launcher `/usr/local/bin/photoframe`.
+- Disables competing display managers (`gdm3`, `sddm`, `lightdm`) and masks `getty@tty1.service`.
+- Deploys the `photoframe-wifi-manager.service`, `buttond.service`, `photoframe-kms.service` and `photoframe-sync.timer` units. The application deploy enables `photoframe-kms.service` and restarts it.
 
 ### Verification
 
 ```bash
 grep VERSION_CODENAME /etc/os-release
-sudo systemctl status greetd
-sudo systemctl status display-manager
-sudo journalctl -u greetd -b
+sudo systemctl status photoframe-kms
+sudo journalctl -t photoframe -b | grep -E "kms_|viewer presenting"
+./setup/tools/verify.sh
 ```
 
-Expected: `greetd` reports `active (running)`; the unit command line includes `/usr/local/bin/photoframe-session`; the journal shows the kiosk session and slideshow startup.
+Expected: `photoframe-kms` reports `active (running)` and the journal has `viewer presenting straight to KMS`. `verify.sh` reports `KMS display: card1 HDMI-A-2 3840x2160@60 power=on` (card, connector and mode), cross-checked between sysfs and the viewer.
 
 ### Idempotent reruns
 
 Re-running provisioning after OS or app updates is supported. Idempotent status lines like `getty@tty1.service already masked; skipping disable/mask` are normal.
-
-For deeper debug workflows (manual Sway launch, overlay tests, kiosk-shell environment export), see [developer/architecture.md › Debugging the kiosk stack](../developer/architecture.md#debugging-the-kiosk-stack).
-
----
-
-## KMS stack (opt-in)
-
-With the KMS stack the viewer presents straight to the display (DRM/KMS through Vulkan's `VK_KHR_display`), with no greetd, sway or compositor in between. It exists because the compositor is the frame-rate ceiling. On Mesa 26.2 with sway 1.10, every present mode is capped near 30 fps. Without the compositor, a native-4K fade holds a vblank-locked 60 Hz. See [performance.md](performance.md#the-viewer-on-kms) for the measurements.
-
-Greeting, slideshow, sleep/wake through the control socket, transitions, mats, the showcase captions and the `metrics` log lines all behave as on the Wayland stack. So do the Wi-Fi recovery overlay and display power, which the viewer handles itself on this stack (next section).
 
 ### Display power and the Wi-Fi overlay on KMS
 
@@ -508,42 +573,12 @@ Commands that arrive while waiting (sleep or wake, the Wi-Fi overlay) are applie
 **What only your eyes can confirm.** The journal shows the display pipe running after a wake. Whether the TV shows a picture at 3840x2160@60 also depends on the HDMI link (at 4K60, the HDMI 2.0 scrambling the TV must accept). If a wake ever leaves the TV on "no signal", report it with the TV model.
 
 **Known limits:**
-- If the viewer restarts while the panel is off and the TV keeps hot-plug detect up, the panel comes back on with the greeting, while buttond still believes the frame is asleep. That matches what a sway restart does on the Wayland stack. The next schedule boundary or button press puts it right.
+- If the viewer restarts while the panel is off and the TV keeps hot-plug detect up, the panel comes back on with the greeting, while buttond still believes the frame is asleep. A sway restart does the same on the Wayland stack. The next schedule boundary or button press puts it right.
 - If a wake fails twice, the viewer restarts to light the panel. During scheduled sleep hours the restart comes back to the sleep banner (the schedule decides the startup state), and buttond, which saw the wake fail, still counts the frame as asleep. The next button press brings both back in step.
-
-### Switching
-
-The choice is persisted in `/etc/photoframe/display.env`, so a plain `deploy.sh` keeps whichever stack was chosen last:
-
-```bash
-PHOTOFRAME_DISPLAY=kms ./setup/application/deploy.sh
-```
-
-```bash
-PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh
-```
-
-When the setup applies a choice it does three things:
-
-- enables `photoframe-kms.service` and disables `greetd.service`, or the reverse;
-- restarts the chosen unit;
-- makes `postcheck`, `verify.sh` and `print-status` check the chosen unit.
-
-`setup/system/install.sh` honours the same variable.
-
-To try the other stack once without changing the persisted choice, start its unit. The two units conflict, so starting one stops the other. The next boot returns to the enabled stack.
-
-```bash
-sudo systemctl start photoframe-kms.service
-```
-
-```bash
-sudo systemctl start greetd.service
-```
 
 ### How it runs
 
-`photoframe-kms.service` runs as `kiosk` (groups `video render input`), with `PHOTOFRAME_SURFACE=drm`. It starts the same `/usr/local/bin/photoframe` launcher sway runs, so logs keep the `photoframe` tag:
+`photoframe-kms.service` runs as `kiosk` (groups `video render input`), with `PHOTOFRAME_SURFACE=drm`. It starts the [launcher](#the-launcher-and-its-environment) and logs keep the `photoframe` tag:
 
 ```bash
 sudo journalctl -t photoframe -b | grep -E "kms_|viewer presenting"
@@ -551,11 +586,7 @@ sudo journalctl -t photoframe -b | grep -E "kms_|viewer presenting"
 
 At startup the viewer logs `kms_probe` lines (cards, connectors, modes, the Vulkan plane) and `kms_target`. On every stop it logs the teardown steps in order: `kms_teardown: releasing swapchain`, then `destroying the wgpu instance`, then `closing the card`. The unit's `TimeoutStopSec=10s` bounds that teardown.
 
-| Knob (unit `Environment=`, via `sudo systemctl edit photoframe-kms.service`) | Default |
-| --- | --- |
-| `PHOTOFRAME_DRM_CONNECTOR` (e.g. `HDMI-A-1`; a name no card has is an error, not a wait) | first connected connector |
-| `PHOTOFRAME_DRM_MODE` (`WxH[@Hz]`, e.g. `3840x2160@60`; must exist) | `3840x2160@60` if the panel offers it (as the sway config pins), else the panel's preferred mode |
-| `PHOTOFRAME_PRESENT_MODE` | `fifo` |
+The variables the unit honours (`PHOTOFRAME_DRM_CONNECTOR`, `PHOTOFRAME_DRM_MODE`, `PHOTOFRAME_PRESENT_MODE` and the rest) are listed under [The launcher and its environment](#the-launcher-and-its-environment).
 
 ### When it stops
 
@@ -570,10 +601,56 @@ At startup the viewer logs `kms_probe` lines (cards, connectors, modes, the Vulk
 
 The restart waits for a display and picks its mode again. Because the check runs on idle wakes, an unplug is noticed at the next photo change, command or matting result.
 
-**Startup failures.** If the viewer cannot start, systemd retries five times in two minutes. The usual cause is that greetd/sway or plymouth still holds the display; the journal reports this as "not DRM master". It then leaves the unit failed and the screen dark. There is deliberately no automatic fallback to greetd. To recover, fix the cause, then:
+**Startup failures.** If the viewer cannot start, systemd retries five times in two minutes. The usual cause is that greetd/sway (a Wayland stack that is still running) or plymouth still holds the display; the journal reports this as "not DRM master". It then leaves the unit failed and the screen dark. There is deliberately no automatic fallback to greetd. To recover, fix the cause, then:
 
 ```bash
 sudo systemctl reset-failed photoframe-kms.service && sudo systemctl start photoframe-kms.service
 ```
 
-You can also switch back to the Wayland stack as above.
+You can also switch to the Wayland stack, as described under [Switching](#switching).
+
+---
+
+## Wayland stack (fallback)
+
+The Wayland stack boots straight into the Wayland app via greetd on Debian 13 (Trixie). greetd launches a dedicated Sway session on tty1 and runs the photo frame as the `kiosk` user, with no display manager shims or PAM templates. It was the only stack before v1.2 and is kept for one release in case a display or Mesa combination does not work on KMS. Choose it with `PHOTOFRAME_DISPLAY=wayland` ([Switching](#switching)).
+
+### Provisioning
+
+With the Wayland choice, `sudo ./setup/system/install.sh` additionally:
+
+- Installs the compositor packages: `greetd`, `seatd`, `sway`, `swaybg`, `swayidle`, `swaylock`, `wayland-protocols` (the base set already has `dbus` and `dbus-user-session`).
+- Adds the `kiosk` user to the `seat` group (required to access `/run/seatd.sock`).
+- Installs `/usr/local/bin/photoframe-session` and the sway config `/usr/local/share/photoframe/sway/config`.
+- Writes `/etc/greetd/config.toml` so tty1 runs `photoframe-session` as `kiosk`.
+- Enables `greetd` as `display-manager` and `seatd`, and disables `photoframe-kms.service`.
+
+### Expected state
+
+`/etc/greetd/config.toml`:
+
+```toml
+[terminal]
+vt = 1
+
+[default_session]
+command = "/usr/local/bin/photoframe-session"
+user = "kiosk"
+```
+
+- The wrapper launches Sway via `dbus-run-session`; `seatd.service` provides seat management (Sway connects to `/run/seatd.sock`).
+- Sway config: `/usr/local/share/photoframe/sway/config`.
+- `greetd` owns tty1; no autologin hacks.
+- Launch chain: `greetd → photoframe-session → dbus-run-session → sway → /usr/local/bin/photoframe`.
+
+### Verification
+
+```bash
+sudo systemctl status greetd
+sudo systemctl status display-manager
+sudo journalctl -u greetd -b
+```
+
+Expected: `greetd` reports `active (running)`; the unit command line includes `/usr/local/bin/photoframe-session`; the journal shows the kiosk session and slideshow startup.
+
+For deeper debug workflows (manual Sway launch, overlay tests, kiosk-shell environment export), see [developer/architecture.md › Debugging the kiosk stack](../developer/architecture.md#debugging-the-kiosk-stack).

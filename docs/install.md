@@ -13,7 +13,9 @@ Blank microSD → running slideshow. Follow the steps in order.
 ## Two accounts you'll meet
 
 - **Operator account** (e.g. `frame`) — your SSH login. You use this for maintenance, `sudo`, and `scp`.
-- **Service account** (`kiosk`) — runs greetd, Sway, the photo app, the Wi-Fi manager, and `buttond`. You'll need `sudo -u kiosk` for anything that touches the Wayland session (`powerctl`, `socat` to the control socket).
+- **Service account** (`kiosk`) — runs the photo app, the Wi-Fi manager, and `buttond`. You'll need `sudo -u kiosk` for anything that talks to the viewer's control socket (`powerctl`, `socat`).
+
+The photo app draws straight to the display through DRM/KMS: there is no desktop, compositor or login manager on the default install. A Wayland fallback (greetd and Sway) exists; see [Advanced › Display stacks](advanced.md#display-stacks).
 
 ---
 
@@ -90,12 +92,14 @@ cd photoframe
 
 The script uses `sudo` internally for system-level steps (your credential is still cached from Step 2 — no extra prompt). It:
 
-- Installs system packages (graphics stack, NetworkManager, Sway, greetd, build tools) and a system-wide Rust toolchain.
+- Installs system packages (graphics stack, NetworkManager, build tools) and a system-wide Rust toolchain. No compositor packages: the default install does not use one.
 - Stages a bootloader EEPROM update if one is available (older Pi 5 bootloaders reduce GPU memory bandwidth by ~35%; the staged update applies on the next reboot).
 - Builds the four crates (`photoframe`, `buttond`, `wifi-manager`, `config-model`).
 - Provisions the `kiosk` user, polkit rules, runtime directories, zram swap, and Pi 5 boot tweaks.
 - Installs binaries, unit files, and a starter config to `/opt/photoframe`.
-- Wires up greetd on tty1 and starts the kiosk session, Wi-Fi watcher, and `buttond`.
+- Enables `photoframe-kms.service` (the viewer on DRM/KMS) and starts it with the Wi-Fi watcher and `buttond`.
+
+To install the Sway/greetd fallback instead, set `PHOTOFRAME_DISPLAY=wayland` for the install: `PHOTOFRAME_DISPLAY=wayland ./setup/install-all.sh`. The choice is remembered; later runs keep it. See [Advanced › Display stacks](advanced.md#display-stacks).
 
 > **Build killed with `signal: 9`?** The Rust build ran out of memory. Cap parallelism: `CARGO_BUILD_JOBS=2 ./setup/install-all.sh`.
 
@@ -108,7 +112,7 @@ cd photoframe
 ./setup/tools/verify.sh
 ```
 
-You should see all checks green. Warnings appear yellow; errors red.
+You should see all checks green. Warnings appear yellow; errors red. One line names the display stack (`display stack: kms (photoframe-kms.service, default)`) and the check for the display reports the connector and mode the viewer drives.
 
 ### What got installed where
 
@@ -118,7 +122,7 @@ You should see all checks green. Warnings appear yellow; errors red.
 /etc/photoframe/       Active configuration (edit this with sudo)
 ```
 
-Re-running the installer updates `/opt/photoframe` without touching `/etc/photoframe/config.yaml` or your photo library.
+Re-running the installer updates `/opt/photoframe` (a frame installed before v1.2 on Sway moves to the KMS stack on its first v1.2 run; to stay on Sway see [Advanced › Switching](advanced.md#switching)) without touching `/etc/photoframe/config.yaml` or your photo library.
 
 The first install seeds `/etc/photoframe/config.yaml` from the repo's rich default `config.yaml`. To start from a different baseline (a minimal file, the showcase tour, or the everything kitchen-sink), copy one from [`examples/`](../examples/README.md) over it and restart the kiosk.
 
@@ -156,7 +160,7 @@ find /var/lib/photoframe/photos -type f | wc -l
 
 When everything is working, the display goes through these states in order:
 
-1. **Blank** (a few seconds) — greetd is launching Sway and handing off the compositor.
+1. **Blank** (a few seconds) — the viewer is starting and taking over the display. (On the Wayland fallback this is greetd launching Sway.)
 2. **Greeting card** ("Warming up your photo memories…", a few seconds) — the app is scanning the library and pre-decoding the first images.
 3. **Display goes dark — this is normal.** After the greeting the frame enters sleep state. The process is running, the GPU is idle, and it's waiting for either a wake command or a scheduled wake window.
 4. **Photos cycle** — once awake, the slideshow begins.
@@ -175,10 +179,10 @@ Photos should begin cycling within a few seconds.
 ### Confirm it's healthy
 
 ```bash
-sudo systemctl status greetd photoframe-wifi-manager buttond
+sudo systemctl status photoframe-kms photoframe-wifi-manager buttond
 ```
 
-All three should report `active (running)`. Live photo logs:
+All three should report `active (running)`. (On the Wayland fallback, check `greetd` in place of `photoframe-kms`.) Live photo logs:
 
 ```bash
 sudo journalctl -t photoframe -f
@@ -225,7 +229,8 @@ Keep direct LAN SSH as a fallback so you can recover if the remote agent goes do
 | --- | --- | --- |
 | Build killed with `signal: 9` | OOM during Rust build | `CARGO_BUILD_JOBS=2 ./setup/install-all.sh` |
 | `VERSION_CODENAME` is not `trixie` | Wrong OS image | Re-flash with Raspberry Pi OS (64-bit) Trixie |
-| `verify.sh` reports failures | Service didn't start | `sudo systemctl status greetd` and check `journalctl -u greetd -b` |
+| `verify.sh` reports failures | Service didn't start | `sudo systemctl status photoframe-kms` and check `journalctl -t photoframe -b` |
+| Screen stays dark and the journal says "not DRM master" | Something else (an old greetd/Sway session, a console) still holds the display | `sudo systemctl stop greetd; sudo systemctl restart photoframe-kms`; see [Advanced › Display stacks](advanced.md#display-stacks) |
 | Screen dark after greeting | Frame in sleep state — normal | Send the wake command from Step 5 |
 | Permission denied writing photos | New `kiosk` group not picked up by SSH session | `exit`, then SSH back in |
 
