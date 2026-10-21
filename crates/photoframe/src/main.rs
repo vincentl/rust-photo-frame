@@ -254,7 +254,7 @@ async fn main() -> Result<()> {
                 now_override,
                 seed_override,
                 metrics,
-                live_pairing.filter(|_| false), // P1 GUARD: the live loop pairs only in tests until the next commit
+                live_pairing,
             )
             .await
             .context("manager task failed")

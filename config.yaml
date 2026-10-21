@@ -206,6 +206,17 @@ playlist:
   # Ignored by weighted-random. Tune with `metrics: true` and grep the `gap`
   # field of photo_display_metric.
   min-spacing: 0.7
+  # Portrait pairing (opt-in): when the next two photos in the playlist are
+  # both portraits tall enough to fill the mat's height, show them side by side
+  # on one screen. The playlist order is unchanged; pairing only groups photos
+  # that were going to be shown one after the other. Needs a matting option
+  # with minimum-mat-percentage > 0 (pairs use only those). See
+  # docs/configure.md "Portrait pairing".
+  # pairing:
+  #   enabled: true
+  #   probability: 1.0      # chance two back-to-back pairable portraits share a screen
+  #   bar-ratio: 0.618      # center bar = this x the mat border (1/phi)
+  #   dwell-multiplier: 1.5 # a pair stays up dwell-ms x this (2 + transition/dwell is time-neutral)
 
 # Matting settings
 matting:

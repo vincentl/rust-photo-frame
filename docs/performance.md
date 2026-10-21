@@ -25,8 +25,19 @@ time a photo reaches the screen, for auditing the scheduler's randomness:
 
 ```
 journalctl -t photoframe -f | grep photo_display_metric
-# seq=412 inventory=1873 distinct=389 shown_count=1 gap=-1 weight=1.00 age_days=4.2 created_source=birthtime path=/var/lib/photoframe/photos/cloud/2021/img_0420.jpg
+# seq=412 inventory=1873 distinct=389 shown_count=1 gap=-1 weight=1.00 age_days=4.2 created_source=birthtime screen=301 pair=solo partner="" pairable=false sent=305 removed=0 path=/var/lib/photoframe/photos/cloud/2021/img_0420.jpg
 ```
+
+There is one line per photo shown, also when two photos share a screen
+([portrait pairing](configure.md#portrait-pairing)). `screen` counts screens,
+`pair` is `solo`, `first` or `second` (left or right of a pair), `partner` names
+the other photo of a pair, and `pairable` says whether the photo could pair on
+the current canvas. `sent` is the index of the screen as the manager sent it to
+the loader (a jump of more than one between consecutive screens means a screen
+was planned but never shown: a failed decode, a priority purge, a sleep), and
+`removed` counts photos removed from the library since the previous screen. The
+analyzer uses these to attribute a photo shown on two consecutive screens to its
+cause.
 
 `gap` is the number of displays since that photo was last shown (`-1` the
 first time it appears); under uniform random selection it averages the
@@ -47,12 +58,19 @@ journal spanning restarts or config changes can be segmented and interpreted:
 
 ```
 journalctl -t photoframe | grep -E 'playlist_scheduler|photo_display_metric'
-# playlist_scheduler order=weighted-spread refractory=0.700 min_spacing=0.700 new_multiplicity=3 half_life_secs=259200
+# playlist_scheduler order=weighted-spread refractory=0.700 min_spacing=0.700 new_multiplicity=3 half_life_secs=259200 pairing=false pairing_probability=1.0 pairing_bar_ratio=0.618 pairing_dwell_multiplier=1.5
 ```
 
 `refractory` is the effective minimum-gap fraction in play (`0.000` for
 `weighted-random`, which ignores `min_spacing`); `min_spacing` echoes the raw
-config value.
+config value. `pairing` says whether portrait pairing is active, followed by its
+configured parameters.
+
+With pairing enabled, three more lines appear without `metrics`:
+`pairing_header_pass` once at startup (photos read, the median header read
+time), `pairing_canvas` whenever the viewer reports a canvas (how many photos
+are pairable on it), and `pair_purged` when a prepared pair screen is dropped
+because one of its photos was re-queued with priority.
 
 Finally, the first time each photo reaches the screen it logs a one-shot
 `photo_first_shown` line carrying `latency_secs` — the precise gap between the

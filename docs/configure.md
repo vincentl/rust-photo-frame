@@ -162,9 +162,9 @@ If the frame launches to a black screen, check that `photo-library-path` points 
 
 - **Purpose:** Tunes how the weighting system surfaces new photos and how evenly the slideshow spreads them.
 - **Required?** Optional.
-- **Defaults:** three copies for new images, one-day half-life, `weighted-spread` order at `min-spacing` 0.7.
+- **Defaults:** three copies for new images, one-day half-life, `weighted-spread` order at `min-spacing` 0.7, portrait pairing off.
 
-See [Playlist weighting](#playlist-weighting) for the algorithm.
+See [Playlist weighting](#playlist-weighting) for the algorithm and [Portrait pairing](#portrait-pairing) for `playlist.pairing`.
 
 ### `photo-effect`
 
@@ -277,7 +277,7 @@ See [Matting configuration](#matting-configuration) for the full reference.
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `enabled` | `bool` | `false` | Activates showcase mode. Overrides `transition.active` and `matting.active` with auto-enumerated sequential lists. |
-| `caption` | `bool` | `true` | Show a text label (`transition: X    mat: Y`) in the bottom-left corner of each frame. |
+| `caption` | `bool` | `true` | Show a text label (`transition: X    mat: Y`) in the bottom-left corner of each frame; a pair screen adds ` · pair`. |
 | `dwell-ms` | `u64` | `4000` | Milliseconds each photo is held; overrides `global-photo-settings.dwell-ms` when showcase is on. |
 | `fixed-image-path` | path | — | Opt-in: include the `fixed-image` mat in the tour using this file as the backdrop. Omitting the path silently skips `fixed-image`. |
 
@@ -361,7 +361,7 @@ cargo run -p photoframe --release -- \
   --playlist-seed 1234
 ```
 
-Prints the **weight** (relative show frequency; equilibrium = 1.0) for each discovered photo and the first 32 scheduled entries. Run with the same seed twice to confirm deterministic output.
+Prints the **weight** (relative show frequency; equilibrium = 1.0) for each discovered photo and the first 32 scheduled entries. Run with the same seed twice to confirm deterministic output. With [portrait pairing](#portrait-pairing) enabled it prints screens instead (`--canvas WxH` sets the canvas pairability is judged on).
 
 ### Playlist knobs
 
@@ -371,6 +371,106 @@ Prints the **weight** (relative show frequency; equilibrium = 1.0) for each disc
 | `half-life`        | Optional  | `1 day`           | Positive duration string parsed by [`humantime`](https://docs.rs/humantime) | Controls how quickly the weight decays back to equilibrium; shorter half-lives return to normal faster.     |
 | `order`            | Optional  | `weighted-spread` | `weighted-spread`, `weighted-random`                                        | Scheduling algorithm. `weighted-spread` (default) adds a minimum-wait floor before a photo can recur; `weighted-random` is plain exponential-gap (i.i.d. random). Weighting (average frequency) is identical for both. |
 | `min-spacing`      | Optional  | `0.7`             | Float in `[0.0, 1.0)`                                                       | For `weighted-spread` only: minimum wait before a photo repeats, as a fraction of one library lap. `0.0` equals `weighted-random`; `0.5` waits half the library. Preserves show frequency; only spacing changes. Ignored by `weighted-random`. |
+| `pairing`          | Optional  | off               | Mapping; see [Portrait pairing](#portrait-pairing)                          | Shows two back-to-back portraits side by side on one screen. |
+
+## Portrait pairing
+
+On a landscape panel a portrait photo uses less than half the screen. With
+`playlist.pairing.enabled: true`, **when the playlist's next two photos are both
+pairable portraits, they share one screen**, side by side in one mat. Pairing is off by
+default.
+
+```yaml
+playlist:
+  pairing:
+    enabled: true
+    probability: 1.0        # chance that two back-to-back pairable portraits share a screen
+    bar-ratio: 0.618        # center bar = this × the mat border (1/φ)
+    dwell-multiplier: 1.5   # a pair stays up dwell-ms × this
+```
+
+**The playlist is unchanged.** Pairing never reorders, skips or adds a showing. It only
+groups two photos that were going to be shown one after the other anyway. So everything
+in [Playlist weighting](#playlist-weighting) carries over exactly: each photo's long-run
+share, the `min-spacing` floor (counted in photos shown), the spread, the prompt debut of
+new photos. The dry run checks the paired sequence against the unpaired one photo for
+photo. With pairing on, `photo_display_metric` still logs one line per photo shown, so
+`seq` and `gap` mean what they always meant.
+
+**No photo on two screens in a row.** Two back-to-back portraits are not paired when the
+second one was on the previous screen, or when the photo after the second is the first
+one again (in A, B, A, pairing A with B would put A on two screens in a row). With these
+two rules a photo appears on consecutive screens only where the unpaired playlist itself
+shows it twice in a row, which only a just-added photo's debut can do.
+
+**Which portraits pair.** A photo is *pairable* when both hold:
+
+- **Shape:** it is narrow enough for two to fit side by side with the center bar:
+  `width / height ≤ (A − g_max) / 2`, where `A` is the canvas aspect (width / height) and
+  `g_max` is the widest bar any of your mats produces, as a fraction of photo height
+  (`bar-ratio × m / (1 − 2m)` for the largest non-zero `minimum-mat-percentage` `m`). On
+  16:9 with the default bar ratio and a 6% mat the limit is 0.868: 4:5, 3:4, 2:3 and 9:16
+  portraits pair, squares never do. On 16:10 it is 0.779, which leaves out 4:5.
+- **Full height:** it is tall enough to fill the mat's height on its own:
+  `height × max-upscale-factor ≥ canvas height × (1 − 2 × m_min)`, with `m_min` the
+  smallest non-zero `minimum-mat-percentage`. On a 4K panel at `max-upscale-factor: 1.0`
+  and a 2% mat that is 2074 px: phone and camera photos qualify, while 1080×1350 and
+  1200×1600 exports always show alone.
+
+Together the two conditions guarantee that **each photo of a pair is drawn exactly as
+tall as it would be on its own**, for every mat a pair can get. Sizes come from each
+file's header (read once at startup, and as files arrive, only while pairing is enabled)
+and are corrected by every decode. Nothing pairs until the viewer has reported its canvas.
+
+**How often.** With `π` the share of showings that are pairable portraits and `p` =
+`probability`, about `2πp / (1 + πp)` of the pairable showings are paired: 57% for a
+library that is 40% portraits, at `p = 1`. That formula treats the playlist as
+independent draws, so the dry run and the analyzer print the measured share beside it; in
+small libraries the two rules above refuse a few pairs and the share is slightly lower.
+`probability` lowers the share without touching the order; at `0` the frame behaves
+exactly as with pairing off.
+
+**One mat, two windows.** The two photos share one mat. They are drawn at the same
+height and never cropped, left to right in playlist order, with a center bar of
+`bar-ratio` × the mat border between them (border = canvas height ×
+`minimum-mat-percentage`; the default 1/φ ≈ 0.618 echoes a framer's bridge between two
+openings, and gives an 80 px bar for a 6% mat on 4K). Blurred mats are drawn from the two
+photos side by side, studio and passe-partout bevels frame each window, and a drop shadow
+falls under both. `fill-when-fits` never applies to a pair. Because the bar is measured
+from the border, pairing needs mats that have one:
+
+- With pairing enabled, at least one matting option must have `minimum-mat-percentage`
+  above 0; otherwise the configuration is rejected.
+- A pair screen picks its mat only among the non-zero options. Random selection keeps
+  their relative weights; sequential selection takes the next non-zero entry, and the
+  zero-margin entries it skips count as used. Solo screens use every option as before.
+- So zero-margin mats are shown less often: under random selection they lose the share
+  of screens that are pairs (about 13% of screens for a library that is 40% portraits);
+  under sequential selection they lose every turn that lands on a pair screen.
+
+**Dwell.** A pair stays up `dwell-ms × dwell-multiplier`; a single photo `dwell-ms`. Each
+paired photo therefore gets `dwell-multiplier / 2` of a single photo's time: the default
+1.5 gives a pair longer than one photo but less than two. A multiplier of
+`2 + transition / dwell-ms` keeps the wall-clock time per photo as without pairing. Any
+smaller value shortens the trip through the library, so every photo comes round
+proportionally more often per hour; the shares stay the same.
+
+| Field              | Default | Accepted values | Effect |
+| ------------------ | ------- | --------------- | ------ |
+| `enabled`          | `false` | `true`, `false` | Opt-in switch. Requires a matting option with `minimum-mat-percentage` > 0. |
+| `probability`      | `1.0`   | `[0.0, 1.0]`    | Chance that two back-to-back pairable portraits share a screen. Never changes the playlist order. |
+| `bar-ratio`        | `0.618` | `[0.0, 1.0]`    | Center bar between the two photos, as a fraction of the mat border. |
+| `dwell-multiplier` | `1.5`   | `[0.5, 4.0]`    | A pair screen stays up `dwell-ms ×` this. |
+
+**Checking it.** With pairing enabled, `--playlist-dry-run N` reads every header, plans
+`N` photos as screens (pairs print as `a.jpg + b.jpg`), and ends with a `# pairing` block:
+pairable photos, `π`, screens vs photos, the measured paired share beside
+`2πp / (1 + πp)`, how often a photo meets the same partner again, and photos on
+consecutive screens (0 in the dry run, except where the unpaired playlist itself repeats
+a photo). Pass `--canvas WxH` (default `3840x2160`) for a panel other than 4K at
+`oversample` 1. On the frame, `metrics: true` adds the pairing fields to
+`photo_display_metric` (see [Performance → Measuring](performance.md#measuring)) and
+`developer/analyze-playlist-metrics.py` reports them in its `# PAIRING` section.
 
 ## Photo-effect configuration
 

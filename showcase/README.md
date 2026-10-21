@@ -60,8 +60,10 @@ The `studio` mat appears twice: plain `studio` (default `photo-average` swatch)
 and `studio (photo-cluster)`.
 
 When `fill-when-fits` triggers (a near-16:9 photo renders full-bleed), the mat
-label reads `full-bleed`. Copy the names you like directly into your real
-`config.yaml`.
+label reads `full-bleed`. If your config enables
+[portrait pairing](../docs/configure.md#portrait-pairing), a screen showing two
+portraits adds ` · pair` to the caption. Copy the names you like directly into
+your real `config.yaml`.
 
 ## The photo set
 
