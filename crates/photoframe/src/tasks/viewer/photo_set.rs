@@ -351,6 +351,30 @@ impl super::MatTask {
 }
 
 impl MatResult {
+    /// The worker's answer to a task that produced no canvas (an unreadable
+    /// or zero-size image): it carries only the task's photo count, which the
+    /// viewer gives back to `mat_inflight` before dropping it. A real result
+    /// always has a canvas of at least 1 x 1.
+    pub(super) fn acknowledgement(path: PathBuf, photos: usize) -> MatResult {
+        MatResult {
+            path,
+            canvas: super::ImagePlane {
+                width: 0,
+                height: 0,
+                pixels: Vec::new(),
+            },
+            priority: false,
+            partner: None,
+            windows: Vec::new(),
+            mat_kind: None,
+            photos,
+        }
+    }
+
+    pub(super) fn is_acknowledgement(&self) -> bool {
+        self.canvas.width == 0
+    }
+
     /// A screen is priority iff any member is (B2).
     pub(super) fn is_priority(&self) -> bool {
         self.priority || self.partner.as_ref().is_some_and(|p| p.priority)

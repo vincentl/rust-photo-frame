@@ -521,8 +521,7 @@ impl App {
     /// One matting result from the awaited channel; same bookkeeping as
     /// `drain_mat_results`.
     fn accept_mat_result(&mut self, result: MatResult) {
-        self.mat_inflight = self.mat_inflight.saturating_sub(result.photos);
-        super::photo_set::queue_result(&mut self.ready_results, result);
+        super::accept_mat_result(&mut self.mat_inflight, &mut self.ready_results, result);
     }
 }
 

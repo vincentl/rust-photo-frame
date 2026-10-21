@@ -469,9 +469,16 @@ impl MattingPipeline {
             // is the right call.
             std::thread::spawn(move || {
                 while let Ok(task) = task_rx.recv() {
-                    if let Some(result) = process_mat_task(task)
-                        && result_tx.blocking_send(result).is_err()
-                    {
+                    // Every task is answered, so the viewer gives back its
+                    // photos (`mat_inflight`) even when no canvas came of
+                    // it; otherwise a lost task would hold its place in the
+                    // preload for good.
+                    let (path, photos) = (task.image.path.clone(), task.photos());
+                    let result = process_mat_task(task).unwrap_or_else(|| {
+                        warn!(path = %path.display(), photos, "matting_produced_no_canvas");
+                        MatResult::acknowledgement(path, photos)
+                    });
+                    if result_tx.blocking_send(result).is_err() {
                         break;
                     }
                 }
@@ -1412,6 +1419,9 @@ fn accept_mat_result(
     result: MatResult,
 ) {
     *mat_inflight = mat_inflight.saturating_sub(result.photos);
+    if result.is_acknowledgement() {
+        return;
+    }
     photo_set::queue_result(ready_results, result);
 }
 
@@ -4598,7 +4608,9 @@ pub mod testkit {
         pub fn drain_pipeline(&mut self) {
             while let Some(result) = self.mat_pipeline.try_recv() {
                 self.mat_inflight = self.mat_inflight.saturating_sub(result.photos);
-                self.ready_results.push_back(result);
+                if !result.is_acknowledgement() {
+                    self.ready_results.push_back(result);
+                }
             }
         }
 
@@ -4879,6 +4891,97 @@ mod tests {
                 rx.photos(),
                 sent - held,
                 "the rest stays in the loader channel"
+            );
+        }
+    }
+
+    /// A matting task that produces no canvas still gives back its photos:
+    /// a pair whose members cannot be read must not hold two places in the
+    /// preload for good (with pairing at preload 3 that would stall it).
+    #[test]
+    fn a_failed_matting_task_gives_back_its_photos() {
+        let cfg: crate::config::Configuration = serde_yaml::from_str(
+            "photo-library-path: /photos\nmatting:\n  selection: fixed\n  active:\n    - kind: fixed-color\n      minimum-mat-percentage: 6\n",
+        )
+        .unwrap();
+        let cfg = cfg.validated().unwrap();
+        let rules = crate::tasks::manager::pairing::PairingRules::from_parts(
+            &crate::config::PairingOptions {
+                enabled: true,
+                ..Default::default()
+            },
+            &cfg.matting,
+            1.0,
+        );
+        // Pairable on 320 x 180; `readable: false` leaves no pixels behind
+        // the claimed size, which `decoded_member` cannot read.
+        let photo = |name: &str, w: u32, readable: bool| PreparedImageCpu {
+            path: name.into(),
+            width: w,
+            height: 160,
+            source_size: (w, 160),
+            pixels: if readable {
+                vec![200; (w * 160 * 4) as usize]
+            } else {
+                Vec::new()
+            },
+        };
+        // (first readable, partner readable) -> canvases expected.
+        for (first_ok, second_ok, canvases) in
+            [(false, false, 0), (true, false, 1), (false, true, 1)]
+        {
+            let pipeline = MattingPipeline::new(1, 4);
+            let mut wake = scenes::WakeScene::new(8_000, 8_000, TransitionConfig::default());
+            let (_tx, mut rx) = crate::tasks::photo_channel::photo_channel(4);
+            let mut deferred_images = VecDeque::from([QueuedImage {
+                image: photo("a.jpg", 120, first_ok),
+                priority: false,
+                partner: Some(LoadedPartner {
+                    prepared: photo("b.jpg", 96, second_ok),
+                    priority: false,
+                }),
+            }]);
+            let mut ready_results = VecDeque::new();
+            let mut mat_inflight = 0;
+            MattingBridge {
+                preload_count: 3,
+                mat_inflight: &mut mat_inflight,
+                deferred_images: &mut deferred_images,
+                ready_results: &mut ready_results,
+                from_loader: &mut rx,
+                surface: Some(SurfaceState::new(320, 180, 4096)),
+                matting: &cfg.matting,
+                oversample: 1.0,
+                max_upscale_factor: 1.0,
+                bar_ratio: 0.618,
+                pairing: rules,
+                mat_pipeline: &pipeline,
+            }
+            .queue_for_wake(&mut wake);
+            assert_eq!(mat_inflight, 2, "the pair went to matting as two photos");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut pipeline = pipeline;
+            while mat_inflight > 0 && Instant::now() < deadline {
+                match pipeline.try_recv() {
+                    Some(result) => {
+                        accept_mat_result(&mut mat_inflight, &mut ready_results, result)
+                    }
+                    None => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            assert_eq!(
+                mat_inflight, 0,
+                "first={first_ok} second={second_ok}: photos leaked"
+            );
+            assert_eq!(
+                ready_results.len(),
+                canvases,
+                "first={first_ok} second={second_ok}"
+            );
+            assert!(
+                ready_results
+                    .iter()
+                    .all(|r| r.partner.is_none() && r.canvas.width > 0)
             );
         }
     }
