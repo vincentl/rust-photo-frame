@@ -98,6 +98,31 @@
 //!   `CONNECTOR_SETTLE_AFTER_WAKE` after a wake: a sleeping sink may drop
 //!   hot-plug detect and take seconds to raise it again. State machine:
 //!   `presentation::PanelPower`.
+//!   **A wake never leaves the panel dark with nothing left to try**
+//!   (`presentation::wake_or_restart`). When the connector reads connected,
+//!   the mode the CRTC kept must still be on its list (a sink or EDID can
+//!   change while dark), a failed commit is retried once, and otherwise the
+//!   process exits: the restart picks a mode again and lights the panel with
+//!   Mesa's startup modeset. A restart while the panel is dark (a deploy, a
+//!   crash) starts in `display_wait`, which answers `display-power` while no
+//!   display reads connected: a wake forces a connector probe, and starts
+//!   on the display if that finds it.
+//!   What this does not prove (gate 2 checks by eye): `ACTIVE=1` re-runs
+//!   vc4's full CRTC and encoder enable, which is close to what an atomic
+//!   "DPMS on" does. At 4K60 the link also needs HDMI 2.0 scrambling set
+//!   over SCDC during that enable; a sink whose DDC is still asleep relies
+//!   on vc4's hot-plug `reset_link` when hot-plug detect returns. The
+//!   `ACTIVE` read-back and the vblank show the pixel pipeline runs, not
+//!   that the TV shows a picture.
+//!   Two cosmetic edges, left as they are:
+//!   * An off that arrives before Mesa's first present (a boot in sleep
+//!     hours) switches off the CRTC state the console left. The wake then
+//!     briefly shows the console's framebuffer, until Mesa's first present
+//!     runs its own modeset: a second HDMI retrain.
+//!   * The same early-process window: Mesa's flip-event thread starts only
+//!     when an acquire finds no idle image. Until then a frame queued
+//!     before the off can stay booked as flipping, so after the wake an
+//!     older frame may show for a moment until the image pool cycles.
 //! * **Shutdown.** Every exit (SIGTERM/SIGINT/stdin via the cancel token,
 //!   the control or matting channel closing, a fatal surface error) returns
 //!   through `run_kms`, which tears down in the only safe order: GPU objects
@@ -153,6 +178,7 @@ fn kms_request_from_env() -> anyhow::Result<KmsRequest> {
         mode,
         prefer_mode: Some(KIOSK_MODE),
         plane: None,
+        force_probe: false,
     })
 }
 
@@ -173,14 +199,21 @@ pub async fn run_kms(
     // 1. Card first, so this process (not v3dv's own open) holds master. A
     //    panel that is not connected yet (boot before the TV, receiver in
     //    standby) is waited for instead of exhausting the unit's StartLimit.
+    //    While waiting, display-power is answered (`display_wait.rs`): a
+    //    wake forces a probe, which may find a TV that dropped hot-plug
+    //    detect in standby; other commands are held and applied below.
     let mut first_attempt = true;
-    let target = drm_display::wait_for_display(
-        || {
+    let waited = super::display_wait::wait_answering(
+        |force_probe| {
             // Log the enumeration once, not on every poll.
             let mut lines = Vec::new();
+            let request = KmsRequest {
+                force_probe,
+                ..request.clone()
+            };
             let result =
                 drm_display::open_target(&request, &mut |line| lines.push(line.to_string()));
-            if first_attempt || result.is_ok() {
+            if first_attempt || force_probe || result.is_ok() {
                 for line in &lines {
                     info!("kms_probe: {line}");
                 }
@@ -188,8 +221,15 @@ pub async fn run_kms(
             first_attempt = false;
             result
         },
+        |target: &KmsTarget| {
+            (
+                target.connector_name.clone(),
+                format!("{}x{}@{}", target.width, target.height, target.vrefresh_hz),
+            )
+        },
         DISPLAY_POLL,
         &cancel,
+        &mut control,
         {
             let mut announced = false;
             move |err| {
@@ -201,9 +241,12 @@ pub async fn run_kms(
         },
     )
     .await?;
-    let Some(target) = target else {
-        info!("kms_viewer_cancelled before a display appeared");
-        return Ok(());
+    let (target, held) = match waited {
+        super::display_wait::Waited::Ready { target, held } => (target, held),
+        super::display_wait::Waited::Cancelled => {
+            info!("kms_viewer_cancelled before a display appeared");
+            return Ok(());
+        }
     };
     info!(target = %target.describe(), "kms_target");
     target.assert_master()?;
@@ -230,6 +273,10 @@ pub async fn run_kms(
     });
     app.install_gpu(parts, size, "kms");
     app.configure_fixed_surface(size);
+    // Commands that arrived while waiting for the display, in order.
+    for cmd in held {
+        app.handle_control_command(cmd);
+    }
     info!(
         width = size.width,
         height = size.height,
@@ -281,8 +328,8 @@ impl App {
     }
 
     /// A control command on KMS: display power needs the display; the rest
-    /// is `handle_control_command`. True when the command lit a dark panel.
-    fn handle_kms_command(&mut self, display: &mut KmsDisplay, cmd: ViewerCommand) -> bool {
+    /// is `handle_control_command`.
+    fn handle_kms_command(&mut self, display: &mut KmsDisplay, cmd: ViewerCommand) -> KmsCommand {
         match cmd {
             ViewerCommand::DisplayPower {
                 state,
@@ -290,33 +337,45 @@ impl App {
                 reply,
             } => {
                 let was_dark = self.presentation.power().is_dark();
-                let answer = self.kms_display_power(display, state, output.as_deref());
+                let (answer, restart) = self.kms_display_power(display, state, output.as_deref());
                 let _ = reply.send(answer);
-                was_dark && !self.presentation.power().is_dark()
+                if let Some(reason) = restart {
+                    KmsCommand::Restart(reason)
+                } else if was_dark && !self.presentation.power().is_dark() {
+                    KmsCommand::Lit
+                } else {
+                    KmsCommand::Done
+                }
             }
             cmd => {
                 self.handle_control_command(cmd);
-                false
+                KmsCommand::Done
             }
         }
     }
 
-    /// `display-power`: see "Display power" in the module docs.
+    /// `display-power`: see "Display power" in the module docs. The second
+    /// value, when set, ends the process for a restart (a wake that cannot
+    /// be committed; systemd's restart then lights the panel with the
+    /// startup modeset).
     fn kms_display_power(
         &mut self,
         display: &mut KmsDisplay,
         state: Option<config_model::control::PowerState>,
         output: Option<&str>,
-    ) -> config_model::control::Reply {
+    ) -> (config_model::control::Reply, Option<String>) {
         use config_model::control::{ErrorKind, PowerState, Reply};
         let connector = display.connector_name().to_string();
         if let Some(output) = output
             && output != "*"
             && !output.eq_ignore_ascii_case(&connector)
         {
-            return Reply::error(
-                ErrorKind::NotDriven,
-                format!("this viewer drives {connector}, not {output}"),
+            return (
+                Reply::error(
+                    ErrorKind::NotDriven,
+                    format!("this viewer drives {connector}, not {output}"),
+                ),
+                None,
             );
         }
         let dark = self.presentation.power().is_dark();
@@ -327,16 +386,48 @@ impl App {
                 self.drain_presents(display);
                 if let Err(err) = display.set_active(false) {
                     warn!(error = %err, "kms_power_off_failed");
-                    return Reply::error(ErrorKind::Failed, err.to_string());
+                    return (Reply::error(ErrorKind::Failed, err.to_string()), None);
                 }
                 self.presentation.power_mut().set_dark();
                 let active = display.crtc_active();
                 info!(%connector, crtc_active = ?active, "kms_power_off: panel off");
             }
             Some(PowerState::On) if dark => {
-                if let Err(err) = display.set_active(true) {
-                    warn!(error = %err, "kms_power_on_failed: panel stays off");
-                    return Reply::error(ErrorKind::Failed, err.to_string());
+                // The wake rule (`presentation::wake_or_restart`): check the
+                // mode the CRTC kept against the connector's list when it
+                // reads connected, retry a failed commit once, and otherwise
+                // restart, so a wake never leaves the panel dark with
+                // nothing left to try.
+                let mode_check = if display.is_connected() {
+                    display.check_unchanged(false)
+                } else {
+                    Ok(())
+                };
+                let woken = crate::tasks::viewer::presentation::wake_or_restart(
+                    mode_check,
+                    || display.set_active(true),
+                    |err| {
+                        warn!(error = %err, "kms_power_on_failed: retrying once");
+                        std::thread::sleep(Duration::from_millis(200));
+                    },
+                );
+                if let Err(failure) = woken {
+                    use crate::tasks::viewer::presentation::WakeFailure;
+                    let (what, err) = match failure {
+                        WakeFailure::ModeGone(err) => ("the kept mode is gone", err),
+                        WakeFailure::CommitFailed(err) => ("the wake commit failed twice", err),
+                    };
+                    let reason = format!(
+                        "kms_power_on: {what} ({err}); exiting for a restart, whose startup modeset lights the panel"
+                    );
+                    warn!("{reason}");
+                    return (
+                        Reply::error(
+                            ErrorKind::Failed,
+                            format!("{what} ({err}); the viewer restarts to light the panel"),
+                        ),
+                        Some(reason),
+                    );
                 }
                 self.presentation.power_mut().set_lit(Instant::now());
                 // The kernel's view after the modeset: ACTIVE, and a vblank
@@ -355,10 +446,13 @@ impl App {
         // Pause or resume the slideshow and ask for a frame of what is now
         // on screen.
         self.sync_presentation();
-        Reply::power(
-            self.presentation.power().reported(),
-            connector,
-            display.mode_label(),
+        (
+            Reply::power(
+                self.presentation.power().reported(),
+                connector,
+                display.mode_label(),
+            ),
+            None,
         )
     }
 
@@ -386,6 +480,15 @@ impl App {
         self.mat_inflight = self.mat_inflight.saturating_sub(1);
         super::photo_set::queue_result(&mut self.ready_results, result);
     }
+}
+
+/// What a control command did, for the loop.
+enum KmsCommand {
+    Done,
+    /// A dark panel was lit (start the hot-plug report).
+    Lit,
+    /// Exit for a restart, with the reason.
+    Restart(String),
 }
 
 /// Times transition frames on the display's vblanks; see "Pacing model"
@@ -490,11 +593,11 @@ async fn drive(
         // refresh of delay).
         loop {
             match control.try_recv() {
-                Ok(cmd) => {
-                    if app.handle_kms_command(&mut pacer.display, cmd) {
-                        wake_hpd_since = Some(Instant::now());
-                    }
-                }
+                Ok(cmd) => match app.handle_kms_command(&mut pacer.display, cmd) {
+                    KmsCommand::Done => {}
+                    KmsCommand::Lit => wake_hpd_since = Some(Instant::now()),
+                    KmsCommand::Restart(reason) => anyhow::bail!("{reason}"),
+                },
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     info!("kms_viewer_control_closed");
@@ -582,11 +685,11 @@ async fn drive(
                 info!("kms_viewer_cancelled");
                 return Ok(());
             }
-            WakeEvent::Command(cmd) => {
-                if app.handle_kms_command(&mut pacer.display, cmd) {
-                    wake_hpd_since = Some(Instant::now());
-                }
-            }
+            WakeEvent::Command(cmd) => match app.handle_kms_command(&mut pacer.display, cmd) {
+                KmsCommand::Done => {}
+                KmsCommand::Lit => wake_hpd_since = Some(Instant::now()),
+                KmsCommand::Restart(reason) => anyhow::bail!("{reason}"),
+            },
             WakeEvent::ControlClosed => {
                 info!("kms_viewer_control_closed");
                 return Ok(());

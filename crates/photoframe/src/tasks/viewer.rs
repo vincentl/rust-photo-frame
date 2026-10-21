@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod canvas_publish_tests;
+mod display_wait;
 mod image_ops;
 #[cfg(target_os = "linux")]
 mod kms;

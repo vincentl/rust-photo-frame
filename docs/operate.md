@@ -356,7 +356,8 @@ sudo journalctl -t photoframe -b | grep -E "kms_power_on|kms_surface_lost"
 systemctl show -p NRestarts photoframe-kms.service
 ```
 
-- `kms_power_on_failed`: the kernel refused the modeset and the panel stays off. Report the line.
+- `kms_power_on_failed: retrying once`, followed by `exiting for a restart`: the wake commit failed twice, or the TV no longer offers the mode in use. The viewer restarted to light the panel. Report the lines.
+- `kms_waiting_for_display … no display reads connected even after a forced probe`: the viewer restarted while the panel was off, and the TV dropped hot-plug detect in standby. Wake the TV with its remote or input button; the slideshow starts within a second.
 - `crtc_active=Ok(false)` or a `vblank=Err(…)`: the commit returned but the CRTC is not running. Report it.
 - `NRestarts` went up at the wake, or `kms_surface_lost` appears: a frame reached Mesa while the panel was off, which the design rules out. Report it, with the journal.
 - All lines are right but the TV still says "no signal": that is the vc4 link failure the full modeset is meant to prevent. Note the TV model and report it.

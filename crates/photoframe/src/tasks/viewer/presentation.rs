@@ -156,6 +156,38 @@ pub(super) fn layer_owes_frame(
     }
 }
 
+/// Why a wake could not light the panel in this process.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum WakeFailure<E> {
+    /// The connector reads connected but no longer lists the mode the CRTC
+    /// kept (the sink or its EDID changed while dark).
+    ModeGone(E),
+    /// The wake commit failed twice.
+    CommitFailed(E),
+}
+
+/// The wake rule (review N1): a wake must never leave the panel dark with
+/// nothing left to try. If the kept mode is gone, or the commit fails twice
+/// (once may be transient, such as a `flip_done` wait that timed out), the
+/// caller exits for a restart, and the startup path picks a mode again and
+/// lights the panel with Mesa's own modeset. `mode_check` is `Ok` when the
+/// connector does not read connected (a TV that dropped hot-plug detect
+/// raises it only once it sees a signal, so there is nothing to compare).
+pub(super) fn wake_or_restart<E>(
+    mode_check: Result<(), E>,
+    mut commit: impl FnMut() -> Result<(), E>,
+    mut before_retry: impl FnMut(&E),
+) -> Result<(), WakeFailure<E>> {
+    mode_check.map_err(WakeFailure::ModeGone)?;
+    match commit() {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            before_retry(&first);
+            commit().map_err(WakeFailure::CommitFailed)
+        }
+    }
+}
+
 /// The panel's power on DRM/KMS.
 ///
 /// ```text
@@ -341,6 +373,44 @@ mod tests {
         assert!(!layer_owes_frame(Layer::Scene(Sleep), greeting_owes, true));
         assert!(!layer_owes_frame(Layer::Scene(Wake), |_| true, true));
         assert!(!layer_owes_frame(Layer::Nothing, |_| true, true));
+    }
+
+    #[test]
+    fn a_wake_retries_once_then_restarts() {
+        // Commits that fail `fails` times, then succeed.
+        let run = |mode: Result<(), &'static str>, fails: usize| {
+            let mut calls = 0;
+            let mut retries = 0;
+            let outcome = wake_or_restart(
+                mode,
+                || {
+                    calls += 1;
+                    if calls <= fails { Err("EBUSY") } else { Ok(()) }
+                },
+                |_| retries += 1,
+            );
+            (outcome, calls, retries)
+        };
+        assert_eq!(run(Ok(()), 0), (Ok(()), 1, 0));
+        assert_eq!(
+            run(Ok(()), 1),
+            (Ok(()), 2, 1),
+            "one transient failure is retried"
+        );
+        assert_eq!(
+            run(Ok(()), 2),
+            (Err(WakeFailure::CommitFailed("EBUSY")), 2, 1),
+            "a second failure restarts instead of leaving the panel dark"
+        );
+        assert_eq!(
+            run(Err("no longer offers 3840x2160@60"), 0),
+            (
+                Err(WakeFailure::ModeGone("no longer offers 3840x2160@60")),
+                0,
+                0
+            ),
+            "a mode the sink no longer lists is not committed at all"
+        );
     }
 
     #[test]

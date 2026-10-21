@@ -562,6 +562,32 @@ mod tests {
         assert_eq!(plan_wake(both, now).deadline, Some(soon));
     }
 
+    /// Review F3 under T5: a Wi-Fi overlay frame that was not presented is
+    /// owed by the layer on screen, so the plan schedules a control step
+    /// within OVERLAY_RETRY (that step runs `App::rearm_wifi_overlay`,
+    /// which asks winit for the frame), without fast ticking. The covered
+    /// greeting's stale request does not count (F9).
+    #[test]
+    fn an_owed_overlay_frame_gets_a_step_within_the_retry_period() {
+        use super::super::ViewerModeKind;
+        use super::super::presentation::{Layer, layer_owes_frame};
+        let now = Instant::now();
+        let covered = |overlay_owes| WakeInputs {
+            slideshow_active: false,
+            overlay_pending: layer_owes_frame(
+                Layer::Overlay,
+                |kind| kind == ViewerModeKind::Greeting,
+                overlay_owes,
+            ),
+            ..resting(now)
+        };
+        let plan = plan_wake(covered(true), now);
+        assert_eq!(plan.deadline, Some(now + OVERLAY_RETRY));
+        assert!(!plan.tick_fast && !plan.redraw_now);
+        let plan = plan_wake(covered(false), now);
+        assert_eq!(plan.deadline, None, "nothing owed: sleep on events");
+    }
+
     #[test]
     fn a_lapsed_overlay_lease_ticks_now_instead_of_waiting() {
         let now = Instant::now();

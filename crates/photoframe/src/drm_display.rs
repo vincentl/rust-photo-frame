@@ -333,6 +333,10 @@ mod device {
         pub prefer_mode: Option<ModeRequest>,
         /// Vulkan display plane index.
         pub plane: Option<u32>,
+        /// Force a probe of each connector (the kernel re-reads hot-plug
+        /// detect and the EDID over DDC; tens of ms each) instead of reading
+        /// the cached state.
+        pub force_probe: bool,
     }
 
     /// The chosen card, connector and mode. Owns the card fd.
@@ -403,7 +407,7 @@ mod device {
             ));
             let mut infos = Vec::new();
             for handle in res.connectors() {
-                let Ok(info) = card.get_connector(*handle, false) else {
+                let Ok(info) = card.get_connector(*handle, request.force_probe) else {
                     continue;
                 };
                 trace(&format!(

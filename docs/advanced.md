@@ -495,9 +495,21 @@ The viewer switches the panel itself with atomic modesetting, which is how the k
 - From Mesa 25.3 on, a frame presented onto the dark CRTC is refused by the kernel, and Mesa then loses the swapchain, which would restart the viewer.
 - Up to 25.2, Mesa falls back to its own modeset and lights the panel behind the viewer's back.
 
-So nothing is presented while the panel is off, and the wake commit always comes before the next frame. If the commit itself fails, `display-power on` answers `failed` and the panel stays off (`kms_power_on_failed` in the journal).
+So nothing is presented while the panel is off, and the wake commit always comes before the next frame.
 
-**Known limit:** if the viewer restarts while the panel is off (a crash, or a deploy at night), the panel comes back on with the greeting, and buttond still believes the frame is asleep. That matches what a sway restart does on the Wayland stack. The next schedule boundary or button press puts it right.
+**A wake never leaves the panel dark with nothing left to try.** Before the wake commit, if the TV reads connected, the viewer checks that it still offers the mode in use (a different TV, or a changed EDID, while the panel was off). A failed commit is retried once. If the mode is gone or the retry fails too, `display-power on` answers `failed … the viewer restarts to light the panel`, and the viewer exits. The restart picks a mode again and lights the panel with the startup modeset.
+
+**Restarts while the panel is off.** The viewer starts by waiting for a connected display. A TV in standby may have dropped hot-plug detect and will only raise it when it sees a signal. So while waiting, the viewer still answers `display-power`:
+- **on** forces a probe of the connectors (a fresh read of hot-plug detect and the EDID) and starts on the display if that finds one;
+- otherwise the answer says no display is connected, and the TV has to be woken with its own remote or input button.
+
+Commands that arrive while waiting (sleep or wake, the Wi-Fi overlay) are applied as soon as the viewer runs.
+
+**What only your eyes can confirm.** The journal shows the display pipe running after a wake. Whether the TV shows a picture at 3840x2160@60 also depends on the HDMI link (at 4K60, the HDMI 2.0 scrambling the TV must accept). If a wake ever leaves the TV on "no signal", report it with the TV model.
+
+**Known limits:**
+- If the viewer restarts while the panel is off and the TV keeps hot-plug detect up, the panel comes back on with the greeting, while buttond still believes the frame is asleep. That matches what a sway restart does on the Wayland stack. The next schedule boundary or button press puts it right.
+- If the frame boots during sleep hours, switching the panel off can happen before the first frame is drawn. The next wake then briefly shows the boot console before the slideshow, and the TV re-syncs twice. This is cosmetic.
 
 ### Switching
 
