@@ -192,8 +192,11 @@ the Pi only do the install half:
 ssh-add
 
 # build release in the VM, stage, rsync to the Pi
-limactl shell photoframe -- developer/lima/stage-to-pi.sh pi@picframe.local
+limactl shell photoframe -- developer/lima/stage-to-pi.sh pi@192.168.1.50
 ```
+
+(Use the Pi's IP: the VM is behind NAT with no mDNS resolver, so `picframe.local` does not resolve from it.
+The script connects with `StrictHostKeyChecking=accept-new` because the VM's `known_hosts` is empty and there is no tty.)
 
 To build and stage without a Pi (no ssh agent, no rsync; the tree is left in
 `/var/cache/photoframe-build/stage-root/stage` in the VM):
@@ -209,7 +212,7 @@ shared libraries, and rsyncs the stage directory to `~/photoframe-stage/stage/` 
 It then prints the Pi-side command; or add `--deploy` to run it for you:
 
 ```bash
-limactl shell photoframe -- developer/lima/stage-to-pi.sh --deploy pi@picframe.local
+limactl shell photoframe -- developer/lima/stage-to-pi.sh --deploy pi@192.168.1.50
 ```
 
 The Pi-side command is:
@@ -219,8 +222,11 @@ cd ~/photoframe && STAGE_ROOT="$HOME/photoframe-stage" ./setup/application/deplo
 ```
 
 **How this interacts with `deploy.sh`.** `deploy.sh` gained one flag, `--skip-build`,
-which skips `10-build.sh` and `20-stage.sh` and fails early if
-`${STAGE_ROOT}/stage/bin/photoframe` is missing. Everything else runs as usual against the
+which skips `10-build.sh` and `20-stage.sh`. It refuses (before touching anything) unless `STAGE_ROOT`
+is set explicitly, `photoframe` and `wifi-manager` are staged, `${STAGE_ROOT}/stage/.stamp` exists
+(`stage-to-pi.sh` writes it last and ships it last, so an interrupted transfer has none), the stamp's
+git revision equals the Pi checkout's `HEAD` (override: `ALLOW_STAGE_REV_MISMATCH=1`), and the system
+stage has run (`kiosk` user, `seat` group). It prints the stamp and binary timestamps. Everything else runs as usual against the
 tree at `${STAGE_ROOT}/stage` (`STAGE_ROOT` already existed): `/opt/photoframe` is updated,
 `/etc/photoframe/config.yaml` and `/var/lib/photoframe/` are preserved, units are
 refreshed, services restart, postcheck runs. Without the flag nothing changes. (`20-stage.sh`
@@ -245,10 +251,13 @@ Things to know:
 
 ## KMS smoke test (experimental)
 
-`claude/viewer-on-kms-1eefd2` adds a compositor-free viewer path (`photoframe-kms.service`,
+On a checkout that has the KMS viewer (at the time of writing the branch `claude/viewer-on-kms-1eefd2`,
+not yet on main), `PHOTOFRAME_DISPLAY=kms` adds a compositor-free viewer path (`photoframe-kms.service`,
 `tasks/viewer/kms.rs`, `PHOTOFRAME_DISPLAY=kms`). The setup half of that is covered by
 the smoke test above like any other unit: `systemd-analyze verify` picks up
-`photoframe-kms.service` from `assets/systemd/` when that branch is checked out.
+`photoframe-kms.service` from `assets/systemd/` when that branch is checked out. With `PHOTOFRAME_DISPLAY=kms` the
+`greetd.service` strings `smoke-setup.sh` tolerates no longer apply (the unit that cannot start is
+`photoframe-kms.service`); read its output by hand then.
 
 The qemu variant exists only to find out whether the *runtime* half can be smoke-tested:
 
@@ -306,8 +315,8 @@ You cannot get this wrong by reading; run these once and look for three things.
 
 1. `limactl shell photoframe -- bash -c 'uname -m; echo $CARGO_TARGET_DIR $RUSTFLAGS; cargo --version'`
    prints `aarch64`, `/var/cache/photoframe-build/target -Ctarget-cpu=cortex-a76 -Ctarget-feature=-aes,-sha2` and a cargo version.
-   If the two variables are empty, `/etc/environment` did not reach the shell; use
-   `limactl shell photoframe -- bash -lc '<cmd>'` and fix the template.
+   Both reach `limactl shell` and `bash -lc` (checked). If they ever come up empty, the fix is a
+   `/etc/profile.d/photoframe.sh` written by the provision script; `bash -lc` alone would not help.
 2. `cargo test --workspace` and clippy finish in the VM, and your Mac `target/` is untouched
    (the Linux artifacts are under `/var/cache/photoframe-build/target`).
 3. `smoke-setup.sh` ends with **0 hard failures**, and the only expected-in-VM items are the greetd ones.
@@ -377,3 +386,14 @@ stage's directory modes and owners as they are.
 cache, debug cache removed, trimmed) and `photoframe-smoke` (the clone with the full kiosk setup
 installed, greetd restart-looping), both stopped. `limactl start photoframe` brings the base back;
 `limactl delete --force photoframe photoframe-smoke` removes them. The qemu VM was deleted.
+
+**Review follow-up (2026-10-21).** A second pass over the guide fixed: the pinned CPU now drops `aes`
+and `sha2`; `deploy.sh --skip-build` refuses stale, partial or unprovisioned installs (each refusal
+exercised in the smoke clone: no `STAGE_ROOT`, missing `wifi-manager`, no `.stamp`, revision mismatch,
+no `kiosk`/`seat`; then a full `--skip-build` install with `ALLOW_STAGE_REV_MISMATCH=1`, which ran
+05/30/35/45 and failed only at the expected greetd postcheck); the provision script no longer
+re-runs apt on every boot (a fresh VM from the template: 1 m 07 s, restart 10 s, no second apt run);
+`smoke-setup.sh` refuses the base VM; `stage-to-pi.sh` clears stale release binaries, stamps the stage
+and no longer lets `grep -q` hide a missing library. Refuted by measurement: zram works on the cloud
+kernel (30-zram completed, zram swap active), and wifi-manager stayed active in both smoke runs.
+

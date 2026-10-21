@@ -29,6 +29,11 @@ pass()    { printf '[smoke] ok:   %s\n' "$*"; }
 expected() { printf '[smoke] EXPECTED IN VM: %s\n' "$*"; expected_failures=$((expected_failures + 1)); }
 
 lima_require_vm
+# The smoke test reconfigures the machine (greetd, zram, journald, masked getty);
+# keep the base VM clean for tests and builds.
+if [[ "$(hostname)" == "lima-photoframe" && "${SMOKE_ALLOW_MAIN_VM:-0}" != 1 ]]; then
+    lima_die "this is the base VM; run the smoke test in a clone (limactl clone --start photoframe photoframe-smoke) or set SMOKE_ALLOW_MAIN_VM=1"
+fi
 sudo -n true 2>/dev/null || lima_die "passwordless sudo is required"
 systemctl is-system-running --wait >/dev/null 2>&1 || true
 [[ -d /run/systemd/system ]] || lima_die "systemd is not PID 1 in this guest"

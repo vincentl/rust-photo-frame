@@ -3,10 +3,11 @@
 #
 #   limactl start --name=photoframe-qemu developer/lima/photoframe-qemu.yaml
 #
-# Not verified. Nothing in developer/lima.md depends on it. It is slower than
-# vz, and even with a DRM node the software Vulkan driver (lavapipe) has no
-# VK_KHR_display, so the viewer's KMS present path will most likely refuse to
-# start rather than run. See "KMS smoke test (experimental)" in
+# Tried 2026-10-19: boots, but Debian's cloud kernel has no DRM so there is no
+# /dev/dri, and the only Vulkan device (lavapipe) has no VK_EXT_physical_device_drm.
+# Not a KMS test; kept only as a record. Nothing in developer/lima.md depends on it.
+# (Original expectation: even with a DRM node the viewer's KMS present path would
+# most likely refuse to start rather than run.) See "KMS smoke test (experimental)" in
 # developer/lima.md for what to check and how to read the result.
 minimumLimaVersion: 2.0.0
 
