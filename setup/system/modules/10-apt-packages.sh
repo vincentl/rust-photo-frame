@@ -66,6 +66,24 @@ log "Display stack ${DISPLAY_CHOICE}: ${STACK_PACKAGE_COUNT} stack-specific pack
 log "Updating apt package index"
 apt-get update
 
+# Debian's greetd package enables and starts itself on install. On a frame
+# being switched from KMS to the wayland fallback that would stop the running
+# viewer (photoframe-kms Conflicts=greetd.service) and put greetd's default
+# greeter on tty1 until 50-greetd.sh and 60-systemd.sh have run, minutes
+# later. Ask invoke-rc.d not to start greetd during this install; the stack is
+# started once at the end of install.sh. Skipped when a policy-rc.d already
+# exists, and removed again on exit.
+POLICY_RC="${POLICY_RC_PATH:-/usr/sbin/policy-rc.d}"
+POLICY_RC_INSTALLED=0
+if [[ "${DISPLAY_CHOICE}" == "wayland" && ! -e "${POLICY_RC}" && -d "$(dirname "${POLICY_RC}")" ]]; then
+    if printf '#!/bin/sh\n[ "$1" = greetd ] && exit 101\nexit 0\n' >"${POLICY_RC}" && chmod 0755 "${POLICY_RC}"; then
+        POLICY_RC_INSTALLED=1
+        trap 'rm -f "${POLICY_RC}"' EXIT
+    else
+        log "Could not write ${POLICY_RC}; greetd may start before it is configured"
+    fi
+fi
+
 log "Installing required packages: ${PACKAGES[*]}"
 DEBIAN_FRONTEND=noninteractive apt-get -y --no-install-recommends install "${PACKAGES[@]}"
 
