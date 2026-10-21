@@ -1,9 +1,9 @@
-# Managed by setup (setup/lib/display-stack.sh). Opt-in alternative to the
-# greetd -> sway kiosk session: the viewer presents straight to DRM/KMS with
-# no compositor. Enabled only when PHOTOFRAME_DISPLAY=kms was chosen at setup;
-# otherwise installed but disabled. The viewer draws the Wi-Fi recovery
-# overlay itself and owns display power (powerctl reaches it through the
-# control socket), so nothing here needs sway.
+# Managed by setup (setup/lib/display-stack.sh). The default display stack:
+# the viewer presents straight to DRM/KMS with no compositor. Enabled unless
+# PHOTOFRAME_DISPLAY=wayland was chosen at setup, which selects the greetd ->
+# sway fallback instead (and disables this unit). The viewer draws the Wi-Fi
+# recovery overlay itself and owns display power (powerctl reaches it through
+# the control socket), so nothing here needs sway.
 [Unit]
 Description=Photo frame viewer on DRM/KMS (no compositor)
 # plymouth (when installed) holds DRM master until it quits; display
@@ -30,8 +30,10 @@ Group=kiosk
 SupplementaryGroups=video render input
 WorkingDirectory=/var/lib/photoframe
 Environment=PHOTOFRAME_SURFACE=drm
-# The same launcher sway runs: env knobs stay in one place, and output still
-# goes to the journal tagged "photoframe" (journalctl -t photoframe).
+# The same launcher the sway fallback runs: env knobs stay in one place
+# (docs/advanced.md, "The launcher and its environment"), and output goes to
+# the journal tagged "photoframe" (journalctl -t photoframe). Add knobs with
+# `systemctl edit photoframe-kms.service` (Environment=PHOTOFRAME_...=...).
 ExecStart=/usr/local/bin/photoframe /etc/photoframe/config.yaml
 # Any exit restarts the viewer, including the deliberate ones: a display
 # mode/connector change or a lost swapchain ends the process (v1.2 does not
