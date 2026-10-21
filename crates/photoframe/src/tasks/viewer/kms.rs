@@ -232,20 +232,6 @@ fn kms_teardown(app: App, pacer: VblankPacer, instance: wgpu::Instance, target: 
 }
 
 impl App {
-    /// KMS: apply the surface configuration once and mark it ready. The mode
-    /// never changes for this process (a change is a restart, see the
-    /// module docs), so there is no configure handshake to wait for.
-    fn configure_fixed_surface(&mut self, size: PhysicalSize<u32>) {
-        if let Some(gpu) = self.gpu.as_ref() {
-            gpu.surface.configure(&gpu.device, &gpu.config);
-        }
-        let _ = self.surface_gate.set_ready(true);
-        self.surface_gate.awaiting = false;
-        self.surface_configured = true;
-        self.configured_surface_size = Some((size.width, size.height));
-        self.publish_canvas();
-    }
-
     /// Take the KMS redraw request (set by `SceneContext::request_redraw`).
     fn take_kms_redraw_request(&self) -> bool {
         match &self.output {
@@ -265,11 +251,7 @@ impl App {
     /// `drain_mat_results`.
     fn accept_mat_result(&mut self, result: MatResult) {
         self.mat_inflight = self.mat_inflight.saturating_sub(1);
-        if result.priority {
-            self.ready_results
-                .retain(|existing| existing.path != result.path);
-        }
-        self.ready_results.push_back(result);
+        super::photo_set::queue_result(&mut self.ready_results, result);
     }
 }
 
@@ -467,12 +449,17 @@ async fn drive(
             WakeEvent::MatClosed => {
                 anyhow::bail!("all matting workers exited; no photo can be prepared")
             }
-            WakeEvent::Photo(PhotoLoaded { prepared, priority }) => {
+            WakeEvent::Photo(PhotoLoaded {
+                prepared,
+                priority,
+                partner,
+            }) => {
                 // queue_for_wake (next process_tick) submits deferred
                 // photos before reading the loader again.
                 app.deferred_images.push_back(QueuedImage {
                     image: prepared,
                     priority,
+                    partner,
                 });
             }
             WakeEvent::LoaderClosed => {

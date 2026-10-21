@@ -1980,3 +1980,187 @@ fn showcase_tour_visits_every_transition_and_mat_pair() {
         );
     }
 }
+
+// ── Portrait pairing (`playlist.pairing`) ───────────────────────────────────
+
+fn pairing_config(pairing: &str, mats: &str) -> anyhow::Result<Configuration> {
+    let yaml = format!(
+        "photo-library-path: /photos\nplaylist:\n  pairing:\n{pairing}\nmatting:\n  selection: random\n  active:\n{mats}"
+    );
+    serde_yaml::from_str::<Configuration>(&yaml)?.validated()
+}
+
+#[test]
+fn pairing_defaults_to_off() {
+    let cfg: Configuration = serde_yaml::from_str("photo-library-path: /photos\n").unwrap();
+    let cfg = cfg.validated().unwrap();
+    let pairing = cfg.playlist.pairing;
+    assert!(!pairing.enabled);
+    assert_eq!(pairing.probability, 1.0);
+    assert_eq!(pairing.bar_ratio, 0.618);
+    assert_eq!(pairing.dwell_multiplier, 1.5);
+}
+
+#[test]
+fn pairing_round_trips_through_the_configuration() {
+    let cfg = pairing_config(
+        "    enabled: true\n    probability: 0.5\n    bar-ratio: 0.4\n    dwell-multiplier: 2.25\n",
+        "    - kind: fixed-color\n      minimum-mat-percentage: 5\n",
+    )
+    .expect("valid");
+    let pairing = cfg.playlist.pairing;
+    assert!(pairing.enabled);
+    assert_eq!(pairing.probability, 0.5);
+    assert_eq!(pairing.bar_ratio, 0.4);
+    assert_eq!(pairing.dwell_multiplier, 2.25);
+}
+
+#[test]
+fn pairing_out_of_range_values_are_rejected_naming_the_key() {
+    let mat = "    - kind: fixed-color\n      minimum-mat-percentage: 5\n";
+    for (line, key) in [
+        ("    probability: 2.0\n", "playlist.pairing.probability"),
+        ("    bar-ratio: 1.5\n", "playlist.pairing.bar-ratio"),
+        (
+            "    dwell-multiplier: 0.1\n",
+            "playlist.pairing.dwell-multiplier",
+        ),
+    ] {
+        let err = pairing_config(&format!("    enabled: true\n{line}"), mat)
+            .expect_err(line)
+            .to_string();
+        assert!(err.contains(key), "{line}: {err}");
+    }
+}
+
+#[test]
+fn pairing_enabled_requires_a_nonzero_mat() {
+    let err = pairing_config(
+        "    enabled: true\n",
+        "    - kind: fixed-color\n      minimum-mat-percentage: 0\n    - kind: blur\n",
+    )
+    .expect_err("only zero-margin mats")
+    .to_string();
+    assert!(err.contains("minimum-mat-percentage > 0"), "{err}");
+
+    // One zero-margin and one non-zero mat: accepted.
+    pairing_config(
+        "    enabled: true\n",
+        "    - kind: fixed-color\n      minimum-mat-percentage: 0\n    - kind: blur\n      minimum-mat-percentage: 3.5\n",
+    )
+    .expect("one non-zero mat suffices");
+
+    // Disabled: zero-margin mats alone stay valid.
+    pairing_config(
+        "    enabled: false\n",
+        "    - kind: fixed-color\n      minimum-mat-percentage: 0\n",
+    )
+    .expect("pairing off");
+}
+
+// ── Mats for pair screens (`select_active_nonzero`) ─────────────────────────
+
+/// Entries: a zero-margin fixed-color palette of three (three slots), a 3.5%
+/// blur, and a 6% studio listed twice (weight 2).
+const MIXED_MATS: &str = r#"
+photo-library-path: "/photos"
+matting:
+  selection: SELECTION
+  active:
+    - kind: fixed-color
+      minimum-mat-percentage: 0
+      colors: [[0, 0, 0], [10, 10, 10], [20, 20, 20]]
+    - kind: blur
+      minimum-mat-percentage: 3.5
+    - kind: studio
+      minimum-mat-percentage: 6
+    - kind: studio
+      minimum-mat-percentage: 6
+"#;
+
+fn mixed_mats(selection: &str) -> Configuration {
+    let cfg: Configuration =
+        serde_yaml::from_str(&MIXED_MATS.replace("SELECTION", selection)).unwrap();
+    cfg.validated().unwrap()
+}
+
+#[test]
+fn pair_screens_never_get_a_zero_margin_mat_random() {
+    let cfg = mixed_mats("random");
+    let mut rng = StdRng::seed_from_u64(17);
+    let mut counts = std::collections::HashMap::<usize, usize>::new();
+    let draws = 30_000;
+    for _ in 0..draws {
+        let selected = cfg
+            .matting
+            .select_active_nonzero(&mut rng)
+            .expect("non-zero");
+        assert!(selected.option.minimum_mat_percentage > 0.0);
+        *counts.entry(selected.entry.index).or_default() += 1;
+    }
+    // The configured distribution conditioned on a non-zero mat: the three
+    // non-zero entries equally (blur 1/3, studio 2/3 over its two slots).
+    let nonzero: Vec<usize> = cfg
+        .matting
+        .iter_selected()
+        .filter(|s| s.option.minimum_mat_percentage > 0.0)
+        .map(|s| s.entry.index)
+        .collect();
+    assert_eq!(nonzero.len(), 3);
+    let expected = draws as f64 / nonzero.len() as f64;
+    let chi2: f64 = nonzero
+        .iter()
+        .map(|i| {
+            let observed = *counts.get(i).unwrap_or(&0) as f64;
+            (observed - expected).powi(2) / expected
+        })
+        .sum();
+    // 2 degrees of freedom: chi-square 0.999 quantile is 13.8.
+    assert!(chi2 < 13.8, "chi2 {chi2:.2}: {counts:?}");
+}
+
+#[test]
+fn pair_screens_never_get_a_zero_margin_mat_sequential() {
+    let cfg = mixed_mats("sequential");
+    let mut rng = StdRng::seed_from_u64(1);
+    // Sequential: the next non-zero entry in order; skipped zero-margin
+    // entries count as consumed.
+    let picks: Vec<usize> = (0..6)
+        .map(|_| {
+            cfg.matting
+                .select_active_nonzero(&mut rng)
+                .unwrap()
+                .entry
+                .index
+        })
+        .collect();
+    let blur = cfg
+        .matting
+        .iter_selected()
+        .find(|s| s.entry.kind == MattingKind::Blur)
+        .unwrap()
+        .entry
+        .index;
+    assert_eq!(picks, [blur, blur + 1, blur + 2, blur, blur + 1, blur + 2]);
+    // A solo screen after them continues from where the pairs left the
+    // shared selector: the zero-margin slots were consumed.
+    let solo = cfg.matting.select_active(&mut rng).entry.index;
+    assert_eq!(solo, 0);
+}
+
+#[test]
+fn solo_screens_keep_every_mat() {
+    let cfg = mixed_mats("random");
+    let mut rng = StdRng::seed_from_u64(3);
+    let zero_margin = (0..3_000)
+        .filter(|_| {
+            cfg.matting
+                .select_active(&mut rng)
+                .option
+                .minimum_mat_percentage
+                == 0.0
+        })
+        .count();
+    // Three of six slots are zero-margin.
+    assert!((1_300..1_700).contains(&zero_margin), "{zero_margin}");
+}

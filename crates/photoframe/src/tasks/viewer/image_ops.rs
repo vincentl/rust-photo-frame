@@ -3,6 +3,7 @@
 //! These functions operate only on CPU-side image data and plain numeric
 //! types, so they are easy to unit-test without a GPU or display.
 
+use super::photo_set::Window;
 use crate::config::GradientDirection;
 use image::{Rgba, RgbaImage, imageops};
 
@@ -152,15 +153,83 @@ pub(super) fn resize_to_fit_with_margin(
 
 // ── Studio mat rendering ─────────────────────────────────────────────────────
 
+/// Window bounds as the studio renderer tests them, in pixel-center space.
+struct StudioWindow<'a> {
+    x: f32,
+    y: f32,
+    max_x: f32,
+    max_y: f32,
+    w: u32,
+    h: u32,
+    photo: &'a RgbaImage,
+}
+
+impl StudioWindow<'_> {
+    fn contains(&self, px: f32, py: f32) -> bool {
+        px >= self.x && px < self.max_x && py >= self.y && py < self.max_y
+    }
+
+    /// Distance outside the window along each axis (0 inside the span).
+    fn outside(&self, px: f32, py: f32) -> (f32, f32) {
+        let dx = if px < self.x {
+            self.x - px
+        } else if px >= self.max_x {
+            px - self.max_x
+        } else {
+            0.0
+        };
+        let dy = if py < self.y {
+            self.y - py
+        } else if py >= self.max_y {
+            py - self.max_y
+        } else {
+            0.0
+        };
+        (dx, dy)
+    }
+}
+
+/// The window nearest to `(px, py)` by Chebyshev distance, with the
+/// per-axis distances outside it (the first window wins a tie).
+fn nearest_window<'w, 'a>(
+    windows: &'w [StudioWindow<'a>],
+    px: f32,
+    py: f32,
+) -> Option<(&'w StudioWindow<'a>, (f32, f32))> {
+    windows
+        .iter()
+        .map(|win| (win, win.outside(px, py)))
+        .reduce(|best, cand| {
+            if cand.1.0.max(cand.1.1) < best.1.0.max(best.1.1) {
+                cand
+            } else {
+                best
+            }
+        })
+}
+
+/// The narrowest gap between horizontally adjacent windows (the center bar
+/// of a pair); `None` for a single window.
+fn narrowest_bar(windows: &[(Window, &RgbaImage)]) -> Option<u32> {
+    let mut spans: Vec<(u32, u32)> = windows.iter().map(|(w, _)| (w.x, w.x + w.w)).collect();
+    spans.sort_unstable();
+    spans
+        .windows(2)
+        .map(|pair| pair[1].0.saturating_sub(pair[0].1))
+        .min()
+}
+
+/// Studio (and passe-partout) mat around one or more windows. Inside a window
+/// the photo is bilinear-sampled from that window's resized pixels; outside,
+/// the bevel is shaded relative to the nearest window (Chebyshev distance)
+/// and the woven mat fills the rest. The bevel is clamped per side against
+/// the canvas edges and, between two windows, to half the bar (R5), so the
+/// two bevels never meet.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_studio_mat(
     canvas_w: u32,
     canvas_h: u32,
-    photo_x: u32,
-    photo_y: u32,
-    photo_w: u32,
-    photo_h: u32,
-    photo: &RgbaImage,
+    windows: &[(Window, &RgbaImage)],
     mat_color: [f32; 3],
     bevel_width_px: f32,
     bevel_color: [u8; 3],
@@ -169,20 +238,47 @@ pub(super) fn render_studio_mat(
     weft_period_px: f32,
 ) -> RgbaImage {
     let mut bevel_px = bevel_width_px.max(0.0);
-    let max_border = photo_x
-        .min(photo_y)
-        .min(canvas_w.saturating_sub(photo_x.saturating_add(photo_w)))
-        .min(canvas_h.saturating_sub(photo_y.saturating_add(photo_h))) as f32;
+    let x0 = windows.iter().map(|(w, _)| w.x).min().unwrap_or(0);
+    let y0 = windows.iter().map(|(w, _)| w.y).min().unwrap_or(0);
+    let x1 = windows
+        .iter()
+        .map(|(w, _)| w.x.saturating_add(w.w))
+        .max()
+        .unwrap_or(0);
+    let y1 = windows
+        .iter()
+        .map(|(w, _)| w.y.saturating_add(w.h))
+        .max()
+        .unwrap_or(0);
+    let mut max_border = x0
+        .min(y0)
+        .min(canvas_w.saturating_sub(x1))
+        .min(canvas_h.saturating_sub(y1)) as f32;
+    if let Some(bar) = narrowest_bar(windows) {
+        max_border = max_border.min(bar as f32 / 2.0);
+    }
     if bevel_px > 0.0 {
         bevel_px = bevel_px.min(max_border.max(0.0));
     } else {
         bevel_px = 0.0;
     }
 
-    let window_x = photo_x as f32;
-    let window_y = photo_y as f32;
-    let window_max_x = window_x + photo_w.max(1) as f32;
-    let window_max_y = window_y + photo_h.max(1) as f32;
+    let studio_windows: Vec<StudioWindow<'_>> = windows
+        .iter()
+        .map(|(win, photo)| {
+            let x = win.x as f32;
+            let y = win.y as f32;
+            StudioWindow {
+                x,
+                y,
+                max_x: x + win.w.max(1) as f32,
+                max_y: y + win.h.max(1) as f32,
+                w: win.w,
+                h: win.h,
+                photo,
+            }
+        })
+        .collect();
 
     let bevel_rgb_f32 = [
         bevel_color[0] as f32 / 255.0,
@@ -201,23 +297,21 @@ pub(super) fn render_studio_mat(
         let px = x as f32 + 0.5;
         let py = y as f32 + 0.5;
 
-        let inside_window =
-            px >= window_x && px < window_max_x && py >= window_y && py < window_max_y;
-
-        if inside_window {
+        if let Some(win) = studio_windows.iter().find(|win| win.contains(px, py)) {
+            let (photo_w, photo_h) = (win.w, win.h);
             let u = if photo_w == 0 {
                 0.0
             } else {
-                ((px - window_x) / photo_w as f32).clamp(0.0, 1.0)
+                ((px - win.x) / photo_w as f32).clamp(0.0, 1.0)
             };
             let v = if photo_h == 0 {
                 0.0
             } else {
-                ((py - window_y) / photo_h as f32).clamp(0.0, 1.0)
+                ((py - win.y) / photo_h as f32).clamp(0.0, 1.0)
             };
             let sample_x = (u * (photo_w.max(1) as f32 - 1.0)).clamp(0.0, photo_w as f32 - 1.0);
             let sample_y = (v * (photo_h.max(1) as f32 - 1.0)).clamp(0.0, photo_h as f32 - 1.0);
-            let sample = sample_bilinear(photo, sample_x, sample_y);
+            let sample = sample_bilinear(win.photo, sample_x, sample_y);
 
             for c in 0..3 {
                 pixel[c] = srgb_u8(sample[c]);
@@ -226,22 +320,12 @@ pub(super) fn render_studio_mat(
             continue;
         }
 
-        if bevel_px > 0.0 {
-            let dx = if px < window_x {
-                window_x - px
-            } else if px >= window_max_x {
-                px - window_max_x
-            } else {
-                0.0
-            };
-            let dy = if py < window_y {
-                window_y - py
-            } else if py >= window_max_y {
-                py - window_max_y
-            } else {
-                0.0
-            };
-
+        // Shade the bevel relative to the nearest window (Chebyshev distance).
+        if bevel_px > 0.0
+            && let Some((win, (dx, dy))) = nearest_window(&studio_windows, px, py)
+        {
+            let (window_x, window_y, window_max_x, window_max_y) =
+                (win.x, win.y, win.max_x, win.max_y);
             if dx < bevel_px && dy < bevel_px {
                 let max_offset = dx.max(dy).clamp(0.0, bevel_px);
                 let depth = if bevel_px <= f32::EPSILON {
@@ -612,12 +696,12 @@ pub(super) struct DropShadowParams {
     pub offset_px: [i32; 2],
 }
 
+/// A soft shadow under one or more windows: per pixel the maximum alpha over
+/// the windows, which is the shadow of their union (one shadow, none in the
+/// bar beyond what the union casts).
 pub(super) fn render_drop_shadow(
     background: &mut RgbaImage,
-    photo_x: u32,
-    photo_y: u32,
-    photo_w: u32,
-    photo_h: u32,
+    windows: &[Window],
     shadow: DropShadowParams,
 ) {
     let shadow_opacity = shadow.opacity.clamp(0.0, 1.0);
@@ -627,19 +711,15 @@ pub(super) fn render_drop_shadow(
         shadow.color[2] as f32 / 255.0,
     ];
 
-    let shadow_x = photo_x as i32 + shadow.offset_px[0];
-    let shadow_y = photo_y as i32 + shadow.offset_px[1];
     let blur_r = shadow.blur_px.max(0.0);
-
-    for (x, y, pixel) in background.enumerate_pixels_mut() {
-        let px = x as f32 + 0.5;
-        let py = y as f32 + 0.5;
-
+    let window_alpha = |win: &Window, px: f32, py: f32| -> f32 {
+        let shadow_x = win.x as i32 + shadow.offset_px[0];
+        let shadow_y = win.y as i32 + shadow.offset_px[1];
         // Distance from the shadow rect (expanded by blur radius).
         let sx0 = shadow_x as f32;
         let sy0 = shadow_y as f32;
-        let sx1 = sx0 + photo_w as f32;
-        let sy1 = sy0 + photo_h as f32;
+        let sx1 = sx0 + win.w as f32;
+        let sy1 = sy0 + win.h as f32;
 
         let ddx = if px < sx0 {
             sx0 - px
@@ -657,11 +737,21 @@ pub(super) fn render_drop_shadow(
         };
         let dist = (ddx * ddx + ddy * ddy).sqrt();
 
-        let alpha = if blur_r <= f32::EPSILON {
+        if blur_r <= f32::EPSILON {
             if dist <= 0.0 { 1.0 } else { 0.0 }
         } else {
             (1.0 - (dist / blur_r).clamp(0.0, 1.0)).max(0.0)
-        };
+        }
+    };
+
+    for (x, y, pixel) in background.enumerate_pixels_mut() {
+        let px = x as f32 + 0.5;
+        let py = y as f32 + 0.5;
+
+        let alpha = windows
+            .iter()
+            .map(|win| window_alpha(win, px, py))
+            .fold(0.0, f32::max);
         let a = (alpha * shadow_opacity).clamp(0.0, 1.0);
         if a <= 0.0 {
             continue;

@@ -1,7 +1,12 @@
+#[cfg(test)]
+mod canvas_publish_tests;
 mod image_ops;
 #[cfg(target_os = "linux")]
 mod kms;
 mod pacing;
+#[cfg(test)]
+mod pair_canvas_tests;
+mod photo_set;
 pub mod scenes;
 mod wake;
 
@@ -13,7 +18,8 @@ use crate::config::{
     TransitionKind, TransitionMode,
 };
 use crate::events::{
-    Displayed, PhotoLoaded, PreparedImageCpu, ViewerCommand, ViewerState as ControlViewerState,
+    Displayed, LoadedPartner, PhotoLoaded, PreparedImageCpu, ViewerCommand,
+    ViewerState as ControlViewerState,
 };
 use crate::processing::blur::apply_blur;
 use crate::processing::color::PhotoSwatches;
@@ -142,6 +148,8 @@ pub(super) struct TexturePlane {
 pub(super) struct ImgTex {
     pub(super) plane: TexturePlane,
     pub(super) path: std::path::PathBuf,
+    /// Portrait pairing: the pair screen's second photo (drawn on the right).
+    pub(super) partner: Option<std::path::PathBuf>,
     /// Mat kind that was baked for this image; `None` means full-bleed (no mat).
     pub(super) mat_kind: Option<crate::config::MatCaption>,
 }
@@ -378,12 +386,16 @@ struct MatParams {
     /// When true, render the photo full-bleed (cover-crop, no mat); `matting`
     /// is ignored. Chosen by the `fill-when-fits` pre-check at selection time.
     fill_screen: bool,
+    /// `pairing.bar-ratio`: a pair's center bar as a fraction of the mat border.
+    bar_ratio: f32,
 }
 
 struct MatTask {
     image: PreparedImageCpu,
     params: MatParams,
     priority: bool,
+    /// Portrait pairing: the second photo of a pair screen.
+    partner: Option<LoadedPartner>,
     mat_kind: Option<crate::config::MatCaption>,
 }
 
@@ -397,6 +409,11 @@ struct MatResult {
     path: std::path::PathBuf,
     canvas: ImagePlane,
     priority: bool,
+    /// Portrait pairing: the pair screen's second member.
+    partner: Option<photo_set::Member>,
+    /// Where each member was drawn (one window for a solo photo; none for
+    /// full-bleed).
+    windows: Vec<photo_set::Window>,
     mat_kind: Option<crate::config::MatCaption>,
 }
 
@@ -408,6 +425,7 @@ impl std::fmt::Debug for MatResult {
             .field("width", &self.canvas.width)
             .field("height", &self.canvas.height)
             .field("priority", &self.priority)
+            .field("partner", &self.partner)
             .finish_non_exhaustive()
     }
 }
@@ -415,6 +433,8 @@ impl std::fmt::Debug for MatResult {
 struct QueuedImage {
     image: PreparedImageCpu,
     priority: bool,
+    /// Portrait pairing: the second photo of a pair screen.
+    partner: Option<LoadedPartner>,
 }
 
 struct MattingPipeline {
@@ -585,6 +605,11 @@ struct MattingBridge<'a> {
     matting: &'a MattingConfig,
     oversample: f32,
     max_upscale_factor: f32,
+    /// `pairing.bar-ratio`.
+    bar_ratio: f32,
+    /// Portrait pairing's pairable rule (`None` with pairing off): a pair is
+    /// drawn only if both members are pairable on the canvas it is drawn on.
+    pairing: Option<crate::tasks::manager::pairing::PairingRules>,
     mat_pipeline: &'a MattingPipeline,
 }
 
@@ -613,25 +638,25 @@ impl<'a> MattingBridge<'a> {
                 Some(img)
             } else {
                 match self.from_loader.try_recv() {
-                    Ok(PhotoLoaded { prepared, priority }) => Some(QueuedImage {
+                    Ok(PhotoLoaded {
+                        prepared,
+                        priority,
+                        partner,
+                    }) => Some(QueuedImage {
                         image: prepared,
                         priority,
+                        partner,
                     }),
                     Err(_) => None,
                 }
             };
-            let Some(queued) = next_img else {
+            let Some(mut queued) = next_img else {
                 break;
             };
             let path = queued.image.path.clone();
-            if queued.priority {
-                self.deferred_images
-                    .retain(|pending| pending.image.path != path);
-                self.ready_results.retain(|pending| pending.path != path);
-                wake.pending_mut().retain(|pending| pending.path != path);
-                if wake.next().is_some_and(|stage| stage.path == path) {
-                    wake.set_next(None);
-                }
+            // Priority is per member (B2), and its purge is by membership (R14).
+            for member in queued.priority_paths() {
+                photo_set::purge_member(&member, self.deferred_images, self.ready_results, wake);
             }
             let Some(surface) = self.surface else {
                 self.deferred_images.push_front(queued);
@@ -647,21 +672,44 @@ impl<'a> MattingBridge<'a> {
                 self.deferred_images.push_front(queued);
                 break;
             }
+            // C2 holds only on the canvas the pair was planned for: a canvas
+            // change since (a mode change, a rotation) can leave the members
+            // unpairable here. Such a pair becomes two solo screens, in order.
+            let canvas = compute_canvas_size(
+                surface.width.max(1),
+                surface.height.max(1),
+                self.oversample,
+                surface.max_texture_dimension,
+            );
+            if queued.partner.is_some() && !queued.pair_fits(self.pairing.as_ref(), canvas) {
+                let (first, second) = queued.split();
+                info!(
+                    path = %first.image.path.display(),
+                    partner = %second.image.path.display(),
+                    canvas = ?canvas,
+                    "pair_split"
+                );
+                self.deferred_images.push_front(second);
+                queued = first;
+            }
             let mut rng = rand::rng();
-            let fill_screen = self
-                .matting
-                .fill_when_fits()
-                .map(|fill| {
-                    fill.should_fill(
-                        queued.image.source_size.0,
-                        queued.image.source_size.1,
-                        surface.width.max(1),
-                        surface.height.max(1),
-                        self.max_upscale_factor,
-                        &mut rng,
-                    )
-                })
-                .unwrap_or(false);
+            let pair = queued.partner.is_some();
+            // fill-when-fits is skipped for pairs.
+            let fill_screen = !pair
+                && self
+                    .matting
+                    .fill_when_fits()
+                    .map(|fill| {
+                        fill.should_fill(
+                            queued.image.source_size.0,
+                            queued.image.source_size.1,
+                            surface.width.max(1),
+                            surface.height.max(1),
+                            self.max_upscale_factor,
+                            &mut rng,
+                        )
+                    })
+                    .unwrap_or(false);
             // When filling the screen, the selected mat is ignored. Use a
             // non-mutating placeholder so the sequential selector is not
             // advanced for a photo that renders without a mat.
@@ -670,6 +718,13 @@ impl<'a> MattingBridge<'a> {
                     .primary_option()
                     .cloned()
                     .expect("validated matting configuration has at least one option")
+            } else if pair {
+                // Mats for pair screens: the non-zero options only.
+                self.matting
+                    .select_active_nonzero(&mut rng)
+                    .expect("validation requires a non-zero mat when pairing is enabled")
+                    .option
+                    .clone()
             } else {
                 self.matting.select_active(&mut rng).option.clone()
             };
@@ -681,6 +736,7 @@ impl<'a> MattingBridge<'a> {
                 max_upscale_factor: self.max_upscale_factor,
                 matting,
                 fill_screen,
+                bar_ratio: self.bar_ratio,
             };
             let mat_kind = if fill_screen {
                 None
@@ -690,11 +746,13 @@ impl<'a> MattingBridge<'a> {
             let QueuedImage {
                 image: img,
                 priority,
+                partner,
             } = queued;
             let task = MatTask {
                 image: img,
                 params,
                 priority,
+                partner,
                 mat_kind,
             };
             match self.mat_pipeline.try_submit(task) {
@@ -702,10 +760,16 @@ impl<'a> MattingBridge<'a> {
                     *self.mat_inflight += 1;
                 }
                 Err(MatTask {
-                    image, priority, ..
+                    image,
+                    priority,
+                    partner,
+                    ..
                 }) => {
-                    self.deferred_images
-                        .push_front(QueuedImage { image, priority });
+                    self.deferred_images.push_front(QueuedImage {
+                        image,
+                        priority,
+                        partner,
+                    });
                     break;
                 }
             }
@@ -730,13 +794,17 @@ impl<'a> MattingBridge<'a> {
 //    scale/format in sync.
 
 const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(4);
-fn process_mat_task(task: MatTask) -> Option<MatResult> {
-    let MatTask {
-        image,
-        params,
-        priority,
-        mat_kind,
-    } = task;
+/// One member's pixels for matting. The loader may have decoded a JPEG at a
+/// reduced DCT scale sized for the canvas as it was then. If the canvas has
+/// since grown (rotation, a new output) so that those pixels no longer cover
+/// what this task draws, decode in full here, off the render thread, rather
+/// than upscale a soft buffer.
+fn decoded_member(
+    image: PreparedImageCpu,
+    canvas: (u32, u32),
+    fill_screen: bool,
+    bg_scale: Option<f32>,
+) -> Option<RgbaImage> {
     let PreparedImageCpu {
         path,
         width,
@@ -748,30 +816,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         return None;
     }
     let mut src = RgbaImage::from_raw(width, height, pixels)?;
-    let MatParams {
-        screen_w,
-        screen_h,
-        oversample,
-        max_dim,
-        max_upscale_factor,
-        matting,
-        fill_screen,
-    } = params;
-    if screen_w == 0 || screen_h == 0 {
-        return None;
-    }
-
-    let (canvas_w, canvas_h) = compute_canvas_size(screen_w, screen_h, oversample, max_dim);
-
-    // The loader may have decoded a JPEG at a reduced DCT scale sized for the
-    // canvas as it was then. If the canvas has since grown (rotation, a new
-    // output) so that those pixels no longer cover what this task draws, decode
-    // in full here, off the render thread, rather than upscale a soft buffer.
-    let bg_scale = if fill_screen {
-        None
-    } else {
-        loader::bg_sample_scale(&matting.style)
-    };
+    let (canvas_w, canvas_h) = canvas;
     if !loader::decoded_suffices(
         (width, height),
         source_size,
@@ -799,11 +844,80 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             ),
         }
     }
-    let (width, height) = src.dimensions();
+    Some(src)
+}
+
+fn process_mat_task(task: MatTask) -> Option<MatResult> {
+    let MatTask {
+        image,
+        params,
+        priority,
+        partner,
+        mat_kind,
+    } = task;
+    let path = image.path.clone();
+    let MatParams {
+        screen_w,
+        screen_h,
+        oversample,
+        max_dim,
+        max_upscale_factor,
+        matting,
+        fill_screen,
+        bar_ratio,
+    } = params;
+    if image.width == 0 || image.height == 0 || screen_w == 0 || screen_h == 0 {
+        return None;
+    }
+
+    let (canvas_w, canvas_h) = compute_canvas_size(screen_w, screen_h, oversample, max_dim);
+    let bg_scale = if fill_screen {
+        None
+    } else {
+        loader::bg_sample_scale(&matting.style)
+    };
+    // D3's sufficiency check runs per member: a pair member's drawn rect is
+    // never larger than its solo rect.
+    let source_size = image.source_size;
+    let first = decoded_member(image, (canvas_w, canvas_h), fill_screen, bg_scale);
+    let second = partner.and_then(|LoadedPartner { prepared, priority }| {
+        let member = photo_set::Member {
+            path: prepared.path.clone(),
+            priority,
+        };
+        let size = prepared.source_size;
+        decoded_member(prepared, (canvas_w, canvas_h), fill_screen, bg_scale)
+            .map(|img| (img, size, member))
+    });
+    let margin = matting.margin_fraction();
+    let g = photo_set::bar_fraction(bar_ratio, margin);
+    // A photo is a set of windows (`photo_set`): n = 1 is the solo path, n = 2
+    // a pair (first appearance on the left). A member whose pixels cannot be
+    // read leaves the other solo rather than dropping the screen.
+    let (set, path, priority, partner) = match (first, second) {
+        (Some(src), None) => (photo_set::PhotoSet::solo(src), path, priority, None),
+        (Some(src), Some((right, right_size, member))) => (
+            photo_set::PhotoSet::pair((src, source_size), (right, right_size), g),
+            path,
+            priority,
+            Some(member),
+        ),
+        (None, Some((right, _, member))) => (
+            photo_set::PhotoSet::solo(right),
+            member.path,
+            member.priority,
+            None,
+        ),
+        (None, None) => return None,
+    };
+    let (width, height) = set.logical_size(None);
+    // Swatches and blurred backgrounds see the members abutted with no gap,
+    // built only for the mats that read them.
+    let whole = std::cell::LazyCell::new(|| set.abutted());
 
     // `fill-when-fits`: render the photo full-bleed (cover-crop, no mat).
     if fill_screen {
-        let canvas = scale_image_to_cover_canvas(&src, canvas_w, canvas_h, max_dim);
+        let canvas = scale_image_to_cover_canvas(&whole, canvas_w, canvas_h, max_dim);
         let canvas = ImagePlane {
             width: canvas_w,
             height: canvas_h,
@@ -813,13 +927,14 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             path,
             canvas,
             priority,
+            partner,
+            windows: Vec::new(),
             mat_kind,
         });
     }
 
-    let margin = (matting.minimum_mat_percentage / 100.0).clamp(0.0, 0.45);
     let max_upscale = max_upscale_factor.max(1.0);
-    let swatches = PhotoSwatches::new(&src);
+    let swatches = std::cell::LazyCell::new(|| PhotoSwatches::new(&whole));
 
     if let MattingMode::Studio {
         bevel_width_px,
@@ -847,6 +962,12 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         }
         let photo_space_w = (canvas_w as f32 - 2.0 * (margin_x + bevel_px)).max(1.0);
         let photo_space_h = (canvas_h as f32 - 2.0 * (margin_y + bevel_px)).max(1.0);
+        // A pair's bar holds both bevels (`photo_set::Bevel`).
+        let bevel = set.is_pair().then_some(photo_set::Bevel {
+            px: bevel_px,
+            space_h: photo_space_h,
+        });
+        let (width, height) = set.logical_size(bevel);
 
         let iw = width.max(1) as f32;
         let ih = height.max(1) as f32;
@@ -865,26 +986,22 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         let photo_w = photo_w as u32;
         let photo_h = photo_h as u32;
         let (offset_x, offset_y) = center_offset(photo_w, photo_h, canvas_w, canvas_h);
-
-        let main_img: Cow<'_, RgbaImage> = if photo_w == width && photo_h == height {
-            Cow::Borrowed(&src)
-        } else {
-            Cow::Owned(imageops::resize(
-                &src,
-                photo_w,
-                photo_h,
-                imageops::FilterType::Triangle,
-            ))
-        };
+        let windows = set.windows(
+            photo_set::Window {
+                x: offset_x,
+                y: offset_y,
+                w: photo_w,
+                h: photo_h,
+            },
+            canvas_w,
+            bevel,
+        );
+        let images = set.resize_to(&windows);
 
         let canvas = render_studio_mat(
             canvas_w,
             canvas_h,
-            offset_x,
-            offset_y,
-            photo_w,
-            photo_h,
-            main_img.as_ref(),
+            &photo_set::placed(&windows, &images),
             mat_color,
             bevel_px,
             *bevel_color,
@@ -899,12 +1016,14 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             pixels: canvas.into_raw(),
         };
 
-        return Some(MatResult {
+        return Some(photo_set::matted(MatResult {
             path,
             canvas,
             priority,
+            partner,
+            windows,
             mat_kind,
-        });
+        }));
     }
 
     if let MattingMode::PassePartout {
@@ -930,6 +1049,12 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         }
         let photo_space_w = (canvas_w as f32 - 2.0 * (margin_x + bevel_px)).max(1.0);
         let photo_space_h = (canvas_h as f32 - 2.0 * (margin_y + bevel_px)).max(1.0);
+        // A pair's bar holds both bevels (`photo_set::Bevel`).
+        let bevel = set.is_pair().then_some(photo_set::Bevel {
+            px: bevel_px,
+            space_h: photo_space_h,
+        });
+        let (width, height) = set.logical_size(bevel);
 
         let iw = width.max(1) as f32;
         let ih = height.max(1) as f32;
@@ -948,26 +1073,22 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         let photo_w = photo_w as u32;
         let photo_h = photo_h as u32;
         let (offset_x, offset_y) = center_offset(photo_w, photo_h, canvas_w, canvas_h);
-
-        let main_img: Cow<'_, RgbaImage> = if photo_w == width && photo_h == height {
-            Cow::Borrowed(&src)
-        } else {
-            Cow::Owned(imageops::resize(
-                &src,
-                photo_w,
-                photo_h,
-                imageops::FilterType::Triangle,
-            ))
-        };
+        let windows = set.windows(
+            photo_set::Window {
+                x: offset_x,
+                y: offset_y,
+                w: photo_w,
+                h: photo_h,
+            },
+            canvas_w,
+            bevel,
+        );
+        let images = set.resize_to(&windows);
 
         let canvas = render_studio_mat(
             canvas_w,
             canvas_h,
-            offset_x,
-            offset_y,
-            photo_w,
-            photo_h,
-            main_img.as_ref(),
+            &photo_set::placed(&windows, &images),
             mat_color,
             bevel_px,
             *bevel_color,
@@ -982,12 +1103,14 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             pixels: canvas.into_raw(),
         };
 
-        return Some(MatResult {
+        return Some(photo_set::matted(MatResult {
             path,
             canvas,
             priority,
+            partner,
+            windows,
             mat_kind,
-        });
+        }));
     }
 
     if let MattingMode::DropShadow {
@@ -1007,27 +1130,24 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         let (final_w, final_h) =
             resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
         let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
-
-        let main_img: Cow<'_, RgbaImage> = if final_w == width && final_h == height {
-            Cow::Borrowed(&src)
-        } else {
-            Cow::Owned(imageops::resize(
-                &src,
-                final_w,
-                final_h,
-                imageops::FilterType::Triangle,
-            ))
-        };
+        let windows = set.windows(
+            photo_set::Window {
+                x: offset_x,
+                y: offset_y,
+                w: final_w,
+                h: final_h,
+            },
+            canvas_w,
+            None,
+        );
+        let images = set.resize_to(&windows);
 
         let bg_px = Rgba([color[0], color[1], color[2], 255]);
         let mut background = RgbaImage::from_pixel(canvas_w, canvas_h, bg_px);
 
         render_drop_shadow(
             &mut background,
-            offset_x,
-            offset_y,
-            final_w,
-            final_h,
+            &windows,
             DropShadowParams {
                 color: *shadow_color,
                 opacity: *shadow_opacity,
@@ -1036,12 +1156,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             },
         );
 
-        imageops::overlay(
-            &mut background,
-            main_img.as_ref(),
-            offset_x as i64,
-            offset_y as i64,
-        );
+        photo_set::overlay_windows(&mut background, &photo_set::placed(&windows, &images));
 
         let canvas = ImagePlane {
             width: canvas_w,
@@ -1049,28 +1164,30 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             pixels: background.into_raw(),
         };
 
-        return Some(MatResult {
+        return Some(photo_set::matted(MatResult {
             path,
             canvas,
             priority,
+            partner,
+            windows,
             mat_kind,
-        });
+        }));
     }
 
     let (final_w, final_h) =
         resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
     let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
-
-    let main_img: Cow<'_, RgbaImage> = if final_w == width && final_h == height {
-        Cow::Borrowed(&src)
-    } else {
-        Cow::Owned(imageops::resize(
-            &src,
-            final_w,
-            final_h,
-            imageops::FilterType::Triangle,
-        ))
-    };
+    let windows = set.windows(
+        photo_set::Window {
+            x: offset_x,
+            y: offset_y,
+            w: final_w,
+            h: final_h,
+        },
+        canvas_w,
+        None,
+    );
+    let images = set.resize_to(&windows);
 
     let mut background = match &matting.style {
         MattingMode::FixedColor { colors, .. } => {
@@ -1087,7 +1204,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             sample_scale,
             backend,
         } => {
-            let bg = scale_image_to_cover_canvas(&src, canvas_w, canvas_h, max_dim);
+            let bg = scale_image_to_cover_canvas(&whole, canvas_w, canvas_h, max_dim);
             if *sigma > 0.0 {
                 let mut sample = bg;
                 let mut sigma_px = *sigma;
@@ -1163,7 +1280,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             darken,
             vignette_strength,
         } => {
-            let bg = scale_image_to_cover_canvas(&src, canvas_w, canvas_h, max_dim);
+            let bg = scale_image_to_cover_canvas(&whole, canvas_w, canvas_h, max_dim);
             let mut blurred = if *sigma > 0.0 {
                 let mut sample = bg;
                 let mut sigma_px = *sigma;
@@ -1224,12 +1341,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         }
     };
 
-    imageops::overlay(
-        &mut background,
-        main_img.as_ref(),
-        offset_x as i64,
-        offset_y as i64,
-    );
+    photo_set::overlay_windows(&mut background, &photo_set::placed(&windows, &images));
 
     let canvas = ImagePlane {
         width: canvas_w,
@@ -1237,12 +1349,14 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         pixels: background.into_raw(),
     };
 
-    Some(MatResult {
+    Some(photo_set::matted(MatResult {
         path,
         canvas,
         priority,
+        partner,
+        windows,
         mat_kind,
-    })
+    }))
 }
 
 #[derive(Debug)]
@@ -1540,6 +1654,7 @@ fn upload_mat_result(gpu: &GpuCtx, result: MatResult) -> Option<ImgTex> {
     let MatResult {
         path,
         canvas,
+        partner,
         mat_kind,
         ..
     } = result;
@@ -1547,6 +1662,7 @@ fn upload_mat_result(gpu: &GpuCtx, result: MatResult) -> Option<ImgTex> {
     Some(ImgTex {
         plane,
         path,
+        partner: partner.map(|member| member.path),
         mat_kind,
     })
 }
@@ -1616,7 +1732,7 @@ impl ViewerMode {
         config: Arc<crate::config::Configuration>,
         redraw: &'a mut dyn FnMut(),
         rng: &'a mut rand::rngs::ThreadRng,
-        notify_displayed: &'a mut dyn FnMut(std::path::PathBuf),
+        notify_displayed: &'a mut dyn FnMut(Displayed),
         enqueue_matting: &'a mut dyn FnMut(&mut scenes::WakeScene),
         f: impl FnOnce(&mut dyn Scene, SceneContext<'a>) -> R,
     ) -> Option<R> {
@@ -2171,6 +2287,11 @@ struct App {
     surface_timeout_streak: u32,
     // Last surface size that we considered "configured" and stabilized
     configured_surface_size: Option<(u32, u32)>,
+    /// The installed GPU's texture limit (bounds the canvas); `None` without
+    /// a GPU.
+    max_texture_dimension: Option<u32>,
+    /// Portrait pairing's pairable rule, `None` with pairing off.
+    pairing_rules: Option<crate::tasks::manager::pairing::PairingRules>,
     /// Shared with the loader: the canvas size it should decode towards
     /// (published once the surface is configured; see `publish_canvas`).
     decode_scaling: super::loader::DecodeScaling,
@@ -2238,17 +2359,34 @@ impl App {
 
     /// Publish the canvas the matting worker renders into (the surface times
     /// the oversample factor, within the texture limit); the loader sizes
-    /// JPEG decodes against it. Called wherever the surface becomes ready.
+    /// JPEG decodes against it, and portrait pairing judges pairability on
+    /// it. Called wherever the surface becomes ready: the Wayland configure
+    /// handshake (`update_surface_ready`) and KMS (`configure_fixed_surface`).
     fn publish_canvas(&self) {
-        if let Some(surface) = self.active_surface() {
-            let (canvas_w, canvas_h) = compute_canvas_size(
-                surface.width.max(1),
-                surface.height.max(1),
-                self.oversample,
-                surface.max_texture_dimension,
-            );
+        if let (true, Some((width, height)), Some(max_dim)) = (
+            self.surface_configured,
+            self.configured_surface_size,
+            self.max_texture_dimension,
+        ) {
+            let (canvas_w, canvas_h) =
+                compute_canvas_size(width.max(1), height.max(1), self.oversample, max_dim);
             self.decode_scaling.publish_canvas(canvas_w, canvas_h);
         }
+    }
+
+    /// KMS: apply the surface configuration once and mark it ready. The mode
+    /// never changes for this process (a change is a restart, see
+    /// `viewer/kms.rs`), so there is no configure handshake to wait for.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // the KMS viewer
+    fn configure_fixed_surface(&mut self, size: PhysicalSize<u32>) {
+        if let Some(gpu) = self.gpu.as_ref() {
+            gpu.surface.configure(&gpu.device, &gpu.config);
+        }
+        let _ = self.surface_gate.set_ready(true);
+        self.surface_gate.awaiting = false;
+        self.surface_configured = true;
+        self.configured_surface_size = Some((size.width, size.height));
+        self.publish_canvas();
     }
 
     fn on_surface_size_settled(&mut self) {
@@ -2276,8 +2414,8 @@ impl App {
         let config = Arc::clone(&self.full_config);
         let mut notify_displayed = {
             let sender = self.to_manager_displayed.clone();
-            move |path: std::path::PathBuf| {
-                let _ = sender.try_send(Displayed(path));
+            move |displayed: Displayed| {
+                let _ = sender.try_send(displayed);
             }
         };
 
@@ -2293,6 +2431,8 @@ impl App {
             matting: &self.matting,
             oversample: self.oversample,
             max_upscale_factor: self.max_upscale_factor,
+            bar_ratio: self.full_config.playlist.pairing.bar_ratio,
+            pairing: self.pairing_rules,
             mat_pipeline: &self.mat_pipeline,
         };
         let mut enqueue_matting = move |wake: &mut scenes::WakeScene| {
@@ -2365,8 +2505,8 @@ impl App {
         let config = Arc::clone(&self.full_config);
         let mut notify_displayed = {
             let sender = self.to_manager_displayed.clone();
-            move |path: std::path::PathBuf| {
-                let _ = sender.try_send(Displayed(path));
+            move |displayed: Displayed| {
+                let _ = sender.try_send(displayed);
             }
         };
         let surface = self.active_surface();
@@ -2380,6 +2520,8 @@ impl App {
             matting: &self.matting,
             oversample: self.oversample,
             max_upscale_factor: self.max_upscale_factor,
+            bar_ratio: self.full_config.playlist.pairing.bar_ratio,
+            pairing: self.pairing_rules,
             mat_pipeline: &self.mat_pipeline,
         };
         let mut enqueue_matting = move |wake: &mut scenes::WakeScene| {
@@ -2483,6 +2625,7 @@ impl App {
         if let Some(mode) = self.mode.as_mut() {
             mode.set_overlays(Some(greeting), Some(sleep));
         }
+        self.max_texture_dimension = Some(gpu.limits.max_texture_dimension_2d);
         self.gpu = Some(gpu);
         self.surface_gate.reset();
         self.surface_gate.arm_for_initial_report();
@@ -2603,6 +2746,7 @@ impl App {
             mode.set_overlays(None, None);
         }
         self.gpu = None;
+        self.max_texture_dimension = None;
         self.surface_gate.reset();
         self.surface_configured = false;
         self.pending_scene_enter = true;
@@ -2683,11 +2827,7 @@ impl App {
     fn drain_mat_results(&mut self) {
         while let Some(result) = self.mat_pipeline.try_recv() {
             self.mat_inflight = self.mat_inflight.saturating_sub(1);
-            if result.priority {
-                self.ready_results
-                    .retain(|existing| existing.path != result.path);
-            }
-            self.ready_results.push_back(result);
+            photo_set::queue_result(&mut self.ready_results, result);
         }
     }
 
@@ -2704,7 +2844,7 @@ impl App {
             let mut deferred = VecDeque::with_capacity(self.ready_results.len());
             let mut priority_now = VecDeque::new();
             for result in self.ready_results.drain(..) {
-                if result.priority {
+                if result.is_priority() {
                     priority_now.push_back(result);
                 } else {
                     deferred.push_back(result);
@@ -2733,7 +2873,9 @@ impl App {
 
         while let Some(result) = self.ready_results.pop_front() {
             let path = result.path.clone();
-            let priority = result.priority;
+            // A screen is priority iff any member is (B2).
+            let priority_paths = result.priority_paths();
+            let priority = !priority_paths.is_empty();
             // Discard canvases that were prepared for a different surface size.
             if result.canvas.width != expected.0 || result.canvas.height != expected.1 {
                 debug!(
@@ -2748,12 +2890,7 @@ impl App {
             }
             if let Some(new_tex) = upload_mat_result(gpu, result) {
                 if priority {
-                    let replace_next = wake.next().is_some_and(|stage| stage.path == path);
-                    wake.pending_mut().retain(|queued| queued.path != path);
-                    if replace_next && let Some(stage) = wake.take_next() {
-                        wake.pending_mut().push_front(stage);
-                    }
-                    wake.pending_mut().push_front(new_tex);
+                    photo_set::stage_priority(wake, new_tex, &priority_paths);
                 } else {
                     wake.pending_mut().push_back(new_tex);
                 }
@@ -2782,6 +2919,8 @@ impl App {
             matting: &self.matting,
             oversample: self.oversample,
             max_upscale_factor: self.max_upscale_factor,
+            bar_ratio: self.full_config.playlist.pairing.bar_ratio,
+            pairing: self.pairing_rules,
             mat_pipeline: &self.mat_pipeline,
         };
         bridge.queue_for_wake(wake);
@@ -3445,7 +3584,8 @@ impl App {
                     // finishes) and the current photo's mat.
                     let transition_kind = wake.last_transition_kind();
                     let mat_kind = wake.current().and_then(|img| img.mat_kind);
-                    let text = scenes::showcase_caption(transition_kind, mat_kind);
+                    let pair = wake.current().is_some_and(|img| img.partner.is_some());
+                    let text = scenes::showcase_caption(transition_kind, mat_kind, pair);
                     cap.set_text(text);
                     let surface_size =
                         winit::dpi::PhysicalSize::new(gpu.config.width, gpu.config.height);
@@ -3537,8 +3677,15 @@ impl App {
                 a: 1.0,
             })
             .unwrap_or(wgpu::Color::BLACK);
-        let initial_wake =
-            scenes::WakeScene::new(cfg.global_photo_settings.dwell_ms, cfg.transition.clone());
+        let pairing_rules = crate::tasks::manager::pairing::PairingRules::from_config(&cfg);
+        let initial_wake = scenes::WakeScene::new(
+            cfg.global_photo_settings.dwell_ms,
+            scenes::pair_dwell_ms(
+                cfg.global_photo_settings.dwell_ms,
+                cfg.playlist.pairing.dwell_multiplier,
+            ),
+            cfg.transition.clone(),
+        );
         App {
             from_loader,
             to_manager_displayed,
@@ -3562,6 +3709,8 @@ impl App {
             full_config: cfg,
             surface_timeout_streak: 0,
             configured_surface_size: None,
+            max_texture_dimension: None,
+            pairing_rules,
             decode_scaling,
             caption_overlay: None,
             transition_frame_metric: None,
@@ -3954,6 +4103,7 @@ pub mod testkit {
         oversample: f32,
         max_upscale_factor: f32,
         matting: MattingConfig,
+        pairing: Option<crate::tasks::manager::pairing::PairingRules>,
         surface_configured: bool,
         surface: Option<SurfaceState>,
     }
@@ -3963,6 +4113,8 @@ pub mod testkit {
         pub width: u32,
         pub height: u32,
         pub priority: bool,
+        /// A pair screen's second member and its priority.
+        pub partner: Option<(std::path::PathBuf, bool)>,
     }
 
     impl MattingQueueHarness {
@@ -3982,9 +4134,19 @@ pub mod testkit {
                 from_loader_tx,
                 from_loader_rx,
                 mat_pipeline: MattingPipeline::new(1, preload_count.max(2)),
-                wake: scenes::WakeScene::new(dwell_ms, transition_cfg),
+                wake: scenes::WakeScene::new(dwell_ms, dwell_ms, transition_cfg),
                 oversample,
                 max_upscale_factor: 1.0,
+                // The rule as the frame would apply it with these mats and
+                // pairing enabled at its defaults.
+                pairing: crate::tasks::manager::pairing::PairingRules::from_parts(
+                    &crate::config::PairingOptions {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                    &matting,
+                    1.0,
+                ),
                 matting,
                 surface_configured: false,
                 surface: None,
@@ -4008,8 +4170,39 @@ pub mod testkit {
         }
 
         pub fn push_deferred(&mut self, image: PreparedImageCpu, priority: bool) {
+            self.deferred_images.push_back(QueuedImage {
+                image,
+                priority,
+                partner: None,
+            });
+        }
+
+        /// Queue a pair screen (portrait pairing) as the loader would send it.
+        pub fn push_deferred_pair(
+            &mut self,
+            (image, priority): (PreparedImageCpu, bool),
+            (partner, partner_priority): (PreparedImageCpu, bool),
+        ) {
+            self.deferred_images.push_back(QueuedImage {
+                image,
+                priority,
+                partner: Some(LoadedPartner {
+                    prepared: partner,
+                    priority: partner_priority,
+                }),
+            });
+        }
+
+        /// Paths of the queued (not yet matted) screens, members in order.
+        pub fn deferred_screens(&self) -> Vec<Vec<std::path::PathBuf>> {
             self.deferred_images
-                .push_back(QueuedImage { image, priority });
+                .iter()
+                .map(|queued| {
+                    std::iter::once(queued.image.path.clone())
+                        .chain(queued.partner.as_ref().map(|p| p.prepared.path.clone()))
+                        .collect()
+                })
+                .collect()
         }
 
         pub fn queue_once(&mut self) {
@@ -4023,6 +4216,8 @@ pub mod testkit {
                 matting: &self.matting,
                 oversample: self.oversample,
                 max_upscale_factor: self.max_upscale_factor,
+                bar_ratio: 0.618,
+                pairing: self.pairing,
                 mat_pipeline: &self.mat_pipeline,
             };
             bridge.queue_for_wake(&mut self.wake);
@@ -4064,6 +4259,7 @@ pub mod testkit {
                     width: result.canvas.width,
                     height: result.canvas.height,
                     priority: result.priority,
+                    partner: result.partner.map(|member| (member.path, member.priority)),
                 })
                 .collect()
         }
@@ -4120,7 +4316,7 @@ mod tests {
                         // Fresh per case: the bridge only ever sees a task
                         // queue no fuller than its own in-flight count.
                         let pipeline = MattingPipeline::new(1, PRELOAD);
-                        let mut wake = scenes::WakeScene::new(8_000, cfg.clone());
+                        let mut wake = scenes::WakeScene::new(8_000, 8_000, cfg.clone());
                         if transition {
                             let selected = cfg.primary_selected().expect("default transition");
                             wake.set_transition_state(Some(TransitionState::new(
@@ -4139,6 +4335,7 @@ mod tests {
                                 pixels: vec![0; 64],
                             },
                             priority: false,
+                            partner: None,
                         })
                         .unwrap();
                         let mut deferred_images: VecDeque<QueuedImage> = (0..deferred)
@@ -4151,6 +4348,7 @@ mod tests {
                                     pixels: vec![0; 64],
                                 },
                                 priority: false,
+                                partner: None,
                             })
                             .collect();
                         let mut mat_inflight = in_flight;
@@ -4168,6 +4366,8 @@ mod tests {
                             matting: &matting,
                             oversample: 1.0,
                             max_upscale_factor: 1.0,
+                            bar_ratio: 0.618,
+                            pairing: None,
                             mat_pipeline: &pipeline,
                         };
                         bridge.queue_for_wake(&mut wake);
@@ -4397,8 +4597,10 @@ mod tests {
                 max_upscale_factor: 2.0,
                 matting: matting.clone(),
                 fill_screen,
+                bar_ratio: 0.618,
             },
             priority: false,
+            partner: None,
             mat_kind: Some(matting.caption()),
         };
         let c = process_mat_task(task).expect("matted canvas").canvas;
@@ -4536,6 +4738,7 @@ mod tests {
                 pixels: photo.image.as_raw().clone(),
             },
             priority: false,
+            partner: None,
         });
         let mut ready_results = VecDeque::new();
         let (tx, mut rx) = mpsc::channel(1);
@@ -4553,9 +4756,11 @@ mod tests {
             // 1.0: the photo (2000 px) fills the 1920 px screen without upscaling,
             // but its 960 px reduced decode would look like it needs 2x.
             max_upscale_factor: 1.0,
+            bar_ratio: 0.618,
+            pairing: None,
             mat_pipeline: &mat_pipeline,
         };
-        let mut wake = scenes::WakeScene::new(5_000, TransitionConfig::default());
+        let mut wake = scenes::WakeScene::new(5_000, 5_000, TransitionConfig::default());
         bridge.queue_for_wake(&mut wake);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -4583,6 +4788,7 @@ mod tests {
         deferred_images.push_back(QueuedImage {
             image: prepared,
             priority: false,
+            partner: None,
         });
         let mut ready_results = VecDeque::new();
         let (tx, mut rx) = mpsc::channel(1);
@@ -4599,9 +4805,11 @@ mod tests {
             matting: &matting,
             oversample: 1.0,
             max_upscale_factor: 1.0,
+            bar_ratio: 0.618,
+            pairing: None,
             mat_pipeline: &mat_pipeline,
         };
-        let mut wake = scenes::WakeScene::new(5_000, TransitionConfig::default());
+        let mut wake = scenes::WakeScene::new(5_000, 5_000, TransitionConfig::default());
 
         bridge.queue_for_wake(&mut wake);
 

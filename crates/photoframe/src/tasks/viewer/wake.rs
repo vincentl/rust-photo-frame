@@ -224,6 +224,38 @@ mod tests {
         );
     }
 
+    /// R1: a pair screen at rest plans `displayed_at + dwell·m` (the dwell is
+    /// the screen's, `WakeScene::dwell`), so the KMS loop wakes for it and the
+    /// slideshow cannot stall on a pair.
+    #[test]
+    fn a_pair_at_rest_plans_its_longer_dwell() {
+        use super::super::scenes::{pair_dwell_ms, screen_dwell};
+        let now = Instant::now();
+        let dwell_ms = DWELL.as_millis() as u64;
+        let pair_ms = pair_dwell_ms(dwell_ms, 1.5);
+        assert_eq!(pair_ms, 12_000);
+        let pair = WakeInputs {
+            dwell: screen_dwell(dwell_ms, pair_ms, true),
+            ..resting(now)
+        };
+        assert_eq!(
+            plan_wake(pair, now).deadline,
+            Some(now + DWELL.mul_f32(1.5))
+        );
+        let solo = WakeInputs {
+            dwell: screen_dwell(dwell_ms, pair_ms, false),
+            ..resting(now)
+        };
+        assert_eq!(plan_wake(solo, now).deadline, Some(now + DWELL));
+        // An empty scene (nothing current) rests the solo dwell.
+        let scene = super::super::scenes::WakeScene::new(
+            dwell_ms,
+            pair_ms,
+            crate::config::TransitionConfig::default(),
+        );
+        assert_eq!(scene.dwell(), DWELL);
+    }
+
     #[test]
     fn deadline_is_never_in_the_past() {
         let start = Instant::now();
@@ -359,6 +391,7 @@ mod tests {
                 pixels: vec![0; 4],
             },
             priority: false,
+            partner: None,
         }
     }
 
@@ -371,6 +404,8 @@ mod tests {
                 pixels: vec![0; 4],
             },
             priority: false,
+            partner: None,
+            windows: Vec::new(),
             mat_kind: None,
         }
     }

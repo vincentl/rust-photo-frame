@@ -118,6 +118,11 @@ playlist:
   half-life: 3 days
   order: weighted-spread
   min-spacing: 0.7
+  pairing:
+    enabled: true
+    probability: 1.0
+    bar-ratio: 0.618
+    dwell-multiplier: 1.5
 
 # Every mat kind, plus palettes/photo-average/photo-cluster and parameter variants.
 matting:

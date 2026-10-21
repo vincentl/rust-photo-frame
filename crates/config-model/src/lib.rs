@@ -14,6 +14,7 @@ pub use awake::{AwakeScheduleConfig, AwakeScheduleRules, AwakeTimeRange};
 pub use greeting::{
     GreetingScreenColorsConfig, GreetingScreenConfig, ScreenMessageConfig, SleepScreenConfig,
 };
+pub use pairing::PairingOptions;
 pub use showcase::ShowcaseConfig;
 
 mod greeting {
@@ -170,6 +171,68 @@ mod greeting {
                     message: Some("Going to Sleep".to_string()),
                     ..ScreenMessageConfig::default()
                 },
+            }
+        }
+    }
+}
+
+mod pairing {
+    use anyhow::{Result, ensure};
+    use serde::Deserialize;
+
+    /// `playlist.pairing`: show two portraits side by side when the
+    /// scheduler's next two appearances are both pairable (back-to-back
+    /// pairing). The appearance sequence is the unpaired scheduler's; pairing
+    /// only groups consecutive appearances into screens. Off by default.
+    #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+    #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
+    pub struct PairingOptions {
+        /// Opt-in switch.
+        pub enabled: bool,
+        /// Pairing coin: two back-to-back pairable portraits share a screen
+        /// with this probability. Never changes the appearance sequence.
+        pub probability: f64,
+        /// Center bar between the two windows, as a fraction of the mat's
+        /// border (`H_c x minimum-mat-percentage`). Default 1/phi.
+        pub bar_ratio: f32,
+        /// A paired screen rests `dwell-ms x dwell-multiplier`; `2 +
+        /// transition/dwell` is wall-clock neutral.
+        pub dwell_multiplier: f32,
+    }
+
+    impl PairingOptions {
+        pub const DEFAULT_PROBABILITY: f64 = 1.0;
+        /// 1/phi, the golden-ratio conjugate.
+        pub const DEFAULT_BAR_RATIO: f32 = 0.618;
+        pub const DEFAULT_DWELL_MULTIPLIER: f32 = 1.5;
+
+        /// Range checks for every key; each error names its key. The
+        /// cross-section rule (at least one non-zero mat when enabled) needs
+        /// the matting list and is checked by the photoframe configuration.
+        pub fn validate(&self) -> Result<()> {
+            ensure!(
+                self.probability.is_finite() && (0.0..=1.0).contains(&self.probability),
+                "playlist.pairing.probability must be in [0.0, 1.0]"
+            );
+            ensure!(
+                self.bar_ratio.is_finite() && (0.0..=1.0).contains(&self.bar_ratio),
+                "playlist.pairing.bar-ratio must be in [0.0, 1.0]"
+            );
+            ensure!(
+                self.dwell_multiplier.is_finite() && (0.5..=4.0).contains(&self.dwell_multiplier),
+                "playlist.pairing.dwell-multiplier must be in [0.5, 4.0]"
+            );
+            Ok(())
+        }
+    }
+
+    impl Default for PairingOptions {
+        fn default() -> Self {
+            Self {
+                enabled: false,
+                probability: Self::DEFAULT_PROBABILITY,
+                bar_ratio: Self::DEFAULT_BAR_RATIO,
+                dwell_multiplier: Self::DEFAULT_DWELL_MULTIPLIER,
             }
         }
     }
@@ -448,6 +511,56 @@ mod awake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pairing_defaults_are_off_with_the_documented_values() {
+        let options: PairingOptions = serde_yaml::from_str("{}").expect("empty map");
+        assert_eq!(options, PairingOptions::default());
+        assert!(!options.enabled);
+        assert_eq!(options.probability, 1.0);
+        assert_eq!(options.bar_ratio, 0.618);
+        assert_eq!(options.dwell_multiplier, 1.5);
+        options.validate().expect("defaults validate");
+    }
+
+    #[test]
+    fn pairing_round_trips_every_key() {
+        let options: PairingOptions = serde_yaml::from_str(
+            "enabled: true\nprobability: 0.25\nbar-ratio: 0.5\ndwell-multiplier: 2.0\n",
+        )
+        .expect("valid pairing block");
+        assert_eq!(
+            options,
+            PairingOptions {
+                enabled: true,
+                probability: 0.25,
+                bar_ratio: 0.5,
+                dwell_multiplier: 2.0,
+            }
+        );
+        options.validate().expect("in range");
+        assert!(serde_yaml::from_str::<PairingOptions>("share: 0.5").is_err());
+    }
+
+    #[test]
+    fn pairing_rejects_out_of_range_values_naming_the_key() {
+        for (yaml, key) in [
+            ("probability: 1.5", "probability"),
+            ("probability: -0.1", "probability"),
+            ("probability: .nan", "probability"),
+            ("bar-ratio: 1.2", "bar-ratio"),
+            ("bar-ratio: -0.5", "bar-ratio"),
+            ("dwell-multiplier: 0.4", "dwell-multiplier"),
+            ("dwell-multiplier: 4.5", "dwell-multiplier"),
+        ] {
+            let options: PairingOptions = serde_yaml::from_str(yaml).expect("parses");
+            let err = options.validate().expect_err(yaml).to_string();
+            assert!(
+                err.contains(&format!("playlist.pairing.{key}")),
+                "{yaml}: {err}"
+            );
+        }
+    }
 
     fn schedule_from_yaml(input: &str) -> AwakeScheduleConfig {
         let mut schedule: AwakeScheduleConfig = serde_yaml::from_str(input).expect("valid yaml");

@@ -16,7 +16,7 @@ use crate::processing::color::PhotoSwatches;
 use crate::processing::fixed_image::FixedImageBackground;
 
 pub use config_model::{
-    AwakeScheduleConfig, GreetingScreenConfig, ScreenMessageConfig, ShowcaseConfig,
+    AwakeScheduleConfig, GreetingScreenConfig, PairingOptions, ScreenMessageConfig, ShowcaseConfig,
     SleepScreenConfig,
 };
 
@@ -867,6 +867,28 @@ impl Default for MattingOptions {
 impl MattingOptions {
     const fn default_minimum_percentage() -> f32 {
         0.0
+    }
+
+    /// The mat's margin `m` as a fraction of each canvas axis, exactly as the
+    /// matting worker applies it.
+    pub fn margin_fraction(&self) -> f32 {
+        (self.minimum_mat_percentage / 100.0).clamp(0.0, 0.45)
+    }
+
+    /// Whether this option draws a mat border at all. Pair screens choose
+    /// only among these (the non-zero-mat rule of portrait pairing).
+    pub fn has_nonzero_mat(&self) -> bool {
+        self.minimum_mat_percentage > 0.0
+    }
+
+    /// Width of the bevel this mat cuts around its window, in canvas pixels
+    /// (studio and passe-partout; 0 for every other kind).
+    pub fn bevel_width(&self) -> f32 {
+        match &self.style {
+            MattingMode::Studio { bevel_width_px, .. }
+            | MattingMode::PassePartout { bevel_width_px, .. } => bevel_width_px.max(0.0),
+            _ => 0.0,
+        }
     }
 
     pub fn prepare_runtime(&mut self) -> Result<()> {
@@ -1828,6 +1850,69 @@ impl MattingConfig {
             .get(entry.index)
             .expect("validated matting selection should resolve to an option");
         SelectedOption { entry, option }
+    }
+
+    /// Mat selection for a **pair screen** (portrait pairing): the configured
+    /// distribution conditioned on a non-zero mat. Random selection draws from
+    /// the non-zero entries with their relative weights unchanged; sequential
+    /// selection takes the next non-zero entry in order, and the zero-margin
+    /// entries it skips count as consumed. Validation guarantees one exists
+    /// when pairing is enabled; `None` only if none is configured.
+    pub fn select_active_nonzero<R: Rng + ?Sized>(
+        &self,
+        rng: &mut R,
+    ) -> Option<SelectedMatting<'_>> {
+        let nonzero = |entry: &SelectionEntry<MattingKind>| {
+            self.options
+                .get(entry.index)
+                .is_some_and(MattingOptions::has_nonzero_mat)
+        };
+        let entry = match self.selection() {
+            MattingSelection::Fixed(entry) => Some(*entry).filter(nonzero),
+            MattingSelection::Random(entries) => entries
+                .iter()
+                .filter(|entry| nonzero(entry))
+                .choose(rng)
+                .copied(),
+            MattingSelection::Sequential { entries, runtime } => {
+                if entries.iter().any(nonzero) {
+                    loop {
+                        let entry = entries[runtime.next(entries.len())];
+                        if nonzero(&entry) {
+                            break Some(entry);
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+        }?;
+        let option = self.options.get(entry.index)?;
+        Some(SelectedOption { entry, option })
+    }
+
+    /// The widest bevel among the selectable options with a non-zero mat (0
+    /// when none cuts one), in canvas pixels.
+    pub fn nonzero_bevel_max(&self) -> f32 {
+        self.iter_selected()
+            .map(|selected| selected.option)
+            .filter(|option| option.has_nonzero_mat())
+            .map(MattingOptions::bevel_width)
+            .fold(0.0, f32::max)
+    }
+
+    /// `(m_min, m_max)`: the smallest and largest margin fraction among the
+    /// selectable options with a non-zero mat, the only mats a pair screen
+    /// can get. `None` when every selectable option is zero-margin.
+    pub fn nonzero_margin_range(&self) -> Option<(f32, f32)> {
+        self.iter_selected()
+            .map(|selected| selected.option)
+            .filter(|option| option.has_nonzero_mat())
+            .map(MattingOptions::margin_fraction)
+            .fold(None, |range, m| match range {
+                None => Some((m, m)),
+                Some((lo, hi)) => Some((lo.min(m), hi.max(m))),
+            })
     }
 
     pub fn primary_option(&self) -> Option<&MattingOptions> {
@@ -3696,6 +3781,14 @@ impl Configuration {
                 .context("invalid matting fill-when-fits configuration")?;
         }
         self.playlist.validate()?;
+        // Portrait pairing's mat rule: a pair screen takes only non-zero
+        // mats, so at least one must exist (the center bar is a fraction of
+        // the mat border).
+        ensure!(
+            !self.playlist.pairing.enabled || self.matting.nonzero_margin_range().is_some(),
+            "playlist.pairing.enabled requires at least one matting option with \
+             minimum-mat-percentage > 0 (pair screens use only non-zero mats)"
+        );
         self.greeting_screen
             .validate()
             .context("invalid greeting screen configuration")?;
@@ -3797,6 +3890,8 @@ pub struct PlaylistOptions {
     /// never alters a photo's long-run show frequency — only its spacing
     /// (coefficient of variation `= 1 - min_spacing`).
     pub min_spacing: f64,
+    /// Opt-in portrait pairing (`playlist.pairing`).
+    pub pairing: PairingOptions,
 }
 
 impl PlaylistOptions {
@@ -3854,6 +3949,7 @@ impl PlaylistOptions {
             (0.0..1.0).contains(&self.min_spacing),
             "playlist.min-spacing must be in [0.0, 1.0)"
         );
+        self.pairing.validate()?;
         Ok(())
     }
 }
@@ -3865,6 +3961,7 @@ impl Default for PlaylistOptions {
             half_life: Self::default_half_life(),
             order: PlaylistOrder::default(),
             min_spacing: Self::default_min_spacing(),
+            pairing: PairingOptions::default(),
         }
     }
 }

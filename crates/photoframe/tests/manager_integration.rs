@@ -23,6 +23,7 @@ async fn manager_ignores_spurious_remove_and_sends_load_on_add() {
         None,
         Some(42),
         false,
+        None,
     ));
 
     // Spurious remove for path never added
@@ -49,11 +50,12 @@ async fn manager_ignores_spurious_remove_and_sends_load_on_add() {
         .await
         .unwrap();
 
-    let LoadPhoto { path: p, priority } =
-        tokio::time::timeout(std::time::Duration::from_secs(5), to_load_rx.recv())
-            .await
-            .expect("timeout waiting for LoadPhoto")
-            .expect("channel closed");
+    let LoadPhoto {
+        path: p, priority, ..
+    } = tokio::time::timeout(std::time::Duration::from_secs(5), to_load_rx.recv())
+        .await
+        .expect("timeout waiting for LoadPhoto")
+        .expect("channel closed");
     assert!(priority, "first load for new photo should be prioritized");
     assert_eq!(p, real);
 
@@ -77,6 +79,7 @@ async fn manager_rotates_actual_sent_item() {
         None,
         Some(42),
         false,
+        None,
     ));
 
     let initial_a = PathBuf::from("/photos/a.jpg");
@@ -162,6 +165,7 @@ fn photo_info(path: PathBuf, created_at: SystemTime) -> PhotoInfo {
         // Default to startup-scan semantics so existing tests exercise the heap;
         // FIFO-specific tests set this true explicitly.
         runtime_added: false,
+        display_size: None,
     }
 }
 
@@ -371,6 +375,7 @@ fn runtime_added_photo_debuts_promptly_via_priority_fifo() {
         created_at: now,
         created_source: CreatedSource::Birthtime,
         runtime_added: true,
+        display_size: None,
     });
 
     // It must debut quickly. With weight ~3 the FIFO wins at odds 3:1, so the
@@ -429,7 +434,10 @@ fn bulk_import_does_not_starve_old_photos() {
             .map(|i| photo_info(PathBuf::from(format!("new_{i}.jpg")), now))
             .collect();
         for p in &old_paths {
-            photos.push(photo_info(p.clone(), now - Duration::from_secs(86_400 * 30)));
+            photos.push(photo_info(
+                p.clone(),
+                now - Duration::from_secs(86_400 * 30),
+            ));
         }
         photos
     };
@@ -471,6 +479,7 @@ async fn manager_churn_tombstone_and_generation() {
         None,
         Some(42),
         false,
+        None,
     ));
 
     let path_a = PathBuf::from("/photos/a.jpg");
@@ -538,6 +547,157 @@ async fn manager_churn_tombstone_and_generation() {
         }
     }
     assert!(seen_a_again, "A should reappear after re-add");
+
+    cancel.cancel();
+    let _ = handle.await;
+}
+
+// ── Live loop with portrait pairing forced on (design test plan, B3) ────────
+
+fn live_pairing() -> manager::pairing::LivePairing {
+    let canvas = photoframe::events::CanvasShape::default();
+    canvas.publish(3840, 2160);
+    manager::pairing::LivePairing {
+        rules: manager::pairing::PairingRules {
+            probability: 1.0,
+            bar_ratio: 0.618,
+            max_upscale: 1.0,
+            m_min: 0.02,
+            m_max: 0.06,
+            bevel_max: 0.0,
+        },
+        canvas,
+    }
+}
+
+fn portrait(name: &str, runtime_added: bool) -> PhotoInfo {
+    PhotoInfo {
+        runtime_added,
+        display_size: Some((3000, 4000)),
+        ..photo_info(
+            PathBuf::from(name),
+            SystemTime::now() - Duration::from_secs(30 * 86_400),
+        )
+    }
+}
+
+async fn receive_request(rx: &mut mpsc::Receiver<LoadPhoto>) -> LoadPhoto {
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timeout waiting for LoadPhoto")
+        .expect("channel closed")
+}
+
+fn members(request: &LoadPhoto) -> Vec<PathBuf> {
+    std::iter::once(request.path.clone())
+        .chain(request.partner.as_ref().map(|p| p.path.clone()))
+        .collect()
+}
+
+/// P (and X) are committed before the send: the screen planned while the
+/// loader is full is fixed, so a debut arriving meanwhile waits for the next
+/// screen instead of taking the slot (today's re-peek would let it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_pairing_commits_before_send_so_a_debut_waits_one_screen() {
+    let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(16);
+    let (_displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(16);
+    let (to_load_tx, mut to_load_rx) = mpsc::channel::<LoadPhoto>(1);
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(manager::run(
+        inv_rx,
+        displayed_rx,
+        to_load_tx,
+        cancel.clone(),
+        PlaylistOptions::default(),
+        None,
+        Some(42),
+        false,
+        Some(live_pairing()),
+    ));
+    for name in ["a", "b", "c", "d", "e", "f"] {
+        inv_tx
+            .send(InventoryEvent::PhotoAdded(portrait(name, false)))
+            .await
+            .unwrap();
+    }
+    // One screen sits in the loader channel; the next is planned (committed)
+    // and blocked on the send.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let debut = PathBuf::from("debut");
+    // Brand new (weight 3): today's re-peek would serve it 3 times in 4.
+    inv_tx
+        .send(InventoryEvent::PhotoAdded(PhotoInfo {
+            created_at: SystemTime::now(),
+            ..portrait("debut", true)
+        }))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let first = receive_request(&mut to_load_rx).await;
+    let second = receive_request(&mut to_load_rx).await;
+    assert!(!members(&first).contains(&debut));
+    assert!(
+        !members(&second).contains(&debut),
+        "the committed screen was replaced: {second:?}"
+    );
+    let mut seen_pair = first.partner.is_some() || second.partner.is_some();
+    let mut debuted = false;
+    for _ in 0..4 {
+        let next = receive_request(&mut to_load_rx).await;
+        seen_pair |= next.partner.is_some();
+        debuted |= members(&next).contains(&debut);
+    }
+    assert!(debuted, "the debut follows within a few screens");
+    assert!(seen_pair, "portraits pair live");
+
+    cancel.cancel();
+    let _ = handle.await;
+}
+
+/// B4: a screen carries only photos in the inventory at send time. Photos
+/// removed while a planned screen waits on the loader never reach it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_pairing_never_sends_a_photo_removed_while_its_screen_waited() {
+    let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(16);
+    let (_displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(16);
+    let (to_load_tx, mut to_load_rx) = mpsc::channel::<LoadPhoto>(1);
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(manager::run(
+        inv_rx,
+        displayed_rx,
+        to_load_tx,
+        cancel.clone(),
+        PlaylistOptions::default(),
+        None,
+        Some(7),
+        false,
+        Some(live_pairing()),
+    ));
+    for name in ["a", "b", "c", "d"] {
+        inv_tx
+            .send(InventoryEvent::PhotoAdded(portrait(name, false)))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The screen already in the channel is out of the manager's hands; the
+    // planned one (most likely containing a or b) is not.
+    let removed = [PathBuf::from("a"), PathBuf::from("b")];
+    for path in &removed {
+        inv_tx
+            .send(InventoryEvent::PhotoRemoved(path.clone()))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _in_channel = receive_request(&mut to_load_rx).await;
+    for _ in 0..6 {
+        let next = receive_request(&mut to_load_rx).await;
+        for path in &removed {
+            assert!(!members(&next).contains(path), "{next:?}");
+        }
+    }
 
     cancel.cancel();
     let _ = handle.await;

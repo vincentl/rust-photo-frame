@@ -257,3 +257,57 @@ async fn startup_shuffle_is_deterministic_with_seed() {
     cancel.cancel();
     let _ = handle.await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pairing_header_pass_reports_startup_sizes_after_the_adds() {
+    use photoframe::events::MetaSource;
+
+    let tmp = tempdir().unwrap();
+    let lib = tmp.path().join("lib");
+    fs::create_dir_all(&lib).unwrap();
+    let portrait = lib.join("portrait.png");
+    image::RgbaImage::from_pixel(30, 40, image::Rgba([9, 9, 9, 255]))
+        .save(&portrait)
+        .unwrap();
+    // Not an image: the pass reads no size for it and sends nothing.
+    fs::write(lib.join("broken.jpg"), b"x").unwrap();
+
+    let mut cfg = Configuration {
+        photo_library_path: lib.clone(),
+        ..Default::default()
+    };
+    cfg.playlist.pairing.enabled = true;
+
+    let (inv_tx, mut inv_rx) = mpsc::channel::<InventoryEvent>(16);
+    let (_invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(16);
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(files::run(cfg.into(), inv_tx, invalid_rx, cancel.clone()));
+
+    let mut adds = 0;
+    let meta = loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), inv_rx.recv())
+            .await
+            .expect("timeout waiting for inventory event")
+            .expect("channel open")
+        {
+            InventoryEvent::PhotoAdded(info) => {
+                // Startup adds go out first, without a size, so the first
+                // photo is not delayed by the pass.
+                assert_eq!(info.display_size, None);
+                adds += 1;
+            }
+            InventoryEvent::PhotoMeta {
+                path,
+                display_size,
+                source,
+            } => break (path, display_size, source, adds),
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    assert_eq!(meta, (portrait, (30, 40), MetaSource::Header, 2));
+    let extra = tokio::time::timeout(std::time::Duration::from_millis(300), inv_rx.recv()).await;
+    assert!(extra.is_err(), "no size for the unreadable file: {extra:?}");
+
+    cancel.cancel();
+    let _ = handle.await;
+}
