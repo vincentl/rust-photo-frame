@@ -10,7 +10,7 @@ fn app() -> (App, super::loader::DecodeScaling, CanvasShape) {
     let cfg = crate::config::Configuration::default();
     let shape = CanvasShape::default();
     let scaling = super::loader::DecodeScaling::from_config(&cfg).with_canvas_shape(shape.clone());
-    let (_loader_tx, loader_rx) = tokio::sync::mpsc::channel(1);
+    let (_loader_tx, loader_rx) = crate::tasks::photo_channel::photo_channel(1);
     let (displayed_tx, _displayed_rx) = tokio::sync::mpsc::channel(1);
     let mut app = App::new(
         loader_rx,

@@ -1435,6 +1435,8 @@ mod tests {
                     pending: 1,
                     in_flight: 0,
                     deferred: 0,
+                    deferred_head: 0,
+                    largest_screen: 1,
                     preload: 1,
                     overlay_expires_at: None,
                     surface_poll: None,

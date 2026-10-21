@@ -11,6 +11,7 @@ mod tasks {
     pub mod greeting_screen;
     pub mod loader;
     pub mod manager;
+    pub mod photo_channel;
     pub mod photo_effect;
     pub mod viewer;
 }
@@ -36,9 +37,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
-use events::{
-    Displayed, InvalidPhoto, InventoryEvent, LoadPhoto, PhotoLoaded, ViewerCommand, ViewerState,
-};
+use events::{Displayed, InvalidPhoto, InventoryEvent, LoadPhoto, ViewerCommand, ViewerState};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -126,13 +125,16 @@ async fn main() -> Result<()> {
     // - invalid_tx / displayed_tx: low-frequency bookkeeping; 64 is generous.
     // - to_load_tx: intentionally small (4) so the manager stays in sync with what the loader needs.
     // - loaded_tx / processed_tx: sized to viewer_preload_count so the decode pipeline stays filled
-    //   without buffering more decoded frames than the viewer will consume.
+    //   without buffering more decoded frames than the viewer will consume. They count decoded
+    //   photos, not screens (photo_channel.rs): a portrait pair is two, so pairing on never
+    //   buffers more decoded pixels than pairing off for the same viewer_preload_count.
     // - viewer_control_tx: external control commands are rare; 16 is ample.
     let (inv_tx, inv_rx) = mpsc::channel::<InventoryEvent>(128);
     let (invalid_tx, invalid_rx) = mpsc::channel::<InvalidPhoto>(64);
     let (to_load_tx, to_load_rx) = mpsc::channel::<LoadPhoto>(4);
-    let (loaded_tx, loaded_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count);
-    let (processed_tx, processed_rx) = mpsc::channel::<PhotoLoaded>(cfg.viewer_preload_count);
+    let (loaded_tx, loaded_rx) = tasks::photo_channel::photo_channel(cfg.viewer_preload_count);
+    let (processed_tx, processed_rx) =
+        tasks::photo_channel::photo_channel(cfg.viewer_preload_count);
     let (displayed_tx, displayed_rx) = mpsc::channel::<Displayed>(64);
     let (viewer_control_tx, viewer_control_rx) = mpsc::channel::<ViewerCommand>(16);
 

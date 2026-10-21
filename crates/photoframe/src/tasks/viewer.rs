@@ -28,6 +28,7 @@ use crate::processing::color::PhotoSwatches;
 use crate::processing::layout::center_offset;
 use crate::tasks::greeting_screen::GreetingScreen;
 use crate::tasks::loader;
+use crate::tasks::photo_channel::{PhotoReceiver, PhotoSender};
 use crossbeam_channel::{Sender as CbSender, TrySendError, bounded};
 use futures::executor::block_on;
 use image::{Rgba, RgbaImage, imageops};
@@ -416,6 +417,9 @@ struct MatResult {
     /// full-bleed).
     windows: Vec<photo_set::Window>,
     mat_kind: Option<crate::config::MatCaption>,
+    /// Decoded photos the task carried (1, or 2 for a pair), whatever the
+    /// canvas ended up showing: what `mat_inflight` gives back.
+    photos: usize,
 }
 
 // Manual so logs and test failures never dump the canvas pixels.
@@ -429,6 +433,12 @@ impl std::fmt::Debug for MatResult {
             .field("partner", &self.partner)
             .finish_non_exhaustive()
     }
+}
+
+/// Photos of the largest screen the loader can send: a portrait pair with
+/// pairing on, else one photo.
+fn largest_screen(pairing: bool) -> usize {
+    if pairing { 2 } else { 1 }
 }
 
 struct QueuedImage {
@@ -601,7 +611,7 @@ struct MattingBridge<'a> {
     mat_inflight: &'a mut usize,
     deferred_images: &'a mut VecDeque<QueuedImage>,
     ready_results: &'a mut VecDeque<MatResult>,
-    from_loader: &'a mut Receiver<PhotoLoaded>,
+    from_loader: &'a mut PhotoReceiver,
     surface: Option<SurfaceState>,
     matting: &'a MattingConfig,
     oversample: f32,
@@ -634,9 +644,20 @@ impl<'a> MattingBridge<'a> {
         if wake.transition_state().is_some() {
             return;
         }
-        while wake.pending().len() + *self.mat_inflight < self.preload_count {
+        // The preload counts decoded photos, not screens (`wake::screen_fits`):
+        // a screen goes in only if it fits, and the loader is read only when
+        // the largest screen it can send would.
+        loop {
+            let used = wake.pending().len() + *self.mat_inflight;
+            let largest = largest_screen(self.pairing.is_some());
             let next_img = if let Some(img) = self.deferred_images.pop_front() {
+                if !wake::screen_fits(used, img.photos(), self.preload_count) {
+                    self.deferred_images.push_front(img);
+                    break;
+                }
                 Some(img)
+            } else if !wake::screen_fits(used, largest, self.preload_count) {
+                None
             } else {
                 match self.from_loader.try_recv() {
                     Ok(PhotoLoaded {
@@ -756,9 +777,10 @@ impl<'a> MattingBridge<'a> {
                 partner,
                 mat_kind,
             };
+            let photos = task.photos();
             match self.mat_pipeline.try_submit(task) {
                 Ok(()) => {
-                    *self.mat_inflight += 1;
+                    *self.mat_inflight += photos;
                 }
                 Err(MatTask {
                     image,
@@ -872,6 +894,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         partner,
         mat_kind,
     } = task;
+    let photos = 1 + usize::from(partner.is_some());
     let path = image.path.clone();
     let MatParams {
         screen_w,
@@ -947,6 +970,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             partner,
             windows: Vec::new(),
             mat_kind,
+            photos,
         });
     }
 
@@ -1040,6 +1064,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             partner,
             windows,
             mat_kind,
+            photos,
         }));
     }
 
@@ -1127,6 +1152,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             partner,
             windows,
             mat_kind,
+            photos,
         }));
     }
 
@@ -1188,6 +1214,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             partner,
             windows,
             mat_kind,
+            photos,
         }));
     }
 
@@ -1373,16 +1400,18 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         partner,
         windows,
         mat_kind,
+        photos,
     }))
 }
 
-/// A finished matting result arrives: one fewer in flight, one more to upload.
+/// A finished matting result arrives: its photos are no longer in flight,
+/// one more canvas to upload.
 fn accept_mat_result(
     mat_inflight: &mut usize,
     ready_results: &mut VecDeque<MatResult>,
     result: MatResult,
 ) {
-    *mat_inflight = mat_inflight.saturating_sub(1);
+    *mat_inflight = mat_inflight.saturating_sub(result.photos);
     photo_set::queue_result(ready_results, result);
 }
 
@@ -1404,7 +1433,7 @@ async fn drive_viewer_events(
     cancel: CancellationToken,
     proxy: winit::event_loop::EventLoopProxy<ViewerEvent>,
     mat_results: Receiver<MatResult>,
-    loader: Receiver<PhotoLoaded>,
+    loader: PhotoReceiver,
     published: tokio::sync::watch::Receiver<wake::Published>,
 ) {
     wake::drive_forwarding(
@@ -2291,7 +2320,7 @@ fn build_gpu(
 }
 
 struct App {
-    from_loader: Receiver<PhotoLoaded>,
+    from_loader: PhotoReceiver,
     to_manager_displayed: Sender<Displayed>,
     cancel: CancellationToken,
     /// `None` until the Wayland window exists; set once at startup on KMS.
@@ -3785,7 +3814,7 @@ impl App {
 impl App {
     /// The viewer state shared by both outputs; no output or GPU yet.
     fn new(
-        from_loader: Receiver<PhotoLoaded>,
+        from_loader: PhotoReceiver,
         to_manager_displayed: Sender<Displayed>,
         cancel: CancellationToken,
         cfg: Arc<crate::config::Configuration>,
@@ -3992,7 +4021,10 @@ impl App {
                 surface_ready: self.surface_configured,
                 pending: wake.pending().len(),
                 in_flight: self.mat_inflight,
-                deferred: self.deferred_images.len(),
+                // Counted in photos (`wake::screen_fits`).
+                deferred: self.deferred_images.iter().map(QueuedImage::photos).sum(),
+                deferred_head: self.deferred_images.front().map_or(0, QueuedImage::photos),
+                largest_screen: largest_screen(self.pairing_rules.is_some()),
                 preload: self.preload_count,
                 overlay_expires_at: self.presentation.overlay_expires_at(),
                 surface_poll: (!on_kms).then_some(SURFACE_POLL_INTERVAL),
@@ -4314,7 +4346,7 @@ pub use kms::run_kms;
 
 #[cfg(not(target_os = "linux"))]
 pub async fn run_kms(
-    _from_loader: Receiver<PhotoLoaded>,
+    _from_loader: PhotoReceiver,
     _to_manager_displayed: Sender<Displayed>,
     _cancel: CancellationToken,
     _cfg: Arc<crate::config::Configuration>,
@@ -4325,7 +4357,7 @@ pub async fn run_kms(
 }
 
 pub fn run_windowed(
-    from_loader: Receiver<PhotoLoaded>,
+    from_loader: PhotoReceiver,
     to_manager_displayed: Sender<Displayed>,
     cancel: CancellationToken,
     cfg: Arc<crate::config::Configuration>,
@@ -4369,7 +4401,7 @@ pub fn run_windowed(
     // The driver owns the loader and matting-result channels (it awaits them
     // and forwards what arrives); the app keeps closed stand-ins, which its
     // `try_recv` polls read as empty.
-    let (_, loader_stand_in) = tokio::sync::mpsc::channel(1);
+    let (_, loader_stand_in) = crate::tasks::photo_channel::photo_channel(1);
     let mut app = App::new(
         loader_stand_in,
         to_manager_displayed,
@@ -4430,15 +4462,14 @@ pub mod testkit {
     //! Internal viewer harness helpers exposed for integration testing.
     use super::*;
     use std::time::{Duration, Instant};
-    use tokio::sync::mpsc;
 
     pub struct MattingQueueHarness {
         preload_count: usize,
         mat_inflight: usize,
         deferred_images: VecDeque<QueuedImage>,
         ready_results: VecDeque<MatResult>,
-        from_loader_tx: mpsc::Sender<PhotoLoaded>,
-        from_loader_rx: mpsc::Receiver<PhotoLoaded>,
+        from_loader_tx: PhotoSender,
+        from_loader_rx: PhotoReceiver,
         mat_pipeline: MattingPipeline,
         wake: scenes::WakeScene,
         oversample: f32,
@@ -4466,7 +4497,7 @@ pub mod testkit {
             dwell_ms: u64,
             transition_cfg: TransitionConfig,
         ) -> Self {
-            let (from_loader_tx, from_loader_rx) = mpsc::channel(8);
+            let (from_loader_tx, from_loader_rx) = crate::tasks::photo_channel::photo_channel(8);
             Self {
                 preload_count,
                 mat_inflight: 0,
@@ -4494,7 +4525,7 @@ pub mod testkit {
             }
         }
 
-        pub fn loader_sender(&self) -> mpsc::Sender<PhotoLoaded> {
+        pub fn loader_sender(&self) -> PhotoSender {
             self.from_loader_tx.clone()
         }
 
@@ -4566,7 +4597,7 @@ pub mod testkit {
 
         pub fn drain_pipeline(&mut self) {
             while let Some(result) = self.mat_pipeline.try_recv() {
-                self.mat_inflight = self.mat_inflight.saturating_sub(1);
+                self.mat_inflight = self.mat_inflight.saturating_sub(result.photos);
                 self.ready_results.push_back(result);
             }
         }
@@ -4633,7 +4664,6 @@ mod tests {
     use image::{Rgba, RgbaImage};
     use std::collections::VecDeque;
     use std::path::PathBuf;
-    use tokio::sync::mpsc;
 
     fn make_gradient(width: u32, height: u32) -> RgbaImage {
         image::ImageBuffer::from_fn(width, height, |x, y| {
@@ -4655,39 +4685,37 @@ mod tests {
         let cfg = crate::config::TransitionConfig::default();
         let matting = MattingConfig::default();
         let now = Instant::now();
-        for transition in [false, true] {
-            for surface_ready in [false, true] {
-                for in_flight in 0..=PRELOAD + 1 {
-                    for deferred in 0..=2usize {
-                        // Fresh per case: the bridge only ever sees a task
-                        // queue no fuller than its own in-flight count.
-                        let pipeline = MattingPipeline::new(1, PRELOAD);
-                        let mut wake = scenes::WakeScene::new(8_000, 8_000, cfg.clone());
-                        if transition {
-                            let selected = cfg.primary_selected().expect("default transition");
-                            wake.set_transition_state(Some(TransitionState::new(
-                                selected,
-                                now,
-                                &mut rand::rng(),
-                            )));
-                        }
-                        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-                        tx.try_send(PhotoLoaded {
-                            prepared: PreparedImageCpu {
-                                path: "loader.jpg".into(),
-                                width: 4,
-                                height: 4,
-                                source_size: (4, 4),
-                                pixels: vec![0; 64],
-                            },
-                            priority: false,
-                            partner: None,
-                        })
-                        .unwrap();
-                        let mut deferred_images: VecDeque<QueuedImage> = (0..deferred)
-                            .map(|i| QueuedImage {
-                                image: PreparedImageCpu {
-                                    path: format!("deferred-{i}.jpg").into(),
+        let rules = crate::tasks::manager::pairing::PairingRules {
+            probability: 1.0,
+            bar_ratio: 0.618,
+            max_upscale: 1.0,
+            m_min: 0.06,
+            m_max: 0.06,
+            bevel_max: 0.0,
+        };
+        // Pairing off and on; with it on, the deferred screens are pairs
+        // (two photos each, review M4).
+        for pairs in [false, true] {
+            for transition in [false, true] {
+                for surface_ready in [false, true] {
+                    for in_flight in 0..=PRELOAD + 1 {
+                        for deferred in 0..=2usize {
+                            // Fresh per case: the bridge only ever sees a task
+                            // queue no fuller than its own in-flight count.
+                            let pipeline = MattingPipeline::new(1, PRELOAD);
+                            let mut wake = scenes::WakeScene::new(8_000, 8_000, cfg.clone());
+                            if transition {
+                                let selected = cfg.primary_selected().expect("default transition");
+                                wake.set_transition_state(Some(TransitionState::new(
+                                    selected,
+                                    now,
+                                    &mut rand::rng(),
+                                )));
+                            }
+                            let (tx, mut rx) = crate::tasks::photo_channel::photo_channel(4);
+                            tx.try_send(PhotoLoaded {
+                                prepared: PreparedImageCpu {
+                                    path: "loader.jpg".into(),
                                     width: 4,
                                     height: 4,
                                     source_size: (4, 4),
@@ -4696,57 +4724,162 @@ mod tests {
                                 priority: false,
                                 partner: None,
                             })
-                            .collect();
-                        let mut mat_inflight = in_flight;
-                        let mut ready_results = VecDeque::new();
-                        let mut bridge = MattingBridge {
-                            preload_count: PRELOAD,
-                            mat_inflight: &mut mat_inflight,
-                            deferred_images: &mut deferred_images,
-                            ready_results: &mut ready_results,
-                            from_loader: &mut rx,
-                            surface: surface_state_for_queue(
-                                surface_ready,
-                                Some(SurfaceState::new(64, 64, 4096)),
-                            ),
-                            matting: &matting,
-                            oversample: 1.0,
-                            max_upscale_factor: 1.0,
-                            bar_ratio: 0.618,
-                            pairing: None,
-                            mat_pipeline: &pipeline,
-                        };
-                        bridge.queue_for_wake(&mut wake);
-                        let bridge_read_loader = rx.is_empty();
+                            .unwrap();
+                            let photo = |name: String| PreparedImageCpu {
+                                path: name.into(),
+                                width: 4,
+                                height: 4,
+                                source_size: (4, 4),
+                                pixels: vec![0; 64],
+                            };
+                            let mut deferred_images: VecDeque<QueuedImage> = (0..deferred)
+                                .map(|i| QueuedImage {
+                                    image: photo(format!("deferred-{i}.jpg")),
+                                    priority: false,
+                                    partner: pairs.then(|| LoadedPartner {
+                                        prepared: photo(format!("partner-{i}.jpg")),
+                                        priority: false,
+                                    }),
+                                })
+                                .collect();
+                            let deferred_photos: usize =
+                                deferred_images.iter().map(QueuedImage::photos).sum();
+                            let deferred_head =
+                                deferred_images.front().map_or(0, QueuedImage::photos);
+                            let mut mat_inflight = in_flight;
+                            let mut ready_results = VecDeque::new();
+                            let mut bridge = MattingBridge {
+                                preload_count: PRELOAD,
+                                mat_inflight: &mut mat_inflight,
+                                deferred_images: &mut deferred_images,
+                                ready_results: &mut ready_results,
+                                from_loader: &mut rx,
+                                surface: surface_state_for_queue(
+                                    surface_ready,
+                                    Some(SurfaceState::new(64, 64, 4096)),
+                                ),
+                                matting: &matting,
+                                oversample: 1.0,
+                                max_upscale_factor: 1.0,
+                                bar_ratio: 0.618,
+                                pairing: pairs.then_some(rules),
+                                mat_pipeline: &pipeline,
+                            };
+                            bridge.queue_for_wake(&mut wake);
+                            let bridge_read_loader = rx.is_empty();
 
-                        let plan = wake::plan_wake(
-                            wake::WakeInputs {
-                                slideshow_active: true,
-                                sleeping: false,
-                                redraw_requested: false,
-                                transition_active: transition,
-                                transition_just_finished: false,
-                                displayed_at: None,
-                                dwell: Duration::from_secs(8),
-                                surface_ready,
-                                pending: 0,
-                                in_flight,
-                                deferred,
-                                preload: PRELOAD,
-                                overlay_expires_at: None,
-                                surface_poll: None,
-                                overlay_pending: false,
-                            },
-                            now,
-                        );
-                        assert_eq!(
-                            plan.want_photo, bridge_read_loader,
-                            "transition={transition} surface_ready={surface_ready} \
+                            let plan = wake::plan_wake(
+                                wake::WakeInputs {
+                                    slideshow_active: true,
+                                    sleeping: false,
+                                    redraw_requested: false,
+                                    transition_active: transition,
+                                    transition_just_finished: false,
+                                    displayed_at: None,
+                                    dwell: Duration::from_secs(8),
+                                    surface_ready,
+                                    pending: 0,
+                                    in_flight,
+                                    deferred: deferred_photos,
+                                    deferred_head,
+                                    largest_screen: largest_screen(pairs),
+                                    preload: PRELOAD,
+                                    overlay_expires_at: None,
+                                    surface_poll: None,
+                                    overlay_pending: false,
+                                },
+                                now,
+                            );
+                            assert_eq!(
+                                plan.want_photo, bridge_read_loader,
+                                "pairs={pairs} transition={transition} surface_ready={surface_ready} \
                              in_flight={in_flight} deferred={deferred}"
-                        );
+                            );
+                        }
                     }
                 }
             }
+        }
+    }
+
+    /// Review M4: the viewer's preload counts decoded photos. Pairs never
+    /// take it past `viewer-preload-count` photos; single photos fill it
+    /// exactly as before.
+    #[test]
+    fn preload_counts_photos_so_pairs_never_hold_more_than_solos() {
+        const PRELOAD: usize = 3;
+        let cfg: crate::config::Configuration = serde_yaml::from_str(
+            "photo-library-path: /photos\nmatting:\n  selection: fixed\n  active:\n    - kind: fixed-color\n      minimum-mat-percentage: 6\n",
+        )
+        .unwrap();
+        let cfg = cfg.validated().unwrap();
+        let rules = crate::tasks::manager::pairing::PairingRules::from_parts(
+            &crate::config::PairingOptions {
+                enabled: true,
+                ..Default::default()
+            },
+            &cfg.matting,
+            1.0,
+        );
+        // Pairable on a 320 x 180 canvas: full height 158.4 px, aspect <= 0.87.
+        let photo = |name: String, w: u32| PreparedImageCpu {
+            path: name.into(),
+            width: w,
+            height: 160,
+            source_size: (w, 160),
+            pixels: vec![200; (w * 160 * 4) as usize],
+        };
+        for (pairing, pairs, expected_photos) in
+            [(false, false, 3), (true, true, 2), (true, false, 2)]
+        {
+            let pipeline = MattingPipeline::new(1, 8);
+            let mut wake = scenes::WakeScene::new(8_000, 8_000, TransitionConfig::default());
+            let (tx, mut rx) = crate::tasks::photo_channel::photo_channel(8);
+            for i in 0..4 {
+                tx.try_send(PhotoLoaded {
+                    prepared: photo(format!("a{i}.jpg"), 120),
+                    priority: false,
+                    partner: pairs.then(|| LoadedPartner {
+                        prepared: photo(format!("b{i}.jpg"), 96),
+                        priority: false,
+                    }),
+                })
+                .unwrap();
+            }
+            let sent = rx.photos();
+            let mut deferred_images = VecDeque::new();
+            let mut ready_results = VecDeque::new();
+            let mut mat_inflight = 0;
+            let mut bridge = MattingBridge {
+                preload_count: PRELOAD,
+                mat_inflight: &mut mat_inflight,
+                deferred_images: &mut deferred_images,
+                ready_results: &mut ready_results,
+                from_loader: &mut rx,
+                surface: Some(SurfaceState::new(320, 180, 4096)),
+                matting: &cfg.matting,
+                oversample: 1.0,
+                max_upscale_factor: 1.0,
+                bar_ratio: 0.618,
+                pairing: if pairing { rules } else { None },
+                mat_pipeline: &pipeline,
+            };
+            bridge.queue_for_wake(&mut wake);
+            let held: usize = mat_inflight
+                + deferred_images
+                    .iter()
+                    .map(QueuedImage::photos)
+                    .sum::<usize>();
+            assert!(
+                held <= PRELOAD,
+                "pairing={pairing} pairs={pairs}: {held} photos"
+            );
+            assert_eq!(held, expected_photos, "pairing={pairing} pairs={pairs}");
+            assert_eq!(
+                rx.photos(),
+                sent - held,
+                "the rest stays in the loader channel"
+            );
         }
     }
 
@@ -4765,6 +4898,7 @@ mod tests {
             partner: None,
             windows: Vec::new(),
             mat_kind: None,
+            photos: 1,
         };
         accept_mat_result(&mut inflight, &mut ready, result("a.jpg"));
         assert_eq!((inflight, ready.len()), (1, 1));
@@ -4819,8 +4953,16 @@ mod tests {
         }
         let m = metric.unwrap();
         let ms = period.as_secs_f32() * 1000.0;
-        assert!((m.best_frame_ms - ms).abs() < 0.01, "best {}", m.best_frame_ms);
-        assert!((m.worst_frame_ms - ms).abs() < 0.01, "worst {}", m.worst_frame_ms);
+        assert!(
+            (m.best_frame_ms - ms).abs() < 0.01,
+            "best {}",
+            m.best_frame_ms
+        );
+        assert!(
+            (m.worst_frame_ms - ms).abs() < 0.01,
+            "worst {}",
+            m.worst_frame_ms
+        );
         // Re-anchoring is one-shot: a later frame time does not restart it.
         let last = *frames.last().unwrap();
         state.anchor_once(last + period);
@@ -5125,7 +5267,7 @@ mod tests {
             partner: None,
         });
         let mut ready_results = VecDeque::new();
-        let (tx, mut rx) = mpsc::channel(1);
+        let (tx, mut rx) = crate::tasks::photo_channel::photo_channel(1);
         drop(tx);
         let mut mat_pipeline = MattingPipeline::new(1, 2);
         let mut bridge = MattingBridge {
@@ -5175,7 +5317,7 @@ mod tests {
             partner: None,
         });
         let mut ready_results = VecDeque::new();
-        let (tx, mut rx) = mpsc::channel(1);
+        let (tx, mut rx) = crate::tasks::photo_channel::photo_channel(1);
         drop(tx);
         let matting = MattingConfig::default();
         let mat_pipeline = MattingPipeline::new(1, 2);

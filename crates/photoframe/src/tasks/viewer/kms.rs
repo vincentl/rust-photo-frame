@@ -196,7 +196,7 @@ fn kms_request_from_env() -> anyhow::Result<KmsRequest> {
 
 /// Run the viewer on DRM/KMS until cancelled or a fatal display error.
 pub async fn run_kms(
-    from_loader: Receiver<PhotoLoaded>,
+    from_loader: PhotoReceiver,
     to_manager_displayed: Sender<Displayed>,
     cancel: CancellationToken,
     cfg: Arc<crate::config::Configuration>,
@@ -521,7 +521,7 @@ impl App {
     /// One matting result from the awaited channel; same bookkeeping as
     /// `drain_mat_results`.
     fn accept_mat_result(&mut self, result: MatResult) {
-        self.mat_inflight = self.mat_inflight.saturating_sub(1);
+        self.mat_inflight = self.mat_inflight.saturating_sub(result.photos);
         super::photo_set::queue_result(&mut self.ready_results, result);
     }
 }

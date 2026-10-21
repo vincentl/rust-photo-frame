@@ -165,6 +165,13 @@ pub struct PhotoLoaded {
     pub partner: Option<LoadedPartner>,
 }
 
+impl PhotoLoaded {
+    /// Decoded photos this screen carries: 1, or 2 for a pair.
+    pub fn photos(&self) -> usize {
+        1 + usize::from(self.partner.is_some())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LoadedPartner {
     pub prepared: PreparedImageCpu,

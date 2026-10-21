@@ -24,6 +24,7 @@
 
 use super::MatResult;
 use crate::events::{PhotoLoaded, ViewerCommand};
+use crate::tasks::photo_channel::PhotoReceiver;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc::Receiver, watch};
 use tokio_util::sync::CancellationToken;
@@ -46,12 +47,17 @@ pub(super) struct WakeInputs {
     pub(super) dwell: Duration,
     /// The surface has a usable size (always, on KMS).
     pub(super) surface_ready: bool,
-    /// Photos uploaded and waiting their turn.
+    /// Screens uploaded and waiting their turn (one canvas each).
     pub(super) pending: usize,
-    /// Photos submitted to the matting workers.
+    /// Decoded photos submitted to the matting workers (a pair is two).
     pub(super) in_flight: usize,
-    /// Photos taken from the loader but not yet submitted.
+    /// Decoded photos taken from the loader but not yet submitted.
     pub(super) deferred: usize,
+    /// Photos of the first deferred screen (0 when none waits).
+    pub(super) deferred_head: usize,
+    /// Photos of the largest screen the loader can send: 2 with portrait
+    /// pairing, else 1.
+    pub(super) largest_screen: usize,
     /// `viewer-preload-count`.
     pub(super) preload: usize,
     /// When the Wi-Fi overlay's lease runs out, if one is held (see
@@ -106,6 +112,21 @@ pub(super) struct WakePlan {
     pub(super) want_photo: bool,
 }
 
+/// **The decoded-photo bound (review M4).** The viewer's preload counts
+/// decoded photos, not screens: a canvas waiting its turn counts one, a
+/// decoded photo in matting or waiting for it counts one, so a portrait pair
+/// counts two. A screen of `photos` photos is admitted (read from the loader,
+/// or submitted to matting) only if it fits beside the `used` ones:
+/// `used + photos ≤ preload`, or the stage is idle, so a pair still flows at
+/// `viewer-preload-count: 1`. For a single photo this is `used < preload`,
+/// the bound before pairing, so with pairing off nothing changes; with it on
+/// the viewer never holds more decoded photos than with it off. The loader is
+/// read only when the largest screen it can send would fit, because a
+/// message's size is known only once it is taken.
+pub(super) fn screen_fits(used: usize, photos: usize, preload: usize) -> bool {
+    used == 0 || used + photos <= preload
+}
+
 pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
     // A transition only animates on the slideshow. One left behind by a
     // switch to Sleep must not keep the loop rendering frames nobody draws.
@@ -142,8 +163,12 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
     if inputs.surface_ready
         && !inputs.sleeping
         && !inputs.transition_active
-        && inputs.deferred > 0
-        && inputs.pending + inputs.in_flight < inputs.preload
+        && inputs.deferred_head > 0
+        && screen_fits(
+            inputs.pending + inputs.in_flight,
+            inputs.deferred_head,
+            inputs.preload,
+        )
     {
         sooner(now + REFILL_RETRY);
     }
@@ -167,13 +192,18 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
     // it first submits every deferred photo and keeps reading while the
     // queue is short; without one it reads a single photo into `deferred`
     // and stops there.
+    // Counted in photos, see `screen_fits`.
     let queued = inputs.pending + inputs.in_flight;
     let want_photo = !inputs.sleeping
         && !inputs.transition_active
         && if inputs.surface_ready {
-            queued + inputs.deferred < inputs.preload
+            screen_fits(
+                queued + inputs.deferred,
+                inputs.largest_screen,
+                inputs.preload,
+            )
         } else {
-            inputs.deferred == 0 && queued < inputs.preload
+            inputs.deferred == 0 && screen_fits(queued, inputs.largest_screen, inputs.preload)
         };
 
     // The surface-ready handshake needs two identical size reports 120 ms
@@ -217,7 +247,7 @@ pub(super) async fn next_wake_event(
     cancel: &CancellationToken,
     control: &mut Receiver<ViewerCommand>,
     mat_results: &mut Receiver<MatResult>,
-    loader: Option<&mut Receiver<PhotoLoaded>>,
+    loader: Option<&mut PhotoReceiver>,
 ) -> WakeEvent {
     let take_photo = plan.want_photo && loader.is_some();
     let photo = async {
@@ -359,7 +389,7 @@ pub(super) async fn drive_forwarding(
     cancel: CancellationToken,
     mut control: Receiver<ViewerCommand>,
     mut mat_results: Receiver<MatResult>,
-    loader: Receiver<PhotoLoaded>,
+    loader: PhotoReceiver,
     mut published: watch::Receiver<Published>,
     tick_interval: Duration,
     mut forward: impl FnMut(Forward) -> bool,
@@ -457,6 +487,7 @@ mod tests {
     use super::super::ImagePlane;
     use super::*;
     use crate::events::{PreparedImageCpu, ViewerState};
+    use crate::tasks::photo_channel::PhotoSender;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
@@ -477,6 +508,8 @@ mod tests {
             pending: 3,
             in_flight: 0,
             deferred: 0,
+            deferred_head: 0,
+            largest_screen: 1,
             preload: 3,
             overlay_expires_at: None,
             surface_poll: None,
@@ -760,6 +793,7 @@ mod tests {
             partner: None,
             windows: Vec::new(),
             mat_kind: None,
+            photos: 1,
         }
     }
 
@@ -769,14 +803,14 @@ mod tests {
         control: Receiver<ViewerCommand>,
         mat_tx: mpsc::Sender<MatResult>,
         mat: Receiver<MatResult>,
-        loader_tx: mpsc::Sender<PhotoLoaded>,
-        loader: Receiver<PhotoLoaded>,
+        loader_tx: PhotoSender,
+        loader: PhotoReceiver,
     }
 
     fn sources() -> Sources {
         let (control_tx, control) = mpsc::channel(4);
         let (mat_tx, mat) = mpsc::channel(4);
-        let (loader_tx, loader) = mpsc::channel(4);
+        let (loader_tx, loader) = crate::tasks::photo_channel::photo_channel(4);
         Sources {
             cancel: CancellationToken::new(),
             control_tx,
@@ -1002,7 +1036,7 @@ mod tests {
         start: tokio::time::Instant,
         control_tx: mpsc::Sender<ViewerCommand>,
         mat_tx: Option<mpsc::Sender<MatResult>>,
-        loader_tx: mpsc::Sender<PhotoLoaded>,
+        loader_tx: PhotoSender,
     }
 
     const TICK: Duration = Duration::from_millis(4);
@@ -1035,7 +1069,7 @@ mod tests {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<&'static str>();
         let (control_tx, control) = mpsc::channel(4);
         let (mat_tx, mat) = mpsc::channel(4);
-        let (loader_tx, loader) = mpsc::channel(4);
+        let (loader_tx, loader) = crate::tasks::photo_channel::photo_channel(4);
 
         // The winit thread.
         {
@@ -1325,6 +1359,7 @@ mod tests {
         // transition or a full queue is holding back is not.
         let stuck = WakeInputs {
             deferred: 1,
+            deferred_head: 1,
             pending: 1,
             ..resting(now)
         };
@@ -1336,6 +1371,15 @@ mod tests {
             },
             WakeInputs {
                 pending: 3,
+                ..stuck
+            },
+            // A pair at the head does not fit beside two waiting canvases
+            // with a preload of 3, where a single photo would (review M4);
+            // the next matting result or upload wakes the loop instead.
+            WakeInputs {
+                pending: 2,
+                deferred: 2,
+                deferred_head: 2,
                 ..stuck
             },
             WakeInputs {
@@ -1455,6 +1499,8 @@ mod tests {
                     pending: self.pending,
                     in_flight: 0,
                     deferred: 0,
+                    deferred_head: 0,
+                    largest_screen: 1,
                     preload: PRELOAD,
                     surface_poll: None,
                     overlay_pending: false,

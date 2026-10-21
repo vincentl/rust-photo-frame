@@ -247,6 +247,11 @@ pub(super) struct Member {
 // ── Membership: per-member priority (B2) and purge (R14) ───────────────────
 
 impl QueuedImage {
+    /// Decoded photos this screen holds: 1, or 2 for a pair.
+    pub(super) fn photos(&self) -> usize {
+        1 + usize::from(self.partner.is_some())
+    }
+
     /// Paths of the members that carry priority (B2: per member).
     pub(super) fn priority_paths(&self) -> Vec<PathBuf> {
         let first = self.priority.then(|| self.image.path.clone());
@@ -336,6 +341,13 @@ pub(super) fn matted(result: MatResult) -> MatResult {
         );
     }
     result
+}
+
+impl super::MatTask {
+    /// Decoded photos the task carries: 1, or 2 for a pair.
+    pub(super) fn photos(&self) -> usize {
+        1 + usize::from(self.partner.is_some())
+    }
 }
 
 impl MatResult {
@@ -475,6 +487,7 @@ mod tests {
             }),
             windows: Vec::new(),
             mat_kind: None,
+            photos: 1,
         }
     }
 
