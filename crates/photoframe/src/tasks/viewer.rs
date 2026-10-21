@@ -2319,6 +2319,9 @@ struct App {
     layer: presentation::Layer,
     /// Renders the Wi-Fi overlay; `None` without a GPU.
     wifi_overlay: Option<scenes::wifi_overlay::WifiOverlayScreen>,
+    /// Frames presented so far (the KMS loop tells a wake's modeset frame
+    /// from a redraw that presented nothing).
+    frames_presented: u64,
 }
 
 impl App {
@@ -2787,9 +2790,11 @@ impl App {
                 ViewerModeKind::Greeting | ViewerModeKind::Wake => self.enter_sleep(),
             },
             ViewerCommand::DisplayPower { reply, .. } => {
+                // The KMS loop handles this itself (`kms.rs`); the control
+                // task answers it on Wayland, so this is only a backstop.
                 let _ = reply.send(config_model::control::Reply::error(
                     config_model::control::ErrorKind::Unsupported,
-                    "display power is not implemented yet",
+                    "the compositor owns display power on this stack",
                 ));
             }
             ViewerCommand::ShowWifiOverlay(content) => self.show_wifi_overlay(*content),
@@ -3015,6 +3020,7 @@ impl App {
 
     fn record_frame_presented(&mut self) {
         self.surface_timeout_streak = 0;
+        self.frames_presented = self.frames_presented.wrapping_add(1);
     }
 
     /// Render and present one frame of the active scene. Shared by the
@@ -3794,6 +3800,7 @@ impl App {
             presentation: presentation::Presentation::default(),
             layer: presentation::Layer::Scene(ViewerModeKind::Greeting),
             wifi_overlay: None,
+            frames_presented: 0,
         }
     }
 

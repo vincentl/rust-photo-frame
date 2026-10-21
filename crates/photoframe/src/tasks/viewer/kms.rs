@@ -73,6 +73,27 @@
 //!   switching, which this stack does not use; "not master" is a startup
 //!   failure (greetd or plymouth still holding the display), retried by
 //!   systemd until its StartLimit and then left failed.
+//! * **Display power** (`display-power` on the control socket, which
+//!   `powerctl` and buttond use). Off sets the connector's DPMS property to
+//!   OFF; from then on the loop presents nothing, waits on no vblank and
+//!   skips the connector check, and the scene's redraw request stays armed.
+//!   A present while dark would light the panel (below), and a vblank wait
+//!   on a dark CRTC fails at once and would count towards disabling pacing.
+//!   **On sets nothing.** The next frame is presented while the CRTC is
+//!   still dark, so Mesa's page flip fails with EINVAL and its display WSI
+//!   (`_wsi_display_queue_next`) falls back to `drmModeSetCrtc`: a full
+//!   modeset from an inactive CRTC, the operation that lights the panel at
+//!   startup, which re-drives the HDMI link and forces DPMS back on. Setting
+//!   DPMS ON ourselves would re-activate the CRTC with its old state, the
+//!   next flip would succeed and no modeset would run, which is the vc4
+//!   failure picframe3 documents (the property reads on, the panel stays on
+//!   "no cable"). That frame is not vblank-paced (its CRTC is dark until it
+//!   lands), and the connector check resumes `CONNECTOR_SETTLE_AFTER_WAKE`
+//!   after it, because a sleeping sink may drop hot-plug detect and take
+//!   seconds to raise it again. If a Mesa ever answered that EINVAL with
+//!   SURFACE_LOST instead, the viewer would exit and the restart's startup
+//!   modeset would light the panel: degraded, but bounded and in the
+//!   journal. State machine: `presentation::PanelPower`.
 //! * **Shutdown.** Every exit (SIGTERM/SIGINT/stdin via the cancel token,
 //!   the control or matting channel closing, a fatal surface error) returns
 //!   through `run_kms`, which tears down in the only safe order: GPU objects
@@ -97,6 +118,14 @@ const KIOSK_MODE: ModeRequest = ModeRequest {
     height: 2160,
     refresh_hz: Some(60),
 };
+/// How long after a wake's modeset frame the connector check waits: a sink
+/// that dropped hot-plug detect while asleep may take seconds to raise it
+/// again, and until then "asleep" and "unplugged" look the same. Pi gate 2
+/// logs the actual time (`kms_power_on: connector reads connected`).
+const CONNECTOR_SETTLE_AFTER_WAKE: Duration = Duration::from_secs(15);
+/// Stop waiting for that log line after this long.
+const CONNECTOR_REPORT_LIMIT: Duration = Duration::from_secs(60);
+
 /// How often to look for a display while none is connected at startup.
 /// One cheap KMS query per second; a panel that appears is picked up
 /// within a second.
@@ -247,6 +276,77 @@ impl App {
         self.mode_kind() == ViewerModeKind::Wake && self.mode().wake().transition_state().is_some()
     }
 
+    /// A control command on KMS: display power needs the display; the rest
+    /// is `handle_control_command`.
+    fn handle_kms_command(&mut self, display: &KmsDisplay, cmd: ViewerCommand) {
+        match cmd {
+            ViewerCommand::DisplayPower {
+                state,
+                output,
+                reply,
+            } => {
+                let answer = self.kms_display_power(display, state, output.as_deref());
+                let _ = reply.send(answer);
+            }
+            cmd => self.handle_control_command(cmd),
+        }
+    }
+
+    /// `display-power`: see "Display power" in the module docs.
+    fn kms_display_power(
+        &mut self,
+        display: &KmsDisplay,
+        state: Option<config_model::control::PowerState>,
+        output: Option<&str>,
+    ) -> config_model::control::Reply {
+        use crate::tasks::viewer::presentation::OffAction;
+        use config_model::control::{ErrorKind, PowerState, Reply};
+        let connector = display.connector_name();
+        if let Some(output) = output
+            && output != "*"
+            && !output.eq_ignore_ascii_case(connector)
+        {
+            return Reply::error(
+                ErrorKind::NotDriven,
+                format!("this viewer drives {connector}, not {output}"),
+            );
+        }
+        match state {
+            None => {}
+            Some(PowerState::Off) => {
+                let power = self.presentation.power_mut();
+                match power.off_action() {
+                    OffAction::DpmsOff => {
+                        if let Err(err) = display.set_dpms_off() {
+                            warn!(error = %err, "kms_dpms_off_failed");
+                            return Reply::error(ErrorKind::Failed, err.to_string());
+                        }
+                        power.set_dark();
+                        info!(connector, "kms_dpms_off: panel off");
+                    }
+                    OffAction::MarkDark => {
+                        // Switched on, but no frame has lit it yet.
+                        power.set_dark();
+                        info!(connector, "kms_dpms_off: panel was still dark");
+                    }
+                    OffAction::Nothing => {}
+                }
+            }
+            Some(PowerState::On) => {
+                if self.presentation.power_mut().on() {
+                    info!(connector, "kms_power_on: the next frame is the modeset");
+                }
+            }
+        }
+        // Pause or resume the slideshow and ask for the frame that lights it.
+        self.sync_presentation();
+        Reply::power(
+            self.presentation.power().reported(),
+            connector,
+            display.mode_label(),
+        )
+    }
+
     /// One matting result from the awaited channel; same bookkeeping as
     /// `drain_mat_results`.
     fn accept_mat_result(&mut self, result: MatResult) {
@@ -345,6 +445,9 @@ async fn drive(
     let mut audit = pacing::FlipAudit::default();
     // Every frame of the transition being audited was vblank-paced.
     let mut audit_complete = true;
+    // After a wake: when its modeset frame went out, until the connector
+    // first reads connected again (logged for Pi gate 2).
+    let mut wake_hpd_since: Option<Instant> = None;
     loop {
         if app.cancel.is_cancelled() {
             info!("kms_viewer_cancelled");
@@ -354,7 +457,7 @@ async fn drive(
         // refresh of delay).
         loop {
             match control.try_recv() {
-                Ok(cmd) => app.handle_control_command(cmd),
+                Ok(cmd) => app.handle_kms_command(&pacer.display, cmd),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     info!("kms_viewer_control_closed");
@@ -367,12 +470,15 @@ async fn drive(
 
         // Every requested redraw presents on KMS (the surface is always
         // configured and the overlays never have a zero size), except after
-        // an acquire timeout, which re-arms the request itself.
-        if app.take_kms_redraw_request() {
+        // an acquire timeout, which re-arms the request itself. While the
+        // panel is dark nothing presents and the request stays armed.
+        let power = *app.presentation.power();
+        if power.may_present() && app.take_kms_redraw_request() {
             let animating = app.transition_animating();
             // Transition frames, and the first frame after a transition
-            // (it closes the audit), wait for the next vblank.
-            let paced = if animating || audit.has_unresolved() {
+            // (it closes the audit), wait for the next vblank; never the
+            // wake's modeset frame, whose CRTC is dark until it lands.
+            let paced = if power.may_pace() && (animating || audit.has_unresolved()) {
                 pacer.wait()
             } else {
                 None
@@ -400,6 +506,7 @@ async fn drive(
             } else {
                 None
             };
+            let presented_before = app.frames_presented;
             match app.redraw(frame_time) {
                 Ok(()) => {}
                 Err(RedrawError::TimeoutStreak) => {
@@ -417,6 +524,14 @@ async fn drive(
                 && animating
             {
                 audit.submitted(vblank, done);
+            }
+            let now = Instant::now();
+            if app.frames_presented != presented_before
+                && app.presentation.power_mut().presented(now)
+            {
+                let lit = pacer.display.crtc_lit();
+                info!(crtc_lit = ?lit, "kms_power_on: modeset frame presented");
+                wake_hpd_since = Some(now);
             }
         }
 
@@ -440,7 +555,7 @@ async fn drive(
                 info!("kms_viewer_cancelled");
                 return Ok(());
             }
-            WakeEvent::Command(cmd) => app.handle_control_command(cmd),
+            WakeEvent::Command(cmd) => app.handle_kms_command(&pacer.display, cmd),
             WakeEvent::ControlClosed => {
                 info!("kms_viewer_control_closed");
                 return Ok(());
@@ -474,8 +589,27 @@ async fn drive(
         // offers the mode ends this process; the restart waits for a
         // display and picks its mode again. The dwell deadline (once per
         // photo, just before the next transition) forces a probe; other
-        // wakes read the kernel's cached state.
-        if let Err(err) = pacer.display.check_unchanged(dwell_elapsed) {
+        // wakes read the kernel's cached state. Not while the panel is dark
+        // or settling after a wake (see "Display power").
+        let now = Instant::now();
+        if let Some(since) = wake_hpd_since {
+            if pacer.display.is_connected() {
+                info!(
+                    after_ms = now.saturating_duration_since(since).as_millis() as u64,
+                    "kms_power_on: connector reads connected"
+                );
+                wake_hpd_since = None;
+            } else if now.saturating_duration_since(since) > CONNECTOR_REPORT_LIMIT {
+                warn!("kms_power_on: connector still not connected a minute after the wake");
+                wake_hpd_since = None;
+            }
+        }
+        if app
+            .presentation
+            .power()
+            .may_check_connector(now, CONNECTOR_SETTLE_AFTER_WAKE)
+            && let Err(err) = pacer.display.check_unchanged(dwell_elapsed)
+        {
             anyhow::bail!("kms_display_changed: {err}; exiting for a restart");
         }
     }

@@ -525,6 +525,7 @@ mod device {
     pub struct KmsDisplay {
         card: Card,
         connector_id: u32,
+        connector_name: String,
         width: u32,
         height: u32,
         vrefresh_hz: u32,
@@ -544,6 +545,7 @@ mod device {
             Ok(KmsDisplay {
                 card: Card(file),
                 connector_id: self.connector_id,
+                connector_name: self.connector_name.clone(),
                 width: self.width,
                 height: self.height,
                 vrefresh_hz: self.vrefresh_hz,
@@ -567,17 +569,20 @@ mod device {
                 })
         }
 
-        fn resolve_pipe(&self) -> Result<u32, KmsError> {
+        fn crtc(&self) -> Result<drm::control::crtc::Handle, KmsError> {
             let info = self.connector(false)?;
             let encoder = info
                 .current_encoder()
                 .ok_or_else(|| KmsError::failed("connector has no active encoder yet"))?;
-            let crtc = self
-                .card
+            self.card
                 .get_encoder(encoder)
                 .map_err(|e| KmsError::failed(format!("query encoder: {e}")))?
                 .crtc()
-                .ok_or_else(|| KmsError::failed("encoder drives no CRTC yet"))?;
+                .ok_or_else(|| KmsError::failed("encoder drives no CRTC yet"))
+        }
+
+        fn resolve_pipe(&self) -> Result<u32, KmsError> {
+            let crtc = self.crtc()?;
             let res = self
                 .card
                 .resource_handles()
@@ -622,6 +627,68 @@ mod device {
                 sequence: reply.frame(),
                 monotonic,
             })
+        }
+
+        /// The connector this display drives, e.g. `HDMI-A-2`.
+        pub fn connector_name(&self) -> &str {
+            &self.connector_name
+        }
+
+        /// The mode in use, `WxH@Hz`.
+        pub fn mode_label(&self) -> String {
+            format!("{}x{}@{}", self.width, self.height, self.vrefresh_hz)
+        }
+
+        /// Switch the connector's DPMS off (legacy property; on atomic
+        /// drivers the kernel turns it into CRTC `ACTIVE` = 0 and commits
+        /// it, waiting for a pending flip first). The viewer never sets it
+        /// back on: see `presentation::PanelPower` for how a wake re-lights
+        /// the panel with a full modeset instead.
+        pub fn set_dpms_off(&self) -> Result<(), KmsError> {
+            /// `DRM_MODE_DPMS_OFF` (include/uapi/drm/drm_mode.h).
+            const DPMS_OFF: u64 = 3;
+            let handle = connector::Handle::from(
+                drm::control::RawResourceHandle::new(self.connector_id)
+                    .ok_or_else(|| KmsError::failed("connector id 0"))?,
+            );
+            let props = self.card.get_properties(handle).map_err(|e| {
+                KmsError::failed(format!(
+                    "query connector {} properties: {e}",
+                    self.connector_id
+                ))
+            })?;
+            let (ids, _) = props.as_props_and_values();
+            for id in ids {
+                let Ok(info) = self.card.get_property(*id) else {
+                    continue;
+                };
+                if info.name().to_bytes() == b"DPMS" {
+                    return self.card.set_property(handle, *id, DPMS_OFF).map_err(|e| {
+                        KmsError::failed(format!("set DPMS off on {}: {e}", self.connector_name))
+                    });
+                }
+            }
+            Err(KmsError::failed(format!(
+                "connector {} has no DPMS property",
+                self.connector_name
+            )))
+        }
+
+        /// The CRTC driving the connector has a mode set (it is lit), as the
+        /// kernel reports it now. For the wake log only.
+        pub fn crtc_lit(&self) -> Result<bool, KmsError> {
+            let crtc = self.crtc()?;
+            let info = self
+                .card
+                .get_crtc(crtc)
+                .map_err(|e| KmsError::failed(format!("query CRTC: {e}")))?;
+            Ok(info.mode().is_some())
+        }
+
+        /// The connector reads connected (kernel's cached state; no probe).
+        pub fn is_connected(&self) -> bool {
+            self.connector(false)
+                .is_ok_and(|info| info.state() == connector::State::Connected)
         }
 
         /// The display this process was started for is still there: the

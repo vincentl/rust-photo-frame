@@ -190,6 +190,7 @@ pub enum ViewerCommand {
     ToggleState,
     /// DRM/KMS display power: switch it (`state: Some`) or report it
     /// (`None`). The viewer answers on `reply`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // read by the KMS loop
     DisplayPower {
         state: Option<PowerState>,
         output: Option<String>,
