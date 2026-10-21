@@ -270,7 +270,10 @@ if systemd_available; then
   # A switch that failed or was interrupted leaves the other stack enabled too;
   # the two conflict at boot.
   other_enabled="$(display_stack_other_enabled "${display_choice}")"
-  if [[ -n "${other_enabled}" ]]; then
+  if display_stack_hold_for_deploy "${display_choice}"; then
+    warn "held on Sway until deploy.sh installs the KMS viewer: ./setup/application/deploy.sh switches to ${DISPLAY_KMS_UNIT}; do not disable ${DISPLAY_WAYLAND_UNIT} meanwhile"
+    warnings=$((warnings+1))
+  elif [[ -n "${other_enabled}" ]]; then
     warn "${other_enabled} is still enabled although the ${display_choice} stack is chosen; disable it: sudo systemctl disable ${other_enabled}"
     warnings=$((warnings+1))
   fi

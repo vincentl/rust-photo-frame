@@ -204,9 +204,12 @@ display_stack_hold_for_deploy() {
         _display_stack_sudo systemctl is-active --quiet "${DISPLAY_WAYLAND_UNIT}" 2>/dev/null
 }
 
-# Prints the unit of the stack that is NOT chosen when it is still enabled:
-# a failed or interrupted switch leaves both enabled, and they conflict at
-# boot. Prints nothing (returns 0) when only the chosen stack is enabled.
+# Prints the unit of the stack that is NOT chosen when both stacks are
+# enabled: a failed or interrupted switch leaves that, and the two conflict at
+# boot. Prints nothing (returns 0) when only one is enabled. A chosen stack
+# that is not enabled is not reported here: that is a frame held on Sway until
+# the deploy installs the KMS viewer (display_stack_hold_for_deploy), and
+# disabling the running stack then would leave neither enabled.
 # Usage: display_stack_other_enabled <kms|wayland>
 display_stack_other_enabled() {
     local other_unit
@@ -215,7 +218,8 @@ display_stack_other_enabled() {
     else
         other_unit="${DISPLAY_KMS_UNIT}"
     fi
-    if _display_stack_sudo systemctl is-enabled --quiet "${other_unit}" 2>/dev/null; then
+    if _display_stack_sudo systemctl is-enabled --quiet "$(display_stack_unit "$1")" 2>/dev/null &&
+        _display_stack_sudo systemctl is-enabled --quiet "${other_unit}" 2>/dev/null; then
         printf '%s\n' "${other_unit}"
     fi
     return 0
