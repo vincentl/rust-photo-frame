@@ -98,10 +98,20 @@ reply '{"ok":false,"error":"unsupported","detail":"the compositor owns display p
 run sleep || fail "sleep fallback failed"
 called "swaymsg -s ${SWAY} output * power off" || fail "unsupported did not fall back to swaymsg"
 
-reset
-reply '{"ok":false,"error":"not-driven","detail":"this viewer drives HDMI-A-2"}'
-run wake HDMI-A-1 || fail "wake fallback failed"
-called "swaymsg -s ${SWAY} output HDMI-A-1 power on" || fail "not-driven did not fall back to swaymsg"
+# --- a refusal is the answer, not a reason to try sway ---------------------
+for refusal in \
+    '{"ok":false,"error":"not-driven","detail":"this viewer drives HDMI-A-2"}' \
+    '{"ok":false,"error":"failed","detail":"atomic commit ACTIVE=0: Permission denied"}' \
+    '{"ok":false,"error":"timeout","detail":"no answer from the viewer within 5s; it may still apply the command"}'; do
+    reset
+    reply "${refusal}"
+    status=0
+    run wake HDMI-A-1 2>"${WORK}/stderr" || status=$?
+    [[ ${status} -eq 1 ]] || fail "refusal ${refusal} exited ${status}, expected 1"
+    called swaymsg && fail "refusal ${refusal} fell back to swaymsg"
+    detail="$(jq -r .detail <<<"${refusal}")"
+    grep -q -F -- "${detail}" "${WORK}/stderr" || fail "refusal detail not shown: $(cat "${WORK}/stderr")"
+done
 
 reset
 CONTROL_SOCKET_UNDER_TEST="${WORK}/missing.sock" run sleep || fail "sleep without a viewer failed"

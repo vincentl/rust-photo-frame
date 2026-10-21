@@ -461,6 +461,28 @@ fn bulk_import_does_not_starve_old_photos() {
     }
 }
 
+/// Receive requests until `target` arrives, handing every other path to `other`.
+/// Bounded by a wall-clock deadline rather than a receive count, so the number of
+/// requests the manager emits first (which depends on its random `select!` order)
+/// cannot make the test fail.
+async fn drain_until(
+    rx: &mut mpsc::Receiver<LoadPhoto>,
+    target: &PathBuf,
+    mut other: impl FnMut(&PathBuf),
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let p = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {}", target.display()))
+            .expect("channel closed");
+        if p.path == *target {
+            return;
+        }
+        other(&p.path);
+    }
+}
+
 /// Tombstone and generation: remove a photo mid-run, verify it eventually disappears;
 /// re-add and verify it returns. Covers the lazy-skip and generation-bump code paths.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -515,13 +537,10 @@ async fn manager_churn_tombstone_and_generation() {
 
     // Drain until B is seen; the remove precedes the add in the channel so once B
     // appears the remove has already been processed by the manager.
-    for _ in 0..20 {
-        let p = receive_with_timeout(&mut to_load_rx).await;
-        if p == path_b {
-            break;
-        }
-        assert_eq!(p, path_a, "unexpected path during post-remove drain");
-    }
+    drain_until(&mut to_load_rx, &path_b, |p| {
+        assert_eq!(*p, path_a, "unexpected path during post-remove drain");
+    })
+    .await;
 
     // Now A is confirmed removed: it must not reappear.
     for _ in 0..5 {
@@ -538,15 +557,14 @@ async fn manager_churn_tombstone_and_generation() {
         .await
         .unwrap();
 
-    let mut seen_a_again = false;
-    for _ in 0..10 {
-        let p = receive_with_timeout(&mut to_load_rx).await;
-        if p == path_a {
-            seen_a_again = true;
-            break;
-        }
-    }
-    assert!(seen_a_again, "A should reappear after re-add");
+    // The manager's select! picks a ready branch at random, and nothing else is ready
+    // here, so while the test drains the loader channel as fast as it fills the send
+    // branch can win many times in a row before the add is taken. Wait for A against a
+    // deadline instead of counting receives; the other photos in between are B.
+    drain_until(&mut to_load_rx, &path_a, |p| {
+        assert_eq!(*p, path_b, "unexpected path while waiting for A to reappear");
+    })
+    .await;
 
     cancel.cancel();
     let _ = handle.await;

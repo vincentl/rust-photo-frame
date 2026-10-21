@@ -336,10 +336,10 @@ First see which path `powerctl` took:
 echo '{"command":"display-power"}' | sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock
 ```
 
-- **KMS stack, the default** (the answer has `"ok":true` and a `connector`): the viewer switches the panel. After `powerctl sleep` the journal shows `kms_dpms_off: panel off`:
+- **KMS stack, the default** (the answer has `"ok":true` and a `connector`): the viewer switches the panel. After `powerctl sleep` the journal shows `kms_power_off: panel off`. A refusal is printed by powerctl itself (`powerctl: the viewer refused: …`):
 
   ```bash
-  sudo journalctl -t photoframe -b | grep -E "kms_dpms_off|kms_power_on"
+  sudo journalctl -t photoframe -b | grep -E "kms_power_off|kms_power_on"
   ```
 
   If `buttond.screen.display-name` names a different connector than the answer's `connector`, the viewer refuses with `not-driven`. Fix the name, or remove the key so powerctl means whatever the viewer drives.
@@ -355,16 +355,18 @@ Update `buttond.screen.display-name` in `/etc/photoframe/config.yaml` to match (
 
 ### The panel stays black after a wake on the KMS stack
 
-The viewer re-lights the panel with a full modeset on the first frame after `display-power on`. The journal should show these in order: `kms_power_on: the next frame is the modeset`, then `kms_power_on: modeset frame presented`, then `kms_power_on: connector reads connected`.
+The viewer re-lights the panel with a full modeset when it gets `display-power on`. The journal should show `kms_power_on: modeset committed crtc_active=Ok(true) vblank=Ok(())`, then `kms_power_on: connector reads connected`.
 
 ```bash
-sudo journalctl -t photoframe -b | grep kms_power_on
+sudo journalctl -t photoframe -b | grep -E "kms_power_on|kms_surface_lost"
 systemctl show -p NRestarts photoframe-kms.service
 ```
 
-- If the second line is missing, no frame was presented after the wake. Report it, with the journal.
-- If `NRestarts` went up at the wake, the modeset failed and the restart lit the panel instead. That works, but it is a bug worth reporting.
-- If all three lines are there but the TV still says "no signal", that is the vc4 link failure the modeset is meant to prevent. Note the TV model and report it.
+- `kms_power_on_failed: retrying once`, followed by `exiting for a restart`: the wake commit failed twice, or the TV no longer offers the mode in use. The viewer restarted to light the panel. Report the lines.
+- `kms_waiting_for_display … no display reads connected even after a forced probe`: the viewer restarted while the panel was off, and the TV dropped hot-plug detect in standby. Wake the TV with its remote or input button; the slideshow starts within a second.
+- `crtc_active=Ok(false)` or a `vblank=Err(…)`: the commit returned but the CRTC is not running. Report it.
+- `NRestarts` went up at the wake, or `kms_surface_lost` appears: a frame reached Mesa while the panel was off, which the design rules out. Report it, with the journal.
+- All lines are right but the TV still says "no signal": that is the vc4 link failure the full modeset is meant to prevent. Note the TV model and report it.
 
 ### `socat` command not found
 

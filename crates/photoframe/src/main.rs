@@ -735,9 +735,11 @@ awake-scheduled:
 const CONTROL_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the control task waits for the viewer to answer a command only
 /// it can answer (display power). The viewer handles commands between
-/// frames, and a DPMS commit waits at most a refresh for a pending flip.
+/// frames; switching the panel off first lets submitted frames reach the
+/// screen (two refreshes, or one kernel vblank timeout of 3 s if the CRTC
+/// has stopped), then commits.
 #[cfg(unix)]
-const VIEWER_REPLY_TIMEOUT: Duration = Duration::from_secs(3);
+const VIEWER_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Requests are small; anything bigger is not one.
 #[cfg(unix)]
 const MAX_CONTROL_PAYLOAD: u64 = 64 * 1024;
@@ -847,7 +849,9 @@ async fn answer_control_request(
                 Ok(Err(_)) => Reply::error(ErrorKind::Failed, "the viewer dropped the request"),
                 Err(_) => Reply::error(
                     ErrorKind::Timeout,
-                    format!("no answer from the viewer within {VIEWER_REPLY_TIMEOUT:?}"),
+                    format!(
+                        "no answer from the viewer within {VIEWER_REPLY_TIMEOUT:?}; it may still apply the command"
+                    ),
                 ),
             }
         }
@@ -865,6 +869,7 @@ async fn answer_control_request(
             tracing::info!(command = name, "received control command");
             forward(ViewerCommand::HideWifiOverlay).await
         }
+        Request::Ping => Reply::ok(),
     }
 }
 
@@ -917,6 +922,13 @@ mod control_socket_tests {
             rx.recv().await,
             Some(ViewerCommand::SetState(ViewerState::Asleep))
         ));
+    }
+
+    #[tokio::test]
+    async fn ping_is_answered_without_reaching_the_viewer() {
+        let (_dir, path, mut rx) = serve(ViewerSurface::Drm).await;
+        assert_eq!(request(&path, r#"{"command":"ping"}"#).await, Reply::ok());
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

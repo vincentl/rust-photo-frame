@@ -267,7 +267,9 @@ impl ButtondSettings {
     }
 
     fn into_runtime(self) -> Result<(Runtime, Option<SchedulerConfig>)> {
-        let sway_env = Arc::new(SwayEnvironment::prepare()?);
+        let sway_env = Arc::new(
+            SwayEnvironment::prepare()?.with_control_socket(self.control_socket_path.clone()),
+        );
         let executor: Arc<dyn CommandExecutor> =
             Arc::new(SwayCommandExecutor::new(sway_env.clone()));
         let powerctl_program =
@@ -1186,9 +1188,22 @@ struct SwayEnvironment {
     /// back to live discovery if it disappears, so a pinned-but-dead socket
     /// never strands us.
     explicit_socket: Option<PathBuf>,
+    /// The viewer's control socket (buttond's `control-socket-path`),
+    /// exported to children as `PHOTOFRAME_CONTROL_SOCKET` so powerctl asks
+    /// the same viewer buttond sends `set-state` to.
+    control_socket: Option<PathBuf>,
+    /// The "no sway socket" warning was given; later ones are debug. On the
+    /// KMS stack there is never a sway socket, and every powerctl call would
+    /// otherwise warn.
+    warned_no_sway: std::sync::atomic::AtomicBool,
 }
 
 impl SwayEnvironment {
+    fn with_control_socket(mut self, path: PathBuf) -> Self {
+        self.control_socket = Some(path);
+        self
+    }
+
     fn prepare() -> Result<Self> {
         let runtime_dir = match env::var_os("XDG_RUNTIME_DIR") {
             Some(value) if !value.is_empty() => PathBuf::from(value),
@@ -1227,6 +1242,8 @@ impl SwayEnvironment {
         Ok(Self {
             runtime_dir,
             explicit_socket,
+            control_socket: None,
+            warned_no_sway: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -1245,9 +1262,14 @@ impl SwayEnvironment {
     }
 
     fn configure(&self, command: &mut Command) {
+        use std::sync::atomic::Ordering;
         command.env("XDG_RUNTIME_DIR", &self.runtime_dir);
+        if let Some(path) = &self.control_socket {
+            command.env("PHOTOFRAME_CONTROL_SOCKET", path);
+        }
         match self.resolve_socket() {
             Ok(socket_path) => {
+                self.warned_no_sway.store(false, Ordering::Relaxed);
                 command.env("SWAYSOCK", socket_path);
             }
             Err(err) => {
@@ -1255,10 +1277,18 @@ impl SwayEnvironment {
                 // socket file on disk, and powerctl/swaymsg would trust an
                 // inherited SWAYSOCK that points at it. Clear it so the child can
                 // rediscover the live socket on its own.
-                warn!(
-                    ?err,
-                    "no live sway IPC socket; clearing SWAYSOCK for child command"
-                );
+                if self.warned_no_sway.swap(true, Ordering::Relaxed) {
+                    debug!(
+                        ?err,
+                        "no live sway IPC socket; clearing SWAYSOCK for child command"
+                    );
+                } else {
+                    warn!(
+                        ?err,
+                        "no live sway IPC socket; clearing SWAYSOCK for child commands \
+                         (normal on the KMS stack, where powerctl asks the viewer)"
+                    );
+                }
                 command.env_remove("SWAYSOCK");
             }
         }
@@ -2378,6 +2408,32 @@ awake-scheduled: {}
         assert_eq!(env.resolve_socket().expect("resolve explicit"), socket_path);
     }
 
+    /// powerctl must ask the viewer buttond talks to, even when
+    /// `control-socket-path` is overridden (review F6).
+    #[test]
+    fn children_get_the_configured_control_socket() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let runtime = tempdir().expect("tempdir");
+        let _runtime_guard = EnvGuard::replace("XDG_RUNTIME_DIR", Some(runtime.path().as_os_str()));
+        let _socket_guard = EnvGuard::replace("SWAYSOCK", None);
+        let env = SwayEnvironment::prepare()
+            .expect("env")
+            .with_control_socket(PathBuf::from("/run/custom/control.sock"));
+        let mut command = std::process::Command::new("true");
+        env.configure(&mut command);
+        let exported = command
+            .get_envs()
+            .find(|(key, _)| *key == "PHOTOFRAME_CONTROL_SOCKET")
+            .and_then(|(_, value)| value.map(PathBuf::from));
+        assert_eq!(exported, Some(PathBuf::from("/run/custom/control.sock")));
+        // The second "no sway" is not a warning again.
+        env.configure(&mut std::process::Command::new("true"));
+        assert!(
+            env.warned_no_sway
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
     /// The KMS stack has no login session, so no /run/user/<uid>: buttond
     /// must still start (powerctl goes to the viewer there).
     #[test]
@@ -2584,6 +2640,8 @@ awake-scheduled: {}
         let env = Arc::new(SwayEnvironment {
             runtime_dir: dir.path().to_path_buf(),
             explicit_socket: None,
+            control_socket: None,
+            warned_no_sway: std::sync::atomic::AtomicBool::new(false),
         });
 
         let detector = SwayScreenDetector::new(env, Some(script_path));
@@ -2607,6 +2665,8 @@ awake-scheduled: {}
         let env = Arc::new(SwayEnvironment {
             runtime_dir: dir.path().to_path_buf(),
             explicit_socket: None,
+            control_socket: None,
+            warned_no_sway: std::sync::atomic::AtomicBool::new(false),
         });
 
         let detector = SwayScreenDetector::new(env, Some(script_path));

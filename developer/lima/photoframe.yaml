@@ -1,0 +1,113 @@
+# Lima template: Debian 13 (trixie) arm64 dev VM for rust-photo-frame.
+# Same architecture and glibc as the Raspberry Pi 5, so a Linux `cargo test`
+# or a release build here is a Pi-shaped result (minus the GPU and the panel).
+# Walkthrough: developer/lima.md
+#
+#   limactl start --name=photoframe developer/lima/photoframe.yaml
+#
+# The Debian image comes from Lima's bundled template (digest-pinned there).
+minimumLimaVersion: 2.0.0
+
+base:
+- template:_images/debian-13
+
+vmType: vz
+
+# Sized for `cargo build --release` of the workspace. Lower these if the Mac
+# is busy; the build is the only heavy thing the VM does.
+cpus: 6
+memory: 8GiB
+disk: 60GiB
+
+# The Mac home directory, read-only, at the same path inside the guest, so
+# `cd <repo> && limactl shell photoframe <cmd>` runs against your working tree
+# (git worktrees included). Read-only on purpose: nothing in the VM can touch
+# the Mac checkout. The scripts in developer/lima/ copy the tree to a VM-local
+# directory before running the setup modules, which chmod and write.
+mounts:
+- location: "~"
+  writable: false
+
+# Written to /etc/environment, so they apply to `limactl shell <cmd>` and to
+# login shells alike.
+env:
+  # System-wide rustup, as setup/system/modules/20-rust.sh installs it on the Pi.
+  RUSTUP_HOME: /usr/local/rustup
+  # Build output on the VM's own disk. target/ on the macOS mount would be slow
+  # and would mix Linux artifacts into the Mac checkout.
+  CARGO_TARGET_DIR: /var/cache/photoframe-build/target
+  # Where deploy.sh / the stage module put the staged tree inside the VM.
+  STAGE_ROOT: /var/cache/photoframe-build/stage-root
+  # Pi 5 = Cortex-A76. setup/application/modules/10-build.sh defaults to
+  # target-cpu=native, which on this VM would be an Apple core and can emit
+  # instructions the Pi's CPU lacks (SIGILL). cortex-a76 is the right core, but
+  # rustc's cortex-a76 also turns on aes and sha2 (the Armv8 crypto extension),
+  # which only some BCM2712 steppings implement. Switching them off leaves the
+  # features every Pi 5 reports (crc, lse, dotprod, fp16, rcpc, rdm, ...).
+  RUSTFLAGS: "-Ctarget-cpu=cortex-a76 -Ctarget-feature=-aes,-sha2"
+
+# Lima enables rootless containerd by default: it downloads nerdctl-full (a few
+# hundred MB), drops ~60 binaries into /usr/local/bin and makes `limactl start`
+# wait on it. Nothing here uses containers.
+containerd:
+  system: false
+  user: false
+
+ssh:
+  # So the VM can rsync to the Pi using the Mac's ssh-agent (no keys copied
+  # into the VM). Only used by developer/lima/stage-to-pi.sh.
+  forwardAgent: true
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Lima runs provision scripts on every boot, not only the first. Everything
+    # below is a one-time install, so stop here once it has completed (and
+    # `limactl start` works offline afterwards).
+    [ -e /var/lib/photoframe-provisioned ] && exit 0
+
+    # setup/system/modules/10-apt-packages.sh, minus the compositor stack
+    # (sway, swaybg, swayidle, swaylock, seatd, libgl1-mesa-dri), kmscube and
+    # network-manager. Those are only needed for the setup smoke test, and
+    # developer/lima/smoke-setup.sh installs them (by running the real system
+    # installer) on demand, so the day-to-day VM stays small and its networking
+    # is left to cloud-init. mesa-vulkan-drivers and vulkan-tools stay: they
+    # provide lavapipe, a software Vulkan device for tests that create a wgpu
+    # adapter.
+    apt-get update
+    apt-get -y --no-install-recommends install \
+      acl at build-essential ca-certificates clang cmake curl file jq dbus \
+      dbus-user-session git libclang-dev libdrm2 libgbm1 libinput10 \
+      libssl-dev libudev-dev libwayland-client0 logrotate \
+      mesa-vulkan-drivers fonts-dejavu-core fonts-noto-core pkg-config \
+      python3 rclone rsync tmux vulkan-tools
+
+    # Rust: same layout as setup/system/modules/20-rust.sh (system-wide
+    # toolchain, per-user CARGO_HOME for the registry cache).
+    if [ ! -x /usr/local/cargo/bin/rustup ]; then
+      curl -fsSL --retry 3 https://sh.rustup.rs -o /tmp/rustup-init.sh
+      RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo \
+        sh /tmp/rustup-init.sh -y --no-modify-path --profile minimal \
+          --default-toolchain stable --component clippy --component rustfmt
+      rm -f /tmp/rustup-init.sh
+    fi
+    # `limactl shell <cmd>` does not read /etc/profile.d, so put the proxies
+    # on the default PATH.
+    for bin in /usr/local/cargo/bin/*; do
+      ln -sf "$bin" "/usr/local/bin/$(basename "$bin")"
+    done
+
+    install -d -m 0755 -o "{{.User}}" /var/cache/photoframe-build
+    touch /var/lib/photoframe-provisioned
+
+message: |
+  Debian 13 arm64 VM "{{.Name}}" is ready. The repo is visible read-only at
+  its macOS path. From the repo root:
+
+    limactl shell {{.Name}} cargo test --workspace
+
+  Full walkthrough: developer/lima.md

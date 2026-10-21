@@ -37,30 +37,29 @@ fn photo(name: &str, w: u32, h: u32) -> PreparedImageCpu {
     }
 }
 
+/// Every canvas the queued work produces. Waits until nothing is left in the
+/// pipeline: `wait_for_ready_results` returns at the first result, and the
+/// single matting worker may still be busy with the next screen, so a fixed
+/// sleep after it is a race on a loaded machine.
 async fn ready(harness: &mut MattingQueueHarness) -> Vec<(PathBuf, Option<PathBuf>)> {
-    harness.wait_for_ready_results(Duration::from_secs(5)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut out = Vec::new();
-    // Up to a few results may still be in flight.
-    for _ in 0..50 {
+    loop {
+        harness.wait_for_ready_results(Duration::from_secs(5)).await;
         out.extend(
             harness
                 .take_ready_canvases()
                 .into_iter()
                 .map(|c| (c.path, c.partner.map(|(p, _)| p))),
         );
-        if harness.deferred_queue_len() == 0 {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            harness.drain_pipeline();
-            out.extend(
-                harness
-                    .take_ready_canvases()
-                    .into_iter()
-                    .map(|c| (c.path, c.partner.map(|(p, _)| p))),
-            );
-            break;
+        if harness.matting_inflight() == 0 {
+            return out;
         }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "matting did not finish"
+        );
     }
-    out
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

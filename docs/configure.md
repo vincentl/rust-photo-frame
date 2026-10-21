@@ -156,6 +156,7 @@ If the frame launches to a black screen, check that `photo-library-path` points 
 
 - **Purpose:** Limits how many images the CPU decoding task processes simultaneously.
 - **Required?** Optional. Default `4`. Minimum `1`.
+- **With [portrait pairing](#portrait-pairing):** a pair screen needs both photos decoded, so an idle loader runs two decodes for it even at `1`.
 
 ### `startup-shuffle-seed`
 
@@ -466,6 +467,8 @@ that have one:
 - So zero-margin mats are shown less often: under random selection they lose the share
   of screens that are pairs (about 13% of screens for a library that is 40% portraits);
   under sequential selection they lose every turn that lands on a pair screen.
+
+**A split pair and a debut.** When a canvas change splits a pair (see above), its two photos are shown one after the other, in order. If the second is a [priority debut](#playlist-weighting), it can be shown first, since priority photos already jump the queue.
 
 **Dwell.** A pair stays up `dwell-ms × dwell-multiplier`; a single photo `dwell-ms`. Each
 paired photo therefore gets `dwell-multiplier / 2` of a single photo's time: the default

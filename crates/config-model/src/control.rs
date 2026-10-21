@@ -48,6 +48,11 @@ pub enum Request {
     WifiOverlayShow(WifiOverlay),
     /// Remove the Wi-Fi recovery overlay.
     WifiOverlayHide,
+    /// `{"command":"ping"}`: answered `ok` and nothing else. A client checks
+    /// with it that the viewer speaks this protocol before sending anything
+    /// sensitive: a viewer from before replies existed answers nothing, and
+    /// logs a payload it cannot parse.
+    Ping,
 }
 
 impl Request {
@@ -59,6 +64,7 @@ impl Request {
             Request::DisplayPower { .. } => "display-power",
             Request::WifiOverlayShow(_) => "wifi-overlay-show",
             Request::WifiOverlayHide => "wifi-overlay-hide",
+            Request::Ping => "ping",
         }
     }
 }
@@ -301,6 +307,7 @@ mod tests {
             },
             Request::WifiOverlayShow(overlay()),
             Request::WifiOverlayHide,
+            Request::Ping,
         ] {
             assert_eq!(round_trip(&request), request);
         }

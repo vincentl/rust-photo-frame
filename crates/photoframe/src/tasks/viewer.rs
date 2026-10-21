@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod canvas_publish_tests;
+mod display_wait;
 mod image_ops;
 #[cfg(target_os = "linux")]
 mod kms;
@@ -37,7 +38,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{Level, debug, info, warn};
 
@@ -794,7 +794,23 @@ impl<'a> MattingBridge<'a> {
 //    pending. Each state transition recreates the greeting resources to keep
 //    scale/format in sync.
 
+/// Wayland: the period of the control tick (`process_tick`) while it has to
+/// run on a cadence. The rule, decided by `wake::plan_wake` (`tick_fast`):
+/// tick every `CONTROL_TICK_INTERVAL` only while a transition is animating
+/// (it finalizes on a tick) or the surface-ready handshake is still polling
+/// the window's size. At any other time the viewer ticks once per event:
+/// a matting result, a decoded photo, a control command, a window event, the
+/// dwell deadline, the bounded size poll (`SURFACE_POLL_INTERVAL`), and once
+/// more after a transition finalizes so the uploads and matting refill it held
+/// back run at once. A resting photo wakes the process about once a second,
+/// not 250 times.
 const CONTROL_TICK_INTERVAL: Duration = Duration::from_millis(4);
+
+/// Wayland: with the surface ready and the viewer awake, the window's size is
+/// re-read at least this often. Sway can change the output mode or scale
+/// without winit delivering `Resized`; the 4 ms tick used to catch that, and
+/// a bounded poll (one wakeup a second at most) replaces the unbounded one.
+const SURFACE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// One member's pixels for matting. The loader may have decoded a JPEG at a
 /// reduced DCT scale sized for the canvas as it was then. If the canvas has
 /// since grown (rotation, a new output) so that those pixels no longer cover
@@ -1360,54 +1376,56 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
     }))
 }
 
+/// A finished matting result arrives: one fewer in flight, one more to upload.
+fn accept_mat_result(
+    mat_inflight: &mut usize,
+    ready_results: &mut VecDeque<MatResult>,
+    result: MatResult,
+) {
+    *mat_inflight = mat_inflight.saturating_sub(1);
+    photo_set::queue_result(ready_results, result);
+}
+
 #[derive(Debug)]
 enum ViewerEvent {
     Tick,
     Command(ViewerCommand),
+    /// A finished matting result, taken off the channel by the driver.
+    MatResult(MatResult),
+    /// A decoded photo, taken off the loader channel by the driver.
+    Photo(PhotoLoaded),
     Cancelled,
 }
 
+/// Wayland: wait for what the viewer needs and tell the winit thread. The
+/// waiting itself is `wake::drive_forwarding`.
 async fn drive_viewer_events(
-    mut control: Receiver<ViewerCommand>,
+    control: Receiver<ViewerCommand>,
     cancel: CancellationToken,
     proxy: winit::event_loop::EventLoopProxy<ViewerEvent>,
+    mat_results: Receiver<MatResult>,
+    loader: Receiver<PhotoLoaded>,
+    published: tokio::sync::watch::Receiver<wake::Published>,
 ) {
-    let mut ticker = interval(CONTROL_TICK_INTERVAL);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    if proxy.send_event(ViewerEvent::Tick).is_err() {
-        return;
-    }
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                let _ = proxy.send_event(ViewerEvent::Cancelled);
-                break;
-            }
-            _ = ticker.tick() => {
-                if proxy.send_event(ViewerEvent::Tick).is_err() {
-                    warn!("viewer event proxy rejected tick event; stopping driver loop");
-                    break;
-                }
-            }
-            cmd = control.recv() => {
-                match cmd {
-                    Some(cmd) => {
-                        debug!(command = ?cmd, "viewer_event_forward_command");
-                        if proxy.send_event(ViewerEvent::Command(cmd)).is_err() {
-                            warn!("viewer event proxy rejected command event; stopping driver loop");
-                            break;
-                        }
-                    }
-                    None => {
-                        warn!("viewer control channel closed; stopping driver loop");
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    wake::drive_forwarding(
+        cancel,
+        control,
+        mat_results,
+        loader,
+        published,
+        CONTROL_TICK_INTERVAL,
+        |forward| {
+            let event = match forward {
+                wake::Forward::Tick => ViewerEvent::Tick,
+                wake::Forward::Command(cmd) => ViewerEvent::Command(cmd),
+                wake::Forward::MatResult(result) => ViewerEvent::MatResult(result),
+                wake::Forward::Photo(photo) => ViewerEvent::Photo(photo),
+                wake::Forward::Cancelled => ViewerEvent::Cancelled,
+            };
+            proxy.send_event(event).is_ok()
+        },
+    )
+    .await;
 }
 
 use winit::application::ApplicationHandler;
@@ -2319,9 +2337,16 @@ struct App {
     layer: presentation::Layer,
     /// Renders the Wi-Fi overlay; `None` without a GPU.
     wifi_overlay: Option<scenes::wifi_overlay::WifiOverlayScreen>,
-    /// Frames presented so far (the KMS loop tells a wake's modeset frame
-    /// from a redraw that presented nothing).
-    frames_presented: u64,
+    /// Wayland: where the winit thread publishes `wake::Published` after each
+    /// event batch for the driver (`wake::drive_forwarding`). `None` on KMS,
+    /// which waits in its own loop, and in tests.
+    wake_published: Option<tokio::sync::watch::Sender<wake::Published>>,
+    /// Wayland: user events handled so far; published with the plan so the
+    /// driver knows the plan includes everything it forwarded.
+    events_handled: u64,
+    /// Wayland: a window event changed what the control step sees (a resize,
+    /// a resume); the step runs at the end of the batch.
+    tick_wanted: bool,
 }
 
 impl App {
@@ -2805,8 +2830,9 @@ impl App {
 
     /// One control step: matting results in, uploads, matting work out, and
     /// the active scene's tick (dwell, transition start/finish, redraw
-    /// requests). Driven by the 4 ms ticker on Wayland and once per loop
-    /// iteration on KMS. Cancellation is the driver's job.
+    /// requests). Run per event and, while a transition animates or the
+    /// surface is settling, every 4 ms on Wayland (`wake::drive_forwarding`);
+    /// once per loop iteration on KMS. Cancellation is the driver's job.
     fn process_tick(&mut self) {
         self.log_event_loop_state("process_tick_start");
         // Keep surface configuration and readiness in sync even if winit
@@ -2819,6 +2845,7 @@ impl App {
             });
         }
         self.sync_presentation();
+        self.rearm_wifi_overlay();
 
         self.drain_mat_results();
 
@@ -2863,10 +2890,30 @@ impl App {
         let _ = self.update_surface_ready(size.width, size.height, SurfaceReport::ConfigureEvent);
     }
 
+    /// One matting result handed over by the Wayland driver (it owns the
+    /// channel); same bookkeeping as `drain_mat_results`.
+    fn accept_forwarded_mat_result(&mut self, result: MatResult) {
+        accept_mat_result(&mut self.mat_inflight, &mut self.ready_results, result);
+    }
+
+    /// Wayland: end of an event batch; see `wake::end_of_batch`. Publishes
+    /// the plan for the state the viewer is now in, without which the driver
+    /// would keep waiting on the state before the batch.
+    fn publish_wake_state(&mut self) {
+        if self.wake_published.is_none() || self.cancel.is_cancelled() {
+            return;
+        }
+        let step_wanted = std::mem::take(&mut self.tick_wanted);
+        let handled = self.events_handled;
+        let published = wake::end_of_batch(self, step_wanted, handled, Instant::now);
+        if let Some(tx) = self.wake_published.as_ref() {
+            let _ = tx.send(published);
+        }
+    }
+
     fn drain_mat_results(&mut self) {
         while let Some(result) = self.mat_pipeline.try_recv() {
-            self.mat_inflight = self.mat_inflight.saturating_sub(1);
-            photo_set::queue_result(&mut self.ready_results, result);
+            accept_mat_result(&mut self.mat_inflight, &mut self.ready_results, result);
         }
     }
 
@@ -3020,7 +3067,6 @@ impl App {
 
     fn record_frame_presented(&mut self) {
         self.surface_timeout_streak = 0;
-        self.frames_presented = self.frames_presented.wrapping_add(1);
     }
 
     /// Render and present one frame of the active scene. Shared by the
@@ -3800,7 +3846,9 @@ impl App {
             presentation: presentation::Presentation::default(),
             layer: presentation::Layer::Scene(ViewerModeKind::Greeting),
             wifi_overlay: None,
-            frames_presented: 0,
+            wake_published: None,
+            events_handled: 0,
+            tick_wanted: false,
         }
     }
 
@@ -3848,6 +3896,22 @@ impl App {
         }
     }
 
+    /// Wayland: an overlay frame that was not presented (an acquire
+    /// timeout, a deferred render) is asked for again on the next control
+    /// step, which the wake plan schedules while the overlay owes a frame
+    /// (`presentation::layer_owes_frame`). Nothing else would: the covered
+    /// slideshow requests no frames, and lease refreshes do not redraw. KMS re-arms its own request after
+    /// an acquire timeout, and re-arming there would spin the loop on a
+    /// render that cannot succeed.
+    fn rearm_wifi_overlay(&self) {
+        if self.layer == presentation::Layer::Overlay
+            && let Some(Output::Window(window)) = self.output.as_ref()
+            && self.wifi_overlay.as_ref().is_some_and(|s| s.needs_redraw())
+        {
+            window.request_redraw();
+        }
+    }
+
     /// `wifi-overlay-show`: set or extend the lease; new content is
     /// re-rendered, a refresh of the same content is not.
     fn show_wifi_overlay(&mut self, content: config_model::control::WifiOverlay) {
@@ -3881,9 +3945,7 @@ impl App {
     }
 
     /// The state `wake::plan_wake` decides from. See `wake.rs` for the
-    /// model; the DRM/KMS loop drives itself from this, and T5 applies it to
-    /// the Wayland driver.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // KMS loop; T5 for Wayland
+    /// model; the DRM/KMS loop and the Wayland driver both wait on it.
     fn wake_plan(&mut self, now: Instant) -> wake::WakePlan {
         let transition_just_finished = self.mode_mut().wake_mut().take_just_finalized();
         let kind = self.mode_kind();
@@ -3895,13 +3957,27 @@ impl App {
             // winit owns the request on Wayland.
             _ => false,
         };
+        let on_kms = matches!(self.output, Some(Output::Kms { .. }));
+        let mode = self.mode();
+        // Wayland retries a frame the layer on screen still owes (T5); under
+        // the Wi-Fi overlay that is the overlay's, not the covered scene's.
+        let overlay_pending = !on_kms
+            && presentation::layer_owes_frame(
+                self.layer,
+                |kind| match kind {
+                    ViewerModeKind::Greeting => mode.greeting().is_some_and(|g| g.needs_redraw()),
+                    ViewerModeKind::Sleep => mode.sleep().is_some_and(|s| s.needs_redraw()),
+                    ViewerModeKind::Wake => false,
+                },
+                self.wifi_overlay.as_ref().is_some_and(|s| s.needs_redraw()),
+            );
         wake::plan_wake(
             wake::WakeInputs {
                 // Paused while covered or dark (`sync_presentation`).
                 slideshow_active: kind == ViewerModeKind::Wake && wake.visible(),
                 sleeping: kind == ViewerModeKind::Sleep,
                 // A dark panel presents nothing; the request stays armed for
-                // the wake's modeset frame.
+                // the first frame after the wake.
                 redraw_requested: redraw_requested && self.presentation.power().may_present(),
                 transition_active: wake.transition_state().is_some(),
                 transition_just_finished,
@@ -3913,9 +3989,33 @@ impl App {
                 deferred: self.deferred_images.len(),
                 preload: self.preload_count,
                 overlay_expires_at: self.presentation.overlay_expires_at(),
+                surface_poll: (!on_kms).then_some(SURFACE_POLL_INTERVAL),
+                overlay_pending,
             },
             now,
         )
+    }
+}
+
+/// Window events after which queued work may have become runnable (a surface
+/// that is now usable, a window that is visible again): the control step runs
+/// at the end of the batch. Redraws do not.
+fn window_event_wants_step(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::Resized(_)
+            | WindowEvent::ScaleFactorChanged { .. }
+            | WindowEvent::Occluded(false)
+    )
+}
+
+impl wake::BatchHost for App {
+    fn step(&mut self) {
+        self.process_tick();
+    }
+
+    fn plan(&mut self, now: Instant) -> wake::WakePlan {
+        self.wake_plan(now)
     }
 }
 
@@ -3926,6 +4026,7 @@ impl ApplicationHandler<ViewerEvent> for App {
         self.log_event_loop_state("resumed_post_reset");
 
         let _ = self.ensure_gpu_ready(event_loop, "resumed");
+        self.tick_wanted = true;
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
@@ -3946,6 +4047,9 @@ impl ApplicationHandler<ViewerEvent> for App {
             return;
         }
         self.log_event_loop_state("window_event_pre");
+        if window_event_wants_step(&event) {
+            self.tick_wanted = true;
+        }
         match event {
             WindowEvent::CloseRequested => {
                 debug!("viewer_window_close_requested");
@@ -4089,9 +4193,11 @@ impl ApplicationHandler<ViewerEvent> for App {
         let _ = self.with_active_scene(|scene, ctx| {
             scene.about_to_wait(ctx);
         });
+        self.publish_wake_state();
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ViewerEvent) {
+        self.events_handled = self.events_handled.wrapping_add(1);
         match event {
             ViewerEvent::Tick => {
                 debug!("viewer_user_event_tick");
@@ -4104,6 +4210,35 @@ impl ApplicationHandler<ViewerEvent> for App {
             ViewerEvent::Command(cmd) => {
                 debug!(command = ?cmd, "viewer_user_event_command");
                 self.handle_control_command(cmd);
+                if self.cancel.is_cancelled() {
+                    event_loop.exit();
+                    return;
+                }
+                self.process_tick();
+            }
+            ViewerEvent::MatResult(result) => {
+                debug!(path = %result.path.display(), "viewer_user_event_mat_result");
+                self.accept_forwarded_mat_result(result);
+                if self.cancel.is_cancelled() {
+                    event_loop.exit();
+                    return;
+                }
+                self.process_tick();
+            }
+            ViewerEvent::Photo(PhotoLoaded {
+                prepared,
+                priority,
+                partner,
+            }) => {
+                debug!(path = %prepared.path.display(), "viewer_user_event_photo");
+                // queue_for_wake (the step below) submits deferred photos
+                // before reading the loader again, which on Wayland is the
+                // driver's alone.
+                self.deferred_images.push_back(QueuedImage {
+                    image: prepared,
+                    priority,
+                    partner,
+                });
                 if self.cancel.is_cancelled() {
                     event_loop.exit();
                     return;
@@ -4225,8 +4360,29 @@ pub fn run_windowed(
             }
         })
     };
-    let control_driver = tokio::spawn(drive_viewer_events(command_rx, control_cancel, proxy));
-    let mut app = App::new(from_loader, to_manager_displayed, cancel, cfg, decode_scaling);
+    // The driver owns the loader and matting-result channels (it awaits them
+    // and forwards what arrives); the app keeps closed stand-ins, which its
+    // `try_recv` polls read as empty.
+    let (_, loader_stand_in) = tokio::sync::mpsc::channel(1);
+    let mut app = App::new(
+        loader_stand_in,
+        to_manager_displayed,
+        cancel,
+        cfg,
+        decode_scaling,
+    );
+    let (_, mat_stand_in) = tokio::sync::mpsc::channel(1);
+    let mat_results = std::mem::replace(&mut app.mat_pipeline.result_rx, mat_stand_in);
+    let (published_tx, published_rx) = tokio::sync::watch::channel(wake::Published::idle());
+    app.wake_published = Some(published_tx);
+    let control_driver = tokio::spawn(drive_viewer_events(
+        command_rx,
+        control_cancel,
+        proxy,
+        mat_results,
+        from_loader,
+        published_rx,
+    ));
     app.enter_greeting();
     event_loop.run_app(&mut app)?;
 
@@ -4446,6 +4602,11 @@ pub mod testkit {
         pub fn deferred_queue_len(&self) -> usize {
             self.deferred_images.len()
         }
+
+        /// Screens handed to the matting pipeline whose result has not been drained yet.
+        pub fn matting_inflight(&self) -> usize {
+            self.mat_inflight
+        }
     }
 
     pub fn compute_canvas_size_for_test(
@@ -4567,6 +4728,8 @@ mod tests {
                                 deferred,
                                 preload: PRELOAD,
                                 overlay_expires_at: None,
+                                surface_poll: None,
+                                overlay_pending: false,
                             },
                             now,
                         );
@@ -4579,6 +4742,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_forwarded_matting_result_is_accounted_like_a_polled_one() {
+        let mut inflight = 2usize;
+        let mut ready = VecDeque::new();
+        let result = |name: &str| MatResult {
+            path: name.into(),
+            canvas: ImagePlane {
+                width: 1,
+                height: 1,
+                pixels: vec![0; 4],
+            },
+            priority: false,
+            partner: None,
+            windows: Vec::new(),
+            mat_kind: None,
+        };
+        accept_mat_result(&mut inflight, &mut ready, result("a.jpg"));
+        assert_eq!((inflight, ready.len()), (1, 1));
+        accept_mat_result(&mut inflight, &mut ready, result("b.jpg"));
+        // After a resume zeroed the count, stragglers do not underflow it.
+        accept_mat_result(&mut inflight, &mut ready, result("c.jpg"));
+        assert_eq!((inflight, ready.len()), (0, 3));
+    }
+
+    #[test]
+    fn window_events_that_free_queued_work_ask_for_a_step() {
+        use winit::dpi::PhysicalSize;
+        assert!(window_event_wants_step(&WindowEvent::Resized(
+            PhysicalSize::new(800, 600)
+        )));
+        assert!(window_event_wants_step(&WindowEvent::Occluded(false)));
+        assert!(!window_event_wants_step(&WindowEvent::Occluded(true)));
+        assert!(!window_event_wants_step(&WindowEvent::RedrawRequested));
     }
 
     #[test]

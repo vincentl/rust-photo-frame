@@ -559,6 +559,7 @@ mod drm_probe {
             // The probe keeps KMS's own default (the EDID-preferred mode).
             prefer_mode: None,
             plane: opts.plane,
+            force_probe: false,
         };
         let mut trace = |line: &str| println!("{line}");
         let target = drm_display::open_target(&request, &mut trace).map_err(|e| e.to_string())?;

@@ -8,6 +8,7 @@ point is [../CONTRIBUTING.md](../CONTRIBUTING.md).
 
 - **[testing.md](testing.md)** — automated checks, the on-device test plan, and the release checklist.
 - **[architecture.md](architecture.md)** — setup-script architecture and kiosk-stack debugging.
+- **[lima.md](lima.md)** — Debian 13 arm64 VM on the Mac: Linux `cargo test`/`clippy`, a setup/systemd smoke test, and building off the Pi. Templates and scripts in [lima/](lima/).
 
 ## Scripts
 
