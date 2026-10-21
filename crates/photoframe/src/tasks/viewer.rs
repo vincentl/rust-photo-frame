@@ -1919,6 +1919,7 @@ struct GpuParts {
     greeting: GreetingScene,
     sleep: SleepScene,
     caption_overlay: Option<scenes::CaptionOverlay>,
+    wifi_overlay: scenes::wifi_overlay::WifiOverlayScreen,
 }
 
 /// Adapter, device, surface configuration (not yet applied), pipelines and
@@ -2238,6 +2239,13 @@ fn build_gpu(
 
     let caption_overlay = (cfg.showcase.enabled && cfg.showcase.caption_enabled())
         .then(|| scenes::CaptionOverlay::new(&device, &queue, format));
+    // Styled like the greeting screen (its colours, font and frame).
+    let wifi_overlay = scenes::wifi_overlay::WifiOverlayScreen::new(
+        &device,
+        &queue,
+        format,
+        cfg.greeting_screen.screen(),
+    );
     let gpu = GpuCtx {
         device,
         queue,
@@ -2260,6 +2268,7 @@ fn build_gpu(
         greeting,
         sleep,
         caption_overlay,
+        wifi_overlay,
     })
 }
 
@@ -2308,6 +2317,8 @@ struct App {
     presentation: presentation::Presentation,
     /// The layer `sync_presentation` last applied.
     layer: presentation::Layer,
+    /// Renders the Wi-Fi overlay; `None` without a GPU.
+    wifi_overlay: Option<scenes::wifi_overlay::WifiOverlayScreen>,
 }
 
 impl App {
@@ -2626,8 +2637,14 @@ impl App {
             greeting,
             sleep,
             caption_overlay,
+            mut wifi_overlay,
         } = parts;
         self.caption_overlay = caption_overlay;
+        // A lease held across a GPU rebuild is drawn by the new renderer.
+        if let Some(content) = self.presentation.overlay() {
+            wifi_overlay.set_content(content);
+        }
+        self.wifi_overlay = Some(wifi_overlay);
         if let Some(mode) = self.mode.as_mut() {
             mode.set_overlays(Some(greeting), Some(sleep));
         }
@@ -2751,6 +2768,7 @@ impl App {
             }
             mode.set_overlays(None, None);
         }
+        self.wifi_overlay = None;
         self.gpu = None;
         self.max_texture_dimension = None;
         self.surface_gate.reset();
@@ -2774,7 +2792,8 @@ impl App {
                     "display power is not implemented yet",
                 ));
             }
-            ViewerCommand::ShowWifiOverlay(_) | ViewerCommand::HideWifiOverlay => {}
+            ViewerCommand::ShowWifiOverlay(content) => self.show_wifi_overlay(*content),
+            ViewerCommand::HideWifiOverlay => self.hide_wifi_overlay(),
         }
         self.sync_presentation();
     }
@@ -3014,6 +3033,24 @@ impl App {
             debug!("viewer_redraw_waiting_for_surface_configuration");
             return Ok(());
         }
+        // What is on screen (presentation.rs): nothing while the panel is
+        // dark, the Wi-Fi overlay while its lease is live (not in Sleep),
+        // the active scene otherwise.
+        let draw_wifi_overlay = match self.presentation.layer(mode_kind, Instant::now()) {
+            presentation::Layer::Nothing => return Ok(()),
+            presentation::Layer::Overlay => true,
+            presentation::Layer::Scene(_) => false,
+        };
+        if draw_wifi_overlay {
+            let (Some(output), Some(screen)) = (self.output.as_ref(), self.wifi_overlay.as_mut())
+            else {
+                return Ok(());
+            };
+            screen.resize(output.size(), output.scale_factor());
+            if !screen.needs_redraw() {
+                return Ok(());
+            }
+        }
         let overlay_pending = match mode_kind {
             ViewerModeKind::Greeting => self
                 .mode()
@@ -3045,11 +3082,15 @@ impl App {
             has_transition,
             "viewer_window_redraw_requested"
         );
-        if matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep) && !overlay_pending
+        if !draw_wifi_overlay
+            && matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep)
+            && !overlay_pending
         {
             return Ok(());
         }
-        if matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep) {
+        if !draw_wifi_overlay
+            && matches!(mode_kind, ViewerModeKind::Greeting | ViewerModeKind::Sleep)
+        {
             let Some(output) = self.output.as_ref() else {
                 return Ok(());
             };
@@ -3238,6 +3279,26 @@ impl App {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("draw-encoder"),
             });
+
+        if draw_wifi_overlay {
+            // Drawn once per change, like Greeting and Sleep (no
+            // pre_present_notify, for the same reason as below).
+            let Some(screen) = self.wifi_overlay.as_mut() else {
+                return Ok(());
+            };
+            encoder.push_debug_group("wifi-overlay");
+            let rendered = screen.render(&mut encoder, &view);
+            encoder.pop_debug_group();
+            if !rendered {
+                debug!("wifi_overlay_render_deferred");
+                return Ok(());
+            }
+            gpu.queue.submit(Some(encoder.finish()));
+            frame.present();
+            screen.after_submit();
+            self.record_frame_presented();
+            return Ok(());
+        }
 
         // Greeting and Sleep draw once on demand and deliberately
         // do not call pre_present_notify: a frame callback is only
@@ -3732,6 +3793,7 @@ impl App {
             paced_submission: None,
             presentation: presentation::Presentation::default(),
             layer: presentation::Layer::Scene(ViewerModeKind::Greeting),
+            wifi_overlay: None,
         }
     }
 
@@ -3743,6 +3805,9 @@ impl App {
         let now = Instant::now();
         if self.presentation.expire_overlay(now) {
             info!("wifi_overlay_expired: no refresh within its lease; hiding it");
+            if let Some(screen) = self.wifi_overlay.as_mut() {
+                screen.clear();
+            }
         }
         let layer = self.presentation.layer(self.mode_kind(), now);
         let visible = layer == presentation::Layer::Scene(ViewerModeKind::Wake);
@@ -3766,8 +3831,45 @@ impl App {
             presentation::Layer::Scene(_) => {
                 let _ = self.with_active_scene(|scene, ctx| scene.handle_visibility(ctx, true));
             }
-            presentation::Layer::Overlay => (self.redraw_requester())(),
+            presentation::Layer::Overlay => {
+                if let Some(screen) = self.wifi_overlay.as_mut() {
+                    screen.mark_redraw_needed();
+                }
+                (self.redraw_requester())();
+            }
             presentation::Layer::Nothing => {}
+        }
+    }
+
+    /// `wifi-overlay-show`: set or extend the lease; new content is
+    /// re-rendered, a refresh of the same content is not.
+    fn show_wifi_overlay(&mut self, content: config_model::control::WifiOverlay) {
+        let now = Instant::now();
+        match self.presentation.show_overlay(content, now) {
+            presentation::OverlayShown::Content => {
+                let content = self.presentation.overlay().expect("just shown");
+                info!(
+                    ssid = %content.ssid,
+                    lease_s = content.ttl().as_secs(),
+                    "wifi_overlay_shown"
+                );
+                if let Some(screen) = self.wifi_overlay.as_mut() {
+                    screen.set_content(content);
+                }
+                if self.layer == presentation::Layer::Overlay {
+                    (self.redraw_requester())();
+                }
+            }
+            presentation::OverlayShown::Refreshed => debug!("wifi_overlay_refreshed"),
+        }
+    }
+
+    fn hide_wifi_overlay(&mut self) {
+        if self.presentation.hide_overlay() {
+            info!("wifi_overlay_hidden");
+            if let Some(screen) = self.wifi_overlay.as_mut() {
+                screen.clear();
+            }
         }
     }
 
@@ -4045,9 +4147,17 @@ impl ViewerSurface {
     }
 }
 
-/// Whether the viewer can render this overlay: the protocol's limits.
+/// Whether the viewer can render this overlay: the protocol's limits, and
+/// both QR payloads encode.
 pub fn validate_wifi_overlay(overlay: &config_model::control::WifiOverlay) -> Result<(), String> {
-    overlay.validate()
+    overlay.validate()?;
+    for (name, payload) in [
+        ("join-qr", &overlay.join_qr),
+        ("portal-url", &overlay.portal_url),
+    ] {
+        scenes::wifi_overlay::qr_modules(payload).map_err(|err| format!("{name}: {err}"))?;
+    }
+    Ok(())
 }
 
 /// Run the viewer on DRM/KMS; see `kms.rs`.
