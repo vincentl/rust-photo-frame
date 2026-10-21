@@ -19,7 +19,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo audit                          # dependency CVE scan (cargo install cargo-audit)
 make -f tests/Makefile docs-links    # markdown link check
-! grep -rnE 'kms_dpms_off|the next frame is the modeset|modeset frame presented' docs developer   # retired wake design (K2 round 1): no docs may describe it
+! grep -rnE --exclude=testing.md 'kms_dpms_off|the next frame is the modeset|modeset frame presented' docs developer   # retired wake design (K2 round 1): no docs may describe it
 for t in setup/tests/*.test.sh; do bash "$t"; done   # display-stack logic (stubbed systemctl), stack-dependent modules (stubbed apt-get), powerctl
 ```
 
