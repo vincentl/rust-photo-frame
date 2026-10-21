@@ -99,6 +99,8 @@ fn main() -> Result<()> {
         // Fire any deferred screen power-off whose delay has elapsed. Runs every
         // iteration so the panel powers down without ever blocking on a sleep.
         runtime.poll_pending_power_off(now);
+        // Retry a panel power-on that failed during a wake.
+        runtime.poll_pending_power_on(now);
 
         if let Some(action) = tracker.handle_timeout(now) {
             perform_action(action, &mut runtime);
@@ -137,6 +139,9 @@ fn main() -> Result<()> {
             // Don't oversleep past a pending power-off deadline.
             if let Some(until_off) = runtime.time_until_power_off(Instant::now()) {
                 sleep_for = sleep_for.min(until_off);
+            }
+            if let Some(until_on) = runtime.time_until_power_on(Instant::now()) {
+                sleep_for = sleep_for.min(until_on);
             }
             if !sleep_for.is_zero() {
                 thread::sleep(sleep_for.min(Duration::from_millis(100)));
@@ -641,6 +646,18 @@ struct PendingPowerOff {
 // Power-off retries reuse `retry_backoff` and never give up: a single-purpose
 // frame must always reach the requested power state (a wake/toggle cancels it).
 
+/// A panel power-on that failed during a wake and is being retried. The
+/// viewer has been told `set-state awake` (and is told again once the panel
+/// is on, in case the first went to a restarting viewer).
+/// The usual cause on the KMS stack is a viewer that was restarting or
+/// still in its greeting, or a power-on that answered `timeout` (the viewer
+/// may still be lighting the panel). A sleep cancels it.
+struct PendingPowerOn {
+    deadline: Instant,
+    attempts: u32,
+    source: TransitionSource,
+}
+
 struct Runtime {
     control_socket: Arc<dyn ControlSocket>,
     shutdown_command: CommandSpec,
@@ -649,6 +666,8 @@ struct Runtime {
     state: Arc<Mutex<FrameState>>,
     /// Deferred panel power-off for an in-flight sleep transition, if any.
     pending_power_off: Option<PendingPowerOff>,
+    /// Panel power-on still owed by a wake whose power-on failed, if any.
+    pending_power_on: Option<PendingPowerOn>,
 }
 
 impl Runtime {
@@ -667,6 +686,7 @@ impl Runtime {
             executor,
             state,
             pending_power_off: None,
+            pending_power_on: None,
         }
     }
 
@@ -750,14 +770,41 @@ impl Runtime {
             }
         }
 
-        self.screen.power_on()?;
+        // A failed power-on must not drop the wake (review M2): the viewer
+        // still gets `set-state awake` now, and the panel power-on is retried
+        // with the same never-give-up backoff as power-off. A `timeout`
+        // reply from the viewer counts as a failure here, and the retry is
+        // harmless if the viewer did light the panel after all.
+        self.pending_power_on = None;
+        let powered = match self.screen.power_on() {
+            Ok(()) => true,
+            Err(err) => {
+                let backoff = retry_backoff(1);
+                warn!(
+                    reason = source.as_str(),
+                    ?err,
+                    backoff = %format_duration(backoff),
+                    "failed to power screen on; waking the viewer anyway and retrying the panel"
+                );
+                self.pending_power_on = Some(PendingPowerOn {
+                    deadline: Instant::now() + backoff,
+                    attempts: 1,
+                    source,
+                });
+                false
+            }
+        };
         self.control_socket.send_set_state(ViewerMode::Awake)?;
-        info!(reason = source.as_str(), "frame wake request completed");
+        if powered {
+            info!(reason = source.as_str(), "frame wake request completed");
+        }
         self.record_state(ViewerMode::Awake, source);
         Ok(())
     }
 
     fn go_to_sleep(&mut self, source: TransitionSource) -> Result<()> {
+        // A sleep wins over a power-on still being retried.
+        self.pending_power_on = None;
         if self.current_viewer_mode() == ViewerMode::Asleep {
             // Viewer believes it's asleep; verify physical screen state.
             if let Ok(detected) = self.screen.detect_state() {
@@ -875,6 +922,61 @@ impl Runtime {
                     "failed to power screen off; will retry"
                 );
                 self.pending_power_off = Some(PendingPowerOff {
+                    deadline: now + backoff,
+                    attempts,
+                    source,
+                });
+            }
+        }
+    }
+
+    /// Remaining time until a retried power-on should fire, if one is armed.
+    fn time_until_power_on(&self, now: Instant) -> Option<Duration> {
+        self.pending_power_on
+            .as_ref()
+            .map(|pending| pending.deadline.saturating_duration_since(now))
+    }
+
+    /// Retry a panel power-on whose deadline has arrived; on failure re-arm
+    /// with the next backoff, indefinitely (as for power-off). A sleep clears
+    /// it, so this never fights the user.
+    fn poll_pending_power_on(&mut self, now: Instant) {
+        let Some(pending) = self.pending_power_on.as_ref() else {
+            return;
+        };
+        if now < pending.deadline {
+            return;
+        }
+        let attempts = pending.attempts;
+        let source = pending.source;
+        self.pending_power_on = None;
+
+        // Power-on, then set-state awake again: the first one may have gone
+        // to a viewer that was restarting, and a restarted viewer applies its
+        // startup state first (the schedule's, asleep in sleep hours); a
+        // request sent now is applied after that.
+        let result = self
+            .screen
+            .power_on()
+            .and_then(|()| self.control_socket.send_set_state(ViewerMode::Awake));
+        match result {
+            Ok(()) => {
+                info!(
+                    reason = source.as_str(),
+                    attempts, "frame wake request completed (panel power-on retried)"
+                );
+                self.record_state(ViewerMode::Awake, source);
+            }
+            Err(err) => {
+                let attempts = attempts.saturating_add(1);
+                let backoff = retry_backoff(attempts);
+                warn!(
+                    ?err,
+                    attempts,
+                    backoff = %format_duration(backoff),
+                    "failed to power screen on; will retry"
+                );
+                self.pending_power_on = Some(PendingPowerOn {
                     deadline: now + backoff,
                     attempts,
                     source,
@@ -2221,14 +2323,26 @@ awake-scheduled: {}
     struct FlakyExecutor {
         fails_left: Arc<Mutex<u32>>,
         screen_off_calls: Arc<Mutex<u32>>,
+        /// The command label that fails (and is counted).
+        label: &'static str,
     }
 
     impl FlakyExecutor {
         fn failing_first(n: u32) -> Self {
+            Self::failing_first_for("screen-off", n)
+        }
+
+        fn failing_first_for(label: &'static str, n: u32) -> Self {
             Self {
                 fails_left: Arc::new(Mutex::new(n)),
                 screen_off_calls: Arc::new(Mutex::new(0)),
+                label,
             }
+        }
+
+        /// Calls of the command this executor fails.
+        fn calls(&self) -> u32 {
+            self.screen_off_calls()
         }
 
         fn screen_off_calls(&self) -> u32 {
@@ -2241,7 +2355,7 @@ awake-scheduled: {}
 
     impl CommandExecutor for FlakyExecutor {
         fn execute(&self, command: &CommandSpec) -> super::Result<()> {
-            if command.label == "screen-off" {
+            if command.label == self.label {
                 *self
                     .screen_off_calls
                     .lock()
@@ -2254,6 +2368,93 @@ awake-scheduled: {}
             }
             Ok(())
         }
+    }
+
+    /// Review M2: a wake whose power-on fails (a viewer still in its
+    /// greeting or restarting, a `timeout` reply) still sends set-state
+    /// awake, and keeps retrying the panel until it comes on.
+    #[test]
+    fn a_failed_power_on_still_wakes_the_viewer_and_is_retried() {
+        let executor = FlakyExecutor::failing_first_for("screen-on", 3);
+        let screen = ScreenRuntime::new(
+            command("screen-on"),
+            command("screen-off"),
+            Duration::from_millis(10),
+            None,
+            Arc::new(executor.clone()),
+            Arc::new(StaticDetector::new(ScreenState::Off)),
+        );
+        let control = RecordingControlSocket::new();
+        let events = control.events();
+        let mut runtime = Runtime::new(
+            Arc::new(control),
+            command("shutdown"),
+            screen,
+            Arc::new(executor.clone()),
+            ViewerMode::Asleep,
+        );
+
+        runtime
+            .wake_up(TransitionSource::Manual)
+            .expect("a failed power-on does not fail the wake");
+        let sent: Vec<_> = events.lock().unwrap().iter().map(|(m, _)| *m).collect();
+        assert_eq!(sent, vec![ViewerMode::Awake], "the viewer is woken anyway");
+        assert_eq!(runtime.current_viewer_mode(), ViewerMode::Awake);
+        assert!(runtime.time_until_power_on(Instant::now()).is_some());
+
+        // Two more failures, then success; each retry waits out its backoff.
+        let mut now = Instant::now();
+        for _ in 0..2 {
+            now += Duration::from_secs(120);
+            runtime.poll_pending_power_on(now);
+            assert!(runtime.time_until_power_on(now).is_some(), "keeps retrying");
+        }
+        assert_eq!(executor.calls(), 3, "three failed power-ons");
+        now += Duration::from_secs(120);
+        runtime.poll_pending_power_on(now);
+        assert!(
+            runtime.time_until_power_on(now).is_none(),
+            "done once it succeeds"
+        );
+        assert_eq!(executor.calls(), 4);
+        let sent: Vec<_> = events.lock().unwrap().iter().map(|(m, _)| *m).collect();
+        assert_eq!(
+            sent,
+            vec![ViewerMode::Awake, ViewerMode::Awake],
+            "set-state awake again once the panel is on (the first may have gone to a restarting viewer)"
+        );
+    }
+
+    #[test]
+    fn a_sleep_cancels_a_power_on_retry() {
+        let executor = FlakyExecutor::failing_first_for("screen-on", 100);
+        let screen = ScreenRuntime::new(
+            command("screen-on"),
+            command("screen-off"),
+            Duration::from_millis(10),
+            None,
+            Arc::new(executor.clone()),
+            Arc::new(StaticDetector::new(ScreenState::On)),
+        );
+        let mut runtime = Runtime::new(
+            Arc::new(RecordingControlSocket::new()),
+            command("shutdown"),
+            screen,
+            Arc::new(executor.clone()),
+            ViewerMode::Asleep,
+        );
+        runtime.wake_up(TransitionSource::Manual).expect("wake");
+        assert!(runtime.time_until_power_on(Instant::now()).is_some());
+        runtime
+            .go_to_sleep(TransitionSource::Manual)
+            .expect("sleep");
+        assert!(
+            runtime.time_until_power_on(Instant::now()).is_none(),
+            "the sleep wins over the retry"
+        );
+        let calls = executor.calls();
+        runtime.poll_pending_power_on(Instant::now() + Duration::from_secs(3600));
+        assert_eq!(executor.calls(), calls, "no power-on after the sleep");
     }
 
     #[test]

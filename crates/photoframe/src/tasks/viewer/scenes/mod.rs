@@ -1020,23 +1020,14 @@ mod tests {
         );
     }
 
-    fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::default();
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .ok()?;
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("caption-test-device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: adapter.limits(),
-            experimental_features: wgpu::ExperimentalFeatures::default(),
-            memory_hints: wgpu::MemoryHints::default(),
-            trace: wgpu::Trace::default(),
-        }))
-        .ok()
+    /// A test device and the guard that serializes GPU tests
+    /// (`crate::gpu::test_device`); keep the guard bound first.
+    fn try_device() -> Option<(
+        std::sync::MutexGuard<'static, ()>,
+        wgpu::Device,
+        wgpu::Queue,
+    )> {
+        crate::gpu::test_device("caption-test-device")
     }
 
     fn read_texture_rgba(
@@ -1103,7 +1094,7 @@ mod tests {
     /// blanked letters). Skips when no GPU adapter is available.
     #[test]
     fn caption_caches_full_text_without_dropping_glyphs() {
-        let Some((device, queue)) = try_device() else {
+        let Some((_gpu, device, queue)) = try_device() else {
             eprintln!("skipping caption test: no GPU adapter available");
             return;
         };
@@ -1222,7 +1213,7 @@ mod tests {
     /// (the live app renders every transition/mat through one long-lived atlas).
     #[test]
     fn caption_glyphs_survive_atlas_churn() {
-        let Some((device, queue)) = try_device() else {
+        let Some((_gpu, device, queue)) = try_device() else {
             eprintln!("skipping caption churn test: no GPU adapter available");
             return;
         };
@@ -1306,7 +1297,7 @@ mod tests {
     /// the panel, or the panel truncated mid-text at a multiple of 64).
     #[test]
     fn caption_composite_covers_exact_panel_rect() {
-        let Some((device, queue)) = try_device() else {
+        let Some((_gpu, device, queue)) = try_device() else {
             eprintln!("skipping caption composite test: no GPU adapter available");
             return;
         };
@@ -1343,7 +1334,7 @@ mod tests {
     /// visible part instead of tripping wgpu's scissor validation.
     #[test]
     fn caption_composite_clamps_to_narrow_surface() {
-        let Some((device, queue)) = try_device() else {
+        let Some((_gpu, device, queue)) = try_device() else {
             eprintln!("skipping caption clamp test: no GPU adapter available");
             return;
         };
@@ -1390,7 +1381,7 @@ mod tests {
         use super::super::{ImgTex, TexturePlane};
         use super::WakeScene;
         use std::time::{Duration, Instant};
-        let Some((device, _queue)) = try_device() else {
+        let Some((_gpu, device, _queue)) = try_device() else {
             eprintln!("skipping wake dwell test: no GPU adapter available");
             return;
         };
@@ -1460,7 +1451,7 @@ mod tests {
         use super::super::{ImgTex, TexturePlane};
         use super::{Visibility, WakeScene};
         use std::time::{Duration, Instant};
-        let Some((device, _queue)) = try_device() else {
+        let Some((_gpu, device, _queue)) = try_device() else {
             eprintln!("skipping wake visibility test: no GPU adapter available");
             return;
         };

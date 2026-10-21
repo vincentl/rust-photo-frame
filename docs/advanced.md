@@ -194,7 +194,8 @@ overlay:
     - swaymsg
   photo-app-id: photoframe
   overlay-app-id: wifi-overlay
-  control-socket: /run/photoframe/control.sock
+  # control-socket: /run/photoframe/control.sock
+  # viewer-config: /etc/photoframe/config.yaml
 ```
 
 | Key | Description |
@@ -213,7 +214,7 @@ overlay:
 | `ui.bind-address`, `ui.port` | HTTP UI bind. |
 | `photo-app.launch-command`, `photo-app.app-id` | Used in `app-handoff` mode. |
 | `overlay.command`, `overlay.photo-app-id`, `overlay.overlay-app-id` | Sway IPC wiring for the fallback window. |
-| `overlay.control-socket` | The viewer's control socket (default `/run/photoframe/control.sock`; match the viewer's `control-socket-path`). |
+| `overlay.control-socket` | The viewer's control socket. Leave it unset to follow the viewer's `control-socket-path` in `overlay.viewer-config` (default `/etc/photoframe/config.yaml`), or `/run/photoframe/control.sock` if that file sets none. |
 
 After editing: `sudo systemctl restart photoframe-wifi-manager.service`.
 
@@ -574,7 +575,7 @@ Commands that arrive while waiting (sleep or wake, the Wi-Fi overlay) are applie
 
 **Known limits:**
 - If the viewer restarts while the panel is off and the TV keeps hot-plug detect up, the panel comes back on with the greeting, while buttond still believes the frame is asleep. A sway restart does the same on the Wayland stack. The next schedule boundary or button press puts it right.
-- If a wake fails twice, the viewer restarts to light the panel. During scheduled sleep hours the restart comes back to the sleep banner (the schedule decides the startup state), and buttond, which saw the wake fail, still counts the frame as asleep. The next button press brings both back in step.
+- If a wake fails twice, the viewer restarts to light the panel and comes back in the schedule's state. buttond retries a failed screen power-on with backoff, as it does a failed power-off, and repeats its wake once the panel is on, so a manual wake in sleep hours ends on the slideshow within a few seconds rather than on the sleep banner.
 
 ### How it runs
 

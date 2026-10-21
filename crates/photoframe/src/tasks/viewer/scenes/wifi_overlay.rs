@@ -795,23 +795,14 @@ mod tests {
         }
     }
 
-    fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::default();
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .ok()?;
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("wifi-overlay-test-device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: adapter.limits(),
-            experimental_features: wgpu::ExperimentalFeatures::default(),
-            memory_hints: wgpu::MemoryHints::default(),
-            trace: wgpu::Trace::default(),
-        }))
-        .ok()
+    /// A test device and the guard that serializes GPU tests
+    /// (`crate::gpu::test_device`); keep the guard bound first.
+    fn try_device() -> Option<(
+        std::sync::MutexGuard<'static, ()>,
+        wgpu::Device,
+        wgpu::Queue,
+    )> {
+        crate::gpu::test_device("wifi-overlay-test-device")
     }
 
     /// Rendered for real: every QR module centre is exactly dark or light as
@@ -819,7 +810,7 @@ mod tests {
     /// cleared background around it to the byte (no visible box edge).
     #[test]
     fn rendered_codes_match_their_modules_and_the_panel_is_seamless() {
-        let Some((device, queue)) = try_device() else {
+        let Some((_gpu, device, queue)) = try_device() else {
             eprintln!("skipping wifi overlay render test: no GPU adapter available");
             return;
         };
@@ -914,7 +905,7 @@ mod tests {
     /// what the viewer re-arms on (review F3).
     #[test]
     fn an_undrawn_overlay_still_needs_its_frame() {
-        let Some((device, queue)) = try_device() else {
+        let Some((_gpu, device, queue)) = try_device() else {
             eprintln!("skipping wifi overlay redraw test: no GPU adapter available");
             return;
         };
@@ -958,7 +949,7 @@ mod tests {
             eprintln!("set WIFI_OVERLAY_PNG_DIR to write the snapshots");
             return;
         };
-        let Some((device, queue)) = try_device() else {
+        let Some((_gpu, device, queue)) = try_device() else {
             eprintln!("no GPU adapter available");
             return;
         };

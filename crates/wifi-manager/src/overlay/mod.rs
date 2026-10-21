@@ -95,6 +95,8 @@ impl OverlayRequest {
 pub struct OverlayController {
     config: OverlayConfig,
     child: Option<Child>,
+    /// Every request to the viewer goes through this, one at a time.
+    link: ViewerLink,
     /// Renews the viewer's lease while the overlay is up (Viewer backend).
     refresher: Option<JoinHandle<()>>,
     /// Who drew the overlay last; kept after `hide` so recovery can tell
@@ -102,39 +104,84 @@ pub struct OverlayController {
     backend: Option<Backend>,
 }
 
-/// Offer the overlay to the viewer. The content carries the hotspot
-/// password, so it goes only to a viewer that has answered something: a
-/// password-free `ping` first, whenever the last attempt got no answer. A
-/// viewer from before the reply protocol answers nothing and logs payloads
-/// it cannot parse; it gets the ping, never the password.
-async fn offer_to_viewer(
-    socket: &Path,
-    content: &WifiOverlay,
-    answered_before: &mut bool,
-) -> viewer_client::Outcome {
-    if !*answered_before {
-        let probe = viewer_client::send(socket.to_path_buf(), Request::Ping).await;
+/// The overlay's conversation with the viewer. Every request (ping, show,
+/// hide) runs under one lock, held from connect until the reply has been
+/// read. The viewer replies only after it has queued the command, so the
+/// viewer applies them in the order they were sent. A hide therefore waits
+/// for a show already in flight, which `abort()` on the refresher cannot
+/// guarantee: the send runs on a blocking thread, and aborting the task does
+/// not stop it (review L1).
+#[derive(Clone)]
+struct ViewerLink {
+    socket: PathBuf,
+    state: std::sync::Arc<tokio::sync::Mutex<LinkState>>,
+}
+
+#[derive(Default)]
+struct LinkState {
+    /// The overlay is wanted; false after a hide, so a late refresh sends
+    /// nothing.
+    active: bool,
+    /// A show has been sent since the last hide. The viewer may draw it
+    /// even if its reply never arrived (a timeout), so a hide follows.
+    offered: bool,
+}
+
+impl ViewerLink {
+    fn new(socket: PathBuf) -> Self {
+        Self {
+            socket,
+            state: Default::default(),
+        }
+    }
+
+    async fn activate(&self) {
+        self.state.lock().await.active = true;
+    }
+
+    /// Offer the overlay. The content carries the hotspot password, so a
+    /// password-free `ping` goes first every time, and the show follows
+    /// only if the viewer answered it. A viewer from before the reply
+    /// protocol answers nothing and logs payloads it cannot parse; it gets
+    /// the ping, never the password. Pinging every time, not only after a
+    /// failure, also covers a viewer replaced by an older one between two
+    /// refreshes (review L7).
+    async fn offer(&self, content: &WifiOverlay) -> viewer_client::Outcome {
+        let mut state = self.state.lock().await;
+        if !state.active {
+            return viewer_client::Outcome::NotAnswered("the overlay was hidden".to_string());
+        }
+        let probe = viewer_client::send(self.socket.clone(), Request::Ping).await;
         if !matches!(probe, viewer_client::Outcome::Answered(_)) {
             return probe;
         }
-        *answered_before = true;
+        state.offered = true;
+        viewer_client::send(
+            self.socket.clone(),
+            Request::WifiOverlayShow(content.clone()),
+        )
+        .await
     }
-    let outcome = viewer_client::send(
-        socket.to_path_buf(),
-        Request::WifiOverlayShow(content.clone()),
-    )
-    .await;
-    if matches!(outcome, viewer_client::Outcome::NotAnswered(_)) {
-        *answered_before = false;
+
+    /// Withdraw the overlay: no more offers, and a hide if a show was ever
+    /// sent. `None` when there was nothing to hide.
+    async fn withdraw(&self) -> Option<viewer_client::Outcome> {
+        let mut state = self.state.lock().await;
+        state.active = false;
+        if !std::mem::take(&mut state.offered) {
+            return None;
+        }
+        Some(viewer_client::send(self.socket.clone(), Request::WifiOverlayHide).await)
     }
-    outcome
 }
 
 impl OverlayController {
     pub fn new(config: OverlayConfig) -> Self {
+        let link = ViewerLink::new(config.control_socket());
         Self {
             config,
             child: None,
+            link,
             refresher: None,
             backend: None,
         }
@@ -152,9 +199,9 @@ impl OverlayController {
     /// refresher keeps offering the overlay to the viewer until it answers.
     pub async fn show(&mut self, request: &OverlayRequest) -> Result<()> {
         let content = request.viewer_content()?;
-        self.stop_refresher();
-        let mut answered = false;
-        let outcome = offer_to_viewer(&self.config.control_socket, &content, &mut answered).await;
+        self.stop_refresher().await;
+        self.link.activate().await;
+        let outcome = self.link.offer(&content).await;
         if outcome.accepted() {
             info!("wifi overlay drawn by the viewer");
             // A window left from an earlier fallback would sit on top.
@@ -188,13 +235,12 @@ impl OverlayController {
     }
 
     fn start_refresher(&mut self, content: WifiOverlay) {
-        let socket = self.config.control_socket.clone();
+        let link = self.link.clone();
         self.refresher = Some(tokio::spawn(async move {
             let mut accepted = true;
-            let mut answered = false;
             loop {
                 sleep(VIEWER_REFRESH).await;
-                let outcome = offer_to_viewer(&socket, &content, &mut answered).await;
+                let outcome = link.offer(&content).await;
                 match (outcome.accepted(), accepted) {
                     (true, false) => info!("the viewer took the wifi overlay again"),
                     (false, true) => {
@@ -207,7 +253,10 @@ impl OverlayController {
         }));
     }
 
-    fn stop_refresher(&mut self) {
+    /// Stop renewing. Taken under the link's lock, so the refresher is never
+    /// stopped half-way through a send.
+    async fn stop_refresher(&mut self) {
+        let _quiet = self.link.state.lock().await;
         if let Some(task) = self.refresher.take() {
             task.abort();
         }
@@ -320,15 +369,14 @@ impl OverlayController {
     /// effort; a viewer that is not running has nothing to hide) and any
     /// window.
     pub async fn hide(&mut self) -> Result<()> {
-        self.stop_refresher();
-        if self.backend == Some(Backend::Viewer) {
-            let outcome =
-                viewer_client::send(self.config.control_socket.clone(), Request::WifiOverlayHide)
-                    .await;
-            if !outcome.accepted() {
-                debug!(reason = %outcome.reason(), "viewer did not acknowledge the overlay hide");
-            }
+        // Whatever the backend: a show the viewer never acknowledged (a
+        // timeout before falling back to the window) may still be drawn.
+        if let Some(outcome) = self.link.withdraw().await
+            && !outcome.accepted()
+        {
+            debug!(reason = %outcome.reason(), "viewer did not acknowledge the overlay hide");
         }
+        self.stop_refresher().await;
         self.hide_window().await
     }
 
@@ -755,7 +803,7 @@ mod tests {
         let mut controller = OverlayController::new(OverlayConfig {
             // Would fail loudly if the window path ran.
             command: vec!["/nonexistent/overlay-window".to_string()],
-            control_socket: socket,
+            control_socket: Some(socket),
             ..OverlayConfig::default()
         });
         controller
@@ -793,7 +841,7 @@ mod tests {
         let mut controller = OverlayController::new(OverlayConfig {
             command: vec!["swaymsg".to_string()],
             sway_socket: Some(missing_sway),
-            control_socket: dir.path().join("no-viewer.sock"),
+            control_socket: Some(dir.path().join("no-viewer.sock")),
             ..OverlayConfig::default()
         });
         controller
@@ -802,7 +850,7 @@ mod tests {
             .expect("show never fails on a missing backend");
         assert_eq!(controller.backend(), Some(Backend::Viewer));
         assert!(controller.refresher.is_some());
-        controller.stop_refresher();
+        controller.stop_refresher().await;
     }
 
     /// A viewer from before the reply protocol reads and closes without an
@@ -819,13 +867,109 @@ mod tests {
             stream.read_to_string(&mut body).unwrap();
             body // and no reply
         });
-        let mut answered = false;
         let content = request(dir.path(), "apple-river-stone")
             .viewer_content()
             .unwrap();
-        let outcome = offer_to_viewer(&path, &content, &mut answered).await;
+        let link = ViewerLink::new(path);
+        link.activate().await;
+        let outcome = link.offer(&content).await;
         assert!(!outcome.accepted());
-        assert!(!answered);
         assert_eq!(old_viewer.join().unwrap(), r#"{"command":"ping"}"#);
+        // Nothing was offered, so a hide has nothing to send.
+        assert!(link.withdraw().await.is_none());
+    }
+
+    /// A fake viewer that serves each connection on its own thread, like
+    /// the real one, and records the order in which it *applies* commands.
+    /// It applies a show only after `show_delay` (a slow forward), a ping
+    /// or a hide at once, then replies ok.
+    fn concurrent_viewer(
+        show_delay: std::time::Duration,
+    ) -> (
+        tempfile::TempDir,
+        PathBuf,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let applied = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = applied.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let log = log.clone();
+                std::thread::spawn(move || {
+                    let mut body = String::new();
+                    stream.read_to_string(&mut body).unwrap();
+                    let command =
+                        config_model::control::command_name(body.as_bytes()).unwrap_or_default();
+                    if command == "wifi-overlay-show" {
+                        std::thread::sleep(show_delay);
+                    }
+                    log.lock().unwrap().push(command);
+                    let _ = stream.write_all(Reply::ok().to_line().as_bytes());
+                });
+            }
+        });
+        (dir, path, applied)
+    }
+
+    /// Review L1: a hide issued while a refresh is in flight is applied
+    /// after that refresh, never before it (which would leave the overlay,
+    /// password included, on screen until its lease ran out). And once
+    /// hidden, a late refresh sends nothing.
+    #[tokio::test]
+    async fn a_hide_during_a_refresh_is_applied_after_it() {
+        let (dir, path, applied) = concurrent_viewer(std::time::Duration::from_millis(300));
+        let content = request(dir.path(), "apple-river-stone")
+            .viewer_content()
+            .unwrap();
+        let link = ViewerLink::new(path);
+        link.activate().await;
+        let refresh = {
+            let link = link.clone();
+            let content = content.clone();
+            tokio::spawn(async move { link.offer(&content).await })
+        };
+        // Let the refresh reach its slow show, then hide.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let hidden = link.withdraw().await.expect("a show was offered");
+        assert!(hidden.accepted());
+        assert!(refresh.await.unwrap().accepted());
+        let order: Vec<_> = applied
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| *c != "ping")
+            .cloned()
+            .collect();
+        assert_eq!(order, vec!["wifi-overlay-show", "wifi-overlay-hide"]);
+
+        let late = link.offer(&content).await;
+        assert!(!late.accepted(), "no offer after a hide");
+        assert_eq!(
+            applied.lock().unwrap().len(),
+            3,
+            "the late refresh sent nothing"
+        );
+    }
+
+    /// Review L7: every show is preceded by its own ping, so a viewer
+    /// replaced between two refreshes is checked again.
+    #[tokio::test]
+    async fn every_offer_pings_first() {
+        let (dir, path, applied) = concurrent_viewer(std::time::Duration::ZERO);
+        let content = request(dir.path(), "apple-river-stone")
+            .viewer_content()
+            .unwrap();
+        let link = ViewerLink::new(path);
+        link.activate().await;
+        assert!(link.offer(&content).await.accepted());
+        assert!(link.offer(&content).await.accepted());
+        assert_eq!(
+            *applied.lock().unwrap(),
+            vec!["ping", "wifi-overlay-show", "ping", "wifi-overlay-show"]
+        );
     }
 }

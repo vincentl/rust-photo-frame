@@ -381,6 +381,19 @@ out="$(kms_check)" && fail "no connected connector and no viewer passed: ${out}"
 [[ "${out}" == ERROR* ]] || fail "nothing connected not an ERROR: ${out}"
 unset -f socat
 
+# --- the viewer's control socket path (review L2) ----------------------------
+cat >"${WORK}/viewer.yaml" <<'YAML'
+photo-library-path: /var/lib/photoframe/photos
+control-socket-path: "/run/custom/control.sock"   # an override
+YAML
+[[ "$(PHOTOFRAME_CONFIG="${WORK}/viewer.yaml" display_stack_control_socket)" == "/run/custom/control.sock" ]] ||
+    fail "control-socket-path override not read"
+printf 'photo-library-path: /x\n' >"${WORK}/viewer.yaml"
+[[ "$(PHOTOFRAME_CONFIG="${WORK}/viewer.yaml" display_stack_control_socket)" == "/run/photoframe/control.sock" ]] ||
+    fail "default control socket not used when the config sets none"
+[[ "$(PHOTOFRAME_CONFIG="${WORK}/missing.yaml" display_stack_control_socket)" == "/run/photoframe/control.sock" ]] ||
+    fail "default control socket not used without a config"
+
 if ((failures)); then
     echo "display-stack tests: ${failures} failure(s)" >&2
     exit 1

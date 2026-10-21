@@ -85,9 +85,37 @@ pub struct OverlayConfig {
     #[serde(default)]
     pub sway_socket: Option<PathBuf>,
     /// The viewer's control socket. The overlay is drawn by the viewer when
-    /// it answers there; the sway window above is the fallback.
-    #[serde(default = "default_control_socket")]
-    pub control_socket: PathBuf,
+    /// it answers there; the sway window above is the fallback. Unset: the
+    /// viewer's own `control-socket-path`, read from `viewer-config`, so an
+    /// override there is followed (see [`OverlayConfig::control_socket`]).
+    #[serde(default)]
+    pub control_socket: Option<PathBuf>,
+    /// The viewer's config file, read for `control-socket-path` when
+    /// `control-socket` is unset.
+    #[serde(default = "default_viewer_config")]
+    pub viewer_config: PathBuf,
+}
+
+impl OverlayConfig {
+    /// Where the viewer listens: `control-socket` if set, else the viewer
+    /// config's `control-socket-path`, else the viewer's default. One
+    /// source of truth with the viewer, buttond and powerctl (review L2).
+    pub fn control_socket(&self) -> PathBuf {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "kebab-case")]
+        struct ViewerConfig {
+            control_socket_path: Option<PathBuf>,
+        }
+        if let Some(path) = &self.control_socket {
+            return path.clone();
+        }
+        fs::read(&self.viewer_config)
+            .ok()
+            .and_then(|data| serde_yaml::from_slice::<ViewerConfig>(&data).ok())
+            .and_then(|viewer| viewer.control_socket_path)
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(default_control_socket)
+    }
 }
 
 impl Config {
@@ -135,7 +163,8 @@ impl Default for OverlayConfig {
             photo_app_id: default_photo_app_id(),
             overlay_app_id: default_overlay_app_id(),
             sway_socket: None,
-            control_socket: default_control_socket(),
+            control_socket: None,
+            viewer_config: default_viewer_config(),
         }
     }
 }
@@ -216,9 +245,50 @@ fn default_control_socket() -> PathBuf {
     PathBuf::from(config_model::control::DEFAULT_SOCKET_PATH)
 }
 
+fn default_viewer_config() -> PathBuf {
+    PathBuf::from("/etc/photoframe/config.yaml")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Config, RecoveryMode};
+
+    /// Review L2: the overlay follows the viewer's control-socket-path
+    /// unless wifi-manager sets its own.
+    #[test]
+    fn the_control_socket_follows_the_viewer_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let viewer = dir.path().join("config.yaml");
+        std::fs::write(
+            &viewer,
+            "photo-library-path: /photos\ncontrol-socket-path: /run/custom/control.sock\n",
+        )
+        .unwrap();
+        let mut overlay = super::OverlayConfig {
+            viewer_config: viewer.clone(),
+            ..Default::default()
+        };
+        assert_eq!(
+            overlay.control_socket(),
+            std::path::PathBuf::from("/run/custom/control.sock")
+        );
+        overlay.control_socket = Some("/run/explicit.sock".into());
+        assert_eq!(
+            overlay.control_socket(),
+            std::path::PathBuf::from("/run/explicit.sock")
+        );
+        overlay.control_socket = None;
+        std::fs::write(&viewer, "photo-library-path: /photos\n").unwrap();
+        assert_eq!(
+            overlay.control_socket(),
+            std::path::PathBuf::from(config_model::control::DEFAULT_SOCKET_PATH)
+        );
+        overlay.viewer_config = dir.path().join("missing.yaml");
+        assert_eq!(
+            overlay.control_socket(),
+            std::path::PathBuf::from(config_model::control::DEFAULT_SOCKET_PATH)
+        );
+    }
 
     #[test]
     fn defaults_include_recovery_settings() {

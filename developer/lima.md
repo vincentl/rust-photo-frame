@@ -96,6 +96,8 @@ limactl shell photoframe -- cargo clippy --workspace --all-targets -- -D warning
 limactl shell photoframe -- cargo fmt --all --check
 ```
 
+The GPU tests (captions, the Wi-Fi overlay) run on lavapipe, Mesa's software Vulkan, in the VM. Lavapipe crashed intermittently (SIGSEGV) when tests created and destroyed devices on parallel test threads, so every test that creates a device holds one lock while it uses it (`gpu::test_device`). If a run still dies with a signal right after a GPU test, rerun with `cargo test --workspace -- --test-threads=1` and report it.
+
 These are the same checks as [testing.md](testing.md#automated-checks-no-pi-required),
 now with the Linux `cfg`s compiled in. The first run builds the whole dependency
 tree; later runs are incremental. To confirm what you are running on:
