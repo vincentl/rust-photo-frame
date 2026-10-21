@@ -97,9 +97,22 @@ display_stack_packages() {
 }
 
 # Resolve the stack and, when PHOTOFRAME_DISPLAY was given, persist it.
+#
+# An explicit wayland choice is refused (nothing persisted, the current
+# persisted or default stack returned) while greetd is not installed: a frame
+# set up on kms gets the compositor packages only from the system stage, and
+# persisting the choice without them would leave display.env naming a stack
+# that is not there. The system stage installs the packages before it
+# resolves, so it is never refused.
 display_stack_resolve() {
     local choice
     choice="$(display_stack_current)" || return 1
+    if [[ -n "${PHOTOFRAME_DISPLAY:-}" && "${choice}" == "wayland" ]] &&
+        ! _display_stack_sudo systemctl list-unit-files "${DISPLAY_WAYLAND_UNIT}" >/dev/null 2>&1; then
+        echo "display stack: ${DISPLAY_WAYLAND_UNIT} is not installed (this frame was set up on the kms stack), so PHOTOFRAME_DISPLAY=wayland is not applied; run 'PHOTOFRAME_DISPLAY=wayland ./setup/system/install.sh' to install the compositor packages and switch" >&2
+        PHOTOFRAME_DISPLAY="" display_stack_current
+        return
+    fi
     if [[ -n "${PHOTOFRAME_DISPLAY:-}" ]]; then
         _display_stack_sudo install -d -m 0755 "$(dirname "${DISPLAY_ENV_PATH}")"
         printf '%s\n%s\n' \

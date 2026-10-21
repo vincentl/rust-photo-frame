@@ -116,6 +116,24 @@ printf 'PHOTOFRAME_DISPLAY=bogus\n' >"${DISPLAY_ENV_PATH}"
 [[ "$(display_stack_source)" == "default" ]] || fail "invalid persisted value reported as persisted"
 rm -f "${DISPLAY_ENV_PATH}"
 
+# On a frame set up on kms (no greetd installed) an explicit wayland choice is
+# refused and not persisted: the deploy stage cannot install the packages.
+reset_stubs
+GREETD_INSTALLED=0
+rm -f "${DISPLAY_ENV_PATH}"
+out="$(PHOTOFRAME_DISPLAY=wayland display_stack_resolve 2>/dev/null)" || fail "refused wayland choice made resolve fail"
+[[ "${out}" == "kms" ]] || fail "refused wayland choice did not resolve to the current stack: ${out}"
+[[ ! -e "${DISPLAY_ENV_PATH}" ]] || fail "a wayland choice without greetd was persisted"
+err="$(PHOTOFRAME_DISPLAY=wayland display_stack_resolve 2>&1 >/dev/null)" || true
+[[ "${err}" == *"PHOTOFRAME_DISPLAY=wayland ./setup/system/install.sh"* ]] || fail "refusal does not give the command: ${err}"
+# ... and keeps whatever was persisted
+printf 'PHOTOFRAME_DISPLAY=kms\n' >"${DISPLAY_ENV_PATH}"
+[[ "$(PHOTOFRAME_DISPLAY=wayland display_stack_resolve 2>/dev/null)" == "kms" ]] || fail "refusal changed the persisted stack"
+# a kms choice never needs greetd
+PHOTOFRAME_DISPLAY=kms display_stack_resolve >/dev/null 2>&1 || fail "kms choice refused without greetd"
+rm -f "${DISPLAY_ENV_PATH}"
+reset_stubs
+
 # --- packages ------------------------------------------------------------
 [[ -z "$(display_stack_packages kms)" ]] || fail "the kms stack installs compositor packages"
 wayland_packages="$(display_stack_packages wayland)"

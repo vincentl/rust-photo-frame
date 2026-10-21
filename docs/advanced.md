@@ -454,7 +454,7 @@ To switch back to the default:
 PHOTOFRAME_DISPLAY=kms ./setup/system/install.sh
 ```
 
-The compositor packages stay installed after a switch back, so a later switch to Wayland is quick. `PHOTOFRAME_DISPLAY=… ./setup/application/deploy.sh` also persists the choice and switches, but it cannot install packages: on a frame set up on KMS it stops with the command above.
+The compositor packages stay installed after a switch back, so a later switch to Wayland is quick. `PHOTOFRAME_DISPLAY=… ./setup/application/deploy.sh` also persists the choice and switches, but it cannot install packages: on a frame set up on KMS, `PHOTOFRAME_DISPLAY=wayland` is refused with a message that names the command above, nothing is persisted and the frame stays on KMS.
 
 Each switch:
 
