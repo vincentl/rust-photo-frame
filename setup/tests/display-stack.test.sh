@@ -23,6 +23,7 @@ FAIL_ENABLE=""       # unit whose `systemctl enable` fails
 FAIL_START=""        # unit whose start/restart fails
 GREETD_STATE="enabled"
 UNIT_WANTED_BY="graphical.target"  # [Install] WantedBy= that `systemctl cat` prints
+KMS_ENABLED=0       # 1: photoframe-kms.service is enabled
 GREETD_RUNNING=0     # 1: greetd is enabled and active (a Sway frame)
 GREETD_INSTALLED=1   # 0: `systemctl list-unit-files greetd.service` finds nothing
 NRESTARTS="${WORK}/nrestarts" # successive NRestarts values, one per line
@@ -39,7 +40,8 @@ systemctl() {
         enable) [[ "$2" != "${FAIL_ENABLE}" ]] ;;
         start | restart) [[ "$2" != "${FAIL_START}" ]] ;;
         cat) [[ -z "${UNIT_WANTED_BY}" ]] || printf '[Install]\nWantedBy=%s\n' "${UNIT_WANTED_BY}" ;;
-        is-enabled | is-active) [[ "$3" != "greetd.service" || "${GREETD_RUNNING}" -eq 1 ]] ;;
+        is-active) [[ "$3" != "greetd.service" || "${GREETD_RUNNING}" -eq 1 ]] ;;
+        is-enabled) if [[ "$3" == "greetd.service" ]]; then [[ "${GREETD_RUNNING}" -eq 1 ]]; else [[ "${KMS_ENABLED}" -eq 1 ]]; fi ;;
         list-unit-files) [[ "$2" != "greetd.service" || "${GREETD_INSTALLED}" -eq 1 ]] ;;
         show)
             case "$3" in
@@ -69,6 +71,7 @@ reset_stubs() {
     GREETD_STATE="enabled"
     GREETD_INSTALLED=1
     GREETD_RUNNING=0
+    KMS_ENABLED=0
     UNIT_WANTED_BY="graphical.target"
     : >"${NRESTARTS}"
     JOURNAL_LINE=""
@@ -206,6 +209,15 @@ display_stack_system_apply wayland start >/dev/null 2>&1 || fail "wayland system
 called "systemctl start greetd.service" || fail "wayland choice was held"
 no_viewer
 unset DISPLAY_VIEWER_BIN
+
+# --- verify.sh: the other stack must not stay enabled -------------------------
+reset_stubs; GREETD_RUNNING=1
+[[ "$(display_stack_other_enabled kms)" == "greetd.service" ]] || fail "enabled greetd not reported on kms"
+GREETD_RUNNING=0
+[[ -z "$(display_stack_other_enabled kms)" ]] || fail "kms with greetd disabled reported something"
+[[ -z "$(display_stack_other_enabled wayland)" ]] || fail "wayland with kms disabled reported something"
+KMS_ENABLED=1
+[[ "$(display_stack_other_enabled wayland)" == "photoframe-kms.service" ]] || fail "enabled kms not reported on wayland"
 
 # --- system stage guard (deploy.sh --skip-build) -----------------------------
 # getent/id stubbed: the user exists, and only the groups in ${GROUPS_PRESENT}.

@@ -267,6 +267,13 @@ if systemd_available; then
   }
 
   check_unit "$(display_stack_unit "${display_choice}")" ERROR "display stack '${display_choice}' (${DISPLAY_ENV_PATH}); set via system install"
+  # A switch that failed or was interrupted leaves the other stack enabled too;
+  # the two conflict at boot.
+  other_enabled="$(display_stack_other_enabled "${display_choice}")"
+  if [[ -n "${other_enabled}" ]]; then
+    warn "${other_enabled} is still enabled although the ${display_choice} stack is chosen; disable it: sudo systemctl disable ${other_enabled}"
+    warnings=$((warnings+1))
+  fi
   # seatd feeds the sway session; the KMS stack does not use it.
   if [[ "${display_choice}" == "wayland" ]]; then
     check_seatd

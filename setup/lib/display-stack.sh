@@ -204,6 +204,23 @@ display_stack_hold_for_deploy() {
         _display_stack_sudo systemctl is-active --quiet "${DISPLAY_WAYLAND_UNIT}" 2>/dev/null
 }
 
+# Prints the unit of the stack that is NOT chosen when it is still enabled:
+# a failed or interrupted switch leaves both enabled, and they conflict at
+# boot. Prints nothing (returns 0) when only the chosen stack is enabled.
+# Usage: display_stack_other_enabled <kms|wayland>
+display_stack_other_enabled() {
+    local other_unit
+    if [[ "$1" == "kms" ]]; then
+        other_unit="${DISPLAY_WAYLAND_UNIT}"
+    else
+        other_unit="${DISPLAY_KMS_UNIT}"
+    fi
+    if _display_stack_sudo systemctl is-enabled --quiet "${other_unit}" 2>/dev/null; then
+        printf '%s\n' "${other_unit}"
+    fi
+    return 0
+}
+
 # display_stack_system_apply <kms|wayland> <start|enable-only>
 #
 # What the system stage (install.sh, 60-systemd) does with the stack: the
