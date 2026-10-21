@@ -2337,6 +2337,10 @@ struct App {
     layer: presentation::Layer,
     /// Renders the Wi-Fi overlay; `None` without a GPU.
     wifi_overlay: Option<scenes::wifi_overlay::WifiOverlayScreen>,
+    /// Frames handed to `present()`. On KMS only "has Mesa presented on
+    /// this display yet" is read from it (`presentation::power_commit`);
+    /// panel power never depends on it (wgpu hides present errors).
+    frames_presented: u64,
     /// Wayland: where the winit thread publishes `wake::Published` after each
     /// event batch for the driver (`wake::drive_forwarding`). `None` on KMS,
     /// which waits in its own loop, and in tests.
@@ -3067,6 +3071,7 @@ impl App {
 
     fn record_frame_presented(&mut self) {
         self.surface_timeout_streak = 0;
+        self.frames_presented = self.frames_presented.saturating_add(1);
     }
 
     /// Render and present one frame of the active scene. Shared by the
@@ -3846,6 +3851,7 @@ impl App {
             presentation: presentation::Presentation::default(),
             layer: presentation::Layer::Scene(ViewerModeKind::Greeting),
             wifi_overlay: None,
+            frames_presented: 0,
             wake_published: None,
             events_handled: 0,
             tick_wanted: false,
