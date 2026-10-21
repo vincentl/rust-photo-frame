@@ -206,12 +206,16 @@ fi
 
 print_header "Photo Frame"
 if [[ -z "${PHOTO_SERVICE:-}" ]]; then
-    # The display stack chosen at setup (setup/lib/display-stack.sh).
-    if grep -qsE '^[[:space:]]*PHOTOFRAME_DISPLAY[[:space:]]*=[[:space:]]*"?kms"?[[:space:]]*$' /etc/photoframe/display.env; then
-        PHOTO_SERVICE="photoframe-kms.service"
-    else
+    # The display stack chosen at setup (setup/lib/display-stack.sh): kms
+    # unless /etc/photoframe/display.env persists wayland.
+    if grep -qsE '^[[:space:]]*PHOTOFRAME_DISPLAY[[:space:]]*=[[:space:]]*"?wayland"?[[:space:]]*$' /etc/photoframe/display.env; then
+        DISPLAY_STACK="wayland"
         PHOTO_SERVICE="greetd.service"
+    else
+        DISPLAY_STACK="kms"
+        PHOTO_SERVICE="photoframe-kms.service"
     fi
+    printf 'Display stack: %s\n' "${DISPLAY_STACK}"
 fi
 PHOTO_STATUS="$(unit_status "${PHOTO_SERVICE}")"
 PHOTO_ENABLED="$(unit_enabled "${PHOTO_SERVICE}")"

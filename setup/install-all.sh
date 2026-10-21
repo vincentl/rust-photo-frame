@@ -2,12 +2,17 @@
 set -euo pipefail
 
 # One-shot installer: provisions the system and deploys the application.
-# - Runs the system stage with sudo to install packages, zram, kiosk user, greetd.
+# - Runs the system stage with sudo to install packages, zram, kiosk user and the
+#   display stack (PHOTOFRAME_DISPLAY=kms by default, wayland for the sway fallback).
 # - Immediately builds and deploys the application as the current (unprivileged) user.
 # - Uses app deploy auto-tuning to avoid OOM (override via CARGO_BUILD_JOBS=N).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=lib/systemd.sh
+source "${SCRIPT_DIR}/lib/systemd.sh"
+# shellcheck source=lib/display-stack.sh
+source "${SCRIPT_DIR}/lib/display-stack.sh"
 
 log() {
   local level="$1"; shift
@@ -35,10 +40,11 @@ env \
   CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-}" \
   "${SCRIPT_DIR}/application/deploy.sh"
 
-log INFO "All done. Quick verification:"
-cat <<'TIP'
+display_unit="$(display_stack_unit "$(display_stack_current)")"
+log INFO "All done (display stack: $(display_stack_describe)). Quick verification:"
+cat <<TIP
 - Check session and services:
-    systemctl status greetd --no-pager
+    systemctl status ${display_unit} --no-pager
     systemctl status photoframe-wifi-manager --no-pager
     systemctl status buttond --no-pager
 - Tail app logs:

@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 # Which stack runs the photo viewer. Exactly one is enabled at a time:
 #
-#   wayland (default)  greetd.service -> photoframe-session -> sway -> photoframe
-#   kms (opt-in)       photoframe-kms.service: the viewer presents straight to
-#                      DRM/KMS with no compositor (PHOTOFRAME_SURFACE=drm)
+#   kms (default)   photoframe-kms.service: the viewer presents straight to
+#                   DRM/KMS with no compositor (PHOTOFRAME_SURFACE=drm)
+#   wayland         greetd.service -> photoframe-session -> sway -> photoframe
+#                   (the fallback, kept for one release after KMS became the
+#                   default)
 #
 # The choice is persisted in /etc/photoframe/display.env so later deploys keep
-# it; it changes only when PHOTOFRAME_DISPLAY is given explicitly:
+# it. With nothing given and nothing persisted the stack is kms. The
+# persisted file changes only when PHOTOFRAME_DISPLAY is given explicitly:
 #
-#   PHOTOFRAME_DISPLAY=kms ./setup/application/deploy.sh       # opt in
-#   PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh   # back to greetd/sway
+#   PHOTOFRAME_DISPLAY=wayland ./setup/system/install.sh       # opt in to the fallback
+#   PHOTOFRAME_DISPLAY=kms ./setup/application/deploy.sh       # back to the default
+#
+# A frame installed on the KMS stack does not have the compositor packages
+# (greetd, sway, ...); switching to wayland therefore goes through the
+# system stage, which installs them. See display_stack_packages and
+# docs/advanced.md.
 #
 # On kms the viewer draws the Wi-Fi recovery overlay itself and switches the
 # panel's power (powerctl asks it over the control socket); see
@@ -20,6 +28,9 @@
 DISPLAY_ENV_PATH="${DISPLAY_ENV_PATH:-/etc/photoframe/display.env}"
 DISPLAY_KMS_UNIT="photoframe-kms.service"
 DISPLAY_WAYLAND_UNIT="greetd.service"
+# What the wayland stack needs beyond the base package set. Installed by the
+# system stage only when that stack is chosen.
+DISPLAY_WAYLAND_PACKAGES=(greetd seatd sway swaybg swayidle swaylock wayland-protocols)
 
 _display_stack_sudo() {
     if [[ $(id -u) -eq 0 ]]; then
@@ -34,7 +45,7 @@ _display_stack_valid() {
 }
 
 # Print the chosen stack (kms|wayland) without changing anything:
-# PHOTOFRAME_DISPLAY if set, else the persisted choice, else wayland.
+# PHOTOFRAME_DISPLAY if set, else the persisted choice, else kms.
 display_stack_current() {
     local choice="${PHOTOFRAME_DISPLAY:-}"
     if [[ -n "${choice}" ]]; then
@@ -51,9 +62,38 @@ display_stack_current() {
             printf '%s\n' "${choice}"
             return 0
         fi
-        echo "ignoring invalid PHOTOFRAME_DISPLAY='${choice}' in ${DISPLAY_ENV_PATH}; using wayland" >&2
+        echo "ignoring invalid PHOTOFRAME_DISPLAY='${choice}' in ${DISPLAY_ENV_PATH}; using kms" >&2
     fi
-    printf 'wayland\n'
+    printf 'kms\n'
+}
+
+# Where the choice came from, for status output: env (PHOTOFRAME_DISPLAY),
+# persisted (${DISPLAY_ENV_PATH}) or default.
+display_stack_source() {
+    if [[ -n "${PHOTOFRAME_DISPLAY:-}" ]]; then
+        printf 'env\n'
+    elif [[ -f "${DISPLAY_ENV_PATH}" ]] &&
+        _display_stack_valid "$(read_env_value PHOTOFRAME_DISPLAY "${DISPLAY_ENV_PATH}")"; then
+        printf 'persisted\n'
+    else
+        printf 'default\n'
+    fi
+}
+
+# One line naming the active stack, its unit and where the choice came from:
+# "kms (photoframe-kms.service, default)".
+display_stack_describe() {
+    local choice
+    choice="$(display_stack_current)" || return 1
+    printf '%s (%s, %s)\n' "${choice}" "$(display_stack_unit "${choice}")" "$(display_stack_source)"
+}
+
+# The extra apt packages a stack needs, one per line: the compositor set for
+# wayland, nothing for kms.
+display_stack_packages() {
+    if [[ "$1" == "wayland" ]]; then
+        printf '%s\n' "${DISPLAY_WAYLAND_PACKAGES[@]}"
+    fi
 }
 
 # Resolve the stack and, when PHOTOFRAME_DISPLAY was given, persist it.
@@ -130,6 +170,12 @@ display_stack_apply() {
     fi
 
     echo "display stack: wayland (${DISPLAY_WAYLAND_UNIT})"
+    # A frame set up on the kms stack has no greetd or sway; only the system
+    # stage installs them. Leave the working stack alone and say how.
+    if ! _display_stack_sudo systemctl list-unit-files "${DISPLAY_WAYLAND_UNIT}" >/dev/null 2>&1; then
+        echo "display stack: ${DISPLAY_WAYLAND_UNIT} is not installed (this frame was set up on the kms stack); run 'PHOTOFRAME_DISPLAY=wayland ./setup/system/install.sh' to install the compositor packages and switch. Leaving ${DISPLAY_KMS_UNIT} as it is" >&2
+        return 1
+    fi
     local greetd_state greetd_enabled=0
     greetd_state="$(_display_stack_sudo systemctl show -p UnitFileState --value "${DISPLAY_WAYLAND_UNIT}" 2>/dev/null || true)"
     case "${greetd_state}" in

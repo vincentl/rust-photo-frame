@@ -129,22 +129,26 @@ enable_systemd_units() {
 
     local session_bin="/opt/photoframe/bin/photoframe"
 
-    local seatd_units=(seatd.service seatd.socket)
-    local seatd_unit
-    for seatd_unit in "${seatd_units[@]}"; do
-        if systemctl list-unit-files "${seatd_unit}" >/dev/null 2>&1; then
-            log "Enabling ${seatd_unit}"
-            systemctl enable "${seatd_unit}" >/dev/null 2>&1 || true
-            log "Starting ${seatd_unit}"
-            systemctl start "${seatd_unit}" >/dev/null 2>&1 || true
-        fi
-    done
-
-    # greetd/sway (default) or photoframe-kms.service (PHOTOFRAME_DISPLAY=kms,
-    # see setup/lib/display-stack.sh). Enable only: install.sh restarts the
-    # chosen stack once every module has run.
+    # photoframe-kms.service (default) or greetd/sway (PHOTOFRAME_DISPLAY=
+    # wayland, the fallback); see setup/lib/display-stack.sh. Enable only:
+    # install.sh restarts the chosen stack once every module has run.
     local display_choice
     display_choice="$(display_stack_resolve)"
+
+    # seatd gives the sway session its seat; the KMS stack does not use it.
+    if [[ "${display_choice}" == "wayland" ]]; then
+        local seatd_units=(seatd.service seatd.socket)
+        local seatd_unit
+        for seatd_unit in "${seatd_units[@]}"; do
+            if systemctl list-unit-files "${seatd_unit}" >/dev/null 2>&1; then
+                log "Enabling ${seatd_unit}"
+                systemctl enable "${seatd_unit}" >/dev/null 2>&1 || true
+                log "Starting ${seatd_unit}"
+                systemctl start "${seatd_unit}" >/dev/null 2>&1 || true
+            fi
+        done
+    fi
+
     log "Enabling the ${display_choice} display stack"
     display_stack_apply "${display_choice}" enable-only || true
 

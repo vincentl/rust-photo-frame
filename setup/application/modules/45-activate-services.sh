@@ -86,28 +86,29 @@ else
     log WARN "Unit source directory not found: ${UNIT_SRC_DIR}"
 fi
 
-# Ensure seatd is enabled and started for DRM access
-for seatd_unit in seatd.socket seatd.service; do
-    if run_sudo systemctl list-unit-files "${seatd_unit}" >/dev/null 2>&1; then
-        log INFO "Enabling ${seatd_unit}"
-        run_sudo systemctl enable "${seatd_unit}" >/dev/null 2>&1 || true
-        log INFO "Starting ${seatd_unit}"
-        run_sudo systemctl start "${seatd_unit}" >/dev/null 2>&1 || true
-    fi
-done
+display_choice="$(display_stack_resolve)"
+
+# The wayland fallback's sway session takes its seat from seatd; the KMS
+# stack (the default) does not use it.
+if [[ "${display_choice}" == "wayland" ]]; then
+    for seatd_unit in seatd.socket seatd.service; do
+        if run_sudo systemctl list-unit-files "${seatd_unit}" >/dev/null 2>&1; then
+            log INFO "Enabling ${seatd_unit}"
+            run_sudo systemctl enable "${seatd_unit}" >/dev/null 2>&1 || true
+            log INFO "Starting ${seatd_unit}"
+            run_sudo systemctl start "${seatd_unit}" >/dev/null 2>&1 || true
+        fi
+    done
+fi
 
 # Enable and (re)start the chosen display stack now that binaries are present:
-# greetd/sway (default) or photoframe-kms.service (PHOTOFRAME_DISPLAY=kms,
+# photoframe-kms.service (default) or greetd/sway (PHOTOFRAME_DISPLAY=wayland,
 # persisted in /etc/photoframe/display.env). A clean restart picks up the
 # freshly installed binaries and recreates the control socket without a reboot.
-display_choice="$(display_stack_resolve)"
-log INFO "Display stack: ${display_choice}"
-if [[ "${display_choice}" == "wayland" ]] && ! run_sudo systemctl list-unit-files greetd.service >/dev/null 2>&1; then
-    log WARN "greetd.service not installed; run 'sudo ./setup/system/install.sh' first"
-else
-    if ! display_stack_apply "${display_choice}" start; then
-        log WARN "Display stack '${display_choice}' did not start cleanly; see the messages above"
-    fi
+# A frame set up on KMS has no greetd: display_stack_apply says how to switch.
+log INFO "Display stack: $(display_stack_describe)"
+if ! display_stack_apply "${display_choice}" start; then
+    log WARN "Display stack '${display_choice}' did not start cleanly; see the messages above"
 fi
 
 # Enable and start app-specific services if present

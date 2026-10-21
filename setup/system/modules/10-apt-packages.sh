@@ -2,6 +2,11 @@
 set -euo pipefail
 
 MODULE="system:10-apt-packages"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/systemd.sh
+source "${SCRIPT_DIR}/../lib/systemd.sh"
+# shellcheck source=../../lib/display-stack.sh
+source "${SCRIPT_DIR}/../../lib/display-stack.sh"
 
 log() {
     printf '[%s] %s\n' "${MODULE}" "$*"
@@ -28,9 +33,10 @@ PACKAGES=(
     libwayland-client0
     # Mesa GL/GLES drivers (v3d gallium). Without these sway cannot create a
     # GPU renderer and silently composites every 4K frame on the CPU with
-    # pixman, which also breaks direct scanout. --no-install-recommends below
-    # means nothing pulls this in implicitly; mesa-vulkan-drivers only covers
-    # the app's Vulkan path.
+    # pixman, which also breaks direct scanout, and kmscube (the smoke test
+    # for the display) has no GL either. --no-install-recommends below means
+    # nothing pulls this in implicitly; mesa-vulkan-drivers only covers the
+    # app's Vulkan path. Installed on both stacks.
     libgl1-mesa-dri
     logrotate
     mesa-vulkan-drivers
@@ -41,14 +47,21 @@ PACKAGES=(
     python3
     rclone
     rsync
-    seatd
-    sway
-    swaybg
-    swayidle
-    swaylock
     tmux
     vulkan-tools
 )
+
+# The compositor stack (greetd, seatd, sway, ...) is only for the wayland
+# fallback; the default KMS stack runs the viewer without any of it.
+# PHOTOFRAME_DISPLAY=wayland (or a persisted wayland choice) adds it; a frame
+# set up on KMS gets it by rerunning this stage with that choice.
+DISPLAY_CHOICE="$(display_stack_current)"
+STACK_PACKAGE_COUNT=0
+while IFS= read -r pkg; do
+    PACKAGES+=("${pkg}")
+    STACK_PACKAGE_COUNT=$((STACK_PACKAGE_COUNT + 1))
+done < <(display_stack_packages "${DISPLAY_CHOICE}")
+log "Display stack ${DISPLAY_CHOICE}: ${STACK_PACKAGE_COUNT} stack-specific package(s)"
 
 log "Updating apt package index"
 apt-get update

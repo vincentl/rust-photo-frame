@@ -22,6 +22,7 @@ CALLS="${WORK}/calls"
 FAIL_ENABLE=""       # unit whose `systemctl enable` fails
 FAIL_START=""        # unit whose start/restart fails
 GREETD_STATE="enabled"
+GREETD_INSTALLED=1   # 0: `systemctl list-unit-files greetd.service` finds nothing
 NRESTARTS="${WORK}/nrestarts" # successive NRestarts values, one per line
 # (a file, because the library reads it from command substitutions)
 JOURNAL_LINE=""      # what journalctl prints for the current invocation
@@ -35,6 +36,7 @@ systemctl() {
     case "$1" in
         enable) [[ "$2" != "${FAIL_ENABLE}" ]] ;;
         start | restart) [[ "$2" != "${FAIL_START}" ]] ;;
+        list-unit-files) [[ "$2" != "greetd.service" || "${GREETD_INSTALLED}" -eq 1 ]] ;;
         show)
             case "$3" in
                 UnitFileState) echo "${GREETD_STATE}" ;;
@@ -61,6 +63,7 @@ reset_stubs() {
     FAIL_ENABLE=""
     FAIL_START=""
     GREETD_STATE="enabled"
+    GREETD_INSTALLED=1
     : >"${NRESTARTS}"
     JOURNAL_LINE=""
 }
@@ -69,17 +72,56 @@ call_line() { grep -n -m1 -F -- "$1" "${CALLS}" | cut -d: -f1 || true; }
 called() { grep -q -F -- "$1" "${CALLS}"; }
 
 # --- choice resolution -------------------------------------------------
+# kms is the default; wayland is an explicit, persisted opt-in.
 reset_stubs
 unset PHOTOFRAME_DISPLAY
-[[ "$(display_stack_current)" == "wayland" ]] || fail "default stack is not wayland"
-PHOTOFRAME_DISPLAY=kms display_stack_resolve >/dev/null
-[[ "$(display_stack_current)" == "kms" ]] || fail "kms choice was not persisted"
+rm -f "${DISPLAY_ENV_PATH}"
+[[ "$(display_stack_current)" == "kms" ]] || fail "default stack is not kms"
+[[ "$(display_stack_source)" == "default" ]] || fail "default stack not reported as default"
+[[ "$(display_stack_describe)" == "kms (photoframe-kms.service, default)" ]] ||
+    fail "describe line for the default: $(display_stack_describe)"
+[[ "$(display_stack_resolve)" == "kms" ]] || fail "resolve with nothing chosen is not kms"
+[[ ! -e "${DISPLAY_ENV_PATH}" ]] || fail "an implicit default was persisted"
 if PHOTOFRAME_DISPLAY=bogus display_stack_current >/dev/null 2>&1; then
     fail "invalid PHOTOFRAME_DISPLAY accepted"
 fi
-PHOTOFRAME_DISPLAY=wayland display_stack_resolve >/dev/null
-[[ "$(display_stack_current)" == "wayland" ]] || fail "switch back to wayland not persisted"
 [[ "$(display_stack_unit kms)" == "photoframe-kms.service" ]] || fail "kms unit name"
+[[ "$(display_stack_unit wayland)" == "greetd.service" ]] || fail "wayland unit name"
+
+# A wayland choice is persisted and survives a re-run with nothing given
+# (what `./setup/application/deploy.sh` or a later system install does).
+PHOTOFRAME_DISPLAY=wayland display_stack_resolve >/dev/null
+[[ "$(display_stack_current)" == "wayland" ]] || fail "wayland choice was not persisted"
+[[ "$(display_stack_source)" == "persisted" ]] || fail "persisted choice not reported as persisted"
+[[ "$(display_stack_describe)" == "wayland (greetd.service, persisted)" ]] ||
+    fail "describe line for the persisted choice: $(display_stack_describe)"
+before="$(cat "${DISPLAY_ENV_PATH}")"
+for rerun in 1 2; do
+    [[ "$(display_stack_resolve)" == "wayland" ]] || fail "re-run ${rerun} lost the persisted wayland choice"
+done
+[[ "$(cat "${DISPLAY_ENV_PATH}")" == "${before}" ]] || fail "a re-run rewrote the persisted choice"
+[[ "$(display_stack_current)" == "wayland" ]] || fail "persisted wayland choice did not survive re-runs"
+# ... and the apply that follows it keeps the wayland stack
+reset_stubs
+display_stack_apply "$(display_stack_resolve)" start >/dev/null || fail "re-run apply reported failure"
+called "systemctl start greetd.service" || fail "re-run with a persisted wayland choice did not start greetd"
+called "systemctl restart photoframe-kms.service" && fail "re-run with a persisted wayland choice started the kms unit"
+# an explicit choice still overrides the persisted one, and is persisted in turn
+PHOTOFRAME_DISPLAY=kms display_stack_resolve >/dev/null
+[[ "$(display_stack_current)" == "kms" ]] || fail "switch back to kms not persisted"
+[[ "$(display_stack_source)" == "persisted" ]] || fail "persisted kms choice not reported as persisted"
+# an unreadable persisted value falls back to the default, with a warning
+printf 'PHOTOFRAME_DISPLAY=bogus\n' >"${DISPLAY_ENV_PATH}"
+[[ "$(display_stack_current 2>/dev/null)" == "kms" ]] || fail "invalid persisted value did not fall back to kms"
+[[ "$(display_stack_source)" == "default" ]] || fail "invalid persisted value reported as persisted"
+rm -f "${DISPLAY_ENV_PATH}"
+
+# --- packages ------------------------------------------------------------
+[[ -z "$(display_stack_packages kms)" ]] || fail "the kms stack installs compositor packages"
+wayland_packages="$(display_stack_packages wayland)"
+for pkg in greetd seatd sway; do
+    grep -qx -- "${pkg}" <<<"${wayland_packages}" || fail "wayland packages lack ${pkg}"
+done
 
 # --- kms: enable the new stack before disabling the old one ------------
 reset_stubs
@@ -118,6 +160,16 @@ GREETD_STATE="masked"
 if display_stack_apply wayland start >/dev/null 2>&1; then fail "wayland: masked greetd not reported"; fi
 called "systemctl disable photoframe-kms.service" && fail "wayland: kms disabled although greetd is masked"
 called "systemctl stop photoframe-kms.service" && fail "wayland: kms stopped although greetd is masked"
+
+# a frame set up on kms has no greetd: switching is refused with the command
+# to run, and the working stack is left alone
+reset_stubs
+GREETD_INSTALLED=0
+out="$(display_stack_apply wayland start 2>&1)" && fail "wayland: missing greetd not reported"
+[[ "${out}" == *"PHOTOFRAME_DISPLAY=wayland ./setup/system/install.sh"* ]] || fail "wayland: no switch hint: ${out}"
+called "systemctl disable photoframe-kms.service" && fail "wayland: kms disabled although greetd is not installed"
+called "systemctl stop photoframe-kms.service" && fail "wayland: kms stopped although greetd is not installed"
+called "systemctl start greetd.service" && fail "wayland: greetd start attempted although it is not installed"
 
 reset_stubs
 display_stack_apply kms enable-only >/dev/null || fail "enable-only reported failure"

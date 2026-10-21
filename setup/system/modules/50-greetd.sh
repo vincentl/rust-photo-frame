@@ -2,6 +2,11 @@
 set -euo pipefail
 
 MODULE="system:50-greetd"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/systemd.sh
+source "${SCRIPT_DIR}/../lib/systemd.sh"
+# shellcheck source=../../lib/display-stack.sh
+source "${SCRIPT_DIR}/../../lib/display-stack.sh"
 
 log() {
     printf '[%s] %s\n' "${MODULE}" "$*"
@@ -79,59 +84,6 @@ WRAPPER
     chmod 0755 "${wrapper}"
 }
 
-install_photo_launcher() {
-    local launcher="/usr/local/bin/photoframe"
-    log "Installing ${launcher}"
-    install -d -m 0755 "$(dirname "${launcher}")"
-    cat <<'LAUNCHER' >"${launcher}"
-#!/usr/bin/env bash
-set -euo pipefail
-
-APP="/opt/photoframe/bin/photoframe"
-
-if [[ ! -x "${APP}" ]]; then
-  echo "[photoframe] binary not found at ${APP}" >&2
-  exit 127
-fi
-
-# Keep WINIT_APP_ID for compatibility with older builds.
-# Current binaries set Wayland app_id via winit window attributes.
-export WINIT_APP_ID="${WINIT_APP_ID:-photoframe}"
-# Direct scanout is currently blocked because v3dv allocates UIF-tiled
-# swapchain buffers ("Buffer format ... modifier 0x0700000000000006 cannot
-# be scanned out" in sway -d logs). MESA_VK_WSI_DEBUG=linear was tested and
-# does NOT change the negotiated modifier on Mesa 25.0. With sway compositing
-# on the GPU this costs only a few ms per frame; revisit with newer Mesa.
-# Uncomment to render via the GL/EGL backend instead of Vulkan:
-# export WGPU_BACKEND=gl
-# The app defaults to mailbox presentation when available (FIFO costs two
-# vsyncs per frame under sway 1.10; see docs/performance.md). Uncomment only
-# to force a different mode, e.g. to retest fifo on a newer sway:
-# export PHOTOFRAME_PRESENT_MODE=fifo
-# Control where logs go via PHOTOFRAME_LOG (journal|stdout|file:/path)
-# Defaults to journald for kiosk stability.
-case "${PHOTOFRAME_LOG:-journal}" in
-  journal)
-    exec systemd-cat -t photoframe -- "${APP}" "$@"
-    ;;
-  stdout)
-    exec "${APP}" "$@"
-    ;;
-  file:*)
-    logfile="${PHOTOFRAME_LOG#file:}"
-    # Ensure parent dir exists; ignore failure
-    mkdir -p -- "$(dirname -- "$logfile")" 2>/dev/null || true
-    # Append and flush; caller can tail the file
-    exec "${APP}" "$@" >>"$logfile" 2>&1
-    ;;
-  *)
-    exec systemd-cat -t photoframe -- "${APP}" "$@"
-    ;;
-esac
-LAUNCHER
-    chmod 0755 "${launcher}"
-}
-
 install_sway_config() {
     local config_dir="/usr/local/share/photoframe/sway"
     local config_file="${config_dir}/config"
@@ -178,9 +130,17 @@ CONFIG
     chmod 0644 "${config_file}"
 }
 
+# The greetd -> sway session is the wayland fallback. On the default KMS
+# stack none of this is installed (the launcher the KMS unit runs comes from
+# 45-launcher.sh); PHOTOFRAME_DISPLAY=wayland provisions it.
+display_choice="$(display_stack_current)"
+if [[ "${display_choice}" != "wayland" ]]; then
+    log "Display stack is ${display_choice}; skipping the greetd/sway session files (PHOTOFRAME_DISPLAY=wayland installs them)"
+    exit 0
+fi
+
 write_greetd_config
 install_sway_config
-install_photo_launcher
 install_session_wrapper
 
 log "greetd session provisioning complete"
