@@ -410,7 +410,10 @@ shows it twice in a row, which only a just-added photo's debut can do.
   `g_max` is the widest bar any of your mats produces, as a fraction of photo height
   (`bar-ratio × m / (1 − 2m)` for the largest non-zero `minimum-mat-percentage` `m`). On
   16:9 with the default bar ratio and a 6% mat the limit is 0.868: 4:5, 3:4, 2:3 and 9:16
-  portraits pair, squares never do. On 16:10 it is 0.779, which leaves out 4:5.
+  portraits pair, squares never do. On 16:10 it is 0.779, which leaves out 4:5. Studio
+  and passe-partout mats cut a bevel around each photo, and the bar holds both of them,
+  so with those mats the limit is lower by `2 × bevel-width-px / (canvas height × (1 − 2m))`
+  (about 0.004 for a 4 px bevel on 4K).
 - **Full height:** it is tall enough to fill the mat's height on its own:
   `height × max-upscale-factor ≥ canvas height × (1 − 2 × m_min)`, with `m_min` the
   smallest non-zero `minimum-mat-percentage`. On a 4K panel at `max-upscale-factor: 1.0`
@@ -436,8 +439,13 @@ height and never cropped, left to right in playlist order, with a center bar of
 `minimum-mat-percentage`; the default 1/φ ≈ 0.618 echoes a framer's bridge between two
 openings, and gives an 80 px bar for a 6% mat on 4K). Blurred mats are drawn from the two
 photos side by side, studio and passe-partout bevels frame each window, and a drop shadow
-falls under both. `fill-when-fits` never applies to a pair. Because the bar is measured
-from the border, pairing needs mats that have one:
+falls under both. On studio and passe-partout mats the bar also holds the two bevels, so
+the flat board between them is `bar-ratio` × the border, like the flat board outside.
+`bar-ratio: 0` puts the two photos edge to edge (on studio and passe-partout, bevel to
+bevel). `fill-when-fits` never applies to a pair. If the canvas changes after a pair was
+planned (a new display mode) and the two no longer qualify on it, they are shown one
+after the other instead. Because the bar is measured from the border, pairing needs mats
+that have one:
 
 - With pairing enabled, at least one matting option must have `minimum-mat-percentage`
   above 0; otherwise the configuration is rejected.
@@ -459,7 +467,7 @@ proportionally more often per hour; the shares stay the same.
 | ------------------ | ------- | --------------- | ------ |
 | `enabled`          | `false` | `true`, `false` | Opt-in switch. Requires a matting option with `minimum-mat-percentage` > 0. |
 | `probability`      | `1.0`   | `[0.0, 1.0]`    | Chance that two back-to-back pairable portraits share a screen. Never changes the playlist order. |
-| `bar-ratio`        | `0.618` | `[0.0, 1.0]`    | Center bar between the two photos, as a fraction of the mat border. |
+| `bar-ratio`        | `0.618` | `[0.0, 1.0]`    | Center bar between the two photos, as a fraction of the mat border (studio and passe-partout add their two bevels). `0` puts the photos edge to edge. |
 | `dwell-multiplier` | `1.5`   | `[0.5, 4.0]`    | A pair screen stays up `dwell-ms ×` this. |
 
 **Checking it.** With pairing enabled, `--playlist-dry-run N` reads every header, plans

@@ -607,6 +607,9 @@ struct MattingBridge<'a> {
     max_upscale_factor: f32,
     /// `pairing.bar-ratio`.
     bar_ratio: f32,
+    /// Portrait pairing's pairable rule (`None` with pairing off): a pair is
+    /// drawn only if both members are pairable on the canvas it is drawn on.
+    pairing: Option<crate::tasks::manager::pairing::PairingRules>,
     mat_pipeline: &'a MattingPipeline,
 }
 
@@ -647,7 +650,7 @@ impl<'a> MattingBridge<'a> {
                     Err(_) => None,
                 }
             };
-            let Some(queued) = next_img else {
+            let Some(mut queued) = next_img else {
                 break;
             };
             let path = queued.image.path.clone();
@@ -668,6 +671,26 @@ impl<'a> MattingBridge<'a> {
                 );
                 self.deferred_images.push_front(queued);
                 break;
+            }
+            // C2 holds only on the canvas the pair was planned for: a canvas
+            // change since (a mode change, a rotation) can leave the members
+            // unpairable here. Such a pair becomes two solo screens, in order.
+            let canvas = compute_canvas_size(
+                surface.width.max(1),
+                surface.height.max(1),
+                self.oversample,
+                surface.max_texture_dimension,
+            );
+            if queued.partner.is_some() && !queued.pair_fits(self.pairing.as_ref(), canvas) {
+                let (first, second) = queued.split();
+                info!(
+                    path = %first.image.path.display(),
+                    partner = %second.image.path.display(),
+                    canvas = ?canvas,
+                    "pair_split"
+                );
+                self.deferred_images.push_front(second);
+                queued = first;
             }
             let mut rng = rand::rng();
             let pair = queued.partner.is_some();
@@ -856,27 +879,41 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
     // D3's sufficiency check runs per member: a pair member's drawn rect is
     // never larger than its solo rect.
     let source_size = image.source_size;
-    let src = decoded_member(image, (canvas_w, canvas_h), fill_screen, bg_scale)?;
+    let first = decoded_member(image, (canvas_w, canvas_h), fill_screen, bg_scale);
+    let second = partner.and_then(|LoadedPartner { prepared, priority }| {
+        let member = photo_set::Member {
+            path: prepared.path.clone(),
+            priority,
+        };
+        let size = prepared.source_size;
+        decoded_member(prepared, (canvas_w, canvas_h), fill_screen, bg_scale)
+            .map(|img| (img, size, member))
+    });
     let margin = matting.margin_fraction();
+    let g = photo_set::bar_fraction(bar_ratio, margin);
     // A photo is a set of windows (`photo_set`): n = 1 is the solo path, n = 2
-    // a pair (first appearance on the left).
-    let (set, partner) = match partner {
-        None => (photo_set::PhotoSet::solo(src), None),
-        Some(LoadedPartner { prepared, priority }) => {
-            let member = photo_set::Member {
-                path: prepared.path.clone(),
-                priority,
-            };
-            let right_size = prepared.source_size;
-            let right = decoded_member(prepared, (canvas_w, canvas_h), fill_screen, bg_scale)?;
-            let g = photo_set::bar_fraction(bar_ratio, margin);
-            let set = photo_set::PhotoSet::pair((src, source_size), (right, right_size), g);
-            (set, Some(member))
-        }
+    // a pair (first appearance on the left). A member whose pixels cannot be
+    // read leaves the other solo rather than dropping the screen.
+    let (set, path, priority, partner) = match (first, second) {
+        (Some(src), None) => (photo_set::PhotoSet::solo(src), path, priority, None),
+        (Some(src), Some((right, right_size, member))) => (
+            photo_set::PhotoSet::pair((src, source_size), (right, right_size), g),
+            path,
+            priority,
+            Some(member),
+        ),
+        (None, Some((right, _, member))) => (
+            photo_set::PhotoSet::solo(right),
+            member.path,
+            member.priority,
+            None,
+        ),
+        (None, None) => return None,
     };
-    let (width, height) = set.logical_size();
-    // Swatches and blurred backgrounds see the members abutted with no gap.
-    let whole = set.abutted();
+    let (width, height) = set.logical_size(None);
+    // Swatches and blurred backgrounds see the members abutted with no gap,
+    // built only for the mats that read them.
+    let whole = std::cell::LazyCell::new(|| set.abutted());
 
     // `fill-when-fits`: render the photo full-bleed (cover-crop, no mat).
     if fill_screen {
@@ -897,7 +934,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
     }
 
     let max_upscale = max_upscale_factor.max(1.0);
-    let swatches = PhotoSwatches::new(&whole);
+    let swatches = std::cell::LazyCell::new(|| PhotoSwatches::new(&whole));
 
     if let MattingMode::Studio {
         bevel_width_px,
@@ -925,6 +962,12 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         }
         let photo_space_w = (canvas_w as f32 - 2.0 * (margin_x + bevel_px)).max(1.0);
         let photo_space_h = (canvas_h as f32 - 2.0 * (margin_y + bevel_px)).max(1.0);
+        // A pair's bar holds both bevels (`photo_set::Bevel`).
+        let bevel = set.is_pair().then_some(photo_set::Bevel {
+            px: bevel_px,
+            space_h: photo_space_h,
+        });
+        let (width, height) = set.logical_size(bevel);
 
         let iw = width.max(1) as f32;
         let ih = height.max(1) as f32;
@@ -951,6 +994,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
                 h: photo_h,
             },
             canvas_w,
+            bevel,
         );
         let images = set.resize_to(&windows);
 
@@ -1005,6 +1049,12 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         }
         let photo_space_w = (canvas_w as f32 - 2.0 * (margin_x + bevel_px)).max(1.0);
         let photo_space_h = (canvas_h as f32 - 2.0 * (margin_y + bevel_px)).max(1.0);
+        // A pair's bar holds both bevels (`photo_set::Bevel`).
+        let bevel = set.is_pair().then_some(photo_set::Bevel {
+            px: bevel_px,
+            space_h: photo_space_h,
+        });
+        let (width, height) = set.logical_size(bevel);
 
         let iw = width.max(1) as f32;
         let ih = height.max(1) as f32;
@@ -1031,6 +1081,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
                 h: photo_h,
             },
             canvas_w,
+            bevel,
         );
         let images = set.resize_to(&windows);
 
@@ -1087,6 +1138,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
                 h: final_h,
             },
             canvas_w,
+            None,
         );
         let images = set.resize_to(&windows);
 
@@ -1133,6 +1185,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             h: final_h,
         },
         canvas_w,
+        None,
     );
     let images = set.resize_to(&windows);
 
@@ -2237,6 +2290,8 @@ struct App {
     /// The installed GPU's texture limit (bounds the canvas); `None` without
     /// a GPU.
     max_texture_dimension: Option<u32>,
+    /// Portrait pairing's pairable rule, `None` with pairing off.
+    pairing_rules: Option<crate::tasks::manager::pairing::PairingRules>,
     /// Shared with the loader: the canvas size it should decode towards
     /// (published once the surface is configured; see `publish_canvas`).
     decode_scaling: super::loader::DecodeScaling,
@@ -2377,6 +2432,7 @@ impl App {
             oversample: self.oversample,
             max_upscale_factor: self.max_upscale_factor,
             bar_ratio: self.full_config.playlist.pairing.bar_ratio,
+            pairing: self.pairing_rules,
             mat_pipeline: &self.mat_pipeline,
         };
         let mut enqueue_matting = move |wake: &mut scenes::WakeScene| {
@@ -2465,6 +2521,7 @@ impl App {
             oversample: self.oversample,
             max_upscale_factor: self.max_upscale_factor,
             bar_ratio: self.full_config.playlist.pairing.bar_ratio,
+            pairing: self.pairing_rules,
             mat_pipeline: &self.mat_pipeline,
         };
         let mut enqueue_matting = move |wake: &mut scenes::WakeScene| {
@@ -2863,6 +2920,7 @@ impl App {
             oversample: self.oversample,
             max_upscale_factor: self.max_upscale_factor,
             bar_ratio: self.full_config.playlist.pairing.bar_ratio,
+            pairing: self.pairing_rules,
             mat_pipeline: &self.mat_pipeline,
         };
         bridge.queue_for_wake(wake);
@@ -3619,6 +3677,7 @@ impl App {
                 a: 1.0,
             })
             .unwrap_or(wgpu::Color::BLACK);
+        let pairing_rules = crate::tasks::manager::pairing::PairingRules::from_config(&cfg);
         let initial_wake = scenes::WakeScene::new(
             cfg.global_photo_settings.dwell_ms,
             scenes::pair_dwell_ms(
@@ -3651,6 +3710,7 @@ impl App {
             surface_timeout_streak: 0,
             configured_surface_size: None,
             max_texture_dimension: None,
+            pairing_rules,
             decode_scaling,
             caption_overlay: None,
             transition_frame_metric: None,
@@ -4043,6 +4103,7 @@ pub mod testkit {
         oversample: f32,
         max_upscale_factor: f32,
         matting: MattingConfig,
+        pairing: Option<crate::tasks::manager::pairing::PairingRules>,
         surface_configured: bool,
         surface: Option<SurfaceState>,
     }
@@ -4076,6 +4137,16 @@ pub mod testkit {
                 wake: scenes::WakeScene::new(dwell_ms, dwell_ms, transition_cfg),
                 oversample,
                 max_upscale_factor: 1.0,
+                // The rule as the frame would apply it with these mats and
+                // pairing enabled at its defaults.
+                pairing: crate::tasks::manager::pairing::PairingRules::from_parts(
+                    &crate::config::PairingOptions {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                    &matting,
+                    1.0,
+                ),
                 matting,
                 surface_configured: false,
                 surface: None,
@@ -4146,6 +4217,7 @@ pub mod testkit {
                 oversample: self.oversample,
                 max_upscale_factor: self.max_upscale_factor,
                 bar_ratio: 0.618,
+                pairing: self.pairing,
                 mat_pipeline: &self.mat_pipeline,
             };
             bridge.queue_for_wake(&mut self.wake);
@@ -4295,6 +4367,7 @@ mod tests {
                             oversample: 1.0,
                             max_upscale_factor: 1.0,
                             bar_ratio: 0.618,
+                            pairing: None,
                             mat_pipeline: &pipeline,
                         };
                         bridge.queue_for_wake(&mut wake);
@@ -4684,6 +4757,7 @@ mod tests {
             // but its 960 px reduced decode would look like it needs 2x.
             max_upscale_factor: 1.0,
             bar_ratio: 0.618,
+            pairing: None,
             mat_pipeline: &mat_pipeline,
         };
         let mut wake = scenes::WakeScene::new(5_000, 5_000, TransitionConfig::default());
@@ -4732,6 +4806,7 @@ mod tests {
             oversample: 1.0,
             max_upscale_factor: 1.0,
             bar_ratio: 0.618,
+            pairing: None,
             mat_pipeline: &mat_pipeline,
         };
         let mut wake = scenes::WakeScene::new(5_000, 5_000, TransitionConfig::default());

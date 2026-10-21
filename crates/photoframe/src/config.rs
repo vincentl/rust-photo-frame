@@ -881,6 +881,16 @@ impl MattingOptions {
         self.minimum_mat_percentage > 0.0
     }
 
+    /// Width of the bevel this mat cuts around its window, in canvas pixels
+    /// (studio and passe-partout; 0 for every other kind).
+    pub fn bevel_width(&self) -> f32 {
+        match &self.style {
+            MattingMode::Studio { bevel_width_px, .. }
+            | MattingMode::PassePartout { bevel_width_px, .. } => bevel_width_px.max(0.0),
+            _ => 0.0,
+        }
+    }
+
     pub fn prepare_runtime(&mut self) -> Result<()> {
         ensure!(
             self.minimum_mat_percentage.is_finite()
@@ -1879,6 +1889,16 @@ impl MattingConfig {
         }?;
         let option = self.options.get(entry.index)?;
         Some(SelectedOption { entry, option })
+    }
+
+    /// The widest bevel among the selectable options with a non-zero mat (0
+    /// when none cuts one), in canvas pixels.
+    pub fn nonzero_bevel_max(&self) -> f32 {
+        self.iter_selected()
+            .map(|selected| selected.option)
+            .filter(|option| option.has_nonzero_mat())
+            .map(MattingOptions::bevel_width)
+            .fold(0.0, f32::max)
     }
 
     /// `(m_min, m_max)`: the smallest and largest margin fraction among the

@@ -13,7 +13,10 @@
 //!   the drawn bar is `r × border` (`border = H_c·m`).
 //! - **Windows.** At the fitted height `H`: a left window `(round(H·a_L), H)`,
 //!   a bar of `round(g·H)`, a right window `(round(H·a_R), H)`, centred on the
-//!   canvas. The aspects `a_i` are each photo's own (`source_size`), never its
+//!   canvas. Studio and passe-partout cut a bevel `b` around each window, so
+//!   their bar is `round(g·H) + ⌈2b⌉`: the flat board between the two bevels is
+//!   `r × border`, like the flat board outside them (`border`), and the
+//!   logical shape includes the two bevels so the fit stays height-bound. The aspects `a_i` are each photo's own (`source_size`), never its
 //!   decoded buffer's, so a DCT-scaled decode lays out exactly as a full one.
 //!   The bar is exact; the rounding of the three widths goes to the outer mat
 //!   (at most a pixel a side). The first appearance goes on the left. **No
@@ -26,6 +29,7 @@
 //!   nearest window and are clamped to `bar/2`; the drop shadow is the union's.
 
 use super::{ImgTex, MatResult, QueuedImage};
+use crate::tasks::manager::pairing::PairingRules;
 use crate::tasks::viewer::scenes::WakeScene;
 use image::{RgbaImage, imageops};
 use std::borrow::Cow;
@@ -54,6 +58,22 @@ pub(super) struct PhotoSet {
 /// ratio `r` and mat margin `m`.
 pub(super) fn bar_fraction(bar_ratio: f32, margin: f32) -> f32 {
     bar_ratio * margin / (1.0 - 2.0 * margin)
+}
+
+/// The bevel a studio or passe-partout mat cuts around each window, and the
+/// height of the photo space it fits in (`H_c` minus margins and bevels).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Bevel {
+    pub px: f32,
+    pub space_h: f32,
+}
+
+impl Bevel {
+    /// The bevels' share of the bar, in pixels: both sides, rounded up so
+    /// each bevel fits whole (the renderer clamps a bevel to half the bar).
+    fn bar_px(self) -> u32 {
+        (2.0 * self.px.max(0.0)).ceil() as u32
+    }
 }
 
 /// A photo's own aspect, `w/h` of its displayed size.
@@ -101,28 +121,33 @@ impl PhotoSet {
 
     /// **Logical shape**: the size the mat code fits. n = 1: the photo's
     /// decoded size (the solo path); n = 2: the members at `h₀`, side by side
-    /// with a gap of `g·h₀`.
-    pub(super) fn logical_size(&self) -> (u32, u32) {
+    /// with a gap of `g·h₀`, plus the two bevels (scaled to `h₀`) for a
+    /// bevelled mat.
+    pub(super) fn logical_size(&self, bevel: Option<Bevel>) -> (u32, u32) {
         if !self.is_pair() {
             return self.members[0].0.dimensions();
         }
         let h0 = self.common_height();
         let aspects: f32 = self.members.iter().map(|(_, a)| a).sum();
-        let w = (h0 as f32 * (aspects + self.bar_fraction)).round().max(1.0);
+        let bevels = bevel.map_or(0.0, |b| b.bar_px() as f32 / b.space_h.max(1.0));
+        let w = (h0 as f32 * (aspects + self.bar_fraction + bevels))
+            .round()
+            .max(1.0);
         (w as u32, h0)
     }
 
     /// **Windows** for the fitted rect: n = 1, the rect itself; n = 2, the
-    /// members at the rect's height `H` with a bar of `round(g·H)` between
-    /// them, centred on a canvas `canvas_w` wide.
-    pub(super) fn windows(&self, rect: Window, canvas_w: u32) -> Vec<Window> {
+    /// members at the rect's height `H` with a bar of `round(g·H)` (plus both
+    /// bevels for a bevelled mat) between them, centred on a canvas
+    /// `canvas_w` wide.
+    pub(super) fn windows(&self, rect: Window, canvas_w: u32, bevel: Option<Bevel>) -> Vec<Window> {
         if !self.is_pair() {
             return vec![rect];
         }
         let h = rect.h;
         let width = |aspect: f32| ((h as f32 * aspect).round() as u32).max(1);
         let (left_w, right_w) = (width(self.members[0].1), width(self.members[1].1));
-        let bar = (h as f32 * self.bar_fraction).round() as u32;
+        let bar = (h as f32 * self.bar_fraction).round() as u32 + bevel.map_or(0, Bevel::bar_px);
         let x = canvas_w.saturating_sub(left_w + bar + right_w) / 2;
         vec![
             Window {
@@ -231,6 +256,36 @@ impl QueuedImage {
             .filter(|p| p.priority)
             .map(|p| p.prepared.path.clone());
         first.into_iter().chain(second).collect()
+    }
+
+    /// Whether this pair may be drawn on `canvas`: both members pairable
+    /// there (R2), which is what guarantees C2. `rules` is `None` with
+    /// pairing off.
+    pub(super) fn pair_fits(&self, rules: Option<&PairingRules>, canvas: (u32, u32)) -> bool {
+        let Some(partner) = &self.partner else {
+            return true;
+        };
+        rules.is_some_and(|rules| {
+            rules.is_pairable(Some(self.image.source_size), Some(canvas))
+                && rules.is_pairable(Some(partner.prepared.source_size), Some(canvas))
+        })
+    }
+
+    /// A pair as two solo screens, in order, each member with its priority.
+    pub(super) fn split(self) -> (QueuedImage, QueuedImage) {
+        let partner = self.partner.expect("split a pair");
+        (
+            QueuedImage {
+                image: self.image,
+                priority: self.priority,
+                partner: None,
+            },
+            QueuedImage {
+                image: partner.prepared,
+                priority: partner.priority,
+                partner: None,
+            },
+        )
     }
 
     fn contains(&self, path: &Path) -> bool {
@@ -468,7 +523,7 @@ mod tests {
             w: 0,
             h: 1901,
         };
-        let w = set.windows(rect, 3840);
+        let w = set.windows(rect, 3840, None);
         assert_eq!((w[0].h, w[1].h), (1901, 1901));
         assert_eq!(w[0].w, (1901.0f32 * 0.75).round() as u32);
         assert_eq!(w[1].w, (1901.0f32 * 0.6).round() as u32);
@@ -478,6 +533,13 @@ mod tests {
         assert!(w[0].x.abs_diff(right_margin) <= 1, "centred");
         // Solo: the fitted rect itself.
         let solo = PhotoSet::solo(RgbaImage::new(30, 40));
-        assert_eq!(solo.windows(rect, 3840), [rect]);
+        assert_eq!(solo.windows(rect, 3840, None), [rect]);
+        // A bevelled mat: the flat bar between the bevels is still round(g·H).
+        let bevel = Bevel {
+            px: 4.0,
+            space_h: 1901.0,
+        };
+        let wb = set.windows(rect, 3840, Some(bevel));
+        assert_eq!(wb[1].x - (wb[0].x + wb[0].w), bar + 8);
     }
 }

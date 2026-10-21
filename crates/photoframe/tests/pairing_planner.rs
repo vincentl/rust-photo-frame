@@ -36,6 +36,7 @@ fn rules(probability: f64) -> PairingRules {
         max_upscale: 1.0,
         m_min: 0.02,
         m_max: 0.06,
+        bevel_max: 0.0,
     }
 }
 

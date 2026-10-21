@@ -5,7 +5,7 @@
 //! the **meta authority** (R10) and the **pairable** rule (R2, with the
 //! no-shrink invariant C2).
 
-use crate::config::Configuration;
+use crate::config::{Configuration, MattingConfig, PairingOptions};
 use crate::events::{CanvasShape, MetaSource, PhotoInfo};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -77,7 +77,10 @@ impl DisplaySizes {
 /// - `m_min`, `m_max` = smallest and largest margin fraction **among the
 ///   non-zero mat options** (the only mats a pair screen can get, §5);
 /// - `r` = `pairing.bar-ratio`; `g_max = r·m_max/(1 − 2·m_max)` is the largest
-///   center bar as a fraction of photo height.
+///   center bar as a fraction of photo height;
+/// - `b_max` = the widest bevel among the non-zero mats (studio and
+///   passe-partout cut one around each window; the bar adds both bevels to
+///   its flat `r × border`, see `viewer/photo_set.rs`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PairingRules {
     /// `pairing.probability`, the pairing coin's `p`.
@@ -90,6 +93,8 @@ pub struct PairingRules {
     pub m_min: f64,
     /// `m_max`.
     pub m_max: f64,
+    /// `b_max`, in canvas pixels.
+    pub bevel_max: f64,
 }
 
 impl PairingRules {
@@ -100,13 +105,29 @@ impl PairingRules {
         if !pairing.enabled {
             return None;
         }
-        let (m_min, m_max) = cfg.matting.nonzero_margin_range()?;
+        Self::from_parts(
+            pairing,
+            &cfg.matting,
+            cfg.global_photo_settings.max_upscale_factor,
+        )
+    }
+
+    /// The rules for `pairing` with these mats and max-upscale factor (the
+    /// viewer's check before drawing a pair, and test harnesses). `None` when
+    /// no non-zero mat is configured.
+    pub fn from_parts(
+        pairing: &PairingOptions,
+        matting: &MattingConfig,
+        max_upscale_factor: f32,
+    ) -> Option<Self> {
+        let (m_min, m_max) = matting.nonzero_margin_range()?;
         Some(Self {
             probability: pairing.probability,
             bar_ratio: f64::from(pairing.bar_ratio),
-            max_upscale: f64::from(cfg.global_photo_settings.max_upscale_factor.max(1.0)),
+            max_upscale: f64::from(max_upscale_factor.max(1.0)),
             m_min: f64::from(m_min),
             m_max: f64::from(m_max),
+            bevel_max: f64::from(matting.nonzero_bevel_max()),
         })
     }
 
@@ -126,12 +147,18 @@ impl PairingRules {
     /// `a_i = w_i/h_i`) is pairable iff
     /// - the canvas `(W_c, H_c)` has been published (`A = W_c/H_c`),
     /// - its size is known,
-    /// - **shape condition:** `a_i ≤ (A − g_max)/2`, and
+    /// - **shape condition:** `a_i ≤ (A − g_max − β)/2`, with the bevel term
+    ///   `β = 4·b_max / (H_c(1 − 2·m_max))` (0 without bevelled mats), and
     /// - **full-height condition:** `h_i·u ≥ H_c(1 − 2·m_min)`.
     ///
     /// Together these give the no-shrink invariant C2: each member of a pair
     /// is drawn at exactly the height it would have alone, for every mat a
-    /// pair can get (proof in the design, §1).
+    /// pair can get (proof in the design, §1). The bevel term extends the
+    /// shape step to studio and passe-partout, whose bar is `g·H + 2b` and
+    /// whose photo space is `D − 2b` tall and `A·D − 2b` wide (`D =
+    /// H_c(1 − 2m)`): the pair fits that width at full height when
+    /// `Σa + g ≤ (A·D − 4b)/(D − 2b)`, which `Σa + g ≤ A − 4b/D` implies, and
+    /// `4b/D ≤ β` for every non-zero mat.
     pub fn is_pairable(
         &self,
         display_size: Option<(u32, u32)>,
@@ -145,7 +172,8 @@ impl PairingRules {
         }
         let a = f64::from(w) / f64::from(h);
         let canvas_aspect = f64::from(canvas_w) / f64::from(canvas_h);
-        let shape = a <= (canvas_aspect - self.g_max()) / 2.0;
+        let bevel_term = 4.0 * self.bevel_max / (f64::from(canvas_h) * (1.0 - 2.0 * self.m_max));
+        let shape = a <= (canvas_aspect - self.g_max() - bevel_term) / 2.0;
         let full_height =
             f64::from(h) * self.max_upscale >= f64::from(canvas_h) * (1.0 - 2.0 * self.m_min);
         shape && full_height
@@ -174,6 +202,7 @@ mod tests {
             max_upscale: 1.0,
             m_min,
             m_max,
+            bevel_max: 0.0,
         }
     }
 
@@ -206,6 +235,26 @@ mod tests {
         assert!((threshold - 0.779).abs() < 0.001, "{threshold}");
         assert!(!r.is_pairable(Some((3200, 4000)), wuxga), "4:5");
         assert!(r.is_pairable(Some((3000, 4000)), wuxga), "3:4");
+    }
+
+    /// Review F4: bevelled mats add both bevels to the bar, so the shape
+    /// condition leaves room for them (`β = 4·b_max/(H_c(1 − 2·m_max))`).
+    #[test]
+    fn s4_bevels_tighten_the_shape_condition() {
+        let plain = rules(0.06, 0.06);
+        let bevelled = PairingRules {
+            bevel_max: 20.0,
+            ..plain
+        };
+        let beta = 4.0 * 20.0 / (2160.0 * 0.88);
+        let edge = (16.0 / 9.0 - plain.g_max()) / 2.0;
+        // A portrait just inside the plain limit is outside the bevelled one.
+        let h = 4000u32;
+        let w = ((edge - beta / 4.0) * h as f64).floor() as u32;
+        assert!(plain.is_pairable(Some((w, h)), UHD));
+        assert!(!bevelled.is_pairable(Some((w, h)), UHD));
+        let w = ((edge - beta / 2.0) * h as f64).floor() as u32;
+        assert!(bevelled.is_pairable(Some((w, h)), UHD));
     }
 
     #[test]

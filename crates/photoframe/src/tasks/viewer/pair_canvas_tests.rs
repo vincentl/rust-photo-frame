@@ -315,6 +315,7 @@ fn k2_low_resolution_fixture_is_excluded_because_pairing_would_shrink() {
         max_upscale: 1.0,
         m_min: 0.02,
         m_max: 0.02,
+        bevel_max: 0.0,
     };
     assert!(!rules.is_pairable(Some(low.dimensions()), Some(SCREEN)));
     assert!(rules.is_pairable(Some(tall.dimensions()), Some(SCREEN)));
@@ -611,4 +612,100 @@ fn k6_scaled_decodes_match_full_decodes_for_pairs() {
         let psnr = psnr_rgb(&render(false), &render(true));
         assert!(psnr > 44.0, "{kind:?}: PSNR {psnr:.1} dB");
     }
+}
+
+/// Review F4: on studio and passe-partout the bar holds both bevels, so the
+/// flat board between them is `r × border` like the flat board outside, and
+/// each window keeps its solo height (C2 with the bevel term in the shape
+/// condition).
+#[test]
+fn bevelled_mats_keep_a_flat_bar_of_r_times_the_border() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixed = fixed_background(&dir);
+    let left = bright(750, 1000, 21);
+    let right = bright(600, 1000, 22);
+    for kind in [MattingKind::Studio, MattingKind::PassePartout] {
+        for pct in [2.0f32, 3.5, 6.0] {
+            let matting = mat_option(kind, pct, &fixed);
+            let bevel = matting.bevel_width();
+            assert!(bevel > 0.0, "{kind:?} cuts a bevel");
+            let pair = pair_result(&left, &right, params(matting.clone(), SCREEN, false));
+            let (l, r) = (pair.windows[0], pair.windows[1]);
+            let flat = (r.x - (l.x + l.w)) as f32 - (2.0 * bevel).ceil();
+            let expected = (0.618 * SCREEN.1 as f32 * pct / 100.0).round();
+            assert!(
+                (flat - expected).abs() <= 1.0,
+                "{kind:?} {pct}%: flat bar {flat} vs r x border {expected}"
+            );
+            for (index, member) in [&left, &right].into_iter().enumerate() {
+                let solo = solo_result(member, params(matting.clone(), SCREEN, false));
+                assert_eq!(pair.windows[index].h, solo.windows[0].h, "{kind:?} {pct}%");
+            }
+        }
+    }
+}
+
+/// Review F8: the bevel clamp to half the bar never reaches the outer
+/// bevels; even at `bar-ratio: 0` (photos edge to edge on overlay mats) a
+/// studio pair keeps full bevels on every side, and the outer ones match the
+/// ones at the default ratio.
+#[test]
+fn bar_ratio_zero_keeps_the_outer_bevels() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixed = fixed_background(&dir);
+    let left = bright(750, 1000, 23);
+    let right = bright(600, 1000, 24);
+    let matting = mat_option(MattingKind::Studio, 6.0, &fixed);
+    let bevel = matting.bevel_width().ceil() as u32;
+    let render = |ratio: f32| {
+        let mut p = params(matting.clone(), SCREEN, false);
+        p.bar_ratio = ratio;
+        let result = pair_result(&left, &right, p);
+        let windows = result.windows.clone();
+        (to_image(result), windows)
+    };
+    let (zero, zw) = render(0.0);
+    let (golden, gw) = render(0.618);
+    assert_eq!(
+        zw[1].x - (zw[0].x + zw[0].w),
+        2 * bevel,
+        "bar = the two bevels"
+    );
+    for y in zw[0].y..zw[0].y + zw[0].h {
+        for d in 1..=bevel {
+            assert_eq!(
+                zero.get_pixel(zw[0].x - d, y),
+                golden.get_pixel(gw[0].x - d, y),
+                "outer bevel at {d} px, row {y}"
+            );
+        }
+    }
+}
+
+/// Review F12: a member whose pixels cannot be read leaves the other solo
+/// instead of dropping the screen.
+#[test]
+fn an_unreadable_member_leaves_the_other_solo() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixed = fixed_background(&dir);
+    let good = bright(750, 1000, 25);
+    let mut broken = prepared(&bright(600, 1000, 26), "broken.png");
+    broken.pixels.clear();
+    let matting = mat_option(MattingKind::FixedColor, 6.0, &fixed);
+    let task = |first: PreparedImageCpu, second: PreparedImageCpu| MatTask {
+        image: first,
+        mat_kind: None,
+        params: params(matting.clone(), SCREEN, false),
+        priority: false,
+        partner: Some(LoadedPartner {
+            prepared: second,
+            priority: true,
+        }),
+    };
+    let r = process_mat_task(task(prepared(&good, "good.png"), broken.clone())).unwrap();
+    assert_eq!(r.path, std::path::PathBuf::from("good.png"));
+    assert!(r.partner.is_none() && !r.priority);
+    let r = process_mat_task(task(broken, prepared(&good, "good.png"))).unwrap();
+    assert_eq!(r.path, std::path::PathBuf::from("good.png"));
+    assert!(r.partner.is_none() && r.priority, "keeps its own priority");
 }

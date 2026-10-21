@@ -957,6 +957,7 @@ mod live_loop_tests {
                 max_upscale: 1.0,
                 m_min: 0.02,
                 m_max: 0.06,
+                bevel_max: 0.0,
             },
             canvas: canvas.clone(),
         });
@@ -1102,6 +1103,7 @@ mod live_loop_tests {
                 max_upscale: 1.0,
                 m_min: 0.02,
                 m_max: 0.06,
+                bevel_max: 0.0,
             },
             canvas: CanvasShape::default(),
         };
