@@ -2,7 +2,10 @@ pub mod ui;
 
 use crate::config::{Config, OverlayConfig};
 use crate::hotspot;
+use crate::qr;
+use crate::viewer_client;
 use anyhow::{Context, Result, bail};
+use config_model::control::{DEFAULT_OVERLAY_TTL_SEC, Request, WifiOverlay};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
@@ -13,6 +16,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use swayipc::{Connection, Error as SwayError, Node};
 use tokio::process::{Child, Command};
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
@@ -24,7 +28,59 @@ pub struct OverlayRequest {
     pub title: Option<String>,
 }
 
+/// The overlay's default copy; the window (`ui.rs`) shows the same words.
+pub const DEFAULT_TITLE: &str = "Reconnect the photo frame to Wi-Fi";
+pub const BODY: &str = "Use another device to restore connectivity.";
+pub const FOOTER: &str = "The slideshow resumes automatically after the frame reconnects.";
+
+/// How often the viewer's lease is renewed while the overlay is up. The
+/// lease (`DEFAULT_OVERLAY_TTL_SEC`, 30 s) outlasts two missed refreshes, so
+/// the overlay survives a slow viewer, comes back within this interval after
+/// a viewer restart, and disappears within the lease if wifi-manager dies.
+const VIEWER_REFRESH: Duration = Duration::from_secs(10);
+
+/// Who draws the overlay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    /// The viewer, as a scene (both display stacks). Nothing to hand off:
+    /// the viewer keeps running and draws the overlay itself.
+    Viewer,
+    /// The sway window (the fallback when the viewer does not answer).
+    Window,
+}
+
 impl OverlayRequest {
+    /// What the viewer is sent: the facts plus the prose wifi-manager owns.
+    /// Reads the current hotspot password.
+    pub fn viewer_content(&self) -> Result<WifiOverlay> {
+        let raw = fs::read_to_string(&self.password_file).with_context(|| {
+            format!(
+                "failed to read hotspot password at {}",
+                self.password_file.display()
+            )
+        })?;
+        let password = raw.trim().to_string();
+        if password.is_empty() {
+            bail!(
+                "hotspot password file {} is empty",
+                self.password_file.display()
+            );
+        }
+        Ok(WifiOverlay {
+            ttl_sec: DEFAULT_OVERLAY_TTL_SEC,
+            headline: self
+                .title
+                .clone()
+                .unwrap_or_else(|| DEFAULT_TITLE.to_string()),
+            body: BODY.to_string(),
+            join_qr: qr::wifi_join_payload(&self.ssid, &password),
+            ssid: self.ssid.clone(),
+            password,
+            portal_url: self.ui_url.clone(),
+            footer: FOOTER.to_string(),
+        })
+    }
+
     pub fn from_config(config: &Config) -> Self {
         let ui_url = format!("http://{}:{}/", config.hotspot.ipv4_addr, config.ui.port);
         Self {
@@ -39,6 +95,11 @@ impl OverlayRequest {
 pub struct OverlayController {
     config: OverlayConfig,
     child: Option<Child>,
+    /// Renews the viewer's lease while the overlay is up (Viewer backend).
+    refresher: Option<JoinHandle<()>>,
+    /// Who drew the overlay last; kept after `hide` so recovery can tell
+    /// whether the photo app was handed off.
+    backend: Option<Backend>,
 }
 
 impl OverlayController {
@@ -46,10 +107,89 @@ impl OverlayController {
         Self {
             config,
             child: None,
+            refresher: None,
+            backend: None,
         }
     }
 
+    /// Who drew (or is drawing) the overlay; `None` before the first show.
+    pub fn backend(&self) -> Option<Backend> {
+        self.backend
+    }
+
+    /// Show the overlay, preferring the viewer: if it accepts
+    /// `wifi-overlay-show`, it draws the overlay as a scene and a refresher
+    /// keeps its lease alive. Otherwise the sway window is used as before.
+    /// If neither works (KMS while the viewer restarts: no sway there), the
+    /// refresher keeps offering the overlay to the viewer until it answers.
     pub async fn show(&mut self, request: &OverlayRequest) -> Result<()> {
+        let content = request.viewer_content()?;
+        self.stop_refresher();
+        let outcome = viewer_client::send(
+            self.config.control_socket.clone(),
+            Request::WifiOverlayShow(content.clone()),
+        )
+        .await;
+        if outcome.accepted() {
+            info!("wifi overlay drawn by the viewer");
+            // A window left from an earlier fallback would sit on top.
+            if self.child.is_some() {
+                self.stop_overlay_only().await?;
+            }
+            self.backend = Some(Backend::Viewer);
+            self.start_refresher(content);
+            return Ok(());
+        }
+        info!(
+            reason = %outcome.reason(),
+            "the viewer did not take the wifi overlay; using the sway window"
+        );
+        match self.show_window(request).await {
+            Ok(()) => {
+                self.backend = Some(Backend::Window);
+                Ok(())
+            }
+            Err(err) => {
+                warn!(
+                    error = ?err,
+                    "no sway window either; offering the overlay to the viewer every {}s",
+                    VIEWER_REFRESH.as_secs()
+                );
+                self.backend = Some(Backend::Viewer);
+                self.start_refresher(content);
+                Ok(())
+            }
+        }
+    }
+
+    fn start_refresher(&mut self, content: WifiOverlay) {
+        let socket = self.config.control_socket.clone();
+        self.refresher = Some(tokio::spawn(async move {
+            let mut answered = true;
+            loop {
+                sleep(VIEWER_REFRESH).await;
+                let outcome =
+                    viewer_client::send(socket.clone(), Request::WifiOverlayShow(content.clone()))
+                        .await;
+                match (outcome.accepted(), answered) {
+                    (true, false) => info!("the viewer took the wifi overlay again"),
+                    (false, true) => {
+                        warn!(reason = %outcome.reason(), "the viewer did not renew the wifi overlay; retrying")
+                    }
+                    _ => {}
+                }
+                answered = outcome.accepted();
+            }
+        }));
+    }
+
+    fn stop_refresher(&mut self) {
+        if let Some(task) = self.refresher.take() {
+            task.abort();
+        }
+    }
+
+    async fn show_window(&mut self, request: &OverlayRequest) -> Result<()> {
         self.prune_exited()?;
         if self.child.is_some() {
             // Always refresh overlay content so any regenerated hotspot password
@@ -152,7 +292,23 @@ impl OverlayController {
         Ok(())
     }
 
+    /// Take the overlay down wherever it is: the viewer's scene (best
+    /// effort; a viewer that is not running has nothing to hide) and any
+    /// window.
     pub async fn hide(&mut self) -> Result<()> {
+        self.stop_refresher();
+        if self.backend == Some(Backend::Viewer) {
+            let outcome =
+                viewer_client::send(self.config.control_socket.clone(), Request::WifiOverlayHide)
+                    .await;
+            if !outcome.accepted() {
+                debug!(reason = %outcome.reason(), "viewer did not acknowledge the overlay hide");
+            }
+        }
+        self.hide_window().await
+    }
+
+    async fn hide_window(&mut self) -> Result<()> {
         if let Some(mut child) = self.child.take() {
             if let Some(pid) = child.id() {
                 debug!(pid, "stopping wifi overlay process");
@@ -420,7 +576,7 @@ fn set_env_path(key: &str, value: &Path) {
 
 pub fn overlay_request(config: &Config) -> OverlayRequest {
     OverlayRequest {
-        title: Some("Reconnect the photo frame to Wi-Fi".to_string()),
+        title: Some(DEFAULT_TITLE.to_string()),
         ..OverlayRequest::from_config(config)
     }
 }
@@ -506,5 +662,118 @@ fn shell_escape(arg: &str) -> String {
         // Single-quote, escaping internal single quotes
         let escaped = arg.replace('\'', "'\\''");
         format!("'{}'", escaped)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use config_model::control::Reply;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    fn request(dir: &Path, password: &str) -> OverlayRequest {
+        let password_file = dir.join("hotspot-password.txt");
+        fs::write(&password_file, password).expect("write password");
+        OverlayRequest {
+            ssid: "Frame;Setup".to_string(),
+            password_file,
+            ui_url: "http://192.168.4.1:8080/".to_string(),
+            title: None,
+        }
+    }
+
+    #[test]
+    fn viewer_content_carries_the_escaped_join_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = request(dir.path(), "apple-river-stone\n")
+            .viewer_content()
+            .unwrap();
+        assert_eq!(content.password, "apple-river-stone");
+        assert_eq!(
+            content.join_qr,
+            "WIFI:T:WPA;S:Frame\\;Setup;P:apple-river-stone;;"
+        );
+        assert_eq!(content.headline, DEFAULT_TITLE);
+        assert_eq!(content.portal_url, "http://192.168.4.1:8080/");
+        assert!(content.validate().is_ok());
+        assert!(request(dir.path(), "  \n").viewer_content().is_err());
+    }
+
+    /// A fake viewer that accepts every request and records it.
+    fn accepting_viewer(
+        connections: usize,
+    ) -> (
+        tempfile::TempDir,
+        PathBuf,
+        std::thread::JoinHandle<Vec<String>>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for _ in 0..connections {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut body = String::new();
+                stream.read_to_string(&mut body).unwrap();
+                stream.write_all(Reply::ok().to_line().as_bytes()).unwrap();
+                seen.push(body);
+            }
+            seen
+        });
+        (dir, path, handle)
+    }
+
+    #[tokio::test]
+    async fn an_answering_viewer_draws_the_overlay_and_no_window_is_spawned() {
+        let (dir, socket, viewer) = accepting_viewer(2);
+        let mut controller = OverlayController::new(OverlayConfig {
+            // Would fail loudly if the window path ran.
+            command: vec!["/nonexistent/overlay-window".to_string()],
+            control_socket: socket,
+            ..OverlayConfig::default()
+        });
+        controller
+            .show(&request(dir.path(), "apple-river-stone"))
+            .await
+            .expect("show");
+        assert_eq!(controller.backend(), Some(Backend::Viewer));
+        assert!(controller.child.is_none(), "no window process");
+        assert!(controller.refresher.is_some(), "the lease is renewed");
+
+        controller.hide().await.expect("hide");
+        assert!(controller.refresher.is_none());
+        assert_eq!(
+            controller.backend(),
+            Some(Backend::Viewer),
+            "kept for the handoff decision"
+        );
+        let seen = viewer.join().unwrap();
+        assert!(
+            seen[0].contains("\"command\":\"wifi-overlay-show\""),
+            "{}",
+            seen[0]
+        );
+        assert_eq!(seen[1], r#"{"command":"wifi-overlay-hide"}"#);
+    }
+
+    #[tokio::test]
+    async fn without_a_viewer_or_a_window_the_viewer_is_offered_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_sway = dir.path().join("no-sway.sock");
+        let mut controller = OverlayController::new(OverlayConfig {
+            command: vec!["swaymsg".to_string()],
+            sway_socket: Some(missing_sway),
+            control_socket: dir.path().join("no-viewer.sock"),
+            ..OverlayConfig::default()
+        });
+        controller
+            .show(&request(dir.path(), "apple-river-stone"))
+            .await
+            .expect("show never fails on a missing backend");
+        assert_eq!(controller.backend(), Some(Backend::Viewer));
+        assert!(controller.refresher.is_some());
+        controller.stop_refresher();
     }
 }

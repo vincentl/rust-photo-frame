@@ -6,6 +6,7 @@ mod overlay;
 mod password;
 mod qr;
 mod status;
+mod viewer_client;
 mod watch;
 mod web;
 
