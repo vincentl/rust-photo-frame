@@ -140,36 +140,23 @@ impl Presentation {
 /// The panel's power on DRM/KMS.
 ///
 /// ```text
-/// Lit    --off-->  Dark      DPMS property := OFF (the caller's ioctl)
-/// Waking --off-->  Dark      nothing to do: the CRTC never came back on
-/// Dark   --on-->   Waking    no ioctl; the next present is the modeset
-/// Waking --frame presented-->  Lit { since }
+/// Lit  --off-->  Dark   commit CRTC ACTIVE = 0 (after in-flight flips land)
+/// Dark --on-->   Lit    commit MODE_ID + ACTIVE = 1 + ALLOW_MODESET
 /// ```
 ///
-/// The viewer never sets DPMS ON. While the CRTC is dark, Mesa's page flip
-/// fails with EINVAL and its display WSI falls back to `drmModeSetCrtc`, a
-/// full modeset, which re-drives the HDMI link and forces DPMS on (see
-/// `kms.rs`).
+/// Both edges are blocking atomic commits the viewer makes itself
+/// (`KmsDisplay::set_active`); the state changes only when the commit
+/// succeeded, so what `display-power` reports is what the kernel accepted.
+/// The wake commit is the full modeset Mesa does when it first takes the
+/// display, so a wake drives the HDMI link up the way startup does. Mesa is
+/// never asked to present onto a dark CRTC (see `kms.rs`, "Display power").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PanelPower {
-    /// Showing frames. `since` is when the last wake's modeset frame was
-    /// presented; `None` when the panel has been lit since startup.
+    /// Showing frames. `since` is when the last wake's modeset committed;
+    /// `None` when the panel has been lit since startup.
     Lit { since: Option<Instant> },
-    /// DPMS off; nothing is presented.
+    /// CRTC inactive; nothing is presented.
     Dark,
-    /// Switched on, but the modeset frame has not been presented yet.
-    Waking,
-}
-
-/// What switching the panel off takes from the caller.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum OffAction {
-    /// Set the connector's DPMS property to OFF, then [`PanelPower::set_dark`].
-    DpmsOff,
-    /// The CRTC is still dark (switched on, no frame yet): just mark it.
-    MarkDark,
-    /// Already dark.
-    Nothing,
 }
 
 impl PanelPower {
@@ -177,65 +164,38 @@ impl PanelPower {
         matches!(self, PanelPower::Dark)
     }
 
-    pub(super) fn off_action(&self) -> OffAction {
-        match self {
-            PanelPower::Lit { .. } => OffAction::DpmsOff,
-            PanelPower::Waking => OffAction::MarkDark,
-            PanelPower::Dark => OffAction::Nothing,
-        }
-    }
-
+    /// The off commit succeeded.
     pub(super) fn set_dark(&mut self) {
         *self = PanelPower::Dark;
     }
 
-    /// Switch on; true when the panel was dark (the caller must arrange a
-    /// frame: that frame is the modeset).
-    pub(super) fn on(&mut self) -> bool {
-        if self.is_dark() {
-            *self = PanelPower::Waking;
-            true
-        } else {
-            false
-        }
+    /// The wake modeset committed at `now`.
+    pub(super) fn set_lit(&mut self, now: Instant) {
+        *self = PanelPower::Lit { since: Some(now) };
     }
 
-    /// A frame was presented; true when it was the modeset frame of a wake.
-    pub(super) fn presented(&mut self, now: Instant) -> bool {
-        if matches!(self, PanelPower::Waking) {
-            *self = PanelPower::Lit { since: Some(now) };
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Frames may be presented (anything but dark: a present while dark
-    /// would light the panel through Mesa's modeset fallback).
+    /// Frames may be presented and paced: only while lit. A present onto a
+    /// dark CRTC fails in Mesa (and loses the swapchain), and a vblank wait
+    /// on one fails at once (two failures disable pacing for the process).
     pub(super) fn may_present(&self) -> bool {
         !self.is_dark()
     }
 
-    /// Frames may wait for a vblank: only while lit. A vblank wait on a dark
-    /// CRTC fails at once, and two failures disable pacing for the process.
-    pub(super) fn may_pace(&self) -> bool {
-        matches!(self, PanelPower::Lit { .. })
-    }
-
     /// The connector check may run: lit, and at least `settle` after a
-    /// wake's modeset frame. A sleeping sink may drop hot-plug detect and
-    /// take seconds to raise it again; until then "asleep" and "unplugged"
-    /// look the same.
+    /// wake's modeset. A sleeping sink may drop hot-plug detect and take
+    /// seconds to raise it again; until then "asleep" and "unplugged" look
+    /// the same.
     pub(super) fn may_check_connector(&self, now: Instant, settle: Duration) -> bool {
         match self {
             PanelPower::Lit { since: None } => true,
             PanelPower::Lit { since: Some(at) } => now >= *at + settle,
-            PanelPower::Dark | PanelPower::Waking => false,
+            PanelPower::Dark => false,
         }
     }
 
-    /// What `display-power` reports: the viewer's own state, never the
-    /// property read back (the kernel documents that as unreliable).
+    /// What `display-power` reports: the state the last successful commit
+    /// set (never the legacy DPMS value, whose read-back the kernel
+    /// documents as unreliable).
     pub(super) fn reported(&self) -> PowerState {
         if self.is_dark() {
             PowerState::Off
@@ -342,40 +302,23 @@ mod tests {
         for mode in [Greeting, Wake, Sleep] {
             assert_eq!(p.layer(mode, now), Layer::Nothing);
         }
-        assert!(p.power_mut().on());
+        p.power_mut().set_lit(now);
         assert_eq!(p.layer(Wake, now), Layer::Overlay, "appears once lit");
     }
 
     #[test]
-    fn power_off_from_each_state() {
-        let mut lit = PanelPower::Lit { since: None };
-        assert_eq!(lit.off_action(), OffAction::DpmsOff);
-        lit.set_dark();
-        assert_eq!(lit.off_action(), OffAction::Nothing);
-        let mut waking = PanelPower::Dark;
-        assert!(waking.on());
-        assert_eq!(waking, PanelPower::Waking);
-        assert_eq!(waking.off_action(), OffAction::MarkDark);
-    }
-
-    #[test]
-    fn wake_takes_one_modeset_frame() {
+    fn power_follows_the_commits() {
         let t0 = Instant::now();
         let mut p = PanelPower::Lit { since: None };
-        assert!(!p.on(), "on while lit is a no-op");
-        p.set_dark();
-        assert!(!p.may_present() && !p.may_pace());
-        assert_eq!(p.reported(), PowerState::Off);
-        assert!(p.on());
-        assert!(!p.on(), "a second on while waking is a no-op");
+        assert!(p.may_present());
         assert_eq!(p.reported(), PowerState::On);
-        // The modeset frame is presented, but not paced: its CRTC is dark
-        // until that frame's modeset.
-        assert!(p.may_present() && !p.may_pace());
-        assert!(p.presented(t0));
+        p.set_dark();
+        assert!(p.is_dark() && !p.may_present());
+        assert_eq!(p.reported(), PowerState::Off);
+        p.set_lit(t0);
         assert_eq!(p, PanelPower::Lit { since: Some(t0) });
-        assert!(p.may_pace());
-        assert!(!p.presented(t0), "later frames are ordinary");
+        assert!(p.may_present());
+        assert_eq!(p.reported(), PowerState::On);
     }
 
     #[test]
@@ -384,7 +327,6 @@ mod tests {
         let t0 = Instant::now();
         assert!(PanelPower::Lit { since: None }.may_check_connector(t0, settle));
         assert!(!PanelPower::Dark.may_check_connector(t0, settle));
-        assert!(!PanelPower::Waking.may_check_connector(t0, settle));
         let woken = PanelPower::Lit { since: Some(t0) };
         assert!(!woken.may_check_connector(t0 + Duration::from_secs(14), settle));
         assert!(woken.may_check_connector(t0 + settle, settle));

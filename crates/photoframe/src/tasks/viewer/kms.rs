@@ -74,26 +74,30 @@
 //!   failure (greetd or plymouth still holding the display), retried by
 //!   systemd until its StartLimit and then left failed.
 //! * **Display power** (`display-power` on the control socket, which
-//!   `powerctl` and buttond use). Off sets the connector's DPMS property to
-//!   OFF; from then on the loop presents nothing, waits on no vblank and
-//!   skips the connector check, and the scene's redraw request stays armed.
-//!   A present while dark would light the panel (below), and a vblank wait
-//!   on a dark CRTC fails at once and would count towards disabling pacing.
-//!   **On sets nothing.** The next frame is presented while the CRTC is
-//!   still dark, so Mesa's page flip fails with EINVAL and its display WSI
-//!   (`_wsi_display_queue_next`) falls back to `drmModeSetCrtc`: a full
-//!   modeset from an inactive CRTC, the operation that lights the panel at
-//!   startup, which re-drives the HDMI link and forces DPMS back on. Setting
-//!   DPMS ON ourselves would re-activate the CRTC with its old state, the
-//!   next flip would succeed and no modeset would run, which is the vc4
-//!   failure picframe3 documents (the property reads on, the panel stays on
-//!   "no cable"). That frame is not vblank-paced (its CRTC is dark until it
-//!   lands), and the connector check resumes `CONNECTOR_SETTLE_AFTER_WAKE`
-//!   after it, because a sleeping sink may drop hot-plug detect and take
-//!   seconds to raise it again. If a Mesa ever answered that EINVAL with
-//!   SURFACE_LOST instead, the viewer would exit and the restart's startup
-//!   modeset would light the panel: degraded, but bounded and in the
-//!   journal. State machine: `presentation::PanelPower`.
+//!   `powerctl` and buttond use). The viewer switches the panel with its
+//!   own blocking atomic commits on the CRTC (`KmsDisplay::set_active`):
+//!   off commits `ACTIVE = 0`, on commits a fresh `MODE_ID`, the
+//!   connector's `CRTC_ID` and `ACTIVE = 1` with `ALLOW_MODESET`, the same
+//!   full modeset Mesa does when it first takes the display, so a wake
+//!   drives the HDMI link up exactly as startup does (vc4 does not reliably
+//!   recover from a mere power toggle, per picframe3). `PanelPower` changes
+//!   only when the commit succeeded; the journal logs the kernel's `ACTIVE`
+//!   read back and, on wake, a vblank received from the running CRTC.
+//!   **Rule: Mesa never presents onto a dark CRTC.** Mesa does not know the
+//!   viewer switched the CRTC off. From 25.3 its display WSI presents with a
+//!   plain atomic flip, which the kernel rejects on an inactive CRTC
+//!   ("requesting event but off"), and Mesa then loses the swapchain (a
+//!   restart for us; wgpu hides the error at present). Up to 25.2 it falls
+//!   back to `drmModeSetCrtc` and lights the panel behind the viewer's back.
+//!   So: while dark the loop presents nothing and waits on no vblank (a
+//!   vblank wait on a dark CRTC fails at once and two failures disable
+//!   pacing); before the off commit the loop lets every submitted frame
+//!   reach the screen (GPU idle, then two vblanks), so no flip is queued
+//!   behind the commit; and the wake commit happens before the next present.
+//!   The connector check is skipped while dark and for
+//!   `CONNECTOR_SETTLE_AFTER_WAKE` after a wake: a sleeping sink may drop
+//!   hot-plug detect and take seconds to raise it again. State machine:
+//!   `presentation::PanelPower`.
 //! * **Shutdown.** Every exit (SIGTERM/SIGINT/stdin via the cancel token,
 //!   the control or matting channel closing, a fatal surface error) returns
 //!   through `run_kms`, which tears down in the only safe order: GPU objects
@@ -118,7 +122,7 @@ const KIOSK_MODE: ModeRequest = ModeRequest {
     height: 2160,
     refresh_hz: Some(60),
 };
-/// How long after a wake's modeset frame the connector check waits: a sink
+/// How long after a wake's modeset the connector check waits: a sink
 /// that dropped hot-plug detect while asleep may take seconds to raise it
 /// again, and until then "asleep" and "unplugged" look the same. Pi gate 2
 /// logs the actual time (`kms_power_on: connector reads connected`).
@@ -277,74 +281,103 @@ impl App {
     }
 
     /// A control command on KMS: display power needs the display; the rest
-    /// is `handle_control_command`.
-    fn handle_kms_command(&mut self, display: &KmsDisplay, cmd: ViewerCommand) {
+    /// is `handle_control_command`. True when the command lit a dark panel.
+    fn handle_kms_command(&mut self, display: &mut KmsDisplay, cmd: ViewerCommand) -> bool {
         match cmd {
             ViewerCommand::DisplayPower {
                 state,
                 output,
                 reply,
             } => {
+                let was_dark = self.presentation.power().is_dark();
                 let answer = self.kms_display_power(display, state, output.as_deref());
                 let _ = reply.send(answer);
+                was_dark && !self.presentation.power().is_dark()
             }
-            cmd => self.handle_control_command(cmd),
+            cmd => {
+                self.handle_control_command(cmd);
+                false
+            }
         }
     }
 
     /// `display-power`: see "Display power" in the module docs.
     fn kms_display_power(
         &mut self,
-        display: &KmsDisplay,
+        display: &mut KmsDisplay,
         state: Option<config_model::control::PowerState>,
         output: Option<&str>,
     ) -> config_model::control::Reply {
-        use crate::tasks::viewer::presentation::OffAction;
         use config_model::control::{ErrorKind, PowerState, Reply};
-        let connector = display.connector_name();
+        let connector = display.connector_name().to_string();
         if let Some(output) = output
             && output != "*"
-            && !output.eq_ignore_ascii_case(connector)
+            && !output.eq_ignore_ascii_case(&connector)
         {
             return Reply::error(
                 ErrorKind::NotDriven,
                 format!("this viewer drives {connector}, not {output}"),
             );
         }
+        let dark = self.presentation.power().is_dark();
         match state {
-            None => {}
-            Some(PowerState::Off) => {
-                let power = self.presentation.power_mut();
-                match power.off_action() {
-                    OffAction::DpmsOff => {
-                        if let Err(err) = display.set_dpms_off() {
-                            warn!(error = %err, "kms_dpms_off_failed");
-                            return Reply::error(ErrorKind::Failed, err.to_string());
-                        }
-                        power.set_dark();
-                        info!(connector, "kms_dpms_off: panel off");
-                    }
-                    OffAction::MarkDark => {
-                        // Switched on, but no frame has lit it yet.
-                        power.set_dark();
-                        info!(connector, "kms_dpms_off: panel was still dark");
-                    }
-                    OffAction::Nothing => {}
+            Some(PowerState::Off) if !dark => {
+                // Every frame already submitted reaches the screen first, so
+                // Mesa has no flip queued behind the off commit.
+                self.drain_presents(display);
+                if let Err(err) = display.set_active(false) {
+                    warn!(error = %err, "kms_power_off_failed");
+                    return Reply::error(ErrorKind::Failed, err.to_string());
                 }
+                self.presentation.power_mut().set_dark();
+                let active = display.crtc_active();
+                info!(%connector, crtc_active = ?active, "kms_power_off: panel off");
             }
-            Some(PowerState::On) => {
-                if self.presentation.power_mut().on() {
-                    info!(connector, "kms_power_on: the next frame is the modeset");
+            Some(PowerState::On) if dark => {
+                if let Err(err) = display.set_active(true) {
+                    warn!(error = %err, "kms_power_on_failed: panel stays off");
+                    return Reply::error(ErrorKind::Failed, err.to_string());
                 }
+                self.presentation.power_mut().set_lit(Instant::now());
+                // The kernel's view after the modeset: ACTIVE, and a vblank
+                // from the CRTC, which only a running CRTC delivers.
+                let active = display.crtc_active();
+                let vblank = display.wait_next_vblank().map(|_| ());
+                info!(
+                    %connector,
+                    crtc_active = ?active,
+                    vblank = ?vblank,
+                    "kms_power_on: modeset committed"
+                );
             }
+            _ => {}
         }
-        // Pause or resume the slideshow and ask for the frame that lights it.
+        // Pause or resume the slideshow and ask for a frame of what is now
+        // on screen.
         self.sync_presentation();
         Reply::power(
             self.presentation.power().reported(),
             connector,
             display.mode_label(),
         )
+    }
+
+    /// Wait until every frame submitted so far has been scanned out: the
+    /// GPU work is done, then two vblanks pass (the flip in progress lands
+    /// on the first, a frame queued behind it on the second). Nothing is
+    /// presented in between: commands are handled between frames.
+    fn drain_presents(&self, display: &mut KmsDisplay) {
+        if let Some(gpu) = self.gpu.as_ref() {
+            let _ = gpu.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_millis(500)),
+            });
+        }
+        for _ in 0..2 {
+            if display.wait_next_vblank().is_err() {
+                break;
+            }
+        }
     }
 
     /// One matting result from the awaited channel; same bookkeeping as
@@ -445,7 +478,7 @@ async fn drive(
     let mut audit = pacing::FlipAudit::default();
     // Every frame of the transition being audited was vblank-paced.
     let mut audit_complete = true;
-    // After a wake: when its modeset frame went out, until the connector
+    // After a wake: when its modeset committed, until the connector
     // first reads connected again (logged for Pi gate 2).
     let mut wake_hpd_since: Option<Instant> = None;
     loop {
@@ -457,7 +490,11 @@ async fn drive(
         // refresh of delay).
         loop {
             match control.try_recv() {
-                Ok(cmd) => app.handle_kms_command(&pacer.display, cmd),
+                Ok(cmd) => {
+                    if app.handle_kms_command(&mut pacer.display, cmd) {
+                        wake_hpd_since = Some(Instant::now());
+                    }
+                }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     info!("kms_viewer_control_closed");
@@ -476,9 +513,8 @@ async fn drive(
         if power.may_present() && app.take_kms_redraw_request() {
             let animating = app.transition_animating();
             // Transition frames, and the first frame after a transition
-            // (it closes the audit), wait for the next vblank; never the
-            // wake's modeset frame, whose CRTC is dark until it lands.
-            let paced = if power.may_pace() && (animating || audit.has_unresolved()) {
+            // (it closes the audit), wait for the next vblank.
+            let paced = if animating || audit.has_unresolved() {
                 pacer.wait()
             } else {
                 None
@@ -506,7 +542,6 @@ async fn drive(
             } else {
                 None
             };
-            let presented_before = app.frames_presented;
             match app.redraw(frame_time) {
                 Ok(()) => {}
                 Err(RedrawError::TimeoutStreak) => {
@@ -524,14 +559,6 @@ async fn drive(
                 && animating
             {
                 audit.submitted(vblank, done);
-            }
-            let now = Instant::now();
-            if app.frames_presented != presented_before
-                && app.presentation.power_mut().presented(now)
-            {
-                let lit = pacer.display.crtc_lit();
-                info!(crtc_lit = ?lit, "kms_power_on: modeset frame presented");
-                wake_hpd_since = Some(now);
             }
         }
 
@@ -555,7 +582,11 @@ async fn drive(
                 info!("kms_viewer_cancelled");
                 return Ok(());
             }
-            WakeEvent::Command(cmd) => app.handle_kms_command(&pacer.display, cmd),
+            WakeEvent::Command(cmd) => {
+                if app.handle_kms_command(&mut pacer.display, cmd) {
+                    wake_hpd_since = Some(Instant::now());
+                }
+            }
             WakeEvent::ControlClosed => {
                 info!("kms_viewer_control_closed");
                 return Ok(());

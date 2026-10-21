@@ -267,15 +267,16 @@ after it.
 during that transition. Look for `kms_vblank_wait_failed` in the
 journal.
 
-**Panel off (`display-power off`).** While the panel is dark the
-viewer presents nothing and waits for no vblank. The slideshow is paused,
-so the loop sleeps until a command arrives: no frames and no wakeups.
-Waits matter here because a vblank wait on a dark CRTC fails at once, and
-two failures in a row would disable pacing for the rest of the process.
-The first frame after `display-power on` is not paced either: it is the
-modeset that lights the CRTC (see
-[advanced.md › Display power on KMS](advanced.md#display-power-and-the-wi-fi-overlay-on-kms)).
-Pacing resumes with the next transition. A transition that the panel
+**Panel off (`display-power off`).** Before switching off, the viewer
+lets submitted frames reach the screen (GPU idle, then two vblanks, about
+33 ms). While the panel is dark the viewer presents nothing and waits for
+no vblank. The slideshow is paused, so the loop sleeps until a command
+arrives: no frames and no wakeups. Waits matter here because a vblank
+wait on a dark CRTC fails at once, and two failures in a row would disable
+pacing for the rest of the process. `display-power on` commits the
+modeset before any frame is presented, so the CRTC is running and every
+later frame is paced as usual (see
+[advanced.md › Display power on KMS](advanced.md#display-power-and-the-wi-fi-overlay-on-kms)). A transition that the panel
 going dark interrupts is undone and logs no `transition_frame_metric`.
 
 **The Wi-Fi overlay** costs one CPU rasterization and one texture upload

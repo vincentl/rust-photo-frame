@@ -102,6 +102,34 @@ pub struct OverlayController {
     backend: Option<Backend>,
 }
 
+/// Offer the overlay to the viewer. The content carries the hotspot
+/// password, so it goes only to a viewer that has answered something: a
+/// password-free `ping` first, whenever the last attempt got no answer. A
+/// viewer from before the reply protocol answers nothing and logs payloads
+/// it cannot parse; it gets the ping, never the password.
+async fn offer_to_viewer(
+    socket: &Path,
+    content: &WifiOverlay,
+    answered_before: &mut bool,
+) -> viewer_client::Outcome {
+    if !*answered_before {
+        let probe = viewer_client::send(socket.to_path_buf(), Request::Ping).await;
+        if !matches!(probe, viewer_client::Outcome::Answered(_)) {
+            return probe;
+        }
+        *answered_before = true;
+    }
+    let outcome = viewer_client::send(
+        socket.to_path_buf(),
+        Request::WifiOverlayShow(content.clone()),
+    )
+    .await;
+    if matches!(outcome, viewer_client::Outcome::NotAnswered(_)) {
+        *answered_before = false;
+    }
+    outcome
+}
+
 impl OverlayController {
     pub fn new(config: OverlayConfig) -> Self {
         Self {
@@ -125,11 +153,8 @@ impl OverlayController {
     pub async fn show(&mut self, request: &OverlayRequest) -> Result<()> {
         let content = request.viewer_content()?;
         self.stop_refresher();
-        let outcome = viewer_client::send(
-            self.config.control_socket.clone(),
-            Request::WifiOverlayShow(content.clone()),
-        )
-        .await;
+        let mut answered = false;
+        let outcome = offer_to_viewer(&self.config.control_socket, &content, &mut answered).await;
         if outcome.accepted() {
             info!("wifi overlay drawn by the viewer");
             // A window left from an earlier fallback would sit on top.
@@ -165,20 +190,19 @@ impl OverlayController {
     fn start_refresher(&mut self, content: WifiOverlay) {
         let socket = self.config.control_socket.clone();
         self.refresher = Some(tokio::spawn(async move {
-            let mut answered = true;
+            let mut accepted = true;
+            let mut answered = false;
             loop {
                 sleep(VIEWER_REFRESH).await;
-                let outcome =
-                    viewer_client::send(socket.clone(), Request::WifiOverlayShow(content.clone()))
-                        .await;
-                match (outcome.accepted(), answered) {
+                let outcome = offer_to_viewer(&socket, &content, &mut answered).await;
+                match (outcome.accepted(), accepted) {
                     (true, false) => info!("the viewer took the wifi overlay again"),
                     (false, true) => {
                         warn!(reason = %outcome.reason(), "the viewer did not renew the wifi overlay; retrying")
                     }
                     _ => {}
                 }
-                answered = outcome.accepted();
+                accepted = outcome.accepted();
             }
         }));
     }
@@ -727,7 +751,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_answering_viewer_draws_the_overlay_and_no_window_is_spawned() {
-        let (dir, socket, viewer) = accepting_viewer(2);
+        let (dir, socket, viewer) = accepting_viewer(3);
         let mut controller = OverlayController::new(OverlayConfig {
             // Would fail loudly if the window path ran.
             command: vec!["/nonexistent/overlay-window".to_string()],
@@ -750,12 +774,16 @@ mod tests {
             "kept for the handoff decision"
         );
         let seen = viewer.join().unwrap();
-        assert!(
-            seen[0].contains("\"command\":\"wifi-overlay-show\""),
-            "{}",
-            seen[0]
+        assert_eq!(
+            seen[0], r#"{"command":"ping"}"#,
+            "the password goes only to a viewer that answered"
         );
-        assert_eq!(seen[1], r#"{"command":"wifi-overlay-hide"}"#);
+        assert!(
+            seen[1].contains("\"command\":\"wifi-overlay-show\""),
+            "{}",
+            seen[1]
+        );
+        assert_eq!(seen[2], r#"{"command":"wifi-overlay-hide"}"#);
     }
 
     #[tokio::test]
@@ -775,5 +803,29 @@ mod tests {
         assert_eq!(controller.backend(), Some(Backend::Viewer));
         assert!(controller.refresher.is_some());
         controller.stop_refresher();
+    }
+
+    /// A viewer from before the reply protocol reads and closes without an
+    /// answer. It gets the ping and never the overlay, which carries the
+    /// password and which such a viewer would log as an unparsable payload.
+    #[tokio::test]
+    async fn a_viewer_that_never_answers_never_receives_the_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let old_viewer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut body = String::new();
+            stream.read_to_string(&mut body).unwrap();
+            body // and no reply
+        });
+        let mut answered = false;
+        let content = request(dir.path(), "apple-river-stone")
+            .viewer_content()
+            .unwrap();
+        let outcome = offer_to_viewer(&path, &content, &mut answered).await;
+        assert!(!outcome.accepted());
+        assert!(!answered);
+        assert_eq!(old_viewer.join().unwrap(), r#"{"command":"ping"}"#);
     }
 }

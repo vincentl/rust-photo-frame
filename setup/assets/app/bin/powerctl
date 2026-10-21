@@ -3,9 +3,11 @@
 #
 # Asks the viewer first, with `display-power` on its control socket. On the
 # KMS stack the viewer holds DRM master and is the only process that can
-# switch the panel. When the viewer does not take the request (on Wayland
-# it answers "unsupported" because sway owns the output, or no viewer is
-# running), this falls back to sway exactly as before.
+# switch the panel. Falls back to sway exactly as before only when the
+# viewer cannot help: no socket, no answer (no viewer, or one too old to
+# answer), or "unsupported" (the Wayland stack, where sway owns the output).
+# Any other refusal (not-driven, failed, timeout) is the answer: it is
+# printed and powerctl exits 1.
 #
 # PHOTOFRAME_CONTROL_SOCKET overrides the socket (default
 # /run/photoframe/control.sock, the viewer's control-socket-path default).
@@ -20,17 +22,27 @@ fi
 
 CONTROL_SOCKET="${PHOTOFRAME_CONTROL_SOCKET:-/run/photoframe/control.sock}"
 
-# Send one request to the viewer and print its reply; succeed only when the
-# viewer answered ok. socat half-closes after the request and waits up to 3 s
-# for the one reply line.
+# Send one request to the viewer. Returns 0 and prints the reply when the
+# viewer answered ok; 1 (reason on stderr) when it refused; 2 when it cannot
+# help and the caller should fall back to sway. socat half-closes after the
+# request and waits up to 6 s for the one reply line (the viewer answers
+# within 5 s, timeout included).
 viewer_request() {
-  [[ -S "$CONTROL_SOCKET" ]] || return 1
-  command -v socat >/dev/null 2>&1 || return 1
-  command -v jq >/dev/null 2>&1 || return 1
+  [[ -S "$CONTROL_SOCKET" ]] || return 2
+  command -v socat >/dev/null 2>&1 || return 2
+  command -v jq >/dev/null 2>&1 || return 2
   local reply
-  reply="$(printf '%s' "$1" | socat -t 3 - "UNIX-CONNECT:${CONTROL_SOCKET}" 2>/dev/null)" || return 1
-  jq -e '.ok == true' >/dev/null 2>&1 <<<"$reply" || return 1
-  printf '%s\n' "$reply"
+  reply="$(printf '%s' "$1" | socat -t 6 - "UNIX-CONNECT:${CONTROL_SOCKET}" 2>/dev/null)" || return 2
+  jq -e 'type == "object" and has("ok")' >/dev/null 2>&1 <<<"$reply" || return 2
+  if jq -e '.ok == true' >/dev/null 2>&1 <<<"$reply"; then
+    printf '%s\n' "$reply"
+    return 0
+  fi
+  if jq -e '.error == "unsupported"' >/dev/null 2>&1 <<<"$reply"; then
+    return 2
+  fi
+  echo "powerctl: the viewer refused: $(jq -r '"\(.error // "error"): \(.detail // "no detail")"' <<<"$reply")" >&2
+  return 1
 }
 
 # display-power with an optional state (on|off; none = query), naming the
@@ -44,20 +56,20 @@ viewer_power() {
   viewer_request "$request"
 }
 
+status=0
 case "$MODE" in
-  sleep)
-    viewer_power off >/dev/null && exit 0
-    ;;
-  wake)
-    viewer_power on >/dev/null && exit 0
-    ;;
+  sleep) viewer_power off >/dev/null || status=$? ;;
+  wake) viewer_power on >/dev/null || status=$? ;;
   state)
     if reply="$(viewer_power)"; then
       jq -r '.state' <<<"$reply"
-      exit 0
+    else
+      status=$?
     fi
     ;;
 esac
+# 0: done by the viewer; 1: the viewer refused (reason printed); 2: sway.
+((status == 2)) || exit "$status"
 
 # --- sway fallback ---------------------------------------------------------
 

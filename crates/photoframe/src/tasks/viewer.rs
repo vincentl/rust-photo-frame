@@ -2319,9 +2319,6 @@ struct App {
     layer: presentation::Layer,
     /// Renders the Wi-Fi overlay; `None` without a GPU.
     wifi_overlay: Option<scenes::wifi_overlay::WifiOverlayScreen>,
-    /// Frames presented so far (the KMS loop tells a wake's modeset frame
-    /// from a redraw that presented nothing).
-    frames_presented: u64,
 }
 
 impl App {
@@ -2819,6 +2816,7 @@ impl App {
             });
         }
         self.sync_presentation();
+        self.rearm_wifi_overlay();
 
         self.drain_mat_results();
 
@@ -3020,7 +3018,6 @@ impl App {
 
     fn record_frame_presented(&mut self) {
         self.surface_timeout_streak = 0;
-        self.frames_presented = self.frames_presented.wrapping_add(1);
     }
 
     /// Render and present one frame of the active scene. Shared by the
@@ -3800,7 +3797,6 @@ impl App {
             presentation: presentation::Presentation::default(),
             layer: presentation::Layer::Scene(ViewerModeKind::Greeting),
             wifi_overlay: None,
-            frames_presented: 0,
         }
     }
 
@@ -3845,6 +3841,21 @@ impl App {
                 (self.redraw_requester())();
             }
             presentation::Layer::Nothing => {}
+        }
+    }
+
+    /// Wayland: an overlay frame that was not presented (an acquire
+    /// timeout, a deferred render) is asked for again on the next control
+    /// step. Nothing else would: the covered slideshow requests no frames,
+    /// and lease refreshes do not redraw. KMS re-arms its own request after
+    /// an acquire timeout, and re-arming there would spin the loop on a
+    /// render that cannot succeed.
+    fn rearm_wifi_overlay(&self) {
+        if self.layer == presentation::Layer::Overlay
+            && let Some(Output::Window(window)) = self.output.as_ref()
+            && self.wifi_overlay.as_ref().is_some_and(|s| s.needs_redraw())
+        {
+            window.request_redraw();
         }
     }
 
@@ -3901,7 +3912,7 @@ impl App {
                 slideshow_active: kind == ViewerModeKind::Wake && wake.visible(),
                 sleeping: kind == ViewerModeKind::Sleep,
                 // A dark panel presents nothing; the request stays armed for
-                // the wake's modeset frame.
+                // the first frame after the wake.
                 redraw_requested: redraw_requested && self.presentation.power().may_present(),
                 transition_active: wake.transition_state().is_some(),
                 transition_just_finished,

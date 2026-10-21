@@ -824,65 +824,128 @@ mod tests {
             return;
         };
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let (w, h) = (1920u32, 1080u32);
+        // 1080p, the Pi's 4K panel, and portrait (the stacked layout).
+        for (w, h) in [(1920u32, 1080u32), (3840, 2160), (1080, 1920)] {
+            let mut screen =
+                WifiOverlayScreen::new(&device, &queue, format, &ScreenMessageConfig::default());
+            screen.set_content(&content());
+            screen.resize(PhysicalSize::new(w, h), 1.0);
+            let target = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("wifi-overlay-test-target"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("wifi-overlay-test"),
+            });
+            assert!(screen.render(&mut encoder, &view), "{w}x{h}");
+            assert!(!screen.needs_redraw(), "{w}x{h}");
+            queue.submit(Some(encoder.finish()));
+            let pixels = read_back(&device, &queue, &target, w, h);
+            let at = |x: u32, y: u32| {
+                let i = ((y * w + x) * 4) as usize;
+                [pixels[i], pixels[i + 1], pixels[i + 2]]
+            };
+
+            assert_eq!(screen.placements().len(), 2, "{w}x{h}: both codes drawn");
+            for placement in screen.placements() {
+                let m = placement.module_px;
+                let n = placement.modules.width;
+                let mut wrong = 0;
+                for y in 0..n {
+                    for x in 0..n {
+                        let px = at(
+                            placement.origin.0 + x * m + m / 2,
+                            placement.origin.1 + y * m + m / 2,
+                        );
+                        let dark = px.iter().all(|c| *c < 40);
+                        let light = px.iter().all(|c| *c > 215);
+                        if placement.modules.is_dark(x, y) != dark || dark == light {
+                            wrong += 1;
+                        }
+                    }
+                }
+                assert_eq!(wrong, 0, "{w}x{h}: {wrong} of {} modules misdrawn", n * n);
+                // The quiet zone is white all round (a reader needs it).
+                let q = QUIET_MODULES * m;
+                for (x, y) in [
+                    (placement.origin.0 - q / 2, placement.origin.1 + n * m / 2),
+                    (
+                        placement.origin.0 + n * m + q / 2,
+                        placement.origin.1 + n * m / 2,
+                    ),
+                    (placement.origin.0 + n * m / 2, placement.origin.1 - q / 2),
+                    (
+                        placement.origin.0 + n * m / 2,
+                        placement.origin.1 + n * m + q / 2,
+                    ),
+                ] {
+                    assert!(
+                        at(x, y).iter().all(|c| *c > 215),
+                        "{w}x{h}: quiet zone at {x},{y}"
+                    );
+                }
+            }
+
+            // The panel's background is exactly the clear colour the frame
+            // is drawn on, so there is no visible box edge.
+            let layout = screen.layout().expect("laid out");
+            let background = srgb_bytes(screen.background);
+            let inside = at(layout.panel.x + 2, layout.panel.bottom() - 2);
+            assert_eq!(
+                inside,
+                [background[0], background[1], background[2]],
+                "{w}x{h}"
+            );
+        }
+    }
+
+    /// A frame that could not be drawn stays owed (`needs_redraw`), which is
+    /// what the viewer re-arms on (review F3).
+    #[test]
+    fn an_undrawn_overlay_still_needs_its_frame() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("skipping wifi overlay redraw test: no GPU adapter available");
+            return;
+        };
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let mut screen =
             WifiOverlayScreen::new(&device, &queue, format, &ScreenMessageConfig::default());
         screen.set_content(&content());
-        screen.resize(PhysicalSize::new(w, h), 1.0);
         let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("wifi-overlay-test-target"),
+            label: Some("wifi-overlay-undrawn"),
             size: wgpu::Extent3d {
-                width: w,
-                height: h,
+                width: 64,
+                height: 64,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("wifi-overlay-test"),
+            label: Some("wifi-overlay-undrawn"),
         });
-        assert!(screen.render(&mut encoder, &view));
-        assert!(!screen.needs_redraw());
-        queue.submit(Some(encoder.finish()));
-        let pixels = read_back(&device, &queue, &target, w, h);
-        let at = |x: u32, y: u32| {
-            let i = ((y * w + x) * 4) as usize;
-            [pixels[i], pixels[i + 1], pixels[i + 2]]
-        };
-
-        assert_eq!(screen.placements().len(), 2, "both codes drawn");
-        for placement in screen.placements() {
-            let m = placement.module_px;
-            let n = placement.modules.width;
-            let mut wrong = 0;
-            for y in 0..n {
-                for x in 0..n {
-                    let px = at(
-                        placement.origin.0 + x * m + m / 2,
-                        placement.origin.1 + y * m + m / 2,
-                    );
-                    let dark = px.iter().all(|c| *c < 40);
-                    let light = px.iter().all(|c| *c > 215);
-                    if placement.modules.is_dark(x, y) != dark || dark == light {
-                        wrong += 1;
-                    }
-                }
-            }
-            assert_eq!(wrong, 0, "{wrong} of {} modules misdrawn", n * n);
-        }
-
-        // The panel's own background equals the cleared background outside
-        // it (here, the gap between the frame and the panel).
-        let layout = screen.layout().expect("laid out");
-        let background = srgb_bytes(screen.background);
-        let inside = at(layout.panel.x + 2, layout.panel.bottom() - 2);
-        assert_eq!(inside, [background[0], background[1], background[2]]);
+        // No size yet: nothing can be drawn.
+        assert!(!screen.render(&mut encoder, &view));
+        assert!(screen.needs_redraw());
+        // A lease refresh with the same content does not clear the debt.
+        screen.set_content(&content());
+        assert!(screen.needs_redraw());
     }
 
     /// Visual check, not a gate: `WIFI_OVERLAY_PNG_DIR=/some/dir cargo test

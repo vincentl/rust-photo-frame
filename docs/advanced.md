@@ -278,7 +278,7 @@ Re-enable: `sudo systemctl unmask photoframe-wifi-manager.service && sudo system
 
 `/opt/photoframe/bin/powerctl {sleep|wake|state} [OUTPUT]` switches the panel off (`sleep`), on (`wake`), or prints `on`/`off` (`state`).
 
-It asks the viewer first, with `display-power` on the control socket. On the KMS stack the viewer holds the display and is the only process that can switch it (see [Display power and the Wi-Fi overlay on KMS](#display-power-and-the-wi-fi-overlay-on-kms)). When the viewer does not take the request, powerctl falls back to sway (`swaymsg output <OUTPUT> power off|on`). That happens on the Wayland stack, where the viewer answers "unsupported" because sway owns the output, or when no viewer is running. `PHOTOFRAME_CONTROL_SOCKET` overrides the socket path.
+It asks the viewer first, with `display-power` on the control socket. On the KMS stack the viewer holds the display and is the only process that can switch it (see [Display power and the Wi-Fi overlay on KMS](#display-power-and-the-wi-fi-overlay-on-kms)). powerctl falls back to sway (`swaymsg output <OUTPUT> power off|on`) only when the viewer cannot help: on the Wayland stack, where the viewer answers "unsupported" because sway owns the output; when no viewer is running; or when the viewer is too old to answer. Any other refusal is the answer. powerctl prints it (for example `powerctl: the viewer refused: not-driven: this viewer drives HDMI-A-2, not HDMI-A-1`) and exits 1. A `timeout` refusal means the viewer was slow, not that it ignored the request: it may still carry it out. `PHOTOFRAME_CONTROL_SOCKET` overrides the socket path; buttond sets it to its own `control-socket-path`.
 
 > Run `powerctl` as the `kiosk` user. The sway fallback looks for a sway session owned by the running UID; any other user gets "no sway process found for uid N".
 
@@ -323,17 +323,18 @@ echo '{"command":"display-power"}' | sudo -u kiosk socat -t 3 - UNIX-CONNECT:/ru
 A refusal is `{"ok":false,"error":KIND,"detail":"…"}`, KIND being:
 
 - `unsupported`: `display-power` on the Wayland stack; sway owns the output, use `swaymsg`.
+- `ping` (`{"command":"ping"}`) is always answered `{"ok":true}`; a client uses it to check the viewer speaks this protocol before sending anything sensitive.
 - `not-driven`: `output` names a connector this viewer does not drive.
 - `invalid`: the request did not parse or is out of limits (texts up to 256 characters, QR payloads up to 512 bytes and encodable).
 - `timeout`: the viewer did not answer within 3 s.
-- `failed`: the viewer tried and the operation failed (for example, the connector has no DPMS property).
+- `failed`: the viewer tried and the operation failed (for example, the kernel refused the atomic commit).
 
 `display-power` reports the viewer's own state, not a value read back from the kernel, and only exists on the KMS stack. `wifi-overlay-show` holds the overlay for `ttl-sec` (5–300, default 30); repeat it to keep the overlay up. The viewer never logs the overlay's content, because it carries the hotspot password. The types are defined once, in `crates/config-model/src/control.rs`.
 
 ### Pi 5 + Dell S2725QC notes
 
 - **Skip `/sys/class/backlight`** — external HDMI panels don't expose a kernel backlight; writing there is a no-op.
-- **Method:** the connector's DPMS on the KMS stack (through the viewer), `swaymsg output <NAME> power off|on` on the Wayland stack, both via `powerctl`.
+- **Method:** the viewer's atomic CRTC switch on the KMS stack, `swaymsg output <NAME> power off|on` on the Wayland stack, both via `powerctl`.
 - **Manual last resort:** `vcgencmd display_power 0|1` still works on Pi 5; `powerctl` does not use it.
 - **CEC:** the Dell S2725QC does not implement HDMI-CEC. `cec-ctl` cannot power it down.
 
@@ -481,11 +482,20 @@ Greeting, slideshow, sleep/wake through the control socket, transitions, mats, t
 
 Nothing on this stack talks to sway. The viewer draws the [Wi-Fi recovery overlay](#the-recovery-overlay) itself, and `powerctl` (so buttond's button and schedule) switches the panel through the viewer's `display-power` command.
 
-**Off** sets the connector's DPMS to off (journal: `kms_dpms_off: panel off`). While the panel is off, the viewer draws nothing, waits for no vblank and pauses the slideshow, so no photo goes by unseen. It also skips its display-change check: a TV in standby often drops hot-plug detect, which would otherwise look like an unplugged panel.
+The viewer switches the panel itself with atomic modesetting, which is how the kernel expects power to be switched on drivers like the Pi's vc4: it turns the display pipe (the CRTC) off and on. It does not use the older DPMS property, which on these drivers is only a stand-in for that switch and whose read-back the kernel calls unreliable.
 
-**On** sets nothing directly. The viewer presents its next frame while the display is still off. The kernel refuses the page flip, and Mesa's display code then does a full modeset (`drmModeSetCrtc`), exactly as at startup. A full modeset is what re-drives the HDMI link on the Pi's vc4. Switching DPMS back on alone often leaves the TV showing "no signal" even though the property reads on, which is the failure the picframe3 project documented. The journal shows `kms_power_on: the next frame is the modeset`, then `kms_power_on: modeset frame presented`, then `kms_power_on: connector reads connected after_ms=…` once the TV has re-asserted hot-plug detect. The display-change check resumes 15 s after the modeset.
+**Off.** The viewer first lets the frames it already submitted reach the screen, then turns the CRTC off. The journal shows `kms_power_off: panel off crtc_active=Ok(false)`. While the panel is off, the viewer:
+- draws nothing and waits for no vblank;
+- pauses the slideshow, so no photo goes by unseen;
+- skips its display-change check, because a TV in standby often drops hot-plug detect, which would otherwise look like an unplugged panel.
 
-If a wake ever ends in a viewer restart instead (`kms_surface_lost` in the journal), the restart's own startup modeset lights the panel. That is slower, but the panel still comes back.
+**On.** The viewer turns the CRTC back on with a full modeset: the same commit Mesa makes when it first takes the display at startup, which drives the HDMI link up from nothing. Simply re-enabling the output is not trusted to re-drive vc4's HDMI link; the picframe3 project saw TVs stay on "no signal" that way. The journal shows `kms_power_on: modeset committed crtc_active=Ok(true) vblank=Ok(())`, where the vblank proves the CRTC is running. It then shows `kms_power_on: connector reads connected after_ms=…` once the TV has re-asserted hot-plug detect. The display-change check resumes 15 s after the modeset.
+
+**Why the viewer does the modeset itself.** Mesa's display code does not know the viewer switched the CRTC off.
+- From Mesa 25.3 on, a frame presented onto the dark CRTC is refused by the kernel, and Mesa then loses the swapchain, which would restart the viewer.
+- Up to 25.2, Mesa falls back to its own modeset and lights the panel behind the viewer's back.
+
+So nothing is presented while the panel is off, and the wake commit always comes before the next frame. If the commit itself fails, `display-power on` answers `failed` and the panel stays off (`kms_power_on_failed` in the journal).
 
 **Known limit:** if the viewer restarts while the panel is off (a crash, or a deploy at night), the panel comes back on with the greeting, and buttond still believes the frame is asleep. That matches what a sway restart does on the Wayland stack. The next schedule boundary or button press puts it right.
 
