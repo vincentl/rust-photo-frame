@@ -59,8 +59,9 @@ uploaded photos debut via the priority FIFO.
    PAIRING       (only with playlist.pairing enabled) screens vs appearances; the
                  measured paired share next to the 2*pi*p/(1+pi*p) approximation;
                  the repeat-partner rate; photos on consecutive screens, each
-                 attributed to its cause (a debut's own Z, Z; a removal between
-                 planning and display; a sleep/wake gap; a skipped screen). Only
+                 attributed to its cause (a debut's own Z, Z; an add or removal
+                 between planning and display; a sleep/wake gap; a skipped
+                 screen). Sessions start at each playlist_scheduler stamp. Only
                  UNATTRIBUTED repeats are failures (design invariant I5): good is 0.
                  The mean gap by weight x pairable should match across pairable
                  and non-pairable photos at equal weight (an end-to-end check; the
@@ -86,7 +87,7 @@ def parse_log(path):
     """Return (displays, firsts, schedulers) as lists of field dicts."""
     displays, firsts, schedulers = [], [], []
     with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
+        for index, line in enumerate(fh):
             if "photo_display_metric" in line:
                 tag, bucket = "photo_display_metric", displays
             elif "photo_first_shown" in line:
@@ -110,6 +111,7 @@ def parse_log(path):
             )
             rec["pid"] = pid.group(1) if pid else "?"
             rec["path"] = photo
+            rec["line"] = index
             bucket.append(rec)
     return displays, firsts, schedulers
 
@@ -289,39 +291,76 @@ def main():
             prev = inv
 
 
+def split_sessions(displays, schedulers):
+    """Process sessions in log order. A session starts at each
+    `playlist_scheduler` stamp (one per process start with metrics on), and
+    also wherever `screen=` goes backwards or the PID changes, so two runs
+    are never merged when the stamp fell outside the gathered span or a PID
+    was reused. Returns [(stamp or None, [display rows])]."""
+    events = sorted(
+        [(r["line"], "stamp", r) for r in schedulers] + [(r["line"], "display", r) for r in displays],
+        key=lambda e: e[0],
+    )
+    sessions = []
+    current = None
+    for _, kind, rec in events:
+        if kind == "stamp":
+            current = (rec, [])
+            sessions.append(current)
+            continue
+        if current is not None and current[1]:
+            last = current[1][-1]
+            screen, last_screen = as_int(rec, "screen"), as_int(last, "screen")
+            restarted = screen is not None and last_screen is not None and screen < last_screen
+            if restarted or rec["pid"] != last["pid"]:
+                current = None
+        if current is None:
+            current = (None, [])
+            sessions.append(current)
+        current[1].append(rec)
+    return sessions
+
+
 def pairing_section(displays, schedulers):
     """# PAIRING: portrait pairing's screens, from the per-appearance lines'
-    screen=, pair=, partner=, pairable=, sent= and removed= fields."""
-    rows = [d for d in displays if "pair" in d and "screen" in d]
-    if not rows:
+    screen=, pair=, partner=, pairable=, sent=, removed= and added= fields.
+    Only sessions that ran with pairing on (stamp `pairing=true`, or lines
+    carrying `pair=`) are counted; with pairing off the section is silent."""
+    sessions = []
+    probabilities = set()
+    for stamp, rows in split_sessions(displays, schedulers):
+        rows = [d for d in rows if "pair" in d and "screen" in d]
+        on = stamp.get("pairing") == "true" if stamp is not None else bool(rows)
+        if not on or not rows:
+            continue
+        if stamp is not None and stamp.get("pairing_probability") is not None:
+            probabilities.add(float(stamp["pairing_probability"]))
+        screens = OrderedDict()
+        for d in rows:
+            screens.setdefault(d["screen"], []).append(d)
+        sessions.append(list(screens.values()))
+    if not sessions:
         return
-    probability = 1.0
-    for s in schedulers:
-        if s.get("pairing_probability") is not None:
-            probability = float(s["pairing_probability"])
-
-    # Screens per session (screen= counts per process).
-    sessions = OrderedDict()
-    for d in rows:
-        sessions.setdefault(d["pid"], OrderedDict()).setdefault(d["screen"], []).append(d)
-    screens = [list(sc.values()) for sc in sessions.values()]
-    n_screens = sum(len(s) for s in screens)
+    rows = [d for session in sessions for screen in session for d in screen]
+    n_screens = sum(len(s) for s in sessions)
     appearances = len(rows)
     pairable_apps = sum(1 for d in rows if d.get("pairable") == "true")
     paired_apps = sum(1 for d in rows if d.get("pair") in ("first", "second"))
     pi = pairable_apps / appearances
     share = paired_apps / max(1, pairable_apps)
-    predicted = 2 * pi * probability / (1 + pi * probability)
 
     print("\n# PAIRING  (good: unattributed consecutive repeats = 0; equal gaps for pairable and not)")
-    print(f"  screens={n_screens} appearances={appearances} pair screens={paired_apps // 2}")
+    print(f"  sessions={len(sessions)} screens={n_screens} appearances={appearances} pair screens={paired_apps // 2}")
+    predicted = ", ".join(
+        f"{2 * pi * p / (1 + pi * p):.3f} (p={p:g})" for p in sorted(probabilities or {1.0})
+    )
     print(
         f"  pi (pairable share of appearances)={pi:.3f}  paired share={share:.3f}  "
-        f"2*pi*p/(1+pi*p)={predicted:.3f} (p={probability:g}; an approximation)"
+        f"2*pi*p/(1+pi*p)={predicted} (an approximation)"
     )
 
     last, rep, tot = {}, 0, 0
-    for session in screens:
+    for session in sessions:
         for screen in session:
             if len(screen) == 2:
                 a, b = screen[0]["path"], screen[1]["path"]
@@ -334,7 +373,7 @@ def pairing_section(displays, schedulers):
 
     causes = Counter()
     examples = []
-    for session in screens:
+    for session in sessions:
         times = [s[0]["dt"] for s in session if s[0]["dt"]]
         steps = sorted((b - a).total_seconds() for a, b in zip(times, times[1:]))
         typical = steps[len(steps) // 2] if steps else 0
@@ -348,10 +387,13 @@ def pairing_section(displays, schedulers):
                 if cur[0]["dt"] and prev[0]["dt"]
                 else 0
             )
+            changed = any(
+                (as_int(d, "removed") or 0) > 0 or (as_int(d, "added") or 0) > 0 for d in cur
+            )
             if any(d["path"] in shared and as_int(d, "shown_count") == 1 for d in prev):
                 cause = "debut (the unpaired sequence's own Z, Z)"
-            elif any((as_int(d, "removed") or 0) > 0 for d in cur):
-                cause = "removal between planning and display"
+            elif changed:
+                cause = "inventory change (add or removal) between planning and display"
             elif typical and gap_secs > max(120, 10 * typical):
                 cause = "sleep/wake gap"
             elif sent_prev is not None and sent_cur is not None and sent_prev >= 0 and sent_cur >= 0 and sent_cur - sent_prev != 1:

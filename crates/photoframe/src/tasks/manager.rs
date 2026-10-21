@@ -75,21 +75,7 @@ pub async fn run(
     pairing: Option<LivePairing>,
 ) -> Result<()> {
     if metrics {
-        // Stamp the scheme + parameters once per process so a grepped
-        // photo_display_metric series can be interpreted (and segmented across
-        // sessions / config changes) without guessing what produced it.
-        info!(
-            order = %options.order,
-            refractory = format_args!("{:.3}", options.refractory_fraction()),
-            min_spacing = format_args!("{:.3}", options.min_spacing),
-            new_multiplicity = options.new_multiplicity,
-            half_life_secs = options.half_life.as_secs(),
-            pairing = pairing.is_some(),
-            pairing_probability = options.pairing.probability,
-            pairing_bar_ratio = options.pairing.bar_ratio,
-            pairing_dwell_multiplier = options.pairing.dwell_multiplier,
-            "playlist_scheduler"
-        );
+        log_scheduler_stamp(&options, pairing.is_some());
     }
     let playlist = build_scheduler(options, seed_override, now_override);
     let mut screens = LiveScreens::new(playlist, pairing, seed_override);
@@ -154,6 +140,37 @@ pub async fn run(
     Ok(())
 }
 
+/// Stamp the scheme + parameters once per process so a grepped
+/// photo_display_metric series can be interpreted (and segmented across
+/// sessions / config changes) without guessing what produced it. With
+/// portrait pairing off the line is exactly the line before pairing; with it
+/// on, the pairing parameters follow (as configured, e.g. `0.618`).
+fn log_scheduler_stamp(options: &PlaylistOptions, pairing: bool) {
+    if pairing {
+        info!(
+            order = %options.order,
+            refractory = format_args!("{:.3}", options.refractory_fraction()),
+            min_spacing = format_args!("{:.3}", options.min_spacing),
+            new_multiplicity = options.new_multiplicity,
+            half_life_secs = options.half_life.as_secs(),
+            pairing = true,
+            pairing_probability = format_args!("{}", options.pairing.probability),
+            pairing_bar_ratio = format_args!("{}", options.pairing.bar_ratio),
+            pairing_dwell_multiplier = format_args!("{}", options.pairing.dwell_multiplier),
+            "playlist_scheduler"
+        );
+    } else {
+        info!(
+            order = %options.order,
+            refractory = format_args!("{:.3}", options.refractory_fraction()),
+            min_spacing = format_args!("{:.3}", options.min_spacing),
+            new_multiplicity = options.new_multiplicity,
+            half_life_secs = options.half_life.as_secs(),
+            "playlist_scheduler"
+        );
+    }
+}
+
 /// The live loop's screen state: the scheduler, the displayed sizes, the
 /// screen planner and the planned screen not yet sent. With pairing off
 /// every plan is today's path (peek, send, commit after the send, re-peek on
@@ -169,21 +186,26 @@ struct LiveScreens {
     /// which sent screen a `Displayed` is (metrics only).
     sent_count: u64,
     recent_sends: VecDeque<(u64, Vec<PathBuf>)>,
-    /// `PhotoRemoved` events since the last `Displayed` (metrics only).
+    /// `PhotoRemoved` / `PhotoAdded` events since the last `Displayed`
+    /// (metrics only).
     removed_since_display: u64,
+    added_since_display: u64,
 }
 
 /// What the manager knows about a displayed screen's history, logged so the
 /// analyzer can attribute a photo on consecutive screens to its cause
 /// (design V1): a send index that jumps means a screen was skipped (failed
-/// decode, purge, sleep reset); removals mean an inventory change between
-/// planning and display.
+/// decode, purge, sleep reset); adds and removals mean an inventory change
+/// between planning and display.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DisplayEvidence {
     /// 1-based index of the sent screen this display is, `None` if unknown.
     sent: Option<u64>,
     /// `PhotoRemoved` events since the previous display.
     removed: u64,
+    /// `PhotoAdded` events since the previous display (an add re-peeks the
+    /// held photo, which can redraw the debut coin).
+    added: u64,
 }
 
 /// How many sent screens are remembered to match displays against (well
@@ -206,6 +228,7 @@ impl LiveScreens {
             sent_count: 0,
             recent_sends: VecDeque::with_capacity(RECENT_SENDS),
             removed_since_display: 0,
+            added_since_display: 0,
         }
     }
 
@@ -277,12 +300,14 @@ impl LiveScreens {
         DisplayEvidence {
             sent,
             removed: std::mem::take(&mut self.removed_since_display),
+            added: std::mem::take(&mut self.added_since_display),
         }
     }
 
     fn on_inventory(&mut self, event: InventoryEvent) {
         match event {
             InventoryEvent::PhotoAdded(info) => {
+                self.added_since_display += 1;
                 self.sizes.on_added(&info);
                 self.playlist.record_add(info);
                 // B7: a held peek is re-peeked after an add.
@@ -687,6 +712,8 @@ struct DisplayLog {
 /// The screen a `photo_display_metric` line belongs to.
 struct ScreenContext<'a> {
     playlist: &'a dyn PlaylistScheduler,
+    /// Portrait pairing is on: the line carries the screen fields.
+    pairing: bool,
     pairable: &'a dyn Fn(&Path) -> bool,
     evidence: DisplayEvidence,
 }
@@ -712,8 +739,10 @@ impl ScreenRole {
 impl DisplayLog {
     /// One `photo_display_metric` line **per appearance**: since pairing
     /// leaves the appearance sequence unchanged (P1), `seq`, `gap` and every
-    /// statistic mean what they meant before pairing. Each line adds
-    /// `screen=<n>`, `pair=solo|first|second`, `partner=` and `pairable=`.
+    /// statistic mean what they meant before pairing. With pairing on, each
+    /// line adds `screen=<n>`, `pair=solo|first|second`, `partner=`,
+    /// `pairable=`, and the evidence `sent=`, `removed=`, `added=`; with it
+    /// off the line is exactly the line before pairing.
     fn log_screen(
         &mut self,
         path: &Path,
@@ -723,6 +752,7 @@ impl DisplayLog {
     ) {
         let screen = ScreenContext {
             playlist: screens.playlist.as_ref(),
+            pairing: screens.pairing.is_some(),
             pairable: &|path: &Path| screens.is_pairable(path),
             evidence,
         };
@@ -767,24 +797,40 @@ impl DisplayLog {
         let created_source = playlist
             .created_source(path)
             .map_or("unknown", CreatedSource::as_str);
-        info!(
-            seq,
-            inventory,
-            distinct,
-            shown_count,
-            gap,
-            weight = format_args!("{weight:.2}"),
-            age_days = format_args!("{age_days:.1}"),
-            created_source = %created_source,
-            screen = self.screens,
-            pair = role.as_str(),
-            partner = ?partner.map(Path::display).map(|p| p.to_string()).unwrap_or_default(),
-            pairable = pairable(path),
-            sent = screen.evidence.sent.map_or(-1, |i| i as i64),
-            removed = screen.evidence.removed,
-            path = %path.display(),
-            "photo_display_metric"
-        );
+        if screen.pairing {
+            info!(
+                seq,
+                inventory,
+                distinct,
+                shown_count,
+                gap,
+                weight = format_args!("{weight:.2}"),
+                age_days = format_args!("{age_days:.1}"),
+                created_source = %created_source,
+                screen = self.screens,
+                pair = %role.as_str(),
+                partner = ?partner.map(Path::display).map(|p| p.to_string()).unwrap_or_default(),
+                pairable = pairable(path),
+                sent = screen.evidence.sent.map_or(-1, |i| i as i64),
+                removed = screen.evidence.removed,
+                added = screen.evidence.added,
+                path = %path.display(),
+                "photo_display_metric"
+            );
+        } else {
+            info!(
+                seq,
+                inventory,
+                distinct,
+                shown_count,
+                gap,
+                weight = format_args!("{weight:.2}"),
+                age_days = format_args!("{age_days:.1}"),
+                created_source = %created_source,
+                path = %path.display(),
+                "photo_display_metric"
+            );
+        }
         if first_show {
             // Precise birthtime → first-appearance latency, logged once per photo
             // (age_days is too coarse to see a minutes-scale staging lag). This is
@@ -1088,12 +1134,14 @@ mod live_loop_tests {
         request(&mut screens);
         screens.sent(); // 3: e+f
         screens.on_inventory(InventoryEvent::PhotoRemoved(PathBuf::from("zzz")));
+        screens.on_inventory(InventoryEvent::PhotoAdded(info("new", (3000, 4000))));
         let first = screens.on_displayed(Path::new("a"));
         assert_eq!(
             first,
             DisplayEvidence {
                 sent: Some(1),
-                removed: 1
+                removed: 1,
+                added: 1
             }
         );
         // Screen 2 never displayed (purged): the next display jumps to 3.
@@ -1102,11 +1150,116 @@ mod live_loop_tests {
             next,
             DisplayEvidence {
                 sent: Some(3),
-                removed: 0
+                removed: 0,
+                added: 0
             }
         );
         // A pair the loader degraded is led by its other member.
         assert_eq!(screens.on_displayed(Path::new("d")).sent, Some(2));
         assert_eq!(screens.on_displayed(Path::new("x")).sent, None);
+    }
+
+    /// The formatted `info!` output of `f`, as the journal would see it.
+    fn capture(f: impl FnOnce()) -> String {
+        use std::io::Write;
+        use std::sync::Mutex;
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().write(bytes)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Buf {
+                self.clone()
+            }
+        }
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .compact()
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// The `key=` names of the first line containing `message`, in order.
+    fn field_names(log: &str, message: &str) -> Vec<String> {
+        let line = log.lines().find(|l| l.contains(message)).expect(message);
+        line.split_whitespace()
+            .filter_map(|token| token.split_once('=').map(|(k, _)| k.to_string()))
+            .collect()
+    }
+
+    /// Review F2: pairing off leaves `photo_display_metric` and the stamp
+    /// exactly as before pairing.
+    #[test]
+    fn pairing_off_keeps_the_metric_lines_of_main() {
+        let (mut screens, _, _) = live("a b", None);
+        request(&mut screens);
+        screens.sent();
+        let evidence = screens.on_displayed(Path::new("a"));
+        let mut log = DisplayLog::default();
+        let out = capture(|| {
+            log_scheduler_stamp(&PlaylistOptions::default(), false);
+            log.log_screen(Path::new("a"), None, evidence, &screens);
+        });
+        assert_eq!(
+            field_names(&out, "photo_display_metric"),
+            [
+                "seq",
+                "inventory",
+                "distinct",
+                "shown_count",
+                "gap",
+                "weight",
+                "age_days",
+                "created_source",
+                "path"
+            ]
+        );
+        assert_eq!(
+            field_names(&out, "playlist_scheduler"),
+            [
+                "order",
+                "refractory",
+                "min_spacing",
+                "new_multiplicity",
+                "half_life_secs"
+            ]
+        );
+    }
+
+    #[test]
+    fn pairing_on_adds_the_screen_fields_and_prints_parameters_as_configured() {
+        let (mut screens, _, _) = live("a b", Some(1.0));
+        request(&mut screens);
+        screens.sent();
+        let evidence = screens.on_displayed(Path::new("a"));
+        let mut log = DisplayLog::default();
+        let out = capture(|| {
+            log_scheduler_stamp(&PlaylistOptions::default(), true);
+            log.log_screen(Path::new("a"), Some(Path::new("b")), evidence, &screens);
+        });
+        let fields = field_names(&out, "photo_display_metric");
+        for key in [
+            "screen", "pair", "partner", "pairable", "sent", "removed", "added",
+        ] {
+            assert!(fields.iter().any(|f| f == key), "{key}: {fields:?}");
+        }
+        assert!(out.contains(" pair=first "), "{out}");
+        assert!(out.contains(" pair=second "), "{out}");
+        assert!(out.contains(" pairing_bar_ratio=0.618 "), "{out}");
+        assert!(out.contains(" pairing_dwell_multiplier=1.5\n"), "{out}");
+        assert!(out.contains(" pairing_probability=1 "), "{out}");
     }
 }
