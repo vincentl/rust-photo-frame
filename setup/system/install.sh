@@ -112,10 +112,12 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
 
     # photoframe-kms.service (default) or greetd/sway (PHOTOFRAME_DISPLAY=wayland);
-    # enables one, disables the other, and restarts the chosen one.
+    # enables one, disables the other, and restarts the chosen one, except
+    # that a running Sway stack is not displaced for a viewer that cannot
+    # present on KMS yet: the application deploy switches after installing it.
     display_choice="$(display_stack_resolve)"
     log INFO "Display stack: ${display_choice}"
-    if ! display_stack_apply "${display_choice}" start; then
+    if ! display_stack_system_apply "${display_choice}" start; then
         log WARN "Display stack '${display_choice}' did not start cleanly; see the messages above"
     fi
 

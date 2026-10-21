@@ -82,6 +82,8 @@ source "${SCRIPT_DIR}/../lib/systemd.sh"
 # shellcheck source=../lib/display-stack.sh
 source "${SCRIPT_DIR}/../lib/display-stack.sh"
 display_stack_refuse_unavailable
+# Reject an invalid PHOTOFRAME_DISPLAY before the build, not after it.
+display_stack_current >/dev/null || exit 1
 
 if [[ ! -d "${MODULE_DIR}" ]]; then
     log ERROR "Module directory not found: ${MODULE_DIR}"

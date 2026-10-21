@@ -28,6 +28,7 @@
 DISPLAY_ENV_PATH="${DISPLAY_ENV_PATH:-/etc/photoframe/display.env}"
 DISPLAY_KMS_UNIT="photoframe-kms.service"
 DISPLAY_WAYLAND_UNIT="greetd.service"
+DISPLAY_VIEWER_BIN="${DISPLAY_VIEWER_BIN:-/opt/photoframe/bin/photoframe}"
 # What the wayland stack needs beyond the base package set. Installed by the
 # system stage only when that stack is chosen.
 DISPLAY_WAYLAND_PACKAGES=(greetd seatd sway swaybg swayidle swaylock wayland-protocols)
@@ -181,6 +182,48 @@ display_stack_unit() {
     fi
 }
 
+# True when the installed viewer can present on KMS. Only a viewer that reads
+# PHOTOFRAME_SURFACE (v1.2 and later) can; the v1.1 binary starts as a Wayland
+# client, finds no compositor and exits. The variable name is a string in the
+# binary, so that is the test. False when no viewer is installed.
+display_stack_viewer_supports_kms() {
+    [[ -x "${DISPLAY_VIEWER_BIN}" ]] && grep -qa 'PHOTOFRAME_SURFACE' "${DISPLAY_VIEWER_BIN}"
+}
+
+# True when the system stage must leave a running Sway stack alone: the
+# choice is kms, greetd is enabled or running, and the installed viewer
+# cannot present on KMS yet. This is a v1.1 frame being updated: switching
+# now would stop greetd and start a unit whose binary exits at once, leaving
+# the console on screen for the whole build and, if the build fails, a frame
+# that stays dark across reboots. The application deploy switches after it
+# has installed the new viewer.
+display_stack_hold_for_deploy() {
+    [[ "$1" == "kms" ]] || return 1
+    display_stack_viewer_supports_kms && return 1
+    _display_stack_sudo systemctl is-enabled --quiet "${DISPLAY_WAYLAND_UNIT}" 2>/dev/null ||
+        _display_stack_sudo systemctl is-active --quiet "${DISPLAY_WAYLAND_UNIT}" 2>/dev/null
+}
+
+# display_stack_system_apply <kms|wayland> <start|enable-only>
+#
+# What the system stage (install.sh, 60-systemd) does with the stack: the
+# application stage is the one that installs the viewer, so this never
+# displaces a running Sway stack for a viewer that cannot present on KMS (see
+# display_stack_hold_for_deploy). When the stage has nothing to hold, it
+# applies the choice, but starts a kms unit only if a KMS-capable viewer is
+# installed (a fresh install has none yet; the unit would only be skipped).
+display_stack_system_apply() {
+    local choice="$1" mode="${2:-start}"
+    if display_stack_hold_for_deploy "${choice}"; then
+        echo "display stack: leaving ${DISPLAY_WAYLAND_UNIT} running; the installed viewer cannot present on KMS yet. The application deploy switches to ${DISPLAY_KMS_UNIT} after it installs the new viewer (./setup/application/deploy.sh)" >&2
+        return 0
+    fi
+    if [[ "${choice}" == "kms" && "${mode}" == "start" ]] && ! display_stack_viewer_supports_kms; then
+        mode="enable-only"
+    fi
+    display_stack_apply "${choice}" "${mode}"
+}
+
 # Enable a unit with only its current [Install] wants (stale *.wants links
 # from older releases removed, but only after the enable succeeded).
 _display_stack_enable_clean() {
@@ -224,6 +267,9 @@ display_stack_apply() {
         if _display_stack_enable_clean "${DISPLAY_KMS_UNIT}"; then
             echo "display stack: enabled ${DISPLAY_KMS_UNIT}; disabling ${DISPLAY_WAYLAND_UNIT}"
             _display_stack_sudo systemctl disable "${DISPLAY_WAYLAND_UNIT}" >/dev/null 2>&1 || true
+            if _display_stack_sudo systemctl list-unit-files "${DISPLAY_WAYLAND_UNIT}" >/dev/null 2>&1; then
+                echo "display stack: to go back to Sway by hand: sudo systemctl enable ${DISPLAY_WAYLAND_UNIT} && sudo systemctl disable ${DISPLAY_KMS_UNIT} && sudo systemctl stop ${DISPLAY_KMS_UNIT} && sudo systemctl start ${DISPLAY_WAYLAND_UNIT}"
+            fi
         else
             echo "display stack: failed to enable ${DISPLAY_KMS_UNIT}; leaving ${DISPLAY_WAYLAND_UNIT} enabled for the next boot" >&2
             status=1
