@@ -114,15 +114,27 @@
 //!   on vc4's hot-plug `reset_link` when hot-plug detect returns. The
 //!   `ACTIVE` read-back and the vblank show the pixel pipeline runs, not
 //!   that the TV shows a picture.
-//!   Two cosmetic edges, left as they are:
-//!   * An off that arrives before Mesa's first present (a boot in sleep
-//!     hours) switches off the CRTC state the console left. The wake then
-//!     briefly shows the console's framebuffer, until Mesa's first present
-//!     runs its own modeset: a second HDMI retrain.
-//!   * The same early-process window: Mesa's flip-event thread starts only
-//!     when an acquire finds no idle image. Until then a frame queued
-//!     before the off can stay booked as flipping, so after the wake an
-//!     older frame may show for a moment until the image pool cycles.
+//!   **Before Mesa's first present** (a boot or restart in sleep hours,
+//!   `presentation::power_commit`): an off switches off whatever the
+//!   console left lit (nothing, if the console never drove the connector),
+//!   and a wake commits nothing. Mesa starts with the connector inactive,
+//!   so its first present is its own full modeset: no console framebuffer
+//!   on the way, one HDMI retrain. An off received while waiting for a
+//!   display is remembered, so the viewer starts dark (`display_wait`).
+//!   One cosmetic edge is left as it is: Mesa's flip-event thread starts
+//!   only when an acquire finds no idle image. Until then a frame queued
+//!   before the off can stay booked as flipping, so after the wake an older
+//!   frame may show for a moment until the image pool cycles.
+//!   **Not fixed here (review D3):** a wake that fails twice restarts the
+//!   viewer, and the restart re-runs the schedule preamble. A manual wake
+//!   in scheduled sleep hours therefore comes back as the sleep banner on a
+//!   lit panel, while buttond, which saw the wake fail, still tracks the
+//!   frame as asleep; the next press converges both. Awake/asleep is
+//!   buttond's state, not the viewer's. The fix is on that side: retry a
+//!   failed power-on with backoff, as buttond already does for power-off,
+//!   so the retry after the restart succeeds and sends `set-state awake`.
+//!   It needs two consecutive commit failures, so it is left for a
+//!   buttond change of its own.
 //! * **Shutdown.** Every exit (SIGTERM/SIGINT/stdin via the cancel token,
 //!   the control or matting channel closing, a fatal surface error) returns
 //!   through `run_kms`, which tears down in the only safe order: GPU objects
@@ -227,6 +239,7 @@ pub async fn run_kms(
                 format!("{}x{}@{}", target.width, target.height, target.vrefresh_hz),
             )
         },
+        request.connector.as_deref(),
         DISPLAY_POLL,
         &cancel,
         &mut control,
@@ -241,8 +254,12 @@ pub async fn run_kms(
         },
     )
     .await?;
-    let (target, held) = match waited {
-        super::display_wait::Waited::Ready { target, held } => (target, held),
+    let (target, held, start_dark) = match waited {
+        super::display_wait::Waited::Ready {
+            target,
+            held,
+            start_dark,
+        } => (target, held, start_dark),
         super::display_wait::Waited::Cancelled => {
             info!("kms_viewer_cancelled before a display appeared");
             return Ok(());
@@ -284,6 +301,16 @@ pub async fn run_kms(
     );
 
     let mut pacer = VblankPacer::new(display);
+    if start_dark {
+        // The last power request while waiting was off (review D1): start
+        // dark, before anything is presented.
+        let (reply, _) = app.kms_display_power(
+            &mut pacer.display,
+            Some(config_model::control::PowerState::Off),
+            None,
+        );
+        info!(ok = reply.ok, detail = ?reply.detail, "kms_power_off: starting dark, as last requested while waiting");
+    }
     let result = drive(&mut app, &mut control, &mut pacer).await;
     if let Err(err) = &result {
         warn!(error = %err, "kms_viewer_exiting_with_error");
@@ -378,8 +405,16 @@ impl App {
                 None,
             );
         }
+        use crate::tasks::viewer::presentation::{PowerCommit, power_commit};
         let dark = self.presentation.power().is_dark();
+        let mesa_has_presented = self.frames_presented > 0;
         match state {
+            Some(PowerState::Off) if !dark && !mesa_has_presented && !display.crtc_routed() => {
+                // Nothing was ever lit on this connector (the console never
+                // drove it, Mesa has not presented): nothing to switch off.
+                self.presentation.power_mut().set_dark();
+                info!(%connector, "kms_power_off: panel off (nothing was lit yet)");
+            }
             Some(PowerState::Off) if !dark => {
                 // Every frame already submitted reaches the screen first, so
                 // Mesa has no flip queued behind the off commit.
@@ -391,6 +426,15 @@ impl App {
                 self.presentation.power_mut().set_dark();
                 let active = display.crtc_active();
                 info!(%connector, crtc_active = ?active, "kms_power_off: panel off");
+            }
+            Some(PowerState::On)
+                if dark
+                    && power_commit(true, mesa_has_presented) == PowerCommit::MesaFirstPresent =>
+            {
+                // Mesa's first present is its own full modeset (review N3):
+                // nothing to commit, no console flash, one HDMI retrain.
+                self.presentation.power_mut().set_lit(Instant::now());
+                info!(%connector, "kms_power_on: Mesa's first present does the modeset");
             }
             Some(PowerState::On) if dark => {
                 // The wake rule (`presentation::wake_or_restart`): check the
