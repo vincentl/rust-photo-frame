@@ -11,8 +11,9 @@
 #   PHOTOFRAME_DISPLAY=kms ./setup/application/deploy.sh       # opt in
 #   PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh   # back to greetd/sway
 #
-# Until K2 lands, kms gives up the Wi-Fi recovery overlay and powerctl's
-# display sleep (both talk to sway); see docs/advanced.md.
+# On kms the viewer draws the Wi-Fi recovery overlay itself and switches the
+# panel's power (powerctl asks it over the control socket); see
+# docs/advanced.md.
 #
 # Requires setup/lib/systemd.sh to be sourced first (read_env_value).
 

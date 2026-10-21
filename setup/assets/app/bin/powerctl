@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# Display power for the frame: powerctl {sleep|wake|state} [OUTPUT]
+#
+# Asks the viewer first, with `display-power` on its control socket. On the
+# KMS stack the viewer holds DRM master and is the only process that can
+# switch the panel. When the viewer does not take the request (on Wayland
+# it answers "unsupported" because sway owns the output, or no viewer is
+# running), this falls back to sway exactly as before.
+#
+# PHOTOFRAME_CONTROL_SOCKET overrides the socket (default
+# /run/photoframe/control.sock, the viewer's control-socket-path default).
 set -euo pipefail
 
 MODE="${1:-}"
@@ -8,9 +18,52 @@ if [[ "$MODE" != "sleep" && "$MODE" != "wake" && "$MODE" != "state" ]]; then
   exit 2
 fi
 
+CONTROL_SOCKET="${PHOTOFRAME_CONTROL_SOCKET:-/run/photoframe/control.sock}"
+
+# Send one request to the viewer and print its reply; succeed only when the
+# viewer answered ok. socat half-closes after the request and waits up to 3 s
+# for the one reply line.
+viewer_request() {
+  [[ -S "$CONTROL_SOCKET" ]] || return 1
+  command -v socat >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  local reply
+  reply="$(printf '%s' "$1" | socat -t 3 - "UNIX-CONNECT:${CONTROL_SOCKET}" 2>/dev/null)" || return 1
+  jq -e '.ok == true' >/dev/null 2>&1 <<<"$reply" || return 1
+  printf '%s\n' "$reply"
+}
+
+# display-power with an optional state (on|off; none = query), naming the
+# output unless it is "*".
+viewer_power() {
+  local request
+  request="$(jq -cn --arg state "${1:-}" --arg output "$TARGET" '
+    {command: "display-power"}
+    + (if $state == "" then {} else {state: $state} end)
+    + (if $output == "*" then {} else {output: $output} end)')" || return 1
+  viewer_request "$request"
+}
+
+case "$MODE" in
+  sleep)
+    viewer_power off >/dev/null && exit 0
+    ;;
+  wake)
+    viewer_power on >/dev/null && exit 0
+    ;;
+  state)
+    if reply="$(viewer_power)"; then
+      jq -r '.state' <<<"$reply"
+      exit 0
+    fi
+    ;;
+esac
+
+# --- sway fallback ---------------------------------------------------------
+
 runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 if [[ ! -d "$runtime_dir" ]]; then
-  echo "powerctl: XDG_RUNTIME_DIR '$runtime_dir' does not exist" >&2
+  echo "powerctl: the viewer did not take the request and XDG_RUNTIME_DIR '$runtime_dir' does not exist (no sway session)" >&2
   exit 1
 fi
 

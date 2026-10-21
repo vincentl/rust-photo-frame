@@ -1199,7 +1199,14 @@ impl SwayEnvironment {
         };
 
         if !runtime_dir.is_dir() {
-            bail!("XDG_RUNTIME_DIR '{}' does not exist", runtime_dir.display());
+            // Normal on the KMS stack: no login session, so logind never
+            // creates /run/user/<uid>. There is no sway to find either;
+            // powerctl reaches the viewer's control socket instead. Socket
+            // discovery already fails per use and is retried, so keep going.
+            warn!(
+                path = %runtime_dir.display(),
+                "XDG_RUNTIME_DIR does not exist (no Wayland session); sway commands will fail until one appears"
+            );
         }
 
         let explicit_socket = match env::var_os("SWAYSOCK") {
@@ -2369,6 +2376,20 @@ awake-scheduled: {}
         assert_eq!(env.runtime_dir, runtime_path);
         assert_eq!(env.explicit_socket, Some(socket_path.clone()));
         assert_eq!(env.resolve_socket().expect("resolve explicit"), socket_path);
+    }
+
+    /// The KMS stack has no login session, so no /run/user/<uid>: buttond
+    /// must still start (powerctl goes to the viewer there).
+    #[test]
+    fn prepare_tolerates_a_missing_runtime_dir() {
+        let _lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let runtime = tempdir().expect("tempdir");
+        let missing = runtime.path().join("no-session");
+        let _runtime_guard = EnvGuard::replace("XDG_RUNTIME_DIR", Some(missing.as_os_str()));
+        let _socket_guard = EnvGuard::replace("SWAYSOCK", None);
+        let env = SwayEnvironment::prepare().expect("starts without a runtime dir");
+        assert_eq!(env.runtime_dir, missing);
+        assert!(env.resolve_socket().is_err(), "no sway to find");
     }
 
     #[test]
