@@ -31,10 +31,12 @@ create_stage_layout() {
 }
 
 get_target_dir() {
+    # Honour CARGO_TARGET_DIR (cargo does), defaulting to the in-repo target/.
+    local target_root="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}"
     if [[ "${CARGO_PROFILE}" == "release" ]]; then
-        printf '%s' "${REPO_ROOT}/target/release"
+        printf '%s' "${target_root}/release"
     else
-        printf '%s' "${REPO_ROOT}/target/${CARGO_PROFILE}"
+        printf '%s' "${target_root}/${CARGO_PROFILE}"
     fi
 }
 
