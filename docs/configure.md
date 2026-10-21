@@ -123,7 +123,8 @@ If the frame launches to a black screen, check that `photo-library-path` points 
 - **Purpose:** Selects where the application exposes its Unix domain control socket.
 - **Required?** Optional; defaults to `/run/photoframe/control.sock`.
 - **Accepted values & defaults:** Any filesystem path, typically under `/run`, `/run/user/<uid>`, or another writable runtime directory.
-- **Notes:** The kiosk provisioning script creates `/run/photoframe` (mode `0770`, owned by `kiosk:kiosk`) and installs a tmpfiles entry so the directory exists after every boot. If you override the setting, pre-create the directory with matching ownership: `sudo install -d -m 0770 -o kiosk -g kiosk /run/photoframe`.
+- **Notes:** The kiosk provisioning script creates `/run/photoframe` (mode `0770`, owned by `kiosk:kiosk`) and installs a tmpfiles entry so the directory exists after every boot. If you override the setting, pre-create the directory with matching ownership: `sudo install -d -m 0770 -o kiosk -g kiosk /run/photoframe`. wifi-manager (`overlay.control-socket`) and `powerctl` (`PHOTOFRAME_CONTROL_SOCKET`) default to the same path; change them together.
+- **Commands:** wake/sleep, display power on the KMS stack, and the Wi-Fi recovery overlay. See [Advanced › Control socket protocol](advanced.md#control-socket-protocol).
 
 ### `transition`
 
@@ -195,7 +196,7 @@ See [Playlist weighting](#playlist-weighting) for the algorithm and [Portrait pa
 ### Wake/sleep control
 
 - **How it works:** The application has no internal schedule. After startup it remains asleep until another client sends `set-state` or `toggle-state` commands over the control socket.
-- **Manual control:** Pipe JSON such as `{"command":"set-state","state":"awake"}` or `{"command":"toggle-state"}` to `/run/photoframe/control.sock` (override via `control-socket-path`).
+- **Manual control:** Pipe JSON such as `{"command":"set-state","state":"awake"}` or `{"command":"toggle-state"}` to `/run/photoframe/control.sock` (override via `control-socket-path`). Each command answers with one JSON line; every command is listed in [Advanced › Control socket protocol](advanced.md#control-socket-protocol).
 - **Automation:** Deploy `buttond` (see below) and populate the shared `awake-schedule` block. `buttond` evaluates the schedule, issues `set-state` commands at the appropriate boundaries, and runs display power hooks on your behalf.
 
 Example schedule fragment consumed by `buttond`:

@@ -18,6 +18,11 @@ Day-to-day commands, status checks, and troubleshooting for a frame you own and 
 | Screen on (DPMS) | `sudo -u kiosk /opt/photoframe/bin/powerctl wake` |
 | Screen off (DPMS) | `sudo -u kiosk /opt/photoframe/bin/powerctl sleep` |
 | Screen on, explicit output | `sudo -u kiosk /opt/photoframe/bin/powerctl wake HDMI-A-2` |
+| Is the screen on? | `sudo -u kiosk /opt/photoframe/bin/powerctl state` |
+| Screen power, straight to the viewer (KMS stack) | `echo '{"command":"display-power","state":"off"}' \| sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock` (`"on"`; omit `state` to query) |
+| Take the Wi-Fi overlay down | `echo '{"command":"wifi-overlay-hide"}' \| sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock` (wifi-manager shows it again within 10 s while recovery lasts) |
+
+Every control-socket command answers with one JSON line (`{"ok":true,…}`); the full list is in [Advanced › Control socket protocol](advanced.md#control-socket-protocol).
 
 ### Check status
 
@@ -191,7 +196,7 @@ If you have an `awake-schedule` configured, also check that the current local ti
 
 ### `powerctl wake` returns "no sway process found for uid N"
 
-`powerctl` looks for a Wayland session owned by the running UID. The kiosk session belongs to `kiosk`, not your operator account. Always run with `sudo -u kiosk`:
+On the Wayland stack `powerctl` falls back to sway and looks for a sway session owned by the running UID. The kiosk session belongs to `kiosk`, not your operator account. Always run with `sudo -u kiosk`:
 
 ```bash
 sudo -u kiosk /opt/photoframe/bin/powerctl wake
@@ -319,15 +324,41 @@ Restart the kiosk after editing. See [Advanced › Memory tuning](advanced.md#me
 
 ### Display power commands run but the monitor stays on
 
-Output name mismatch. Find the connector:
+First see which path `powerctl` took:
 
 ```bash
-# wlr-randr must run in the kiosk Wayland session (display is usually wayland-1;
-# find it with: sudo ls /run/user/$(id -u kiosk)/wayland-*)
-sudo -u kiosk env XDG_RUNTIME_DIR=/run/user/$(id -u kiosk) WAYLAND_DISPLAY=wayland-1 wlr-randr
+echo '{"command":"display-power"}' | sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock
 ```
 
+- **KMS stack** (the answer has `"ok":true` and a `connector`): the viewer switches the panel. After `powerctl sleep` the journal shows `kms_dpms_off: panel off`:
+
+  ```bash
+  sudo journalctl -t photoframe -b | grep -E "kms_dpms_off|kms_power_on"
+  ```
+
+  If `buttond.screen.display-name` names a different connector than the answer's `connector`, the viewer refuses with `not-driven`. Fix the name, or remove the key so powerctl means whatever the viewer drives.
+- **Wayland stack** (the answer is `"error":"unsupported"`): sway switches the panel, and the usual cause is an output name mismatch. Find the connector:
+
+  ```bash
+  # wlr-randr must run in the kiosk Wayland session (display is usually wayland-1;
+  # find it with: sudo ls /run/user/$(id -u kiosk)/wayland-*)
+  sudo -u kiosk env XDG_RUNTIME_DIR=/run/user/$(id -u kiosk) WAYLAND_DISPLAY=wayland-1 wlr-randr
+  ```
+
 Update `buttond.screen.display-name` in `/etc/photoframe/config.yaml` to match (e.g. `HDMI-A-2`), then `sudo systemctl restart buttond.service`. See [Advanced › Power and sleep](advanced.md#power-and-sleep).
+
+### The panel stays black after a wake on the KMS stack
+
+The viewer re-lights the panel with a full modeset on the first frame after `display-power on`. The journal should show these in order: `kms_power_on: the next frame is the modeset`, then `kms_power_on: modeset frame presented`, then `kms_power_on: connector reads connected`.
+
+```bash
+sudo journalctl -t photoframe -b | grep kms_power_on
+systemctl show -p NRestarts photoframe-kms.service
+```
+
+- If the second line is missing, no frame was presented after the wake. Report it, with the journal.
+- If `NRestarts` went up at the wake, the modeset failed and the restart lit the panel instead. That works, but it is a bug worth reporting.
+- If all three lines are there but the TV still says "no signal", that is the vc4 link failure the modeset is meant to prevent. Note the TV model and report it.
 
 ### `socat` command not found
 
