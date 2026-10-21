@@ -177,7 +177,7 @@ impl ViewerLink {
 
 impl OverlayController {
     pub fn new(config: OverlayConfig) -> Self {
-        let link = ViewerLink::new(config.control_socket.clone());
+        let link = ViewerLink::new(config.control_socket());
         Self {
             config,
             child: None,
@@ -803,7 +803,7 @@ mod tests {
         let mut controller = OverlayController::new(OverlayConfig {
             // Would fail loudly if the window path ran.
             command: vec!["/nonexistent/overlay-window".to_string()],
-            control_socket: socket,
+            control_socket: Some(socket),
             ..OverlayConfig::default()
         });
         controller
@@ -841,7 +841,7 @@ mod tests {
         let mut controller = OverlayController::new(OverlayConfig {
             command: vec!["swaymsg".to_string()],
             sway_socket: Some(missing_sway),
-            control_socket: dir.path().join("no-viewer.sock"),
+            control_socket: Some(dir.path().join("no-viewer.sock")),
             ..OverlayConfig::default()
         });
         controller

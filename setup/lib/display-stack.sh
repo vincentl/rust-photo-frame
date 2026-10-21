@@ -339,6 +339,31 @@ display_stack_kms_healthy() {
     echo "${DISPLAY_KMS_UNIT}: presenting and stable for ${settle_sec}s (NRestarts ${restarts_after})"
 }
 
+# The viewer's control socket: `control-socket-path` from its config
+# (default /etc/photoframe/config.yaml, override with PHOTOFRAME_CONFIG),
+# else /run/photoframe/control.sock. The same rule 50-postcheck.sh uses, so
+# verify follows an override as the viewer, buttond and powerctl do.
+display_stack_control_socket() {
+    local config="${PHOTOFRAME_CONFIG:-/etc/photoframe/config.yaml}"
+    local configured=""
+    if [[ -f "${config}" ]]; then
+        local reader=(awk)
+        [[ -r "${config}" ]] || reader=(_display_stack_sudo awk)
+        # shellcheck disable=SC2016 # an awk program, not shell
+        configured="$("${reader[@]}" -F ':' '
+            /^[[:space:]]*control-socket-path:[[:space:]]*/ {
+                value=$2
+                sub(/^[[:space:]]+/, "", value)
+                sub(/[[:space:]]+#.*/, "", value)
+                gsub(/["[:space:]]/, "", value)
+                print value
+                exit
+            }
+        ' "${config}" 2>/dev/null || true)"
+    fi
+    printf '%s\n' "${configured:-/run/photoframe/control.sock}"
+}
+
 # KMS display check for verify.sh: the card, connector and mode, from two
 # sources that must agree. sysfs says which connectors are connected and
 # which modes they list; the viewer (`display-power` query on its control
@@ -350,10 +375,10 @@ display_stack_kms_healthy() {
 # disconnected connector is only a warning while the viewer reports it off.
 #
 # DISPLAY_SYSFS_ROOT (default /sys/class/drm) and PHOTOFRAME_CONTROL_SOCKET
-# (default /run/photoframe/control.sock) are overridable for tests.
+# (default: display_stack_control_socket) are overridable for tests.
 display_stack_kms_check() {
     local sysfs="${DISPLAY_SYSFS_ROOT:-/sys/class/drm}"
-    local socket="${PHOTOFRAME_CONTROL_SOCKET:-/run/photoframe/control.sock}"
+    local socket="${PHOTOFRAME_CONTROL_SOCKET:-$(display_stack_control_socket)}"
     local status_file connected=()
     for status_file in "${sysfs}"/card*-*/status; do
         [[ -f "${status_file}" ]] || continue
