@@ -173,8 +173,12 @@ if (( SKIP_BUILD )); then
         log WARN "--skip-build: ${REPO_ROOT} is not a git checkout; cannot compare it with the staged revision."
     fi
     # What the system stage leaves behind. Without it 05/30/45 would half-provision the device.
-    if ! id -u "${SERVICE_USER}" >/dev/null 2>&1 || ! getent group seat >/dev/null 2>&1; then
-        log ERROR "--skip-build: the system stage has not run (no ${SERVICE_USER} user or seat group). Run sudo ./setup/system/install.sh first."
+    # What it must leave depends on the display stack: seat (seatd) exists
+    # only for wayland; the default KMS stack needs video/render/input.
+    display_stack_name="$(display_stack_current)"
+    missing_items="$(display_stack_system_stage_missing "${display_stack_name}" "${SERVICE_USER}" | paste -sd, -)"
+    if [[ -n "${missing_items}" ]]; then
+        log ERROR "--skip-build: the system stage has not run for the ${display_stack_name} display stack (missing: ${missing_items//,/, }). Run sudo ./setup/system/install.sh first."
         exit 1
     fi
 fi

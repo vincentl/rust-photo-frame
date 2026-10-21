@@ -80,6 +80,31 @@ display_stack_source() {
     fi
 }
 
+# The groups the kiosk user must be in for a stack: the KMS unit opens
+# /dev/dri through video and render and takes input from the input group;
+# the wayland session also needs seat (seatd). One per line.
+display_stack_required_groups() {
+    printf '%s\n' video render input
+    if [[ "$1" == "wayland" ]]; then
+        printf '%s\n' seat
+    fi
+}
+
+# What the system stage should have left for <stack> and is missing, one
+# item per line ("user kiosk", "group seat"); empty when it ran. Used by
+# deploy.sh --skip-build, which must not half-provision a device.
+# Usage: display_stack_system_stage_missing <kms|wayland> <user>
+display_stack_system_stage_missing() {
+    local stack="$1" user="$2" group
+    if ! id -u "${user}" >/dev/null 2>&1; then
+        printf 'user %s\n' "${user}"
+        return 0
+    fi
+    while IFS= read -r group; do
+        getent group "${group}" >/dev/null 2>&1 || printf 'group %s\n' "${group}"
+    done < <(display_stack_required_groups "${stack}")
+}
+
 # One line naming the active stack, its unit and where the choice came from:
 # "kms (photoframe-kms.service, default)".
 display_stack_describe() {

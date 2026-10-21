@@ -156,6 +156,24 @@ PHOTOFRAME_DISPLAY=kms display_stack_resolve >/dev/null 2>&1 || fail "kms choice
 rm -f "${DISPLAY_ENV_PATH}"
 reset_stubs
 
+# --- system stage guard (deploy.sh --skip-build) -----------------------------
+# getent/id stubbed: the user exists, and only the groups in ${GROUPS_PRESENT}.
+GROUPS_PRESENT="video render input"
+getent() { [[ "$1" == group ]] && [[ " ${GROUPS_PRESENT} " == *" $2 "* ]]; }
+id() { if [[ "${1:-}" == "-u" && "${2:-}" == "kiosk" ]]; then echo 1001; elif [[ "${1:-}" == "-u" && -n "${2:-}" ]]; then return 1; elif [[ "${1:-}" == "-u" ]]; then echo 1000; else command id "$@"; fi; }
+# kms needs no seat group (seatd is not installed there)
+[[ -z "$(display_stack_system_stage_missing kms kiosk)" ]] || fail "kms guard demands more than video/render/input: $(display_stack_system_stage_missing kms kiosk)"
+# wayland does
+[[ "$(display_stack_system_stage_missing wayland kiosk)" == "group seat" ]] || fail "wayland guard does not demand the seat group"
+GROUPS_PRESENT="video render input seat"
+[[ -z "$(display_stack_system_stage_missing wayland kiosk)" ]] || fail "wayland guard fails with every group present"
+# a stage that never ran fails on both stacks
+GROUPS_PRESENT="seat"
+[[ "$(display_stack_system_stage_missing kms kiosk | paste -sd, -)" == "group video,group render,group input" ]] || fail "kms guard misses absent groups"
+[[ "$(display_stack_system_stage_missing kms nobody)" == "user nobody" ]] || fail "guard does not report a missing user"
+unset -f getent
+id() { if [[ "${1:-}" == "-u" ]]; then echo 1000; else command id "$@"; fi; }
+
 # --- packages ------------------------------------------------------------
 [[ -z "$(display_stack_packages kms)" ]] || fail "the kms stack installs compositor packages"
 wayland_packages="$(display_stack_packages wayland)"
