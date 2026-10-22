@@ -257,9 +257,10 @@ fn crop(canvas: &RgbaImage, w: photo_set::Window) -> RgbaImage {
 
 const SCREEN: (u32, u32) = (960, 540);
 
-/// **K2 Layout.** Equal heights; widths in aspect ratio ±1 px; the bar is
-/// `round(r·H_c·m)` ±1 px at 2%, 3.5% and 6%; centred; and each window is
-/// exactly the member's solo height (C2).
+/// **K2 Layout.** Equal heights; widths in aspect ratio ±1 px; the slack
+/// after the two windows is shared `1 : r : 1` between the margins and the
+/// bar (±1 px) at 2%, 3.5% and 6%; centred; and each window is exactly the
+/// member's solo height (C2).
 #[test]
 fn k2_pair_layout_bar_and_solo_height() {
     let dir = tempfile::tempdir().unwrap();
@@ -278,13 +279,23 @@ fn k2_pair_layout_bar_and_solo_height() {
         assert!((l.w as f32 - h * 0.75).abs() <= 1.0, "{pct}%: left {l:?}");
         assert!((r.w as f32 - h * 0.6).abs() <= 1.0, "{pct}%: right {r:?}");
         let bar = r.x - (l.x + l.w);
-        let expected = (0.618 * SCREEN.1 as f32 * pct / 100.0).round();
+        let slack = (SCREEN.0 - l.w - r.w) as f32;
+        let expected = (0.618 * slack / 2.618).round();
         assert!(
             (bar as f32 - expected).abs() <= 1.0,
             "{pct}%: bar {bar} vs {expected}"
         );
         let (left_margin, right_margin) = (l.x, SCREEN.0 - (r.x + r.w));
         assert!(left_margin.abs_diff(right_margin) <= 1, "{pct}%: centred");
+        let side = slack / 2.618;
+        assert!(
+            (left_margin as f32 - side).abs() <= 1.0,
+            "{pct}%: margin {left_margin} vs {side}"
+        );
+        assert!(
+            side >= SCREEN.1 as f32 * pct / 100.0,
+            "{pct}%: margins at least the border"
+        );
         let (top, bottom) = (l.y, SCREEN.1 - (l.y + l.h));
         assert!(top.abs_diff(bottom) <= 1, "{pct}%: centred vertically");
         // C2: each member is drawn at exactly its solo height.
@@ -615,12 +626,12 @@ fn k6_scaled_decodes_match_full_decodes_for_pairs() {
     }
 }
 
-/// Review F4: on studio and passe-partout the bar holds both bevels, so the
-/// flat board between them is `r × border` like the flat board outside, and
-/// each window keeps its solo height (C2 with the bevel term in the shape
-/// condition).
+/// Review F4: on studio and passe-partout the bar holds both inner bevels
+/// and the margins the outer ones, so the flat boards share the slack
+/// `1 : r : 1` like an overlay mat's, and each window keeps its solo height
+/// (C2 with the bevel term in the shape condition).
 #[test]
-fn bevelled_mats_keep_a_flat_bar_of_r_times_the_border() {
+fn bevelled_mats_share_the_flat_board_one_to_r_to_one() {
     let dir = tempfile::tempdir().unwrap();
     let fixed = fixed_background(&dir);
     let left = bright(750, 1000, 21);
@@ -633,10 +644,17 @@ fn bevelled_mats_keep_a_flat_bar_of_r_times_the_border() {
             let pair = pair_result(&left, &right, params(matting.clone(), SCREEN, false));
             let (l, r) = (pair.windows[0], pair.windows[1]);
             let flat = (r.x - (l.x + l.w)) as f32 - (2.0 * bevel).ceil();
-            let expected = (0.618 * SCREEN.1 as f32 * pct / 100.0).round();
+            let slack = (SCREEN.0 - l.w - r.w) as f32 - 2.0 * bevel - (2.0 * bevel).ceil();
+            let expected = (0.618 * slack / 2.618).round();
             assert!(
                 (flat - expected).abs() <= 1.0,
-                "{kind:?} {pct}%: flat bar {flat} vs r x border {expected}"
+                "{kind:?} {pct}%: flat bar {flat} vs {expected}"
+            );
+            let flat_margin = l.x as f32 - bevel;
+            assert!(
+                (flat_margin - slack / 2.618).abs() <= 1.0,
+                "{kind:?} {pct}%: flat margin {flat_margin} vs {}",
+                slack / 2.618
             );
             for (index, member) in [&left, &right].into_iter().enumerate() {
                 let solo = solo_result(member, params(matting.clone(), SCREEN, false));
@@ -681,6 +699,28 @@ fn bar_ratio_zero_keeps_the_outer_bevels() {
             );
         }
     }
+}
+
+/// The frame's own numbers: two 3:4 portraits on a 6% fixed-colour mat at
+/// 3840x2160. The overlay fit's height is `round(2160 × 0.88) = 1901` (the
+/// solo height on that mat, C2), so the windows are 1426 wide, the slack
+/// 988 and the bar `round(0.618 × 988 / 2.618) = 233`; the odd pixel of the
+/// margins goes to the right.
+#[test]
+fn two_3_4_portraits_on_4k_share_the_slack_one_to_r_to_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixed = fixed_background(&dir);
+    let left = bright(1500, 2000, 61);
+    let right = bright(1500, 2000, 62);
+    let matting = mat_option(MattingKind::FixedColor, 6.0, &fixed);
+    let pair = pair_result(&left, &right, params(matting.clone(), (3840, 2160), false));
+    let (l, r) = (pair.windows[0], pair.windows[1]);
+    assert_eq!((l.w, l.h, r.w, r.h), (1426, 1901, 1426, 1901));
+    assert_eq!(r.x - (l.x + l.w), 233, "bar");
+    assert_eq!((l.x, 3840 - (r.x + r.w)), (377, 378), "margins");
+    assert_eq!((l.y, 2160 - (l.y + l.h)), (129, 130), "centred vertically");
+    let solo = solo_result(&left, params(matting, (3840, 2160), false));
+    assert_eq!(solo.windows[0].h, 1901);
 }
 
 /// Review F12: a member whose pixels cannot be read leaves the other solo

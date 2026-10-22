@@ -76,11 +76,13 @@ impl DisplaySizes {
 /// - `u` = `max-upscale-factor` (at least 1, as the matting worker applies it);
 /// - `m_min`, `m_max` = smallest and largest margin fraction **among the
 ///   non-zero mat options** (the only mats a pair screen can get, §5);
-/// - `r` = `pairing.bar-ratio`; `g_max = r·m_max/(1 − 2·m_max)` is the largest
-///   center bar as a fraction of photo height;
+/// - `r` = `pairing.bar-ratio`, the bar's weight against each side margin:
+///   the horizontal slack after the two windows is shared `1 : r : 1`, and
+///   each side margin is at least the mat border `b = m·H_c` (the shorter
+///   side's share), see `viewer/photo_set.rs`;
 /// - `b_max` = the widest bevel among the non-zero mats (studio and
-///   passe-partout cut one around each window; the bar adds both bevels to
-///   its flat `r × border`, see `viewer/photo_set.rs`).
+///   passe-partout cut one around each window; the bar holds both inner
+///   bevels, the margins the outer ones).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PairingRules {
     /// `pairing.probability`, the pairing coin's `p`.
@@ -152,34 +154,38 @@ impl PairingRules {
         })
     }
 
-    /// Center bar as a fraction of photo height for a mat of margin `m`:
-    /// `g = r·m/(1 − 2m)`, so that at photo height `H_c(1 − 2m)` the bar is
-    /// exactly `r × border` (`border = H_c·m`).
-    pub fn bar_fraction(bar_ratio: f64, m: f64) -> f64 {
-        bar_ratio * m / (1.0 - 2.0 * m)
-    }
-
-    /// `g_max`, the largest center bar a pair screen can get.
-    pub fn g_max(&self) -> f64 {
-        Self::bar_fraction(self.bar_ratio, self.m_max)
+    /// **Shape limit.** The largest aspect a pairable photo may have on
+    /// `canvas` (`A = W_c/H_c`): for a mat of margin `m` two photos at the
+    /// solo height `D = H_c(1 − 2m)` stay height-bound iff
+    /// `(a_P + a_Q)·D ≤ W_c − (2 + r)·m·H_c − 4·b_max` (the width that leaves
+    /// each side margin its border and room for the four bevels), so
+    /// `a_i ≤ (A − (2 + r)·m − 4·b_max/H_c) / (2(1 − 2m))` for both suffices.
+    /// That bound is monotone in `m` (its derivative has the sign of
+    /// `2A − (2 + r)`), so the tightest of the mats a pair can get is at
+    /// `m_min` or `m_max`; the limit is the smaller of the two. Bevelled mats
+    /// stand their photos `2·b_max` shorter, which only loosens the width
+    /// bound; the rounding of their margins and bevels can cost at most a
+    /// pixel at the boundary.
+    pub fn shape_limit(&self, canvas: (u32, u32)) -> f64 {
+        let (canvas_w, canvas_h) = (f64::from(canvas.0.max(1)), f64::from(canvas.1.max(1)));
+        let canvas_aspect = canvas_w / canvas_h;
+        let bevel_term = 4.0 * self.bevel_max / canvas_h;
+        let limit = |m: f64| {
+            (canvas_aspect - (2.0 + self.bar_ratio) * m - bevel_term) / (2.0 * (1.0 - 2.0 * m))
+        };
+        limit(self.m_min).min(limit(self.m_max))
     }
 
     /// **Pairable (R2).** Photo `i` (displayed size `w_i x h_i`, aspect
     /// `a_i = w_i/h_i`) is pairable iff
-    /// - the canvas `(W_c, H_c)` has been published (`A = W_c/H_c`),
+    /// - the canvas `(W_c, H_c)` has been published,
     /// - its size is known,
-    /// - **shape condition:** `a_i ≤ (A − g_max − β)/2`, with the bevel term
-    ///   `β = 4·b_max / (H_c(1 − 2·m_max))` (0 without bevelled mats), and
+    /// - **shape condition:** `a_i ≤` [`Self::shape_limit`], and
     /// - **full-height condition:** `h_i·u ≥ H_c(1 − 2·m_min)`.
     ///
     /// Together these give the no-shrink invariant C2: each member of a pair
     /// is drawn at exactly the height it would have alone, for every mat a
-    /// pair can get (proof in the design, §1). The bevel term extends the
-    /// shape step to studio and passe-partout, whose bar is `g·H + 2b` and
-    /// whose photo space is `D − 2b` tall and `A·D − 2b` wide (`D =
-    /// H_c(1 − 2m)`): the pair fits that width at full height when
-    /// `Σa + g ≤ (A·D − 4b)/(D − 2b)`, which `Σa + g ≤ A − 4b/D` implies, and
-    /// `4b/D ≤ β` for every non-zero mat.
+    /// pair can get (proof in the design, §1).
     pub fn is_pairable(
         &self,
         display_size: Option<(u32, u32)>,
@@ -192,9 +198,7 @@ impl PairingRules {
             return false;
         }
         let a = f64::from(w) / f64::from(h);
-        let canvas_aspect = f64::from(canvas_w) / f64::from(canvas_h);
-        let bevel_term = 4.0 * self.bevel_max / (f64::from(canvas_h) * (1.0 - 2.0 * self.m_max));
-        let shape = a <= (canvas_aspect - self.g_max() - bevel_term) / 2.0;
+        let shape = a <= self.shape_limit((canvas_w, canvas_h));
         let full_height =
             f64::from(h) * self.max_upscale >= f64::from(canvas_h) * (1.0 - 2.0 * self.m_min);
         shape && full_height
@@ -240,27 +244,59 @@ mod tests {
 
     #[test]
     fn s4_common_portrait_shapes_on_16_9() {
-        // r = 0.618, 6% mat: threshold (16/9 − g_max)/2 ≈ 0.868.
+        // r = 0.618, 6% mat: limit (16/9 − 2.618 × 0.06) / (2 × 0.88) ≈ 0.921.
         let r = rules(0.06, 0.06);
-        let threshold = (16.0 / 9.0 - r.g_max()) / 2.0;
-        assert!((threshold - 0.868).abs() < 0.001, "{threshold}");
-        for (w, h) in [(3200, 4000), (3000, 4000), (2667, 4000), (2250, 4000)] {
+        let threshold = r.shape_limit((3840, 2160));
+        assert!((threshold - 0.921).abs() < 0.001, "{threshold}");
+        for (w, h) in [
+            (3600, 4000),
+            (3200, 4000),
+            (3000, 4000),
+            (2667, 4000),
+            (2250, 4000),
+        ] {
             assert!(r.is_pairable(Some((w, h)), UHD), "{w}x{h}");
         }
+        assert!(!r.is_pairable(Some((3700, 4000)), UHD), "0.925");
     }
 
     #[test]
-    fn s4_16_10_excludes_4_5() {
+    fn s4_16_10_includes_4_5_but_not_5_6() {
         let r = rules(0.06, 0.06);
         let wuxga = Some((2560, 1600));
-        let threshold = (1.6 - r.g_max()) / 2.0;
-        assert!((threshold - 0.779).abs() < 0.001, "{threshold}");
-        assert!(!r.is_pairable(Some((3200, 4000)), wuxga), "4:5");
-        assert!(r.is_pairable(Some((3000, 4000)), wuxga), "3:4");
+        let threshold = r.shape_limit((2560, 1600));
+        assert!((threshold - 0.820).abs() < 0.001, "{threshold}");
+        assert!(r.is_pairable(Some((3200, 4000)), wuxga), "4:5");
+        assert!(!r.is_pairable(Some((3333, 4000)), wuxga), "5:6");
     }
 
-    /// Review F4: bevelled mats add both bevels to the bar, so the shape
-    /// condition leaves room for them (`β = 4·b_max/(H_c(1 − 2·m_max))`).
+    /// The limit is the tightest over the mats a pair can get: on 16:9 the
+    /// smallest margin binds (a wider mat shortens the photos faster than it
+    /// narrows the width), on 5:4 the largest does.
+    #[test]
+    fn s4_shape_limit_takes_the_tightest_mat() {
+        let r = rules(0.02, 0.06);
+        let at = |m: f64, a: f64| (a - 2.618 * m) / (2.0 * (1.0 - 2.0 * m));
+        let uhd = r.shape_limit((3840, 2160));
+        assert!((uhd - at(0.02, 16.0 / 9.0)).abs() < 1e-9, "{uhd}");
+        assert!(uhd < at(0.06, 16.0 / 9.0));
+        let sxga = r.shape_limit((1280, 1024));
+        assert!((sxga - at(0.06, 1.25)).abs() < 1e-9, "{sxga}");
+        assert!(sxga < at(0.02, 1.25));
+        // r = 0: the photos may fill the width edge to edge but for the two
+        // borders.
+        let edge_to_edge = PairingRules {
+            bar_ratio: 0.0,
+            ..rules(0.06, 0.06)
+        };
+        let limit = edge_to_edge.shape_limit((3840, 2160));
+        assert!((limit - (16.0 / 9.0 - 0.12) / 1.76).abs() < 1e-9, "{limit}");
+    }
+
+    /// Review F4: bevelled mats hold both inner bevels in the bar and the
+    /// outer ones in the margins, so the shape limit leaves room for four
+    /// (`4·b_max/H_c` of the canvas aspect, `2·b_max/(H_c(1 − 2m))` of the
+    /// per-photo limit).
     #[test]
     fn s4_bevels_tighten_the_shape_condition() {
         let plain = rules(0.06, 0.06);
@@ -269,7 +305,7 @@ mod tests {
             ..plain
         };
         let beta = 4.0 * 20.0 / (2160.0 * 0.88);
-        let edge = (16.0 / 9.0 - plain.g_max()) / 2.0;
+        let edge = plain.shape_limit((3840, 2160));
         // A portrait just inside the plain limit is outside the bevelled one.
         let h = 4000u32;
         let w = ((edge - beta / 4.0) * h as f64).floor() as u32;

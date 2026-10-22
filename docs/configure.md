@@ -396,7 +396,7 @@ playlist:
   pairing:
     enabled: true
     probability: 1.0        # chance that two back-to-back pairable portraits share a screen
-    bar-ratio: 0.618        # center bar = this × the mat border (1/φ)
+    bar-ratio: 0.618        # the bar's weight against each side margin (1/φ)
     dwell-multiplier: 1.5   # a pair stays up dwell-ms × this
     lookahead: false        # true: pair across the next W unsent positions (W = viewer-preload-count, at most 3)
 ```
@@ -448,14 +448,16 @@ nothing already handed to the loader is ever moved. What changes and what does n
 
 **Which portraits pair.** A photo is *pairable* when both hold:
 
-- **Shape:** it is narrow enough for two to fit side by side with the center bar:
-  `width / height ≤ (A − g_max) / 2`, where `A` is the canvas aspect (width / height) and
-  `g_max` is the widest bar any of your mats produces, as a fraction of photo height
-  (`bar-ratio × m / (1 − 2m)` for the largest non-zero `minimum-mat-percentage` `m`). On
-  16:9 with the default bar ratio and a 6% mat the limit is 0.868: 4:5, 3:4, 2:3 and 9:16
-  portraits pair, squares never do. On 16:10 it is 0.779, which leaves out 4:5. Studio
-  and passe-partout mats cut a bevel around each photo, and the bar holds both of them,
-  so with those mats the limit is lower by `2 × bevel-width-px / (canvas height × (1 − 2m))`
+- **Shape:** it is narrow enough for two to fit side by side at full height with a
+  border on each side: `width / height ≤ (A − (2 + bar-ratio) × m) / (2 × (1 − 2m))`,
+  where `A` is the canvas aspect (width / height) and `m` is the `minimum-mat-percentage`
+  (as a fraction) of the mat that makes this tightest, the smallest non-zero one on
+  landscape canvases wider than 4:3 and the largest on narrower ones. On 16:9 with the
+  default bar ratio and a 6% mat the limit is 0.921: 4:5, 3:4, 2:3 and 9:16 portraits
+  pair, squares never do; with a 2% mat it is 0.899. On 16:10 it is 0.820, so 4:5 pairs
+  there too, 5:6 does not. Studio and passe-partout mats cut a bevel around each photo,
+  and the bar holds the two inner ones while the margins hold the outer two, so with
+  those mats the limit is lower by `2 × bevel-width-px / (canvas height × (1 − 2m))`
   (about 0.004 for a 4 px bevel on 4K).
 - **Full height:** it is tall enough to fill the mat's height on its own:
   `height × max-upscale-factor ≥ canvas height × (1 − 2 × m_min)`, with `m_min` the
@@ -478,18 +480,23 @@ each is sent to the loader, are exactly those of pairing off (headers are still 
 the non-zero-mat rule still applies and the metric lines still carry the pairing fields).
 
 **One mat, two windows.** The two photos share one mat. They are drawn at the same
-height and never cropped, left to right in playlist order, with a center bar of
-`bar-ratio` × the mat border between them (border = canvas height ×
-`minimum-mat-percentage`; the default 1/φ ≈ 0.618 echoes a framer's bridge between two
-openings, and gives an 80 px bar for a 6% mat on 4K). Blurred mats are drawn from the two
-photos side by side, studio and passe-partout bevels frame each window, and a drop shadow
-falls under both. On studio and passe-partout mats the bar also holds the two bevels, so
-the flat board between them is `bar-ratio` × the border, like the flat board outside.
-`bar-ratio: 0` puts the two photos edge to edge (on studio and passe-partout, bevel to
-bevel). `fill-when-fits` never applies to a pair. If the canvas changes after a pair was
-planned (a new display mode) and the two no longer qualify on it, they are shown one
-after the other instead. Because the bar is measured from the border, pairing needs mats
-that have one:
+height and never cropped, left to right in playlist order. Each stands as tall as it
+would alone on that mat, which on a landscape canvas leaves width to spare: the
+horizontal slack left after the two photos is shared between the left margin, the center
+bar and the right margin with weights 1 : `bar-ratio` : 1. The default 1/φ ≈ 0.618 makes
+the bar a little over half a side margin: two 3:4 portraits on a 6% mat at 4K stand
+1901 px tall and 1426 px wide, and the 988 px left over become margins of 377 px and a
+bar of 233 px. A pair of narrower photos gets wider margins and a wider bar in the same
+proportion; the side margins never fall below the mat border (`minimum-mat-percentage`
+of the canvas's shorter side). Blurred mats are drawn from the two photos side by side,
+studio and passe-partout bevels frame each window, and a drop shadow falls under both.
+On studio and passe-partout mats the bar also holds the two inner bevels, and the flat
+boards on either side of them share the slack with the flat bar in the same 1 : `bar-ratio`
+: 1. `bar-ratio: 0` puts the two photos edge to edge (on studio and passe-partout, bevel
+to bevel) with all the slack in the margins. `fill-when-fits` never applies to a pair.
+If the canvas changes after a pair was planned (a new display mode) and the two no
+longer qualify on it, they are shown one after the other instead. Because the margins
+are measured from the border, pairing needs mats that have one:
 
 - With pairing enabled, at least one matting option must have `minimum-mat-percentage`
   above 0; otherwise the configuration is rejected.
@@ -513,7 +520,7 @@ proportionally more often per hour; the shares stay the same.
 | ------------------ | ------- | --------------- | ------ |
 | `enabled`          | `false` | `true`, `false` | Opt-in switch. Requires a matting option with `minimum-mat-percentage` > 0. |
 | `probability`      | `1.0`   | `[0.0, 1.0]`    | Chance that two back-to-back pairable portraits share a screen. Never changes the playlist order. |
-| `bar-ratio`        | `0.618` | `[0.0, 1.0]`    | Center bar between the two photos, as a fraction of the mat border (studio and passe-partout add their two bevels). `0` puts the photos edge to edge. |
+| `bar-ratio`        | `0.618` | `[0.0, 1.0]`    | The center bar's weight against each side margin: the horizontal slack left after the two photos is shared 1 : `bar-ratio` : 1 (studio and passe-partout add their two inner bevels to the bar). `0` puts the photos edge to edge. |
 | `dwell-multiplier` | `1.5`   | `[0.5, 4.0]`    | A pair screen stays up `dwell-ms ×` this. |
 | `lookahead`        | `false` | `true`, `false` | Pair a portrait with the first pairable portrait in the next `W` unsent playlist positions (`W` = `viewer-preload-count`, capped at 3), shifting the photos between one position later. Every showing moves at most `W − 1` places; the scheduler itself is unchanged. |
 
