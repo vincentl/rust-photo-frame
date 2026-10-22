@@ -65,7 +65,7 @@ fn with_overlay_app_id(attrs: WindowAttributes) -> WindowAttributes {
     ))]
     {
         use winit::platform::wayland::WindowAttributesExtWayland;
-        return attrs.with_name("wifi-overlay", "wifi-overlay");
+        attrs.with_name("wifi-overlay", "wifi-overlay")
     }
 
     #[cfg(not(any(
