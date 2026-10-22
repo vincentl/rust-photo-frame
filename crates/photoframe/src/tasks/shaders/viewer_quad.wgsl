@@ -100,20 +100,18 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
 // measures what the second fetch costs. Off (and compiled out) otherwise.
 override PROBE_SINGLE_SAMPLE: bool = false;
 
-// PHOTOFRAME_PROBE=no-skip (diagnostic): every per-pixel branch that skips
-// work (a photo fetch whose weight is zero, the smoothsteps outside a soft
-// band) is taken unconditionally, so each kind runs straight-line: the same
-// math, the same output, no branch. It measures what the branches cost on
-// the device against what they skip. Off (and compiled out) otherwise.
-override PROBE_NO_SKIP: bool = false;
+// Transition shaders are straight-line: every photo is fetched and every
+// smoothstep evaluated on every pixel, even where a weight is zero. On V3D a
+// per-pixel branch that skips work costs more than it saves (Pi, 2026-10-22:
+// 0.4-1.5 ms per 1080p frame against two mip-1 fetches; see "Branch-free
+// transition shaders" in docs/performance.md).
 
 // 1 inside a photo plane (texture coordinate in 0..1), 0 outside.
 fn covered(uv: vec2<f32>) -> f32 {
   return select(0.0, 1.0, all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0)));
 }
 
-// The color of a plane at `uv`, from the mip level U.lod. An explicit level
-// needs no derivatives, so a fetch may sit in a branch (see fs_wipe).
+// The color of a plane at `uv`, from the mip level U.lod.
 fn fetch_current(uv: vec2<f32>) -> vec3<f32> {
   return textureSampleLevel(cur_tex, cur_samp, uv, U.lod).rgb;
 }
@@ -136,32 +134,6 @@ fn current_plane(uv: vec2<f32>) -> vec4<f32> {
 fn next_plane(uv: vec2<f32>) -> vec4<f32> {
   let a = covered(uv);
   return vec4<f32>(fetch_next(uv) * a, a);
-}
-
-// Both planes for a kind whose result is `current * (1 - t) + next * t`,
-// fetching a plane's color only where its weight is not zero. Where t is
-// exactly 0 or 1 (everywhere but the band around a wipe's front) the
-// skipped plane's color is multiplied by zero anyway, so the result is the
-// same; its coverage is always computed (the composite needs both). The
-// branch is per pixel but coherent: whole tiles lie on one side of the
-// front, so their fetch is skipped, not just masked.
-struct PlanePair {
-  current: vec4<f32>,
-  next: vec4<f32>,
-};
-
-fn planes_for_weight(in: VSOut, t: f32) -> PlanePair {
-  let cur_a = covered(in.current_uv);
-  let next_a = covered(in.next_uv);
-  var cur_rgb = vec3<f32>(0.0);
-  var next_rgb = vec3<f32>(0.0);
-  if (PROBE_NO_SKIP || t < 1.0) {
-    cur_rgb = fetch_current(in.current_uv) * cur_a;
-  }
-  if (PROBE_NO_SKIP || t > 0.0) {
-    next_rgb = fetch_next(in.next_uv) * next_a;
-  }
-  return PlanePair(vec4<f32>(cur_rgb, cur_a), vec4<f32>(next_rgb, next_a));
 }
 
 // Signed distance to iris petal `i` using the CPU-precomputed constants in
@@ -397,9 +369,8 @@ fn fs_fade(in: VSOut) -> @location(0) vec4<f32> {
 fn fs_wipe(in: VSOut) -> @location(0) vec4<f32> {
   let normalized = clamp(dot(U.params0.xy, in.screen_uv) + U.params0.z, 0.0, 1.0);
   let mask = 1.0 - smoothstep(U.params1.x, U.params1.y, normalized);
-  let planes = planes_for_weight(in, mask);
-  let current = planes.current;
-  let next = planes.next;
+  let current = current_of(in);
+  let next = next_of(in);
   return over_background(current * (1.0 - mask) + next * mask, current, next);
 }
 
@@ -419,7 +390,7 @@ fn fs_push(in: VSOut) -> @location(0) vec4<f32> {
 // cell's gate depends only on its row (the stagger), a hash of the cell
 // and the progress. fs_eink_mask computes each cell's mask once per frame
 // into a stripes x stripes texture (bound at group 3); fs_eink reads its
-// cell's texel and fetches a photo only where its weight is not zero.
+// cell's texel.
 @fragment
 fn fs_eink_mask(in: VSOut) -> @location(0) vec4<f32> {
   let progress = progress01();
@@ -459,18 +430,14 @@ fn fs_eink(in: VSOut) -> @location(0) vec4<f32> {
   let stripes = max(U.params0.z, 1.0);
   let flash_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
   if (progress < reveal_start) {
-    // Flashes: the same for every pixel but the current photo, which is
-    // fetched only while it shows.
+    // Flashes: the same for every pixel but the current photo.
     let prep_ratio = progress / max(reveal_start, 1e-3);
     let segments = flashes * 2.0 + 1.0;
     let staged = clamp(floor(prep_ratio * segments), 0.0, segments);
     let stage_u = u32(staged);
     let stage_pos = fract(prep_ratio * segments);
     let flash_mix = clamp(smoothstep(0.15, 0.85, stage_pos), 0.0, 1.0);
-    var current = vec4<f32>(0.0);
-    if (PROBE_NO_SKIP || stage_u == 0u || flash_mix < 1.0) {
-      current = current_of(in);
-    }
+    let current = current_of(in);
     var flash_color = current;
     if (stage_u > 0u) {
       let toggle = (stage_u & 1u) == 1u;
@@ -486,14 +453,8 @@ fn fs_eink(in: VSOut) -> @location(0) vec4<f32> {
   let cell = vec2<i32>(floor(in.screen_uv * stripes));
   let stored = textureLoad(petal_tex, cell, 0);
   let mask = stored.r + stored.g;
-  var ghost = vec3<f32>(0.0);
-  var next = vec3<f32>(0.0);
-  if (PROBE_NO_SKIP || mask < 1.0) {
-    ghost = mix(current_of(in).rgb, flash_rgb, 0.55);
-  }
-  if (PROBE_NO_SKIP || mask > 0.0) {
-    next = next_of(in).rgb;
-  }
+  let ghost = mix(current_of(in).rgb, flash_rgb, 0.55);
+  let next = next_of(in).rgb;
   return vec4<f32>(mix(ghost, next, mask), 1.0);
 }
 
@@ -516,24 +477,14 @@ fn fs_dissolve(in: VSOut) -> @location(0) vec4<f32> {
 // Circle or diamond reveal from a center, as a function of screen_uv:
 // the offset from the center in units of the screen diagonal is
 // screen_uv * params0.xy - params0.zw; params1 = (mask edges, diamond)
-// (draw_params::radial_wipe). params3.xy bound the band where the mask is
-// strictly between 0 and 1, on the squared distance for a circle (so only
-// pixels in the band take the square root) or on the distance for a
-// diamond (draw_params::radial_wipe_band).
+// (draw_params::radial_wipe).
 @fragment
 fn fs_radial_wipe(in: VSOut) -> @location(0) vec4<f32> {
   let dv = in.screen_uv * U.params0.xy - U.params0.zw;
-  let diamond = U.params1.z > 0.5;
-  let manhattan = abs(dv.x) + abs(dv.y);
-  let q = select(dot(dv, dv), manhattan, diamond);
-  var mask = select(0.0, 1.0, q <= U.params3.x);
-  if (PROBE_NO_SKIP || (q > U.params3.x && q < U.params3.y)) {
-    let dist = select(length(dv), manhattan, diamond);
-    mask = 1.0 - smoothstep(U.params1.x, U.params1.y, dist);
-  }
-  let planes = planes_for_weight(in, mask);
-  let current = planes.current;
-  let next = planes.next;
+  let dist = select(length(dv), abs(dv.x) + abs(dv.y), U.params1.z > 0.5);
+  let mask = 1.0 - smoothstep(U.params1.x, U.params1.y, dist);
+  let current = current_of(in);
+  let next = next_of(in);
   return over_background_rgb(mix(current.rgb, next.rgb, mask), max(current.a, next.a));
 }
 
@@ -544,9 +495,8 @@ fn fs_venetian_blinds(in: VSOut) -> @location(0) vec4<f32> {
   let local = fract(dot(in.screen_uv, U.params1.xy) * U.params0.x);
   let mask = smoothstep(U.params0.y, U.params0.z, 1.0 - local);
   let t = 1.0 - mask;
-  let planes = planes_for_weight(in, t);
-  let current = planes.current;
-  let next = planes.next;
+  let current = current_of(in);
+  let next = next_of(in);
   return over_background(mix(current, next, t), current, next);
 }
 
@@ -571,45 +521,19 @@ fn fs_crossfade_zoom(in: VSOut) -> @location(0) vec4<f32> {
 // an anti-aliasing band of this pass's pixel size (params3.w, screen px),
 // the edge highlight added inside it, and the petals composited over the
 // crossfading photos. params0.w = photo_swap_mix.
-//
-// A photo's color is fetched only where it can show: not under fully opaque
-// petals (most of the screen around full close), and not while its share of
-// the swap is zero (the whole transition but the swap window around full
-// close). Skipped colors would be multiplied by zero, so the result is the
-// same; coverage is always computed (the composite needs it).
-//
-// The outline and the highlight are computed only within the highlight's
-// reach of the outline (a coherent band: whole tiles lie inside or outside
-// the petals), where the same smoothsteps give exactly 1 or 0 coverage and
-// no highlight anyway.
 @fragment
 fn fs_iris(in: VSOut) -> @location(0) vec4<f32> {
   let layer = textureSample(petal_tex, petal_samp, in.screen_uv);
   let d = layer.a;
-  var cov = select(0.0, 1.0, d < 0.0);
-  var rim = 0.0;
-  if (PROBE_NO_SKIP || abs(d) < 3.5 * IRIS_RIM_PX) {
-    let band = U.params3.w;
-    cov = 1.0 - smoothstep(-band, band, d);
-    // Thin edge highlight, under petal_sheen so 0 is perfectly flat.
-    rim = smoothstep(3.5 * IRIS_RIM_PX, 0.5 * IRIS_RIM_PX, abs(d))
-      * clamp(U.params0.y, 0.0, 1.0) * 0.2;
-  }
+  let band = U.params3.w;
+  let cov = 1.0 - smoothstep(-band, band, d);
+  // Thin edge highlight, under petal_sheen so 0 is perfectly flat.
+  let rim = smoothstep(3.5 * IRIS_RIM_PX, 0.5 * IRIS_RIM_PX, abs(d))
+    * clamp(U.params0.y, 0.0, 1.0) * 0.2;
   let cur_a = covered(in.current_uv);
   let next_a = covered(in.next_uv);
-  var photo = vec3<f32>(0.0);
-  if (PROBE_NO_SKIP || cov < 1.0) {
-    let swap = clamp(U.params0.w, 0.0, 1.0);
-    var cur_rgb = vec3<f32>(0.0);
-    var next_rgb = vec3<f32>(0.0);
-    if (PROBE_NO_SKIP || swap < 1.0) {
-      cur_rgb = fetch_current(in.current_uv) * cur_a;
-    }
-    if (PROBE_NO_SKIP || swap > 0.0) {
-      next_rgb = fetch_next(in.next_uv) * next_a;
-    }
-    photo = mix(cur_rgb, next_rgb, swap);
-  }
+  let swap = clamp(U.params0.w, 0.0, 1.0);
+  let photo = mix(fetch_current(in.current_uv) * cur_a, fetch_next(in.next_uv) * next_a, swap);
   let rgb = photo * (1.0 - cov) + (layer.rgb + vec3<f32>(rim)) * cov;
   return over_background_rgb(rgb, max(max(cur_a, next_a), cov));
 }

@@ -559,10 +559,8 @@ full-screen passes are spent carefully:
   instructions; the one 2-thread shader in the build is `fs_debug_bezier`,
   used only with `PHOTOFRAME_DEBUG_BEZIER`).
 
-  `fs_iris` fetches a photo only where it can show: not under fully opaque
-  petals, most of the screen around full close, and not while its share
-  of the swap is zero, every frame but the swap window. `kms_frame`
-  reports the layer and the main pass separately (`gpu_layer_ms`,
+  `fs_iris` fetches both photos and evaluates the outline on every pixel
+  (see "Branch-free transition shaders" below). `kms_frame` reports the layer and the main pass separately (`gpu_layer_ms`,
   `gpu_main_ms`). The layer is `Rgba16Float`, not 8-bit: petals are very
   dark in linear light, so a smooth shading gradient spans only a few
   8-bit levels and visibly bands; half floats also hold the distance.
@@ -650,59 +648,64 @@ full-screen passes are spent carefully:
   `PHOTOFRAME_TRANSITION_SCALE=1` (no mips, no render-target usage on the
   canvases): the RSS difference between the two runs should be
   `live_canvases` × 8.3 MB.
-- **Fetching only what a pixel shows.** Wipe, radial-wipe, venetian
-  blinds and e-ink's reveal fetch a plane's color only where its weight is
-  not zero. Away from the front a pixel shows one photo, and whole tiles
-  lie on one side, so the other fetch is skipped. Coverage is always
-  computed. Fade, dissolve and crossfade need both photos everywhere.
 - **The main-pass budget.** Pi measurement, 2026-10-22: at scale 2 the
   upscale costs 10.9 ms median and 11.5 ms at p90 on every frame, so a
   kind holds 60 with no late frames only while its main pass stays under
-  about 5.2 ms at p90. At 1920x1080 the main pass costs about 4.5 ms with
-  almost no arithmetic (fade), and each instruction per pixel adds roughly
-  0.05 ms, so the kinds over budget (radial, e-ink, iris; 5.9–6.4 ms at
-  p90) are trimmed by instructions, not memory:
-  - radial-wipe computes only the distance its shape uses, compares the
-    squared distance against the soft band's bounds
-    (`draw_params::radial_wipe_band`), and takes the square root and the
-    smoothstep only inside the band;
-  - e-ink's reveal is decided per cell of its stripes x stripes grid
-    (the row's stagger, a sine hash of the cell, the progress), so a tiny
-    pass (`fs_eink_mask`, one texel per cell, timed as `gpu_layer_ms`)
-    computes each cell's mask once; `fs_eink` reads its cell's texel and
-    fetches a photo only where its weight is not zero. Its flash frames
-    no longer fetch the next photo, nor the current one under a full
-    flash;
-  - iris computes the outline's smoothstep and the highlight only within
-    the highlight's reach of the outline;
-  - the three composite with `over_background_rgb`: a mix of the two
-    photos never covers more than the larger of their coverages, so its
-    alpha is not computed.
+  about 5.2 ms at p90. At 1920x1080 a two-photo pass with almost no
+  arithmetic (fade) costs about 4.5 ms.
+- **Branch-free transition shaders.** On V3D, keep transition fragment
+  shaders straight-line: a per-pixel branch that skips work costs more
+  than two mip-1 fetches. Every kind fetches both photos and evaluates its
+  smoothsteps on every pixel, even where a weight is zero; nothing tests a
+  soft band or skips a fetch under an opaque layer.
 
-  Checked on the Mac's GPU against the previous shaders over the whole
-  progress range: radial-wipe identical (circle and diamond, 328 frames);
-  iris 2 pixels and e-ink 105 pixels of 64 million 1 LSB away (e-ink's
-  mask is stored as a half float plus its rounding remainder).
+  This was measured, not assumed. Until v1.2.0-rc2 wipe, venetian blinds,
+  radial-wipe, e-ink and iris skipped a photo's fetch where its weight was
+  zero ("whole tiles lie on one side of the front"), and radial-wipe and
+  iris also skipped their smoothsteps outside a soft band. An A/B from one
+  binary (`PHOTOFRAME_PROBE=no-skip`, which compiled every such branch as
+  taken, the same output from straight-line code), Pi 5, scale 2, 6 min
+  each, 2026-10-22:
+
+  | Kind | Main pass median / p90, branched | Straight-line |
+  |---|---|---|
+  | iris (main) | 6.43 / 6.75 ms | 4.89 / 5.06 ms |
+  | radial-wipe | 6.36 / 7.12 ms | 5.27 / 5.68 ms |
+  | wipe | 5.46 / 5.57 ms | 5.05 / 5.26 ms |
+  | venetian blinds | 5.64 / 5.74 ms | 5.07 / 5.22 ms |
+  | fade (control, no branch) | 4.47 ms | 4.36 ms |
+  | push (control) | 4.97 ms | 4.91 ms |
+  | dissolve (control) | 5.39 ms | 5.31 ms |
+  | crossfade-zoom (control) | 5.80 ms | 5.67 ms |
+
+  Straight-line, every kind in the window ran at 60 with no late frames,
+  iris included (57.7 fps, 6 late, branched). At 1080p from mip 1 the
+  fetches are cheap (about 16 MB a frame); the branch tests, the values
+  kept live across them and the divergence within a quad cost 0.4–1.5 ms
+  a frame and saved nothing. Two things that look like skipping stay,
+  because they remove work rather than branch around it:
+  - e-ink's reveal is decided per cell of its stripes x stripes grid (the
+    row's stagger, a sine hash of the cell, the progress), so a tiny pass
+    (`fs_eink_mask`, one texel per cell, timed as `gpu_layer_ms`; about
+    0.02 ms) computes each cell's mask once, stored as a half float plus
+    its rounding remainder, and `fs_eink` reads its cell's texel;
+  - radial-wipe, e-ink and iris composite with `over_background_rgb`: a
+    mix of the two photos never covers more than the larger of their
+    coverages, so the mix's alpha is not computed.
+
+  The iris layer passes keep their early-outs (inside the aperture,
+  beyond the outline's reach): they run at 240x135, where the loop over
+  petals, not the branch, is the cost.
 - **`PHOTOFRAME_PROBE`** (diagnostic, comma-separated; set it in the unit
   with `systemctl edit` and remove it afterwards):
   - `single-sample` compiles the transition shaders with the next photo's
     color replaced by a constant, so every kind reads one photo per pixel.
     Transitions look wrong on purpose. It measures what the second fetch
     costs on the device, with no rebuild.
-  - `no-skip` compiles every per-pixel branch that skips work (a photo
-    fetch whose weight is zero, the smoothsteps outside a soft band:
-    wipe, venetian, radial, e-ink, iris) as taken unconditionally, so each
-    kind runs straight-line with the same output (Mac GPU: identical for
-    wipe, venetian, radial and e-ink; iris 2 pixels of 64 million 1 LSB
-    away). It measures what the branches cost against what they skip,
-    from the same binary and photos.
-  - `native-mip` draws every kind's transition frames except iris at
-    native resolution, sampling the mip level the intermediate would have
-    read (push stays at level 0): one 4K pass instead of a reduced draw
-    plus the 4K upscale, at the same softness. It tests whether one pass
-    beats two: at scale 2 every transition frame costs its draw plus about
-    10.6 ms of upscale, and `fs_rest` at 4K (one read, one 4K write) costs
-    12–13 ms.
+
+  Answered and removed in rc2: `native-mip` (every kind drawn at 4K from
+  mip 1, no intermediate: 16.7–23 ms a frame, worse than draw + upscale
+  for every kind, Pi 2026-10-22) and `no-skip` (the A/B above).
 - **Lead-in frames before a transition (KMS).** The V3D clock idles at
   500 MHz through a dwell and needs 150–200 ms of load to reach 960 MHz.
   The kernel has no devfreq knob for v3d, so this has to be handled in the

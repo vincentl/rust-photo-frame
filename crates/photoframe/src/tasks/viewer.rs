@@ -2142,17 +2142,6 @@ struct Probes {
     /// next plane's color is a constant), to measure what the second fetch
     /// costs. Transitions look wrong on purpose.
     single_sample: bool,
-    /// `native-mip`: every kind but iris draws its transition frames at
-    /// native resolution, sampling the canvas mip level the intermediate
-    /// would have read (push stays at level 0, as it does into the
-    /// intermediate): one pass instead of a reduced-resolution draw plus
-    /// the upscale, at the same softness.
-    native_mip: bool,
-    /// `no-skip`: every per-pixel branch that skips work (a photo fetch
-    /// whose weight is zero, the smoothsteps outside a soft band) is taken
-    /// unconditionally (`PROBE_NO_SKIP` in the shader): the same output from
-    /// straight-line code, to measure what the branches cost.
-    no_skip: bool,
 }
 
 /// The probes named in `value`, and the names it has that are not probes.
@@ -2162,8 +2151,6 @@ fn parse_probes(value: &str) -> (Probes, Vec<&str>) {
     for name in value.split(',').map(str::trim).filter(|n| !n.is_empty()) {
         match name {
             "single-sample" => probes.single_sample = true,
-            "native-mip" => probes.native_mip = true,
-            "no-skip" => probes.no_skip = true,
             other => unknown.push(other),
         }
     }
@@ -2186,17 +2173,6 @@ fn probes() -> Probes {
                 "PHOTOFRAME_PROBE=single-sample: transitions show a flat next photo (diagnostic)"
             );
         }
-        if probes.no_skip {
-            warn!(
-                "PHOTOFRAME_PROBE=no-skip: transitions run without per-pixel skipping (diagnostic)"
-            );
-        }
-        if probes.native_mip {
-            warn!(
-                "PHOTOFRAME_PROBE=native-mip: transitions draw at native resolution from the mips, \
-                 no intermediate (diagnostic)"
-            );
-        }
         probes
     })
 }
@@ -2206,9 +2182,6 @@ fn probe_pipeline_constants(probes: Probes) -> Vec<(&'static str, f64)> {
     let mut constants = Vec::new();
     if probes.single_sample {
         constants.push(("PROBE_SINGLE_SAMPLE", 1.0));
-    }
-    if probes.no_skip {
-        constants.push(("PROBE_NO_SKIP", 1.0));
     }
     constants
 }
@@ -2940,7 +2913,7 @@ fn build_gpu(
         multiview: None,
         cache: None,
     });
-    // PHOTOFRAME_PROBE=single-sample / no-skip (diagnostic): see the
+    // PHOTOFRAME_PROBE=single-sample (diagnostic): see the
     // shader.
     let probe_constants = probe_pipeline_constants(probes());
     let probe_constants = probe_constants.as_slice();
@@ -4393,7 +4366,6 @@ impl App {
                                 uniforms.progress,
                                 screen,
                             );
-                            uniforms.params3 = draw_params::radial_wipe_band(uniforms.params1);
                         }
                         ActiveTransition::VenetianBlinds {
                             stripe_count,
@@ -4531,10 +4503,7 @@ impl App {
                     // transition's final frame render natively.
                     let transition_frame =
                         active_transition.is_some() && !debug_bezier && !final_frame;
-                    // PHOTOFRAME_PROBE=native-mip: natively, from the mips.
-                    let native_mip =
-                        transition_frame && probes().native_mip && draw_kind != DrawKind::Iris;
-                    let half_target = if transition_frame && !native_mip && transition_scale() > 1 {
+                    let half_target = if transition_frame && transition_scale() > 1 {
                         gpu.half_target.as_ref()
                     } else {
                         None
@@ -4545,9 +4514,7 @@ impl App {
                     // 2:1 level softens fine detail; it reads one real plane
                     // per pixel and holds 60 at level 0, so it stays exact
                     // there (Pi, 94094b0).
-                    uniforms.lod = canvas_lod(
-                        (half_target.is_some() || native_mip) && draw_kind != DrawKind::Push,
-                    );
+                    uniforms.lod = canvas_lod(half_target.is_some() && draw_kind != DrawKind::Push);
                     gpu.queue
                         .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
                     if iris_active {
@@ -6061,10 +6028,10 @@ mod tests {
     #[test]
     fn probes_parse_a_comma_list() {
         assert_eq!(parse_probes(""), (Probes::default(), vec![]));
-        let (probes, unknown) = parse_probes("native-mip");
-        assert!(probes.native_mip && !probes.single_sample && unknown.is_empty());
-        let (probes, unknown) = parse_probes(" single-sample , native-mip,bogus,no-skip");
-        assert!(probes.native_mip && probes.single_sample && probes.no_skip);
+        let (probes, unknown) = parse_probes("single-sample");
+        assert!(probes.single_sample && unknown.is_empty());
+        let (probes, unknown) = parse_probes(" single-sample ,bogus,");
+        assert!(probes.single_sample);
         assert_eq!(unknown, vec!["bogus"]);
     }
 
@@ -6305,14 +6272,8 @@ mod tests {
             assert_eq!(ep.stage, naga::ShaderStage::Fragment, "{name}");
             // Resolve the pipeline constants as wgpu does at pipeline
             // creation, for every combination of the compiled-in probes.
-            for (single_sample, no_skip) in
-                [(false, false), (true, false), (false, true), (true, true)]
-            {
-                let probe = Probes {
-                    single_sample,
-                    no_skip,
-                    ..Probes::default()
-                };
+            for single_sample in [false, true] {
+                let probe = Probes { single_sample };
                 let mut constants = naga::back::PipelineConstants::default();
                 for (name, value) in probe_pipeline_constants(probe) {
                     constants.insert(name.to_string(), value);
