@@ -487,6 +487,7 @@ The viewer reads these variables. They are environment, not `config.yaml` keys, 
 | `PHOTOFRAME_PRESENT_MODE` | `fifo`, `mailbox`, `immediate` | `fifo` on KMS; `mailbox` (else the driver's vsync mode) on Wayland |
 | `PHOTOFRAME_TRANSITION_SCALE` | `1`–`4`; the linear downscale of the buffer transitions render into, `1` is native resolution | `2` |
 | `PHOTOFRAME_IRIS_LAYER_SCALE` | `1`–`16`; the iris petal layer's shading resolution (the outline stays crisp at any scale) | `16` |
+| `PHOTOFRAME_UPSCALE` | `bilinear`, `bicubic`, `bicubic-9`; how transition frames are upscaled from the intermediate (see [performance.md](performance.md)) | `bicubic` |
 | `PHOTOFRAME_PROBE` | `single-sample` (diagnostic: transitions read one photo per pixel and look wrong on purpose; see [performance.md](performance.md)); remove after measuring | unset |
 | `PHOTOFRAME_DRM_CONNECTOR` | e.g. `HDMI-A-1` (KMS only; a name no card has is an error) | first connected connector |
 | `PHOTOFRAME_DRM_MODE` | `WxH[@Hz]` (KMS only; must exist) | `3840x2160@60` if offered, else the panel's preferred mode |

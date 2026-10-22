@@ -97,6 +97,60 @@ fn iris_layer_scale() -> u32 {
     *SCALE.get_or_init(|| scale_from_env("PHOTOFRAME_IRIS_LAYER_SCALE", IRIS_LAYER_SCALE, 16))
 }
 
+/// How the reduced-resolution intermediate is upscaled to the surface
+/// (`PHOTOFRAME_UPSCALE`). The upscale pass is bound by its 4K write, not
+/// by its texture reads (Pi, 2026-10-22: a 4K pass with one read costs
+/// 0.14 ms more than one with none), so a sharper reconstruction is cheap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpscaleFilter {
+    /// One bilinear tap: the softest; motion hides it, but the eye tracks a
+    /// slow front (a wide radial wipe) and sees it.
+    Bilinear,
+    /// Catmull-Rom from 5 bilinear taps (the corner taps left out and the
+    /// rest renormalized): nearly the exact cubic.
+    Bicubic,
+    /// Catmull-Rom from 9 bilinear taps: the exact cubic.
+    Bicubic9,
+}
+
+impl UpscaleFilter {
+    const DEFAULT: Self = Self::Bicubic;
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "bilinear" => Some(Self::Bilinear),
+            "bicubic" => Some(Self::Bicubic),
+            "bicubic-9" => Some(Self::Bicubic9),
+            _ => None,
+        }
+    }
+
+    fn entry_point(self) -> &'static str {
+        match self {
+            Self::Bilinear => "fs_blit",
+            Self::Bicubic => "fs_upscale_bicubic",
+            Self::Bicubic9 => "fs_upscale_bicubic9",
+        }
+    }
+}
+
+/// The `PHOTOFRAME_UPSCALE` filter (`bilinear`, `bicubic`, `bicubic-9`),
+/// read once.
+fn upscale_filter() -> UpscaleFilter {
+    static FILTER: std::sync::OnceLock<UpscaleFilter> = std::sync::OnceLock::new();
+    *FILTER.get_or_init(|| {
+        let filter = match std::env::var("PHOTOFRAME_UPSCALE") {
+            Ok(raw) => UpscaleFilter::parse(&raw).unwrap_or_else(|| {
+                warn!(value = %raw, "unknown PHOTOFRAME_UPSCALE; using the default");
+                UpscaleFilter::DEFAULT
+            }),
+            Err(_) => UpscaleFilter::DEFAULT,
+        };
+        info!(filter = ?filter, "viewer_upscale_filter");
+        filter
+    })
+}
+
 /// DRM/KMS: how long before a transition the viewer starts rendering the
 /// resting photo on every refresh (`wake::plan_wake`, "lead-in"). The V3D
 /// clock idles at its lowest step (500 MHz) through a dwell and reaches
@@ -2880,6 +2934,7 @@ fn build_gpu(
         bind_group_layouts: &[&uniform_layout, &img_bind_layout],
         push_constant_ranges: &[],
     });
+    // The upscale of the intermediate (PHOTOFRAME_UPSCALE).
     let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("blit-pipeline"),
         layout: Some(&blit_pipeline_layout),
@@ -2894,7 +2949,7 @@ fn build_gpu(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: Some("fs_blit"),
+            entry_point: Some(upscale_filter().entry_point()),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: None,
@@ -6046,6 +6101,22 @@ mod tests {
     }
 
     #[test]
+    fn upscale_filters_parse_to_their_entry_points() {
+        assert_eq!(UpscaleFilter::DEFAULT, UpscaleFilter::Bicubic);
+        for (value, entry) in [
+            ("bilinear", "fs_blit"),
+            (" bicubic ", "fs_upscale_bicubic"),
+            ("bicubic-9", "fs_upscale_bicubic9"),
+        ] {
+            assert_eq!(
+                UpscaleFilter::parse(value).map(UpscaleFilter::entry_point),
+                Some(entry)
+            );
+        }
+        assert_eq!(UpscaleFilter::parse("lanczos"), None);
+    }
+
+    #[test]
     fn probes_parse_a_comma_list() {
         assert_eq!(parse_probes(""), (Probes::default(), vec![]));
         let (probes, unknown) = parse_probes("single-sample");
@@ -6282,7 +6353,14 @@ mod tests {
         .validate(&module)
         .expect("viewer_quad.wgsl validates");
         let mut entry_points: Vec<&str> = DrawKind::ALL.iter().map(|k| k.entry_point()).collect();
-        entry_points.extend(["fs_iris_cover", "fs_iris_layer", "fs_eink_mask", "fs_blit"]);
+        entry_points.extend([
+            "fs_iris_cover",
+            "fs_iris_layer",
+            "fs_eink_mask",
+            "fs_blit",
+            "fs_upscale_bicubic",
+            "fs_upscale_bicubic9",
+        ]);
         for name in entry_points {
             let ep = module
                 .entry_points

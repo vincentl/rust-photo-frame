@@ -516,6 +516,32 @@ full-screen passes are spent carefully:
   progress-1 image on a full-screen canvas is the next photo; dissolve and
   venetian blinds, whose soft edges never quite close at progress 1, now
   reach it one frame earlier instead of on the first dwell frame.
+
+  **Where transition-time softness comes from.** Not from aliasing (a
+  radial wipe's default feather is a tenth of the diagonal, about 880 px
+  at 4K), but from the 2x upscale of the intermediate: the photos are read
+  from their mip 1 at 1920x1080 and reconstructed to 4K. The eye tracks a
+  slow front and sees that softness, then the native final frame snaps the
+  photo to full sharpness. The upscale reconstructs with a Catmull-Rom
+  cubic (`PHOTOFRAME_UPSCALE`, default `bicubic`: 5 bilinear taps, the
+  corner taps of the exact 9-tap form left out and the rest renormalized;
+  `bicubic-9` is exact; `bilinear` is the single tap of v1.2.0-rc2). The
+  upscale pass is bound by its 4K write, not its reads (`frametest --drm`:
+  a 4K pass with one texture read costs 0.14 ms more than one with none),
+  so the extra taps should be nearly free.
+
+  Mac GPU, five project photos (two native 4K showcase photos, a 3600x2000
+  one, two 4032x3024 library photos; each cover-cropped to 3840x2160), the
+  viewer's own mip 1 upscaled 2x against the native 4K canvas, sRGB 8-bit:
+
+  | Upscale | Mean abs error | Pixels off by > 8 LSB |
+  |---|---|---|
+  | bilinear | 4.32 LSB | 15.8% |
+  | bicubic (5 taps) | 3.47 LSB | 12.7% |
+  | bicubic-9 | 3.49 LSB | 12.8% |
+
+  The cubic cuts the error by a fifth on every photo; what remains is the
+  detail mip 1 never held. The 5-tap form is as close as the exact one.
 - **Iris petals are a signed-distance layer at 1/`IRIS_LAYER_SCALE`
   (default 16)** (`PHOTOFRAME_IRIS_LAYER_SCALE`, 1–16, to override). The
   petal math runs on CPU-precomputed per-frame constants and avoids

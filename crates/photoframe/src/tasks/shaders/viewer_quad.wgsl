@@ -287,12 +287,93 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
 }
 
 // Upscales the half-resolution transition intermediate (bound at group 1)
-// to the swapchain. Transitions render at reduced resolution because the
-// 4K frame cost on the Pi is dominated by per-pixel fill; resting photos
-// are still drawn at native resolution by the direct fs_main path.
+// to the swapchain with one bilinear tap (PHOTOFRAME_UPSCALE=bilinear), and
+// writes each canvas mip level from the level above it at upload (2:1, where
+// the bilinear tap is a box filter). Transitions render at reduced
+// resolution because the 4K frame cost on the Pi is dominated by per-pixel
+// fill; resting photos are still drawn at native resolution.
 @fragment
 fn fs_blit(in: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(textureSample(cur_tex, cur_samp, in.screen_uv).rgb, 1.0);
+}
+
+// Catmull-Rom (bicubic) reconstruction of the intermediate, from bilinear
+// taps of the linear-filtering, edge-clamped sampler. Per axis the cubic
+// weighs the four texels around `uv` by w0 < 0, w1 > 0, w2 > 0, w3 < 0; the two
+// inner texels share one tap placed between them in proportion to their
+// weights (w1 + w2 at offset w2 / (w1 + w2)), the outer two get a tap each,
+// so 3 x 3 = 9 taps reproduce the 16-texel cubic exactly. The four corner
+// taps carry the products of two outer weights (at most 1/64 each, and
+// positive), so leaving them out and renormalizing (5 taps) is the common
+// close approximation. Branch-free: the taps are fixed.
+struct CatmullRomTaps {
+  t0: vec2<f32>,
+  t12: vec2<f32>,
+  t3: vec2<f32>,
+  w0: vec2<f32>,
+  w12: vec2<f32>,
+  w3: vec2<f32>,
+};
+
+fn catmull_rom_taps(uv: vec2<f32>) -> CatmullRomTaps {
+  let size = vec2<f32>(textureDimensions(cur_tex));
+  let texel = 1.0 / size;
+  let pos = uv * size;
+  // The texel center at or before `pos`, and the position past it.
+  let p1 = floor(pos - 0.5) + 0.5;
+  let f = pos - p1;
+  let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+  let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+  let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+  let w3 = f * f * (-0.5 + 0.5 * f);
+  let w12 = w1 + w2;
+  return CatmullRomTaps(
+    (p1 - 1.0) * texel,
+    (p1 + w2 / w12) * texel,
+    (p1 + 2.0) * texel,
+    w0,
+    w12,
+    w3
+  );
+}
+
+fn intermediate_tap(x: f32, y: f32) -> vec3<f32> {
+  return textureSampleLevel(cur_tex, cur_samp, vec2<f32>(x, y), 0.0).rgb;
+}
+
+// The center and the four edge taps, and their total weight.
+fn catmull_rom_cross(t: CatmullRomTaps) -> vec4<f32> {
+  let c = intermediate_tap(t.t12.x, t.t12.y) * (t.w12.x * t.w12.y)
+    + intermediate_tap(t.t0.x, t.t12.y) * (t.w0.x * t.w12.y)
+    + intermediate_tap(t.t3.x, t.t12.y) * (t.w3.x * t.w12.y)
+    + intermediate_tap(t.t12.x, t.t0.y) * (t.w12.x * t.w0.y)
+    + intermediate_tap(t.t12.x, t.t3.y) * (t.w12.x * t.w3.y);
+  let w = t.w12.x * t.w12.y
+    + t.w0.x * t.w12.y
+    + t.w3.x * t.w12.y
+    + t.w12.x * t.w0.y
+    + t.w12.x * t.w3.y;
+  return vec4<f32>(c, w);
+}
+
+// PHOTOFRAME_UPSCALE=bicubic (the default): 5 taps, renormalized.
+@fragment
+fn fs_upscale_bicubic(in: VSOut) -> @location(0) vec4<f32> {
+  let cross = catmull_rom_cross(catmull_rom_taps(in.screen_uv));
+  return vec4<f32>(cross.rgb / cross.a, 1.0);
+}
+
+// PHOTOFRAME_UPSCALE=bicubic-9: all 9 taps, the exact cubic (the weights
+// sum to 1).
+@fragment
+fn fs_upscale_bicubic9(in: VSOut) -> @location(0) vec4<f32> {
+  let t = catmull_rom_taps(in.screen_uv);
+  let cross = catmull_rom_cross(t);
+  let corners = intermediate_tap(t.t0.x, t.t0.y) * (t.w0.x * t.w0.y)
+    + intermediate_tap(t.t3.x, t.t0.y) * (t.w3.x * t.w0.y)
+    + intermediate_tap(t.t0.x, t.t3.y) * (t.w0.x * t.w3.y)
+    + intermediate_tap(t.t3.x, t.t3.y) * (t.w3.x * t.w3.y);
+  return vec4<f32>(cross.rgb + corners, 1.0);
 }
 
 // The common tail of every photo pass: composite over the background here
