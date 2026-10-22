@@ -90,11 +90,6 @@ fn iris_layer_scale() -> u32 {
     *SCALE.get_or_init(|| scale_from_env("PHOTOFRAME_IRIS_LAYER_SCALE", IRIS_LAYER_SCALE, 8))
 }
 
-/// Past this (eased) progress the transition renders at native resolution
-/// again, so the incoming photo settles into full sharpness instead of
-/// popping when the first dwell frame lands.
-const TRANSITION_FULL_RES_TAIL: f32 = 0.99;
-
 /// DRM/KMS: how long before a transition the viewer starts rendering the
 /// resting photo on every refresh (`wake::plan_wake`, "lead-in"). The V3D
 /// clock idles at its lowest step (500 MHz) through a dwell and reaches
@@ -157,6 +152,41 @@ pub(super) struct TexturePlane {
     pub(super) bind: wgpu::BindGroup,
     pub(super) w: u32,
     pub(super) h: u32,
+    /// Photo canvases only: their GPU bytes, counted while the plane lives
+    /// (held for its `Drop`).
+    pub(super) _gpu_bytes: Option<CanvasBytes>,
+}
+
+/// The GPU memory held by photo canvases: every level of every canvas
+/// alive, counted at upload and released when its plane is dropped. Logged
+/// at each upload (`canvas_upload`, debug) so the viewer's RSS on the Pi
+/// can be checked against what the canvases account for.
+pub(super) struct CanvasBytes(u64);
+
+static LIVE_CANVASES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LIVE_CANVAS_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl CanvasBytes {
+    fn track(bytes: u64) -> Self {
+        LIVE_CANVASES.fetch_add(1, Ordering::Relaxed);
+        LIVE_CANVAS_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        Self(bytes)
+    }
+}
+
+impl Drop for CanvasBytes {
+    fn drop(&mut self) {
+        LIVE_CANVASES.fetch_sub(1, Ordering::Relaxed);
+        LIVE_CANVAS_BYTES.fetch_sub(self.0, Ordering::Relaxed);
+    }
+}
+
+/// Bytes of an RGBA8 texture with `levels` mip levels (each level halves,
+/// rounding down, at least 1).
+fn rgba8_bytes(width: u32, height: u32, levels: u32) -> u64 {
+    (0..levels)
+        .map(|l| u64::from((width >> l).max(1)) * u64::from((height >> l).max(1)) * 4)
+        .sum()
 }
 
 pub(super) struct ImgTex {
@@ -1846,7 +1876,9 @@ fn probe_single_sample() -> bool {
     static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *PROBE.get_or_init(|| match std::env::var("PHOTOFRAME_PROBE") {
         Ok(v) if v == "single-sample" => {
-            warn!("PHOTOFRAME_PROBE=single-sample: transitions show a flat next photo (diagnostic)");
+            warn!(
+                "PHOTOFRAME_PROBE=single-sample: transitions show a flat next photo (diagnostic)"
+            );
             true
         }
         Ok(other) => {
@@ -1937,10 +1969,25 @@ fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
             },
         ],
     });
+    let bytes = rgba8_bytes(width, height, mip_levels);
+    let account = CanvasBytes::track(bytes);
+    debug!(
+        width,
+        height,
+        mip_levels,
+        canvas_mb = format_args!("{:.1}", bytes as f64 / 1e6),
+        live_canvases = LIVE_CANVASES.load(Ordering::Relaxed),
+        live_canvas_mb = format_args!(
+            "{:.1}",
+            LIVE_CANVAS_BYTES.load(Ordering::Relaxed) as f64 / 1e6
+        ),
+        "canvas_upload"
+    );
     Some(TexturePlane {
         bind,
         w: width,
         h: height,
+        _gpu_bytes: Some(account),
     })
 }
 
@@ -2641,7 +2688,12 @@ fn build_gpu(
                 },
             ],
         });
-        TexturePlane { bind, w, h }
+        TexturePlane {
+            bind,
+            w,
+            h,
+            _gpu_bytes: None,
+        }
     };
 
     let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
@@ -4037,7 +4089,7 @@ impl App {
                             uniforms.params1 = [r_in - e, color[0], color[1], color[2]];
                             // Petal-layer upscale factor: keeps the edge
                             // feather at least one layer texel wide.
-                            uniforms.params3[0] = iris_layer_scale() as f32;
+                            uniforms.params3 = [iris_layer_scale() as f32, r_mid, 0.5 * r_in, r_in];
                             let (s_psi, c_psi) = psi.sin_cos();
                             for i in 0..n {
                                 let ai = std::f32::consts::TAU * i as f32 / n as f32 + spin;
@@ -4064,7 +4116,31 @@ impl App {
                     should_draw_quad = true;
                 }
 
-                if draw_kind == DrawKind::Rest && have_next {
+                // A transition's final frame (drawn for progress 1) is its
+                // end state, the next photo at rest, drawn natively with
+                // fs_rest: the switch from the half-res intermediate to
+                // native resolution happens on exactly one frame, and that
+                // frame costs a resting frame, not the kind's shader at 4K.
+                // (Previously every frame past *eased* progress 0.99 was
+                // native, which smoothstep easing makes the last ~6% of a
+                // transition: e-ink missed a refresh on each of them.) On
+                // full-screen canvases every kind's progress-1 image is the
+                // next photo; dissolve and venetian blinds, whose soft edges
+                // never quite finish at progress 1, now reach it one frame
+                // earlier instead of on the first dwell frame.
+                let final_frame = active_transition.is_some()
+                    && !debug_bezier
+                    && uniforms.progress >= 1.0
+                    && have_next;
+                if final_frame {
+                    draw_kind = DrawKind::Rest;
+                    current_dest = next_dest;
+                    current_bind = next_bind;
+                    next_dest = [0.0; 4];
+                    next_bind = &gpu.blank_plane.bind;
+                    should_draw_quad = true;
+                }
+                if draw_kind == DrawKind::Rest && have_next && !final_frame {
                     // fs_rest draws the current plane only; a next photo
                     // staged at rest still counts for coverage, as it always
                     // has: a fade at progress 0 is exactly that.
@@ -4078,12 +4154,11 @@ impl App {
                 if should_draw_quad {
                     let iris_active = draw_kind == DrawKind::Iris;
                     // Transitions render into the reduced-resolution
-                    // intermediate and get upsampled; resting photos
-                    // and the tail of a transition render natively so
-                    // the incoming photo settles into full sharpness.
+                    // intermediate and get upsampled; resting photos and a
+                    // transition's final frame render natively.
                     let half_target = if active_transition.is_some()
                         && !debug_bezier
-                        && uniforms.progress < TRANSITION_FULL_RES_TAIL
+                        && !final_frame
                         && transition_scale() > 1
                     {
                         gpu.half_target.as_ref()
@@ -4092,7 +4167,11 @@ impl App {
                     };
                     // Into the intermediate the planes are read from the
                     // mip level that matches its resolution.
-                    uniforms.lod = canvas_lod(half_target.is_some());
+                    // Push moves its planes off the canvas grid, where the
+                    // 2:1 level softens fine detail; it reads one real plane
+                    // per pixel and holds 60 at level 0, so it stays exact
+                    // there (Pi, 94094b0).
+                    uniforms.lod = canvas_lod(half_target.is_some() && draw_kind != DrawKind::Push);
                     gpu.queue
                         .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
                     if iris_active {
@@ -5532,6 +5611,15 @@ mod tests {
     }
 
     #[test]
+    fn canvas_bytes_count_every_level() {
+        let one = 3840u64 * 2160 * 4;
+        assert_eq!(rgba8_bytes(3840, 2160, 1), one);
+        // Level 1 adds a quarter: +25% at scale 2.
+        assert_eq!(rgba8_bytes(3840, 2160, 2), one + one / 4);
+        assert_eq!(rgba8_bytes(3840, 2160, 3), one + one / 4 + one / 16);
+    }
+
+    #[test]
     fn canvases_carry_the_levels_the_transition_scale_reads() {
         assert_eq!(canvas_mip_levels(3840, 2160, 1), 1);
         assert_eq!(canvas_mip_levels(3840, 2160, 2), 2);
@@ -5548,7 +5636,10 @@ mod tests {
         for &kind in TransitionKind::ALL {
             let draw = DrawKind::for_transition(kind);
             assert!(DrawKind::ALL.contains(&draw), "{kind:?} -> {draw:?}");
-            assert!(seen.insert(draw), "{kind:?} shares {draw:?} with another kind");
+            assert!(
+                seen.insert(draw),
+                "{kind:?} shares {draw:?} with another kind"
+            );
             assert_ne!(draw, DrawKind::Rest);
             assert_ne!(draw, DrawKind::DebugBezier);
         }

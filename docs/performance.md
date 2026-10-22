@@ -475,14 +475,31 @@ full-screen passes are spent carefully:
   is still is the product; nothing below applies to dwell frames.
 - **Transition frames render at 1/`TRANSITION_HALF_SCALE` (default 2)**
   into an offscreen intermediate and are upsampled — quarter the fill cost,
-  hidden by motion. The final ~1% of each transition renders native so the
-  incoming photo settles in sharp. Override per deployment with
-  `PHOTOFRAME_TRANSITION_SCALE` (1 bypasses the intermediate entirely).
+  hidden by motion. Only a transition's final frame (progress 1) renders
+  native: it is the next photo at rest, drawn by `fs_rest`, so the photo
+  settles in sharp and that frame costs what a dwell frame costs. Override
+  per deployment with `PHOTOFRAME_TRANSITION_SCALE` (1 bypasses the
+  intermediate entirely).
+
+  Until v1.2 the native tail was every frame past *eased* progress 0.99.
+  Smoothstep easing reaches 0.99 at about 94% of the time, so the last ~6%
+  of each transition's frames ran the kind's own shader at 4K. E-ink, the heaviest, missed a refresh on each of
+  them (33 ms frames at the end of the per-frame audit). Every kind's
+  progress-1 image on a full-screen canvas is the next photo; dissolve and
+  venetian blinds, whose soft edges never quite close at progress 1, now
+  reach it one frame earlier instead of on the first dwell frame.
 - **Iris petals render at 1/`IRIS_LAYER_SCALE` (default 4)** in their own
   premultiplied layer (`PHOTOFRAME_IRIS_LAYER_SCALE` to override). The
   petal SDF math runs on CPU-precomputed per-frame constants and avoids
   dynamically indexed local arrays, which the V3D compiler demotes to slow
-  per-pixel scratch memory. The layer is `Rgba16Float`, not 8-bit: petals
+  per-pixel scratch memory. The full-screen `fs_iris` is a plain composite
+  of the two photos and the layer, with no loop; everything petal-related
+  is in `fs_iris_layer`. Its petal loop carries only the nearest edge
+  distance and a 16-bit "inside" mask; which petal is on top and how many
+  cover the pixel are read from the mask after the loop (`firstLeadingBit`,
+  `countOneBits`), so few values stay live across iterations and the layer
+  can compile at 4 threads. Output is bit-identical to the earlier loop
+  (Mac GPU, 36 frames across petal counts and progress). The layer is `Rgba16Float`, not 8-bit: petals
   are very dark in linear light, so a smooth shading gradient spans only a
   few 8-bit levels and visibly bands — half-float has the dark-range
   precision to keep it smooth, at negligible cost on a quarter-res layer.
@@ -547,20 +564,29 @@ full-screen passes are spent carefully:
   linear light, one `fs_blit` pass per level. Transition passes sample the
   level that matches the intermediate (`textureSampleLevel` at
   `U.lod = log2(scale)`). Native frames (resting photos, a transition's
-  tail) stay at level 0, unchanged.
+  final frame) stay at level 0, unchanged, and so does push: it reads one
+  plane per pixel, already held 60 at level 0, and at level 0 its moving
+  planes keep their sharpness.
 
   Output, checked on the Mac's GPU against v1.2 builds:
   - native frames are identical;
   - a screen-sized canvas drawn full-screen (the default layout) is within
     1 LSB for every kind whose planes stay put;
-  - planes that move (push) or zoom (crossfade-zoom) land between canvas
-    texels, where the old 2:1 bilinear read undersampled level 0 and the
-    mip is a proper prefilter. Those frames are slightly softer, by up to
-    about 20 LSB on fine detail.
+  - planes that zoom (crossfade-zoom) land between canvas texels, where
+    the old 2:1 bilinear read undersampled level 0 and the mip is a proper
+    prefilter. Those frames are slightly softer, by up to about 20 LSB on
+    fine detail. Push would be too, which is why it stays at level 0.
 
   Memory: +25% per canvas at scale 2 (8.3 MB on a 33 MB 4K canvas), +31% at
   scale 4. That is about +40 MB with the default preload of three plus the
-  current and next photos.
+  current and next photos. With `RUST_LOG=photoframe=debug` each upload
+  logs `canvas_upload` with the canvas's bytes (every level) and the live
+  total over all canvases (`live_canvases`, `live_canvas_mb`), so a
+  process's RSS can be set against what the canvases account for. The
+  mips' own share is isolated by running once with
+  `PHOTOFRAME_TRANSITION_SCALE=1` (no mips, no render-target usage on the
+  canvases): the RSS difference between the two runs should be
+  `live_canvases` × 8.3 MB.
 - **Fetching only what a pixel shows.** Wipe, radial-wipe and venetian
   blinds fetch a plane's color only where its weight is not zero. Away
   from the front a pixel shows one photo, and whole tiles lie on one side,

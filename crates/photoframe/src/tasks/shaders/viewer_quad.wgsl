@@ -161,7 +161,7 @@ fn planes_for_weight(in: VSOut, t: f32) -> PlanePair {
 // P.petals_a / P.petals_b. Returns (distance, radius about the petal's
 // annulus center). On-screen the only petal boundaries are the inner arc and
 // the two end caps, so this band+cap distance is exact for visible pixels.
-fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> vec2<f32> {
+fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> f32 {
   let a = P.petals_a[i];
   let b = P.petals_b[i];
   let v = p - a.xy;
@@ -178,7 +178,7 @@ fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> vec2<f32> {
     // Within the petal's angular span: the annular band.
     d = abs(r - r_mid) - w;
   }
-  return vec2<f32>(d, r);
+  return d;
 }
 
 // Renders the iris petals (shape + shading, premultiplied alpha) into a
@@ -190,7 +190,14 @@ fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> vec2<f32> {
 // stays at least one layer texel wide.
 // params0 = (blades, petal_sheen, overlap_shadow, photo_swap_mix)
 // params1 = (open_radius_px, color.r, color.g, color.b)
-// params3 = (layer_scale, unused, unused, unused)
+// params3 = (layer_scale, r_mid, half band width w, r_in): the petal ring's
+// geometry, the same for every pixel, from the CPU.
+//
+// Register pressure decides this shader's speed on V3D (it compiled at 2
+// threads with 33 temporaries, Pi 2026-10-21), so the loop over petals
+// carries only the nearest distance and a bitmask of covered petals. The
+// topmost petal and the covered count come from the mask afterwards with
+// bit operations; they equal the old per-iteration bookkeeping exactly.
 @fragment
 fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   let screen_pos = in.screen_uv * U.screen_size;
@@ -204,9 +211,9 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   if (length(p) < U.params1.x - aa) {
     return vec4<f32>(0.0);
   }
-  let r_in = 1.02 * 0.5 * length(U.screen_size);
-  let r_mid = 1.5 * r_in;
-  let w = 0.5 * r_in;
+  let r_mid = U.params3.y;
+  let w = U.params3.z;
+  let r_in = U.params3.w;
   // No local arrays: dynamically indexed function-scope arrays get demoted
   // to per-pixel scratch memory on V3D, which costs far more than
   // recomputing the few distances needed after the loop.
@@ -214,23 +221,23 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   // always form one contiguous run, so the topmost is the covered petal
   // whose successor is uncovered.
   var d_min = 1e9;
-  var d_first = 0.0;
-  var d_prev = 0.0;
-  var top: i32 = 0;
-  var covered_count = 0;
+  var covered = 0u;
   for (var i: i32 = 0; i < 16; i++) {
     if (i >= n) { break; }
-    let d = iris_petal(i, p, r_mid, w).x;
+    let d = iris_petal(i, p, r_mid, w);
     d_min = min(d_min, d);
-    if (d < 0.0) { covered_count = covered_count + 1; }
-    if (i == 0) {
-      d_first = d;
-    } else if (d_prev < 0.0 && d >= 0.0) {
-      top = i - 1;
-    }
-    d_prev = d;
+    covered = covered | (select(0u, 1u, d < 0.0) << u32(i));
   }
-  if (d_prev < 0.0 && d_first >= 0.0) { top = n - 1; }
+  // Bit j of `succ` is petal (j + 1) mod n covered; the candidates are
+  // covered petals with an uncovered successor. The old loop kept the last
+  // candidate in index order, with the wrap-around candidate n - 1 winning,
+  // which is the highest set bit; none (all or no petals covered) gives 0.
+  let un = u32(n);
+  let all_petals = (1u << un) - 1u;
+  let succ = ((covered >> 1u) | (covered << (un - 1u))) & all_petals;
+  let candidates = covered & ~succ;
+  let top = select(0, i32(firstLeadingBit(candidates)), candidates != 0u);
+  let covered_count = i32(countOneBits(covered));
   let cov = 1.0 - smoothstep(-aa, aa, d_min);
   if (cov <= 0.0) {
     return vec4<f32>(0.0);
@@ -252,8 +259,8 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   let tone = max(1.0 + contrast * IRIS_SHEEN_MAX * P.petals_b[top].z * var_scale, 0.0);
   // Soft shadow cast by the petals stacked above the top one.
   let shadow_w = max(0.012 * r_in, 4.0);
-  let dn1 = max(iris_petal(j1, p, r_mid, w).x, 0.0);
-  let dn2 = max(iris_petal(j2, p, r_mid, w).x, 0.0);
+  let dn1 = max(iris_petal(j1, p, r_mid, w), 0.0);
+  let dn2 = max(iris_petal(j2, p, r_mid, w), 0.0);
   let occ = 0.5 * (1.0 - smoothstep(0.0, shadow_w, dn1))
     + 0.22 * (1.0 - smoothstep(0.0, shadow_w * 0.6, dn2));
   // Thin edge highlight, also under petal_sheen so 0 is perfectly flat.
