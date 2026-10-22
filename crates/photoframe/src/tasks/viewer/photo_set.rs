@@ -1,26 +1,31 @@
 //! A photo as a set of windows (`local-markdown/p1-pairing-design.md` §5).
 //!
-//! Every mat kind places `n ≥ 1` windows inside the rectangle it already
-//! computes for the photo. `n = 1` is the solo code path, bit-identical to
-//! the matting worker before pairing (invariant C1, tested against goldens);
-//! `n = 2` is a pair screen. The rules, by name:
+//! Every mat kind draws `n ≥ 1` windows in the photo space it already
+//! computes. `n = 1` is the solo code path, bit-identical to the matting
+//! worker before pairing (invariant C1, tested against goldens); `n = 2` is a
+//! pair screen, laid out explicitly in that space. The rules, by name:
 //!
-//! - **Logical shape.** Members are scaled to the smaller of their decoded
-//!   heights `h₀` and set side by side with a gap of `g·h₀`, where
-//!   `g = r·m/(1 − 2m)` (`r` = `pairing.bar-ratio`, `m` the mat's margin).
-//!   The mat code fits that logical size with its existing margin and
-//!   max-upscale logic; for pairable members the fit is height-bound (C2), so
-//!   the drawn bar is `r × border` (`border = H_c·m`).
-//! - **Windows.** At the fitted height `H`: a left window `(round(H·a_L), H)`,
-//!   a bar of `round(g·H)`, a right window `(round(H·a_R), H)`, centred on the
-//!   canvas. Studio and passe-partout cut a bevel `b` around each window, so
-//!   their bar is `round(g·H) + ⌈2b⌉`: the flat board between the two bevels is
-//!   `r × border`, like the flat board outside them (`border`), and the
-//!   logical shape includes the two bevels so the fit stays height-bound. The aspects `a_i` are each photo's own (`source_size`), never its
-//!   decoded buffer's, so a DCT-scaled decode lays out exactly as a full one.
-//!   The bar is exact; the rounding of the three widths goes to the outer mat
-//!   (at most a pixel a side). The first appearance goes on the left. **No
-//!   cropping**: different aspects keep their full frame.
+//! - **Height.** With `a_L`, `a_R` the members' aspects, `b` the mat's side
+//!   margin (`minimum-mat-percentage` of the canvas width, as the solo fit
+//!   reserves it), `r` = `pairing.bar-ratio` and `β` the bevel a studio or
+//!   passe-partout mat cuts around each window (0 elsewhere), the pair's
+//!   height is the solo fit's
+//!   `H = min(avail_h, (W_c − (2 + r)·b − 4β) / (a_L + a_R), u·h₀)`: the
+//!   mat's own available height (so a pairable member keeps its solo height,
+//!   C2), the width that leaves each side margin at least `b`, and the
+//!   max-upscale cap on the smaller decoded height `h₀`, exactly as the solo
+//!   fit applies them.
+//! - **Windows.** A left window `(round(H·a_L), H)` and a right window
+//!   `(round(H·a_R), H)`, centred vertically. The horizontal slack
+//!   `S = W_c − w_L − w_R − 4β` is shared between the left margin, the bar and
+//!   the right margin with weights `1 : r : 1`: the bar is `round(r·S/(2 + r))`
+//!   (plus `⌈2β⌉` for the two inner bevels), the rounding of the widths goes
+//!   to the outer mat (so a margin can fall up to a pixel short of `b` at the
+//!   width bound), and `r = 0` puts the photos edge to edge. The aspects
+//!   `a_i` are each photo's own (`source_size`),
+//!   never its decoded buffer's, so a DCT-scaled decode lays out exactly as a
+//!   full one. The first appearance goes on the left. **No cropping**:
+//!   different aspects keep their full frame.
 //! - **Drawing.** Each member is resized from its own decoded pixels straight
 //!   to its window (C3: no resampling step a solo photo of the same mat kind
 //!   does not have).
@@ -50,29 +55,49 @@ pub(super) struct Window {
 /// as decoded, each with its own aspect (from `source_size`).
 pub(super) struct PhotoSet {
     members: Vec<(RgbaImage, f32)>,
-    /// `g`: the center bar as a fraction of photo height (unused for n = 1).
-    bar_fraction: f32,
+    /// How a pair shares the mat (unused for n = 1).
+    spacing: PairSpacing,
 }
 
-/// `g = r·m/(1 − 2m)`: the center bar as a fraction of photo height for bar
-/// ratio `r` and mat margin `m`.
-pub(super) fn bar_fraction(bar_ratio: f32, margin: f32) -> f32 {
-    bar_ratio * margin / (1.0 - 2.0 * margin)
+/// A pair's share of the mat: `r` = `pairing.bar-ratio`, the bar's weight
+/// against each side margin, and `b`, the mat's side margin in canvas pixels
+/// (`minimum-mat-percentage` of the canvas width, what the solo fit reserves
+/// on each side), the floor under each side margin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PairSpacing {
+    pub bar_ratio: f32,
+    pub border: f32,
 }
 
-/// The bevel a studio or passe-partout mat cuts around each window, and the
-/// height of the photo space it fits in (`H_c` minus margins and bevels).
+impl PairSpacing {
+    /// `r` and `b` for `bar_ratio` on a `canvas` matted with `margin`
+    /// (`minimum-mat-percentage / 100`).
+    pub(super) fn new(bar_ratio: f32, margin: f32, canvas: (u32, u32)) -> Self {
+        Self {
+            bar_ratio: bar_ratio.max(0.0),
+            border: margin.max(0.0) * canvas.0 as f32,
+        }
+    }
+}
+
+/// The space a mat offers a pair: the canvas, the height the solo fit would
+/// allow (the canvas less the mat's vertical margins and bevels, clamped as
+/// that mat clamps it), the bevel it cuts around each window (0 for overlay
+/// kinds) and the max-upscale factor.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Bevel {
-    pub px: f32,
-    pub space_h: f32,
+pub(super) struct PhotoSpace {
+    pub canvas_w: u32,
+    pub canvas_h: u32,
+    pub avail_h: f32,
+    pub bevel_px: f32,
+    pub max_upscale: f32,
 }
 
-impl Bevel {
-    /// The bevels' share of the bar, in pixels: both sides, rounded up so
-    /// each bevel fits whole (the renderer clamps a bevel to half the bar).
-    fn bar_px(self) -> u32 {
-        (2.0 * self.px.max(0.0)).ceil() as u32
+impl PhotoSpace {
+    /// The two inner bevels' share of the bar, in pixels, rounded up so each
+    /// bevel fits whole (the renderer clamps a bevel to half the bar).
+    fn bar_bevels(&self) -> u32 {
+        (2.0 * self.bevel_px.max(0.0)).ceil() as u32
     }
 }
 
@@ -86,7 +111,10 @@ impl PhotoSet {
         let aspect = source_aspect(photo.dimensions());
         Self {
             members: vec![(photo, aspect)],
-            bar_fraction: 0.0,
+            spacing: PairSpacing {
+                bar_ratio: 0.0,
+                border: 0.0,
+            },
         }
     }
 
@@ -94,14 +122,14 @@ impl PhotoSet {
     pub(super) fn pair(
         (left, left_size): (RgbaImage, (u32, u32)),
         (right, right_size): (RgbaImage, (u32, u32)),
-        bar_fraction: f32,
+        spacing: PairSpacing,
     ) -> Self {
         Self {
             members: vec![
                 (left, source_aspect(left_size)),
                 (right, source_aspect(right_size)),
             ],
-            bar_fraction,
+            spacing,
         }
     }
 
@@ -119,46 +147,50 @@ impl PhotoSet {
             .max(1)
     }
 
-    /// **Logical shape**: the size the mat code fits. n = 1: the photo's
-    /// decoded size (the solo path); n = 2: the members at `h₀`, side by side
-    /// with a gap of `g·h₀`, plus the two bevels (scaled to `h₀`) for a
-    /// bevelled mat.
-    pub(super) fn logical_size(&self, bevel: Option<Bevel>) -> (u32, u32) {
-        if !self.is_pair() {
-            return self.members[0].0.dimensions();
-        }
-        let h0 = self.common_height();
-        let aspects: f32 = self.members.iter().map(|(_, a)| a).sum();
-        let bevels = bevel.map_or(0.0, |b| b.bar_px() as f32 / b.space_h.max(1.0));
-        let w = (h0 as f32 * (aspects + self.bar_fraction + bevels))
-            .round()
-            .max(1.0);
-        (w as u32, h0)
+    /// n = 1: the photo's decoded size, which the solo path fits as before.
+    pub(super) fn solo_size(&self) -> (u32, u32) {
+        debug_assert!(!self.is_pair());
+        self.members[0].0.dimensions()
     }
 
-    /// **Windows** for the fitted rect: n = 1, the rect itself; n = 2, the
-    /// members at the rect's height `H` with a bar of `round(g·H)` (plus both
-    /// bevels for a bevelled mat) between them, centred on a canvas
-    /// `canvas_w` wide.
-    pub(super) fn windows(&self, rect: Window, canvas_w: u32, bevel: Option<Bevel>) -> Vec<Window> {
-        if !self.is_pair() {
-            return vec![rect];
+    /// n = 2: **Height** and **Windows** in `space` (the module doc). The
+    /// height is the solo fit's, `round(h₀·s)` for the scale
+    /// `s = min(avail_h/h₀, avail_w/((a_L + a_R)·h₀), u)` with
+    /// `avail_w = W_c − (2 + r)·b − 4β`, so a height-bound pair is exactly as
+    /// tall as its members alone on this mat. The slack left after the two
+    /// windows and the four bevels is shared `1 : r : 1` between the left
+    /// margin, the bar and the right margin.
+    pub(super) fn pair_windows(&self, space: PhotoSpace) -> Vec<Window> {
+        debug_assert!(self.is_pair());
+        let (a_left, a_right) = (self.members[0].1, self.members[1].1);
+        let aspects = (a_left + a_right).max(f32::EPSILON);
+        let h0 = self.common_height() as f32;
+        let PairSpacing {
+            bar_ratio: r,
+            border,
+        } = self.spacing;
+        let bar_bevels = space.bar_bevels();
+        let bevels = 2.0 * space.bevel_px.max(0.0) + bar_bevels as f32;
+        let avail_w = (space.canvas_w as f32 - (2.0 + r) * border - bevels).max(1.0);
+        let avail_h = space.avail_h.max(1.0);
+        let mut scale = (avail_h / h0)
+            .min(avail_w / (aspects * h0))
+            .min(space.max_upscale.max(1.0));
+        if !scale.is_finite() || scale <= 0.0 {
+            scale = 1.0;
         }
-        let h = rect.h;
+        let h = ((h0 * scale).round() as u32).clamp(1, space.canvas_h.max(1));
         let width = |aspect: f32| ((h as f32 * aspect).round() as u32).max(1);
-        let (left_w, right_w) = (width(self.members[0].1), width(self.members[1].1));
-        let bar = (h as f32 * self.bar_fraction).round() as u32 + bevel.map_or(0, Bevel::bar_px);
-        let x = canvas_w.saturating_sub(left_w + bar + right_w) / 2;
+        let (left_w, right_w) = (width(a_left), width(a_right));
+        let slack = (space.canvas_w as f32 - (left_w + right_w) as f32 - bevels).max(0.0);
+        let bar = (r * slack / (2.0 + r)).round() as u32 + bar_bevels;
+        let x = space.canvas_w.saturating_sub(left_w + bar + right_w) / 2;
+        let y = space.canvas_h.saturating_sub(h) / 2;
         vec![
-            Window {
-                x,
-                y: rect.y,
-                w: left_w,
-                h,
-            },
+            Window { x, y, w: left_w, h },
             Window {
                 x: x + left_w + bar,
-                y: rect.y,
+                y,
                 w: right_w,
                 h,
             },
@@ -547,36 +579,139 @@ mod tests {
         assert_eq!(paths(&ready), ["z", "w+y"]);
     }
 
+    /// A pair of `left` and `right` (displayed sizes) decoded at those sizes.
+    fn pair(left: (u32, u32), right: (u32, u32), bar_ratio: f32, margin: f32) -> PhotoSet {
+        PhotoSet::pair(
+            (RgbaImage::new(left.0, left.1), left),
+            (RgbaImage::new(right.0, right.1), right),
+            PairSpacing::new(bar_ratio, margin, (3840, 2160)),
+        )
+    }
+
+    /// A 6% mat on 3840x2160 that stands its photos 1900 px tall (two
+    /// 130 px borders), with no bevel.
+    fn uhd_6pct() -> PhotoSpace {
+        PhotoSpace {
+            canvas_w: 3840,
+            canvas_h: 2160,
+            avail_h: 1900.0,
+            bevel_px: 0.0,
+            max_upscale: 1.0,
+        }
+    }
+
+    /// `(left margin, left width, bar, right width, right margin)` and the
+    /// common height of a pair's windows on a canvas `canvas_w` wide.
+    fn layout(w: &[Window], canvas_w: u32) -> ((u32, u32, u32, u32, u32), u32) {
+        assert_eq!(w[0].h, w[1].h);
+        assert_eq!(w[0].y, w[1].y);
+        (
+            (
+                w[0].x,
+                w[0].w,
+                w[1].x - (w[0].x + w[0].w),
+                w[1].w,
+                canvas_w - (w[1].x + w[1].w),
+            ),
+            w[0].h,
+        )
+    }
+
+    /// Golden numbers on 3840x2160, 6%: two 3:4 portraits at `r = 0.618` are
+    /// 1900 tall and 1425 wide; the slack of 990 is shared 1 : 0.618 : 1 as
+    /// margins of 378 and a bar of 234.
     #[test]
-    fn windows_put_an_exact_bar_between_full_height_members() {
+    fn two_3_4_portraits_at_the_default_ratio() {
+        let set = pair((1500, 2000), (1500, 2000), 0.618, 0.06);
+        let w = set.pair_windows(uhd_6pct());
+        assert_eq!(layout(&w, 3840), ((378, 1425, 234, 1425, 378), 1900));
+        assert_eq!(w[0].y, 130, "centred vertically: (2160 − 1900) / 2");
+    }
+
+    /// A 3:4 beside a 4:5: windows 1425 and 1520, slack 895, margins 342
+    /// (341.9), bar 211 (211.3).
+    #[test]
+    fn a_3_4_beside_a_4_5() {
+        let set = pair((1500, 2000), (1600, 2000), 0.618, 0.06);
+        let w = set.pair_windows(uhd_6pct());
+        assert_eq!(layout(&w, 3840), ((342, 1425, 211, 1520, 342), 1900));
+    }
+
+    /// `r = 0`: edge to edge, all the slack to the sides.
+    #[test]
+    fn ratio_zero_puts_the_photos_edge_to_edge() {
+        let set = pair((1500, 2000), (1500, 2000), 0.0, 0.06);
+        let w = set.pair_windows(uhd_6pct());
+        assert_eq!(layout(&w, 3840), ((495, 1425, 0, 1425, 495), 1900));
+    }
+
+    /// Width-bound: two squares on a 4:3 canvas (1600x1200, 6%, side margin
+    /// 96) cannot stand 1056 tall; the width `1600 − 2.618 × 96 = 1348.7`
+    /// leaves them 674 each, the side margins the mat's own (the odd pixel to
+    /// the right) and the bar `round(0.618 × 252 / 2.618) = 59`, centred in
+    /// the leftover height.
+    #[test]
+    fn a_width_bound_pair_keeps_its_margins_at_the_border() {
         let set = PhotoSet::pair(
-            (RgbaImage::new(30, 40), (3000, 4000)),
-            (RgbaImage::new(24, 40), (2400, 4000)),
-            bar_fraction(0.618, 0.06),
+            (RgbaImage::new(2000, 2000), (2000, 2000)),
+            (RgbaImage::new(2000, 2000), (2000, 2000)),
+            PairSpacing::new(0.618, 0.06, (1600, 1200)),
         );
-        let rect = Window {
-            x: 0,
-            y: 65,
-            w: 0,
-            h: 1901,
-        };
-        let w = set.windows(rect, 3840, None);
-        assert_eq!((w[0].h, w[1].h), (1901, 1901));
-        assert_eq!(w[0].w, (1901.0f32 * 0.75).round() as u32);
-        assert_eq!(w[1].w, (1901.0f32 * 0.6).round() as u32);
-        let bar = w[1].x - (w[0].x + w[0].w);
-        assert_eq!(bar, (1901.0 * bar_fraction(0.618, 0.06)).round() as u32);
-        let right_margin = 3840 - (w[1].x + w[1].w);
-        assert!(w[0].x.abs_diff(right_margin) <= 1, "centred");
-        // Solo: the fitted rect itself.
-        let solo = PhotoSet::solo(RgbaImage::new(30, 40));
-        assert_eq!(solo.windows(rect, 3840, None), [rect]);
-        // A bevelled mat: the flat bar between the bevels is still round(g·H).
-        let bevel = Bevel {
-            px: 4.0,
-            space_h: 1901.0,
-        };
-        let wb = set.windows(rect, 3840, Some(bevel));
-        assert_eq!(wb[1].x - (wb[0].x + wb[0].w), bar + 8);
+        let w = set.pair_windows(PhotoSpace {
+            canvas_w: 1600,
+            canvas_h: 1200,
+            avail_h: 1056.0,
+            bevel_px: 0.0,
+            max_upscale: 1.0,
+        });
+        assert_eq!(layout(&w, 1600), ((96, 674, 59, 674, 97), 674));
+        assert_eq!(w[0].y, 263, "(1200 − 674) / 2");
+    }
+
+    /// A 2% fixed-colour mat: the overlay fit stands the photos
+    /// `round(2160 × 0.96) = 2074` tall (decodes of 2200 px, so the upscale
+    /// cap is clear), so 1556 wide (1555.5 rounds up), slack 728, margins
+    /// 278, bar 172 (171.9).
+    #[test]
+    fn a_2_percent_mat() {
+        let set = pair((1650, 2200), (1650, 2200), 0.618, 0.02);
+        let w = set.pair_windows(PhotoSpace {
+            avail_h: 2160.0 * 0.96,
+            ..uhd_6pct()
+        });
+        assert_eq!(layout(&w, 3840), ((278, 1556, 172, 1556, 278), 2074));
+    }
+
+    /// Studio, 6%, a 4 px bevel: the photo space is 1892 tall; the four
+    /// bevels take 16 of the width, the flat boards share the rest 1 : r : 1
+    /// (376.6 : 232.8 : 376.6), and the bar holds the two inner bevels.
+    #[test]
+    fn bevels_sit_in_the_bar_and_the_margins() {
+        let set = pair((1500, 2000), (1500, 2000), 0.618, 0.06);
+        let w = set.pair_windows(PhotoSpace {
+            avail_h: 1892.0,
+            bevel_px: 4.0,
+            ..uhd_6pct()
+        });
+        assert_eq!(layout(&w, 3840), ((380, 1419, 241, 1419, 381), 1892));
+    }
+
+    /// The solo fit's max-upscale cap: the height never exceeds `u × h₀`,
+    /// the smaller decoded height.
+    #[test]
+    fn the_height_is_capped_by_max_upscale_of_the_smaller_decode() {
+        let set = PhotoSet::pair(
+            (RgbaImage::new(600, 800), (1500, 2000)),
+            (RgbaImage::new(1500, 2000), (1500, 2000)),
+            PairSpacing::new(0.618, 0.06, (3840, 2160)),
+        );
+        for (u, h) in [(1.0, 800), (2.0, 1600), (3.0, 1900)] {
+            let w = set.pair_windows(PhotoSpace {
+                max_upscale: u,
+                ..uhd_6pct()
+            });
+            assert_eq!(w[0].h, h, "u = {u}");
+            assert_eq!(w[0].w, (h as f32 * 0.75).round() as u32);
+        }
     }
 }

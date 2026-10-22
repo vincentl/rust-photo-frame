@@ -215,7 +215,8 @@ playlist:
   # pairing:
   #   enabled: true
   #   probability: 1.0      # chance two back-to-back pairable portraits share a screen
-  #   bar-ratio: 0.618      # center bar = this x the mat border (1/phi)
+  #   bar-ratio: 0.618      # the bar's weight against each side margin: the width left
+  #                         # after the two photos is shared 1 : this : 1 (1/phi); 0 = edge to edge
   #   dwell-multiplier: 1.5 # a pair stays up dwell-ms x this (2 + transition/dwell is time-neutral)
   #   lookahead: false      # true: pair across the next W unsent positions (W = viewer-preload-count,
   #                         # at most 3), shifting the photos between one position later

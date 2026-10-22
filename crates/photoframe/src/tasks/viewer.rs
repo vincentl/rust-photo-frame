@@ -660,7 +660,7 @@ struct MatParams {
     /// When true, render the photo full-bleed (cover-crop, no mat); `matting`
     /// is ignored. Chosen by the `fill-when-fits` pre-check at selection time.
     fill_screen: bool,
-    /// `pairing.bar-ratio`: a pair's center bar as a fraction of the mat border.
+    /// `pairing.bar-ratio`: a pair's bar as a weight against each side margin.
     bar_ratio: f32,
 }
 
@@ -1165,6 +1165,38 @@ fn decoded_member(
     Some(src)
 }
 
+/// The windows of an overlay mat (every kind but studio and passe-partout):
+/// a solo photo fitted with the mat's margin and centred, as before pairing;
+/// a pair laid out in that photo space (`photo_set`).
+fn overlay_windows(
+    set: &photo_set::PhotoSet,
+    canvas_w: u32,
+    canvas_h: u32,
+    margin: f32,
+    max_upscale: f32,
+) -> Vec<photo_set::Window> {
+    if set.is_pair() {
+        let margin = margin.clamp(0.0, 0.45);
+        return set.pair_windows(photo_set::PhotoSpace {
+            canvas_w,
+            canvas_h,
+            avail_h: (canvas_h.max(1) as f32 * (1.0 - 2.0 * margin)).max(1.0),
+            bevel_px: 0.0,
+            max_upscale,
+        });
+    }
+    let (width, height) = set.solo_size();
+    let (final_w, final_h) =
+        resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
+    let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
+    vec![photo_set::Window {
+        x: offset_x,
+        y: offset_y,
+        w: final_w,
+        h: final_h,
+    }]
+}
+
 fn process_mat_task(task: MatTask) -> Option<MatResult> {
     let MatTask {
         image,
@@ -1209,14 +1241,14 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
             .map(|img| (img, size, member))
     });
     let margin = matting.margin_fraction();
-    let g = photo_set::bar_fraction(bar_ratio, margin);
+    let spacing = photo_set::PairSpacing::new(bar_ratio, margin, (canvas_w, canvas_h));
     // A photo is a set of windows (`photo_set`): n = 1 is the solo path, n = 2
     // a pair (first appearance on the left). A member whose pixels cannot be
     // read leaves the other solo rather than dropping the screen.
     let (set, path, priority, partner) = match (first, second) {
         (Some(src), None) => (photo_set::PhotoSet::solo(src), path, priority, None),
         (Some(src), Some((right, right_size, member))) => (
-            photo_set::PhotoSet::pair((src, source_size), (right, right_size), g),
+            photo_set::PhotoSet::pair((src, source_size), (right, right_size), spacing),
             path,
             priority,
             Some(member),
@@ -1229,7 +1261,6 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         ),
         (None, None) => return None,
     };
-    let (width, height) = set.logical_size(None);
     // Swatches and blurred backgrounds see the members abutted with no gap,
     // built only for the mats that read them.
     let whole = std::cell::LazyCell::new(|| set.abutted());
@@ -1282,40 +1313,42 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         }
         let photo_space_w = (canvas_w as f32 - 2.0 * (margin_x + bevel_px)).max(1.0);
         let photo_space_h = (canvas_h as f32 - 2.0 * (margin_y + bevel_px)).max(1.0);
-        // A pair's bar holds both bevels (`photo_set::Bevel`).
-        let bevel = set.is_pair().then_some(photo_set::Bevel {
-            px: bevel_px,
-            space_h: photo_space_h,
-        });
-        let (width, height) = set.logical_size(bevel);
-
-        let iw = width.max(1) as f32;
-        let ih = height.max(1) as f32;
-        let mut scale = (photo_space_w / iw)
-            .min(photo_space_h / ih)
-            .min(max_upscale);
-        if !scale.is_finite() || scale <= 0.0 {
-            scale = 1.0;
-        }
         let max_photo_w = photo_space_w.floor().max(1.0);
         let max_photo_h = photo_space_h.floor().max(1.0);
-        let mut photo_w = (iw * scale).round().clamp(1.0, max_photo_w);
-        let mut photo_h = (ih * scale).round().clamp(1.0, max_photo_h);
-        photo_w = photo_w.clamp(1.0, canvas_w as f32);
-        photo_h = photo_h.clamp(1.0, canvas_h as f32);
-        let photo_w = photo_w as u32;
-        let photo_h = photo_h as u32;
-        let (offset_x, offset_y) = center_offset(photo_w, photo_h, canvas_w, canvas_h);
-        let windows = set.windows(
-            photo_set::Window {
+        let windows = if set.is_pair() {
+            // A pair is laid out in the photo space (`photo_set`): the bar
+            // holds both inner bevels, the margins the outer ones.
+            set.pair_windows(photo_set::PhotoSpace {
+                canvas_w,
+                canvas_h,
+                avail_h: max_photo_h,
+                bevel_px,
+                max_upscale,
+            })
+        } else {
+            let (width, height) = set.solo_size();
+            let iw = width.max(1) as f32;
+            let ih = height.max(1) as f32;
+            let mut scale = (photo_space_w / iw)
+                .min(photo_space_h / ih)
+                .min(max_upscale);
+            if !scale.is_finite() || scale <= 0.0 {
+                scale = 1.0;
+            }
+            let mut photo_w = (iw * scale).round().clamp(1.0, max_photo_w);
+            let mut photo_h = (ih * scale).round().clamp(1.0, max_photo_h);
+            photo_w = photo_w.clamp(1.0, canvas_w as f32);
+            photo_h = photo_h.clamp(1.0, canvas_h as f32);
+            let photo_w = photo_w as u32;
+            let photo_h = photo_h as u32;
+            let (offset_x, offset_y) = center_offset(photo_w, photo_h, canvas_w, canvas_h);
+            vec![photo_set::Window {
                 x: offset_x,
                 y: offset_y,
                 w: photo_w,
                 h: photo_h,
-            },
-            canvas_w,
-            bevel,
-        );
+            }]
+        };
         let images = set.resize_to(&windows);
 
         let canvas = render_studio_mat(
@@ -1370,40 +1403,42 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         }
         let photo_space_w = (canvas_w as f32 - 2.0 * (margin_x + bevel_px)).max(1.0);
         let photo_space_h = (canvas_h as f32 - 2.0 * (margin_y + bevel_px)).max(1.0);
-        // A pair's bar holds both bevels (`photo_set::Bevel`).
-        let bevel = set.is_pair().then_some(photo_set::Bevel {
-            px: bevel_px,
-            space_h: photo_space_h,
-        });
-        let (width, height) = set.logical_size(bevel);
-
-        let iw = width.max(1) as f32;
-        let ih = height.max(1) as f32;
-        let mut scale = (photo_space_w / iw)
-            .min(photo_space_h / ih)
-            .min(max_upscale);
-        if !scale.is_finite() || scale <= 0.0 {
-            scale = 1.0;
-        }
         let max_photo_w = photo_space_w.floor().max(1.0);
         let max_photo_h = photo_space_h.floor().max(1.0);
-        let mut photo_w = (iw * scale).round().clamp(1.0, max_photo_w);
-        let mut photo_h = (ih * scale).round().clamp(1.0, max_photo_h);
-        photo_w = photo_w.clamp(1.0, canvas_w as f32);
-        photo_h = photo_h.clamp(1.0, canvas_h as f32);
-        let photo_w = photo_w as u32;
-        let photo_h = photo_h as u32;
-        let (offset_x, offset_y) = center_offset(photo_w, photo_h, canvas_w, canvas_h);
-        let windows = set.windows(
-            photo_set::Window {
+        let windows = if set.is_pair() {
+            // A pair is laid out in the photo space (`photo_set`): the bar
+            // holds both inner bevels, the margins the outer ones.
+            set.pair_windows(photo_set::PhotoSpace {
+                canvas_w,
+                canvas_h,
+                avail_h: max_photo_h,
+                bevel_px,
+                max_upscale,
+            })
+        } else {
+            let (width, height) = set.solo_size();
+            let iw = width.max(1) as f32;
+            let ih = height.max(1) as f32;
+            let mut scale = (photo_space_w / iw)
+                .min(photo_space_h / ih)
+                .min(max_upscale);
+            if !scale.is_finite() || scale <= 0.0 {
+                scale = 1.0;
+            }
+            let mut photo_w = (iw * scale).round().clamp(1.0, max_photo_w);
+            let mut photo_h = (ih * scale).round().clamp(1.0, max_photo_h);
+            photo_w = photo_w.clamp(1.0, canvas_w as f32);
+            photo_h = photo_h.clamp(1.0, canvas_h as f32);
+            let photo_w = photo_w as u32;
+            let photo_h = photo_h as u32;
+            let (offset_x, offset_y) = center_offset(photo_w, photo_h, canvas_w, canvas_h);
+            vec![photo_set::Window {
                 x: offset_x,
                 y: offset_y,
                 w: photo_w,
                 h: photo_h,
-            },
-            canvas_w,
-            bevel,
-        );
+            }]
+        };
         let images = set.resize_to(&windows);
 
         let canvas = render_studio_mat(
@@ -1449,19 +1484,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
                 .drop_shadow_color(&swatches)
                 .unwrap_or_else(|| swatches.average()),
         );
-        let (final_w, final_h) =
-            resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
-        let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
-        let windows = set.windows(
-            photo_set::Window {
-                x: offset_x,
-                y: offset_y,
-                w: final_w,
-                h: final_h,
-            },
-            canvas_w,
-            None,
-        );
+        let windows = overlay_windows(&set, canvas_w, canvas_h, margin, max_upscale);
         let images = set.resize_to(&windows);
 
         let bg_px = Rgba([color[0], color[1], color[2], 255]);
@@ -1497,19 +1520,7 @@ fn process_mat_task(task: MatTask) -> Option<MatResult> {
         }));
     }
 
-    let (final_w, final_h) =
-        resize_to_fit_with_margin(canvas_w, canvas_h, width, height, margin, max_upscale);
-    let (offset_x, offset_y) = center_offset(final_w, final_h, canvas_w, canvas_h);
-    let windows = set.windows(
-        photo_set::Window {
-            x: offset_x,
-            y: offset_y,
-            w: final_w,
-            h: final_h,
-        },
-        canvas_w,
-        None,
-    );
+    let windows = overlay_windows(&set, canvas_w, canvas_h, margin, max_upscale);
     let images = set.resize_to(&windows);
 
     let mut background = match &matting.style {
