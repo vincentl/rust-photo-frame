@@ -689,6 +689,13 @@ full-screen passes are spent carefully:
     color replaced by a constant, so every kind reads one photo per pixel.
     Transitions look wrong on purpose. It measures what the second fetch
     costs on the device, with no rebuild.
+  - `no-skip` compiles every per-pixel branch that skips work (a photo
+    fetch whose weight is zero, the smoothsteps outside a soft band:
+    wipe, venetian, radial, e-ink, iris) as taken unconditionally, so each
+    kind runs straight-line with the same output (Mac GPU: identical for
+    wipe, venetian, radial and e-ink; iris 2 pixels of 64 million 1 LSB
+    away). It measures what the branches cost against what they skip,
+    from the same binary and photos.
   - `native-mip` draws every kind's transition frames except iris at
     native resolution, sampling the mip level the intermediate would have
     read (push stays at level 0): one 4K pass instead of a reduced draw

@@ -100,6 +100,13 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
 // measures what the second fetch costs. Off (and compiled out) otherwise.
 override PROBE_SINGLE_SAMPLE: bool = false;
 
+// PHOTOFRAME_PROBE=no-skip (diagnostic): every per-pixel branch that skips
+// work (a photo fetch whose weight is zero, the smoothsteps outside a soft
+// band) is taken unconditionally, so each kind runs straight-line: the same
+// math, the same output, no branch. It measures what the branches cost on
+// the device against what they skip. Off (and compiled out) otherwise.
+override PROBE_NO_SKIP: bool = false;
+
 // 1 inside a photo plane (texture coordinate in 0..1), 0 outside.
 fn covered(uv: vec2<f32>) -> f32 {
   return select(0.0, 1.0, all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0)));
@@ -148,10 +155,10 @@ fn planes_for_weight(in: VSOut, t: f32) -> PlanePair {
   let next_a = covered(in.next_uv);
   var cur_rgb = vec3<f32>(0.0);
   var next_rgb = vec3<f32>(0.0);
-  if (t < 1.0) {
+  if (PROBE_NO_SKIP || t < 1.0) {
     cur_rgb = fetch_current(in.current_uv) * cur_a;
   }
-  if (t > 0.0) {
+  if (PROBE_NO_SKIP || t > 0.0) {
     next_rgb = fetch_next(in.next_uv) * next_a;
   }
   return PlanePair(vec4<f32>(cur_rgb, cur_a), vec4<f32>(next_rgb, next_a));
@@ -461,7 +468,7 @@ fn fs_eink(in: VSOut) -> @location(0) vec4<f32> {
     let stage_pos = fract(prep_ratio * segments);
     let flash_mix = clamp(smoothstep(0.15, 0.85, stage_pos), 0.0, 1.0);
     var current = vec4<f32>(0.0);
-    if (stage_u == 0u || flash_mix < 1.0) {
+    if (PROBE_NO_SKIP || stage_u == 0u || flash_mix < 1.0) {
       current = current_of(in);
     }
     var flash_color = current;
@@ -481,10 +488,10 @@ fn fs_eink(in: VSOut) -> @location(0) vec4<f32> {
   let mask = stored.r + stored.g;
   var ghost = vec3<f32>(0.0);
   var next = vec3<f32>(0.0);
-  if (mask < 1.0) {
+  if (PROBE_NO_SKIP || mask < 1.0) {
     ghost = mix(current_of(in).rgb, flash_rgb, 0.55);
   }
-  if (mask > 0.0) {
+  if (PROBE_NO_SKIP || mask > 0.0) {
     next = next_of(in).rgb;
   }
   return vec4<f32>(mix(ghost, next, mask), 1.0);
@@ -520,7 +527,7 @@ fn fs_radial_wipe(in: VSOut) -> @location(0) vec4<f32> {
   let manhattan = abs(dv.x) + abs(dv.y);
   let q = select(dot(dv, dv), manhattan, diamond);
   var mask = select(0.0, 1.0, q <= U.params3.x);
-  if (q > U.params3.x && q < U.params3.y) {
+  if (PROBE_NO_SKIP || (q > U.params3.x && q < U.params3.y)) {
     let dist = select(length(dv), manhattan, diamond);
     mask = 1.0 - smoothstep(U.params1.x, U.params1.y, dist);
   }
@@ -581,7 +588,7 @@ fn fs_iris(in: VSOut) -> @location(0) vec4<f32> {
   let d = layer.a;
   var cov = select(0.0, 1.0, d < 0.0);
   var rim = 0.0;
-  if (abs(d) < 3.5 * IRIS_RIM_PX) {
+  if (PROBE_NO_SKIP || abs(d) < 3.5 * IRIS_RIM_PX) {
     let band = U.params3.w;
     cov = 1.0 - smoothstep(-band, band, d);
     // Thin edge highlight, under petal_sheen so 0 is perfectly flat.
@@ -591,14 +598,14 @@ fn fs_iris(in: VSOut) -> @location(0) vec4<f32> {
   let cur_a = covered(in.current_uv);
   let next_a = covered(in.next_uv);
   var photo = vec3<f32>(0.0);
-  if (cov < 1.0) {
+  if (PROBE_NO_SKIP || cov < 1.0) {
     let swap = clamp(U.params0.w, 0.0, 1.0);
     var cur_rgb = vec3<f32>(0.0);
     var next_rgb = vec3<f32>(0.0);
-    if (swap < 1.0) {
+    if (PROBE_NO_SKIP || swap < 1.0) {
       cur_rgb = fetch_current(in.current_uv) * cur_a;
     }
-    if (swap > 0.0) {
+    if (PROBE_NO_SKIP || swap > 0.0) {
       next_rgb = fetch_next(in.next_uv) * next_a;
     }
     photo = mix(cur_rgb, next_rgb, swap);

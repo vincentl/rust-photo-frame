@@ -2148,6 +2148,11 @@ struct Probes {
     /// intermediate): one pass instead of a reduced-resolution draw plus
     /// the upscale, at the same softness.
     native_mip: bool,
+    /// `no-skip`: every per-pixel branch that skips work (a photo fetch
+    /// whose weight is zero, the smoothsteps outside a soft band) is taken
+    /// unconditionally (`PROBE_NO_SKIP` in the shader): the same output from
+    /// straight-line code, to measure what the branches cost.
+    no_skip: bool,
 }
 
 /// The probes named in `value`, and the names it has that are not probes.
@@ -2158,6 +2163,7 @@ fn parse_probes(value: &str) -> (Probes, Vec<&str>) {
         match name {
             "single-sample" => probes.single_sample = true,
             "native-mip" => probes.native_mip = true,
+            "no-skip" => probes.no_skip = true,
             other => unknown.push(other),
         }
     }
@@ -2180,6 +2186,11 @@ fn probes() -> Probes {
                 "PHOTOFRAME_PROBE=single-sample: transitions show a flat next photo (diagnostic)"
             );
         }
+        if probes.no_skip {
+            warn!(
+                "PHOTOFRAME_PROBE=no-skip: transitions run without per-pixel skipping (diagnostic)"
+            );
+        }
         if probes.native_mip {
             warn!(
                 "PHOTOFRAME_PROBE=native-mip: transitions draw at native resolution from the mips, \
@@ -2190,8 +2201,16 @@ fn probes() -> Probes {
     })
 }
 
-fn probe_single_sample() -> bool {
-    probes().single_sample
+/// The shader's pipeline constants for the probes that are compiled in.
+fn probe_pipeline_constants(probes: Probes) -> Vec<(&'static str, f64)> {
+    let mut constants = Vec::new();
+    if probes.single_sample {
+        constants.push(("PROBE_SINGLE_SAMPLE", 1.0));
+    }
+    if probes.no_skip {
+        constants.push(("PROBE_NO_SKIP", 1.0));
+    }
+    constants
 }
 
 fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
@@ -2921,12 +2940,10 @@ fn build_gpu(
         multiview: None,
         cache: None,
     });
-    // PHOTOFRAME_PROBE=single-sample (diagnostic): see the shader.
-    let probe_constants: &[(&str, f64)] = if probe_single_sample() {
-        &[("PROBE_SINGLE_SAMPLE", 1.0)]
-    } else {
-        &[]
-    };
+    // PHOTOFRAME_PROBE=single-sample / no-skip (diagnostic): see the
+    // shader.
+    let probe_constants = probe_pipeline_constants(probes());
+    let probe_constants = probe_constants.as_slice();
     // One pipeline per DrawKind (see DrawKind for why), all on the same
     // layout and vertex stage.
     let quad_pipelines = QuadPipelines {
@@ -6046,8 +6063,8 @@ mod tests {
         assert_eq!(parse_probes(""), (Probes::default(), vec![]));
         let (probes, unknown) = parse_probes("native-mip");
         assert!(probes.native_mip && !probes.single_sample && unknown.is_empty());
-        let (probes, unknown) = parse_probes(" single-sample , native-mip,bogus,");
-        assert!(probes.native_mip && probes.single_sample);
+        let (probes, unknown) = parse_probes(" single-sample , native-mip,bogus,no-skip");
+        assert!(probes.native_mip && probes.single_sample && probes.no_skip);
         assert_eq!(unknown, vec!["bogus"]);
     }
 
@@ -6287,11 +6304,18 @@ mod tests {
                 .unwrap_or_else(|| panic!("viewer_quad.wgsl has no entry point {name}"));
             assert_eq!(ep.stage, naga::ShaderStage::Fragment, "{name}");
             // Resolve the pipeline constants as wgpu does at pipeline
-            // creation: the default, and PHOTOFRAME_PROBE=single-sample.
-            for probe in [None, Some(1.0)] {
+            // creation, for every combination of the compiled-in probes.
+            for (single_sample, no_skip) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let probe = Probes {
+                    single_sample,
+                    no_skip,
+                    ..Probes::default()
+                };
                 let mut constants = naga::back::PipelineConstants::default();
-                if let Some(value) = probe {
-                    constants.insert("PROBE_SINGLE_SAMPLE".to_string(), value);
+                for (name, value) in probe_pipeline_constants(probe) {
+                    constants.insert(name.to_string(), value);
                 }
                 let (resolved, resolved_info) = naga::back::pipeline_constants::process_overrides(
                     &module,
