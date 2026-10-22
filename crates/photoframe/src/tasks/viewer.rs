@@ -161,6 +161,8 @@ pub(super) struct TransitionState {
     /// Set once `started_at` has been moved to the first frame's clock
     /// (DRM/KMS; see `anchor_once`).
     anchored: bool,
+    /// DRM/KMS: progress of the last frame rendered (`note_rendered`).
+    rendered_progress: f32,
     duration: std::time::Duration,
     kind: TransitionKind,
     variant: ActiveTransition,
@@ -240,14 +242,36 @@ impl TransitionState {
         Self {
             started_at,
             anchored: false,
+            rendered_progress: 0.0,
             duration,
             kind,
             variant,
         }
     }
 
+    /// Wayland: the wall clock has run the full duration. DRM/KMS (an
+    /// anchored transition): a frame drawn for progress 1 has been rendered.
+    /// Frames are rendered ahead of the wall clock there, so the transition
+    /// ends when its last frame is queued, not a few refreshes later with
+    /// repeats of it.
     pub(super) fn is_complete(&self) -> bool {
-        self.progress() >= 1.0
+        if self.anchored {
+            self.rendered_progress >= 1.0
+        } else {
+            self.progress() >= 1.0
+        }
+    }
+
+    /// Whether the DRM/KMS frame clock has been anchored (a frame of this
+    /// transition was rendered).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // read by the KMS loop
+    pub(super) fn is_anchored(&self) -> bool {
+        self.anchored
+    }
+
+    /// DRM/KMS: the progress the frame just rendered was drawn for.
+    pub(super) fn note_rendered(&mut self, progress: f32) {
+        self.rendered_progress = progress;
     }
 
     pub(super) fn progress(&self) -> f32 {
@@ -262,11 +286,11 @@ impl TransitionState {
         (elapsed / duration).clamp(0.0, 1.0)
     }
 
-    /// DRM/KMS: start the transition clock at the first frame's vblank
-    /// instead of when the transition was created (the end of a dwell, at an
-    /// arbitrary phase of the refresh). The first frame therefore shows
-    /// progress 0, and every later frame advances by exactly the time
-    /// between the vblanks it and its predecessor are paced on.
+    /// DRM/KMS: start the transition clock at the vblank its first frame is
+    /// meant for (`pacing::FrameClock`), instead of when the transition was
+    /// created (the end of a dwell, at an arbitrary phase of the refresh).
+    /// The first frame therefore shows progress 0, and frame k is drawn for
+    /// k refreshes later.
     pub(super) fn anchor_once(&mut self, frame_time: Instant) {
         if !self.anchored {
             self.started_at = frame_time;
@@ -293,10 +317,38 @@ pub(super) struct TransitionFrameMetric {
     frames: u32,
     worst_frame_ms: f32,
     best_frame_ms: f32,
-    /// DRM/KMS only: refreshes on which the panel showed no new frame
-    /// (`pacing::FlipAudit`). `None` on Wayland, or when KMS vblank pacing
-    /// was unavailable for this transition; the field is then not logged.
-    late_frames: Option<u32>,
+    /// DRM/KMS only: what the panel showed, from the flip audit. `None` on
+    /// Wayland, or when the audit was incomplete (no vblank information for
+    /// part of the transition); the line then has no `late_frames` field.
+    display: Option<DisplayCadence>,
+}
+
+/// DRM/KMS: a transition as the panel showed it (`pacing::FlipAudit`).
+/// Replaces the loop-side intervals in `transition_frame_metric`, which on
+/// KMS only say how far ahead frames were rendered.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DisplayCadence {
+    frames: u32,
+    /// From the first frame's flip to the last's.
+    span: Duration,
+    best: Duration,
+    worst: Duration,
+    /// Refreshes on which no new frame appeared.
+    late_frames: u32,
+}
+
+impl DisplayCadence {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // built by the KMS loop
+    fn from_audit(summary: pacing::AuditSummary, period: Duration) -> Option<Self> {
+        let refreshes = |n: u64| period * u32::try_from(n).unwrap_or(u32::MAX);
+        Some(Self {
+            frames: summary.frames,
+            span: refreshes(summary.span),
+            best: refreshes(summary.best?),
+            worst: refreshes(summary.worst?),
+            late_frames: summary.repeats,
+        })
+    }
 }
 
 impl TransitionFrameMetric {
@@ -308,7 +360,7 @@ impl TransitionFrameMetric {
             frames: 1,
             worst_frame_ms: 0.0,
             best_frame_ms: f32::INFINITY,
-            late_frames: None,
+            display: None,
         }
     }
 
@@ -331,15 +383,19 @@ impl TransitionFrameMetric {
             .as_secs_f32()
             .max(f32::EPSILON);
         let intervals = (self.frames - 1) as f32;
-        if let Some(late_frames) = self.late_frames {
+        if let Some(shown) = self.display
+            && shown.frames >= 2
+        {
+            let intervals = (shown.frames - 1) as f32;
+            let span = shown.span.as_secs_f32().max(f32::EPSILON);
             info!(
                 transition = %self.kind,
-                frames = self.frames,
+                frames = shown.frames,
                 avg_fps = format_args!("{:.1}", intervals / span),
                 avg_frame_ms = format_args!("{:.1}", 1000.0 * span / intervals),
-                best_frame_ms = format_args!("{:.1}", self.best_frame_ms),
-                worst_frame_ms = format_args!("{:.1}", self.worst_frame_ms),
-                late_frames,
+                best_frame_ms = format_args!("{:.1}", shown.best.as_secs_f32() * 1000.0),
+                worst_frame_ms = format_args!("{:.1}", shown.worst.as_secs_f32() * 1000.0),
+                late_frames = shown.late_frames,
                 "transition_frame_metric"
             );
             return;
@@ -354,6 +410,16 @@ impl TransitionFrameMetric {
             "transition_frame_metric"
         );
     }
+}
+
+/// DRM/KMS: when a transition frame is meant to be shown (`kms.rs`,
+/// "Pacing law"; `pacing::FrameClock`).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PacedFrame {
+    /// The time of the vblank the transition's first frame is meant for.
+    pub(super) anchor: Instant,
+    /// The time of the vblank this frame is meant for.
+    pub(super) index_time: Instant,
 }
 
 /// Convert one sRGB channel (0..1) to linear light, the space the transition
@@ -3117,10 +3183,12 @@ impl App {
     /// winit handler (RedrawRequested) and the KMS loop; each decides what
     /// a `RedrawError` means for its output.
     ///
-    /// `frame_time` is the clock a transition frame is drawn for: `None`
-    /// means "now" (Wayland, and KMS frames outside a transition); the KMS
-    /// loop passes the vblank it paced the frame on.
-    fn redraw(&mut self, frame_time: Option<Instant>) -> Result<(), RedrawError> {
+    /// `paced` is `None` on Wayland and for KMS frames outside a transition
+    /// (they are drawn for "now"). For a KMS transition frame it carries the
+    /// frame clock; the frame is drawn for `pacing::frame_time`: the vblank
+    /// it is meant for, or the moment it is rendered (after the acquire) if
+    /// that is later.
+    fn redraw(&mut self, paced: Option<PacedFrame>) -> Result<(), RedrawError> {
         let mode_kind = self.mode_kind();
         let Some(_) = self.gpu.as_ref() else {
             return Ok(());
@@ -3443,8 +3511,14 @@ impl App {
             }
             ViewerModeKind::Wake => {
                 let wake = mode.wake_mut();
-                if let (Some(frame_time), Some(state)) = (frame_time, wake.transition_state_mut()) {
-                    state.anchor_once(frame_time);
+                // After the acquire: a frame is never drawn for a time before
+                // it is rendered.
+                let frame_time = paced.map(|p| pacing::frame_time(p.index_time, Instant::now()));
+                if let (Some(p), Some(frame_time), Some(state)) =
+                    (paced, frame_time, wake.transition_state_mut())
+                {
+                    state.anchor_once(p.anchor);
+                    state.note_rendered(state.progress_at(frame_time));
                 }
                 encoder.push_debug_group("wake-draw");
                 // Created up front: later code holds immutable
@@ -3766,17 +3840,18 @@ impl App {
                 }
 
                 gpu.queue.submit(Some(encoder.finish()));
-                // KMS transition frames (the only ones with a frame_time):
-                // learn when the GPU finished, for the late-frame audit.
-                if frame_time.is_some() {
+                // KMS transition frames (the only paced ones): learn when the
+                // GPU finished, for the late-frame audit.
+                if paced.is_some() {
                     let done = Arc::new(AtomicBool::new(false));
                     let flag = Arc::clone(&done);
                     gpu.queue
                         .on_submitted_work_done(move || flag.store(true, Ordering::Release));
                     self.paced_submission = Some(done);
                 }
-                // Wayland: frame-callback pacing; KMS: nothing (the loop
-                // waits for the vblank). See Output::before_present.
+                // Wayland: frame-callback pacing; KMS: nothing (the FIFO
+                // acquire bounds how far ahead the loop renders). See
+                // Output::before_present.
                 if let Some(output) = self.output.as_ref() {
                     output.before_present();
                 }
@@ -5020,6 +5095,26 @@ mod tests {
         assert!(window_event_wants_step(&WindowEvent::Occluded(false)));
         assert!(!window_event_wants_step(&WindowEvent::Occluded(true)));
         assert!(!window_event_wants_step(&WindowEvent::RedrawRequested));
+    }
+
+    #[test]
+    fn a_kms_transition_ends_when_its_last_frame_is_rendered_not_by_wall_time() {
+        let cfg = crate::config::TransitionConfig::default();
+        let selected = cfg.primary_selected().expect("default transition");
+        let created = Instant::now();
+        let mut state = TransitionState::new(selected, created, &mut rand::rng());
+        // Wayland (never anchored): wall time decides; a fresh one is running.
+        assert!(!state.is_complete());
+        // KMS: frames render ahead of the wall clock, so the frame drawn for
+        // progress 1 may be rendered before the duration has passed on the
+        // wall; that frame ends the transition.
+        let anchor = created + Duration::from_millis(10);
+        state.anchor_once(anchor);
+        state.note_rendered(state.progress_at(anchor + state.duration / 2));
+        assert!(!state.is_complete());
+        state.note_rendered(state.progress_at(anchor + state.duration));
+        assert!(state.is_complete());
+        assert!(state.is_anchored());
     }
 
     #[test]

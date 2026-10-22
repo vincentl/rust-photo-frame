@@ -160,6 +160,15 @@ pub fn pick_connector(
     }
 }
 
+/// The exact time between two vblanks of a progressive mode: one frame is
+/// `htotal x vtotal` pixel clocks, and KMS reports the clock in kHz. (The
+/// integer `vrefresh` rounds 59.94 and 60 Hz to the same 60.)
+pub fn refresh_period(clock_khz: u32, htotal: u16, vtotal: u16) -> std::time::Duration {
+    let pixels = u64::from(htotal) * u64::from(vtotal);
+    let clock_hz = u64::from(clock_khz.max(1)) * 1000;
+    std::time::Duration::from_nanos(pixels * 1_000_000_000 / clock_hz)
+}
+
 /// One mode from a connector's KMS mode list.
 #[derive(Clone, Copy, Debug)]
 pub struct ModeCandidate {
@@ -348,6 +357,8 @@ mod device {
         pub width: u32,
         pub height: u32,
         pub vrefresh_hz: u32,
+        /// Exact vblank period of the chosen mode ([`refresh_period`]).
+        pub refresh_period: std::time::Duration,
         /// Vulkan plane override from the request, if any.
         plane: Option<u32>,
     }
@@ -464,10 +475,13 @@ mod device {
                     }
                 })
                 .collect();
-            let mode = pick_mode(&mode_candidates, request.mode, request.prefer_mode)
+            let mode_index = pick_mode(&mode_candidates, request.mode, request.prefer_mode)
                 .map_err(|e| e.context(format!("{name} on {path}")))?;
-            let mode = mode_candidates[mode];
+            let mode = mode_candidates[mode_index];
+            let timing = &modes[mode_index];
+            let refresh_period = refresh_period(timing.clock(), timing.hsync().2, timing.vsync().2);
             return Ok(KmsTarget {
+                refresh_period,
                 connector_id: u32::from(info.handle()),
                 connector_name: name,
                 width: mode.width,
@@ -533,6 +547,7 @@ mod device {
         width: u32,
         height: u32,
         vrefresh_hz: u32,
+        refresh_period: std::time::Duration,
         /// Index of the CRTC driving the connector (the "pipe" the vblank
         /// ioctl addresses); resolved lazily because Mesa picks the CRTC at
         /// its first modeset.
@@ -556,6 +571,7 @@ mod device {
                 width: self.width,
                 height: self.height,
                 vrefresh_hz: self.vrefresh_hz,
+                refresh_period: self.refresh_period,
                 pipe: None,
                 crtc_handle: None,
             })
@@ -602,10 +618,25 @@ mod device {
                 .ok_or_else(|| KmsError::failed("CRTC not in the card's list"))
         }
 
+        /// Exact vblank period of the mode in use.
+        pub fn refresh_period(&self) -> std::time::Duration {
+            self.refresh_period
+        }
+
         /// Block until the next vblank of the CRTC showing this connector and
         /// return the kernel's timestamp for it. The kernel bounds the wait
         /// (about 3 s, then EBUSY), so a stopped CRTC is an error, not a hang.
         pub fn wait_next_vblank(&mut self) -> Result<Vblank, KmsError> {
+            self.vblank_query(1)
+        }
+
+        /// The most recent vblank (its sequence number and timestamp),
+        /// without waiting: `DRM_IOCTL_WAIT_VBLANK` relative 0 returns at once.
+        pub fn last_vblank(&mut self) -> Result<Vblank, KmsError> {
+            self.vblank_query(0)
+        }
+
+        fn vblank_query(&mut self, relative: u32) -> Result<Vblank, KmsError> {
             use drm::{VblankWaitFlags, VblankWaitTarget};
             let pipe = match self.pipe {
                 Some(pipe) => pipe,
@@ -618,7 +649,7 @@ mod device {
             let reply = self
                 .card
                 .wait_vblank(
-                    VblankWaitTarget::Relative(1),
+                    VblankWaitTarget::Relative(relative),
                     VblankWaitFlags::empty(),
                     pipe,
                     0,
@@ -1119,6 +1150,19 @@ mod tests {
         assert_eq!(err.kind(), KmsErrorKind::NoConnectedDisplay);
         let err = pick_mode(&[], None, None).unwrap_err();
         assert_eq!(err.kind(), KmsErrorKind::Failed);
+    }
+
+    #[test]
+    fn refresh_period_comes_from_the_mode_timings() {
+        // CTA 3840x2160@60: 594 MHz, 4400 x 2250.
+        assert_eq!(
+            refresh_period(594_000, 4400, 2250),
+            std::time::Duration::from_nanos(16_666_666)
+        );
+        // The 59.94 Hz variant of the same timings (594/1.001 MHz).
+        let ntsc = refresh_period(593_407, 4400, 2250);
+        assert!(ntsc > std::time::Duration::from_nanos(16_683_000));
+        assert!(ntsc < std::time::Duration::from_nanos(16_684_000));
     }
 
     #[test]

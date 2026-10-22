@@ -122,7 +122,7 @@ as its own systemd unit.
 The stats measure *submission* cadence (when `present()` returns). On the
 Wayland fallback that matches what the panel displays only because transition
 redraws are paced to the compositor's frame callbacks (one per output refresh);
-on KMS the viewer waits for each vblank itself (see
+on KMS the metric reports what the panel showed, from the flip audit (see
 [The viewer on KMS](#the-viewer-on-kms)). If
 `best_frame_ms` ever drops well below a vsync (e.g. 0.4ms), frames are
 being submitted back-to-back and mailbox is discarding some unseen — the
@@ -231,33 +231,60 @@ probe's target selection and ordering rules
 - The card is closed only after the instance is gone, because Mesa's
   display WSI keeps polling the fd until then.
 
-**Pacing model.** Each transition frame is rendered right after a vblank.
-The viewer waits for that vblank explicitly with `DRM_IOCTL_WAIT_VBLANK`
-on the connector's CRTC, then draws the frame for that vblank's kernel
-timestamp.
+**Pacing law: render ahead, clock by frame index.** During a transition
+the viewer renders frames back to back, exactly as `frametest --drm` does.
+It has no wait of its own. The FIFO swapchain acquire blocks when every
+image is on screen or queued, so the viewer runs at most two frames ahead
+of the display.
 
-The transition's clock starts at the vblank before its first frame. So:
-- the first frame shows progress 0;
-- each later frame advances by exactly the time between the vblanks that
-  it and the previous frame are shown on.
+The clock works by frame index:
+- **Anchor.** When a transition's first frame is rendered, the viewer
+  reads the most recent vblank without waiting (`DRM_IOCTL_WAIT_VBLANK`,
+  relative 0). The anchor is the vblank after it.
+- **Frame k** is meant for vblank `anchor + k` and is drawn for that
+  vblank's time, `anchor time + k × T`. T is the mode's exact period,
+  `htotal × vtotal / pixel clock`.
+- **Why this is exact.** Under FIFO, frames that are not late flip on
+  consecutive vblanks, so every frame is shown exactly when its clock
+  says. That includes the first frames, which take the idle images back
+  to back after a dwell.
+- **When the GPU cannot keep up.** No frame is drawn for a time before
+  it is rendered. A frame rendered after the vblank it was meant for is
+  drawn for the moment it is rendered. So a GPU that cannot keep up
+  gives a transition of the right length with repeated frames, not a
+  slow-motion one.
+- **End.** A transition ends when its frame for progress 1 has been
+  rendered.
 
-`transition_frame_metric` records the same clock, so it reports the
-display's cadence.
+**Why not wait for the vblank before each frame (the v1.2.0-rc1 law).**
+Pi gate 1 measured it on 2026-10-21. Every transition alternated 16.7 ms
+and 33.3 ms frames, and none reached 60. Means at transition scale 2:
 
-**Why the blocking FIFO acquire alone is not enough.** After a dwell,
-every swapchain image except the one on screen is idle. The first
-frames of a transition would get those images back to back and be
-presented a few ms apart, ahead of the display. The animation clock
-would then run ahead of the panel, and the metric would read
-`best_frame_ms` of 1–3 ms. With the explicit wait at most one frame is
-queued, so FIFO only guarantees there is no tearing.
+| Transition | avg_fps | late frames per frame |
+| --- | --- | --- |
+| fade | 45 | 0.35 |
+| wipe | 42 | 0.46 |
+| push | 39 | 0.51 |
 
-**Present mode.** FIFO stays the default on KMS.
-`PHOTOFRAME_PRESENT_MODE=mailbox` is honoured; transitions are still
-vblank-paced, and resting frames are single presents.
+`frametest --drm`, which renders ahead, held 60 on the same build.
 
-**Fallback.** If a vblank wait fails, the rest of that transition is
-paced by FIFO alone, and the journal logs `kms_vblank_wait_failed`.
+Waiting for vblank V before starting frame k leaves less than one
+refresh before the flip at V+1. In that time the frame needs its CPU
+work, the transition pass, the 4K upscale and Mesa's display copy.
+
+With the loop and the GPU in series around the present, the cost
+compounds:
+- a frame of slightly over one refresh costs two;
+- the next frame cannot start before the vblank after that.
+
+Rendering ahead starts the next frame as soon as an image is free. A
+frame over budget then loses only its excess, and the queue absorbs
+single slow frames. The pacing tests in
+`crates/photoframe/src/tasks/viewer/pacing.rs` cover this with a
+simulated FIFO swapchain.
+
+**Present mode.** FIFO stays the default on KMS, and it is the only mode
+the Pi's display path offers.
 
 **Idle behaviour.** There is no 4 ms control tick on KMS. While nothing
 animates, the viewer sleeps until one of these happens:
@@ -273,45 +300,68 @@ is still settling at startup, and otherwise wakes for those events plus a
 once-a-second look at the window's size (sway can change the output mode
 without telling winit), instead of 250 times a second.
 
-**Reading `transition_frame_metric` on KMS.** On KMS the line has one
-more field than on Wayland, `late_frames`. The fields answer two
-different questions:
+**Reading `transition_frame_metric` on KMS.** On KMS the line reports
+what the panel showed, not the loop's timing. The loop's timing would
+mostly show how far ahead frames were rendered.
 
-- **`best_frame_ms` / `worst_frame_ms` / `avg_fps`: did the CPU loop
-  keep up?** These are the times between the vblanks the frames were
-  paced on. A `worst_frame_ms` of about 33 means the loop missed a
-  vblank.
-- **`late_frames`: did the panel show a new frame on every refresh?**
-  It counts the refreshes during the transition on which the panel
-  showed no new frame, whatever the cause: the CPU loop was late, or the
-  GPU finished a frame after the vblank it was meant for. The interval
-  fields cannot see the second case, because the CPU stays on time while
-  the panel repeats a frame.
+The fields:
+- `frames`: the frames that flipped.
+- `avg_fps`: frames divided by the time from the first frame's flip to
+  the last's.
+- `best_frame_ms` / `worst_frame_ms`: the shortest and longest time a
+  frame stayed on screen.
+- `late_frames`: the refreshes on which no new frame appeared.
 
-How `late_frames` is computed: each paced frame registers a
-GPU-completion callback, and every pacing wake polls for it. The viewer
-then replays FIFO: a frame flips at the first vblank by which it is
-complete, and never before the frame ahead of it. That replay is
-optimistic by at most the microseconds between a vblank and the wake
-after it.
+How the fields are known:
+- **Audit.** Each transition frame registers a GPU-completion callback.
+  While a transition plays, a flip-observer thread waits on every vblank,
+  on its own handle on the card, and polls the GPU. This runs off the
+  render path, so it never delays a frame.
+- **Replay.** The viewer replays FIFO from those observations: a frame
+  flips at the first vblank by which it is complete, and never before
+  the frame ahead of it. The replay is optimistic only by the fraction of
+  a millisecond between a vblank and the observer's wake.
+- **Closing.** After the transition's last frame, the viewer waits until
+  every frame has flipped, normally two or three refreshes, and logs the
+  line.
 
-**What to expect.** For a transition that holds 60 at native 4K:
-`avg_fps` ≈ 60, `best_frame_ms` ≈ `worst_frame_ms` ≈ 16.7, and
-`late_frames=0`.
+**What to expect.** A transition that holds 60 reads:
+- `avg_fps` ≈ 60;
+- `best_frame_ms` ≈ `worst_frame_ms` ≈ 16.7;
+- `late_frames=0`.
 
-**When the field is missing.** It is absent if vblank pacing failed
-during that transition. Look for `kms_vblank_wait_failed` in the
-journal.
+`late_frames=0` is the test. A frame that stayed on screen for two
+refreshes shows up both as a `worst_frame_ms` of 33.3 and as one late
+frame.
+
+**When `late_frames` is missing.** It is missing if the audit failed in
+that transition. The journal then shows `kms_vblank_wait_failed`. In
+that case the other fields are the loop's own timings.
+
+**Per-frame detail for T4.** With `RUST_LOG=debug` (or `photoframe=debug`)
+every transition frame logs a `kms_frame` line, with:
+- the vblank the frame was meant for, the one it flipped on, and
+  `late_refreshes`;
+- bounds on its GPU time: `gpu_ms_at_least` comes from the last vblank
+  at which it was still running, `gpu_ms_at_most` from the first at which
+  it was seen done.
+
+The bounds are one refresh apart. They are enough to tell whether a
+transition kind fits in a refresh at a given `PHOTOFRAME_TRANSITION_SCALE`.
 
 **Panel off (`display-power off`).** Before switching off, the viewer
-lets submitted frames reach the screen (GPU idle, then two vblanks, about
-33 ms). While the panel is dark the viewer presents nothing and waits for
-no vblank. The slideshow is paused, so the loop sleeps until a command
-arrives: no frames and no wakeups. Waits matter here because a vblank
-wait on a dark CRTC fails at once, and two failures in a row would disable
-pacing for the rest of the process. `display-power on` commits the
-modeset before any frame is presented, so the CRTC is running and every
-later frame is paced as usual (see
+lets submitted frames reach the screen: GPU idle, then two vblanks, about
+33 ms. With render-ahead at most two frames are queued behind the one on
+screen. A display-power command first abandons any transition audit, so
+the flip observer is parked and nothing waits on a vblank around the
+power commit.
+
+While the panel is dark the viewer presents nothing. The slideshow is
+paused, so the loop sleeps until a command arrives: no frames and no
+wakeups.
+
+`display-power on` commits the modeset before any frame is presented, so
+the CRTC is running and every later frame is paced as usual (see
 [advanced.md › Display power on KMS](advanced.md#display-power-and-the-wi-fi-overlay-on-kms)). A transition that the panel
 going dark interrupts is undone and logs no `transition_frame_metric`.
 
@@ -320,15 +370,10 @@ per change of content or size (lease refreshes cost nothing), then one
 composite per redraw. It pauses the slideshow while it covers it, so no
 transition runs underneath.
 
-**GPU slack.** With the explicit vblank wait, a frame has less than one
-refresh to finish. FIFO's run-ahead allowed up to two, but that
-run-ahead is what put every transition's first frames ahead of the
-display. A miss leaves one frame queued, which gives every later frame
-of that transition two refreshes. So one miss costs exactly one
-repeated refresh and does not cascade.
-
-**For T4.** The native-resolution decision should require
-`late_frames=0`, not just the interval fields.
+**For T4.** Decide native resolution from `late_frames=0`, not just the
+interval fields. Use the `kms_frame` lines to see which passes fit in a
+refresh. With render-ahead, the half-res intermediate plus the 4K upscale
+pass have to be measured again against `PHOTOFRAME_TRANSITION_SCALE=1`.
 
 ## Root causes and fixes (June 2026)
 

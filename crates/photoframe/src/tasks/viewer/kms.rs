@@ -17,49 +17,57 @@
 //!   `wake::next_wake_event` until a control command, a matting result, a
 //!   decoded photo (only while the preload queue is short), or the dwell
 //!   deadline. See `wake.rs`.
-//! * **Pacing model (transitions).** Each transition frame is rendered right
-//!   after a vblank, which the loop waits for explicitly
-//!   (`DRM_IOCTL_WAIT_VBLANK` on the connector's CRTC, see `VblankPacer`),
-//!   and is drawn for that vblank's kernel timestamp. The transition's clock
-//!   starts at the vblank before its first frame (`TransitionState::
-//!   anchor_once`), so the first frame shows progress 0 and each later frame
-//!   advances by exactly the time between the vblanks the two frames are
-//!   paced on, which is the time between the vblanks they are shown on.
-//!   `transition_frame_metric` records the same clock, so its frame times
-//!   report the vblanks the loop paced on. Why not let FIFO's blocking
-//!   acquire pace on its own: after a dwell every swapchain image but the one
-//!   on screen is idle, so the first frames of a transition are handed out
-//!   back to back and presented a few ms apart, ahead of the display, and the
-//!   transition clock (and the metric) would run ahead of what the panel
-//!   shows. With the explicit wait, at most one frame is queued and an idle
-//!   image is always free, so the acquire no longer decides the timing; FIFO
-//!   still guarantees no tearing. Frames outside a transition (greeting,
-//!   sleep, the resting photo) render at once, except the first frame after
-//!   a transition, which is paced too so the audit below can close.
-//! * **Late frames.** Vblank-to-vblank times cannot show a frame whose GPU
-//!   work finishes after the vblank it was meant for: the CPU loop stays on
-//!   time while the panel repeats a frame. So each paced frame registers a
-//!   submitted-work-done callback, every pacing wake polls the device, and
-//!   `pacing::FlipAudit` replays FIFO (a frame flips at the first vblank by
-//!   which it is complete, never before its predecessor) to count the
-//!   refreshes on which no new frame appeared. `transition_frame_metric`
-//!   logs that count as `late_frames`; with best ≈ worst ≈ one refresh and
-//!   `late_frames=0` the panel showed every frame on consecutive refreshes.
-//! * **GPU slack.** The explicit wait gives a frame less than one refresh
-//!   from its vblank to finish, where FIFO's run-ahead allowed up to two.
-//!   That is accepted: (1) the exact clock is the point, and FIFO's slack
-//!   came with the run-ahead that put every transition's first frames ahead
-//!   of the display; (2) the trade is bounded, because after a miss one frame
-//!   stays queued and every later frame of that transition gets two refreshes
-//!   of GPU time, so a miss costs exactly one repeated refresh and does not
-//!   cascade; (3) it is measured, not assumed: `late_frames` counts every
-//!   such repeat, which is what Pi gate 1 and the T4 native-resolution
-//!   decision read.
-//! * **Pacer failures.** A failed vblank wait (disabled CRTC: immediate
-//!   EINVAL; vblanks stopped: the kernel's 3 s timeout) leaves the rest of
-//!   that transition to FIFO alone and drops its `late_frames` field; two
-//!   failures in a row disable vblank pacing for the process
-//!   (`pacing::PacerHealth`), so a stopped CRTC costs at most two 3 s stalls.
+//! * **Pacing law (transitions): render ahead, clock by frame index.** The
+//!   loop renders transition frames back to back with no wait of its own;
+//!   the FIFO swapchain acquire blocks when every image is either on screen
+//!   or queued, so the loop runs at most the swapchain depth (two frames)
+//!   ahead of the display, exactly like `frametest --drm`. Frame k of a
+//!   transition is meant for vblank `anchor + k`, where the anchor is the
+//!   vblank after the most recent one when the first frame is rendered (a
+//!   non-blocking `DRM_IOCTL_WAIT_VBLANK`, relative 0), and it is drawn for
+//!   that vblank's time, `anchor_time + k·T` with T the mode's exact period
+//!   (`pacing::FrameClock`). Under FIFO, frames that are not late flip on
+//!   consecutive vblanks, so frame k is shown exactly when its clock says.
+//!   A frame rendered after the time it was meant for (the display is
+//!   already behind) is drawn for the moment it is rendered instead
+//!   (`pacing::frame_time`), so a GPU that cannot keep up gives a transition
+//!   of the right length with repeats, not a slow-motion one. A KMS
+//!   transition ends when its frame for progress 1 has been rendered
+//!   (`TransitionState::is_complete`).
+//! * **Why not wait for the vblank before each frame** (the v1.2.0-rc1 law).
+//!   Gate 1 on the Pi measured it: every transition alternated 16.7 and
+//!   33.3 ms frames and none reached 60, while `frametest --drm` (render
+//!   ahead) held 60 on the same build. Waiting for vblank V and only then
+//!   starting frame k leaves frame k less than one refresh for CPU work,
+//!   the transition pass, the 4K upscale and Mesa's display copy before its
+//!   flip at V+1; with the loop and GPU in series around the present, a
+//!   frame of slightly over one refresh costs two, and the next frame cannot
+//!   start before the vblank after that. Rendering ahead starts frame k+1
+//!   as soon as an image is free, so a frame over budget loses only its
+//!   excess and the queue absorbs single slow frames
+//!   (`pacing::tests::with_the_loop_in_series_with_the_gpu_render_ahead_loses_only_the_excess`).
+//! * **Late frames** (`pacing::FlipAudit`). Neither the loop's timing nor
+//!   the frame clock can show a frame the GPU finished after the vblank it
+//!   was meant for. So each transition frame registers a submitted-work-done
+//!   callback, and while a transition is audited a flip-observer thread
+//!   (`FlipObserver`) waits on every vblank on its own dup of the card fd
+//!   and polls the device; the audit replays FIFO (a frame flips at the
+//!   first vblank by which it is complete, never before its predecessor) to
+//!   find the vblank each frame actually showed on.
+//!   `transition_frame_metric` then reports what the panel showed: frames,
+//!   `avg_fps`, best and worst time a frame stayed on screen, and
+//!   `late_frames`, the refreshes on which no new frame appeared. The audit
+//!   is closed after the transition's last frame (the loop waits, at most a
+//!   few refreshes, until every frame has flipped); with `late_frames=0`
+//!   the panel showed every frame on consecutive refreshes. Each frame's
+//!   flip and the bounds on its GPU time are logged at debug level
+//!   (`kms_frame`), for T4.
+//! * **Observer failures.** The observer's blocking vblank waits run off the
+//!   render path, so they never stall a frame. A failed wait (disabled CRTC:
+//!   immediate EINVAL; vblanks stopped: the kernel's 3 s timeout) ends that
+//!   transition's audit (its metric line has no `late_frames`); two in a
+//!   row stop auditing for the process (`pacing::PacerHealth`). The observer
+//!   is idle (parked, no vblank waits) outside transitions and while dark.
 //! * **Runtime display changes.** Every idle wake checks that the connector
 //!   is still connected and still offers the mode in use
 //!   (`KmsDisplay::check_unchanged`; the dwell-deadline wake, once per
@@ -89,11 +97,13 @@
 //!   ("requesting event but off"), and Mesa then loses the swapchain (a
 //!   restart for us; wgpu hides the error at present). Up to 25.2 it falls
 //!   back to `drmModeSetCrtc` and lights the panel behind the viewer's back.
-//!   So: while dark the loop presents nothing and waits on no vblank (a
-//!   vblank wait on a dark CRTC fails at once and two failures disable
-//!   pacing); before the off commit the loop lets every submitted frame
-//!   reach the screen (GPU idle, then two vblanks), so no flip is queued
-//!   behind the commit; and the wake commit happens before the next present.
+//!   So: while dark the loop presents nothing and nothing waits on a vblank
+//!   (a display-power command first abandons any transition audit, which
+//!   parks the flip observer); before the off commit the loop lets every
+//!   submitted frame reach the screen (GPU idle, then two vblanks: with
+//!   render-ahead at most two frames are queued behind the one on screen),
+//!   so no flip is queued behind the commit; and the wake commit happens
+//!   before the next present.
 //!   The connector check is skipped while dark and for
 //!   `CONNECTOR_SETTLE_AFTER_WAKE` after a wake: a sleeping sink may drop
 //!   hot-plug detect and take seconds to raise it again. State machine:
@@ -277,7 +287,13 @@ pub async fn run_kms(
     let parts = build_gpu(&instance, surface, size, PresentDefault::Kms, &cfg, "kms")
         .map_err(|e| anyhow::anyhow!("failed to initialize GPU on KMS: {e}"))?;
 
-    let mut app = App::new(from_loader, to_manager_displayed, cancel, cfg, decode_scaling);
+    let mut app = App::new(
+        from_loader,
+        to_manager_displayed,
+        cancel,
+        cfg,
+        decode_scaling,
+    );
     app.enter_greeting();
     app.output = Some(Output::Kms {
         size,
@@ -295,7 +311,15 @@ pub async fn run_kms(
         "viewer presenting straight to KMS"
     );
 
-    let mut pacer = VblankPacer::new(display);
+    // The observer's own dup of the card fd and its own device handle; it
+    // is joined in kms_teardown before the device and the card go.
+    let observer_display = target.display_handle()?;
+    let device = app
+        .gpu
+        .as_ref()
+        .map(|gpu| gpu.device.clone())
+        .ok_or_else(|| anyhow::anyhow!("no GPU device after install"))?;
+    let mut pacer = FramePacer::new(display, FlipObserver::spawn(observer_display, device));
     if start_dark {
         // The last power request while waiting was off (review D1): start
         // dark, before anything is presented.
@@ -314,18 +338,21 @@ pub async fn run_kms(
     result
 }
 
-/// The one safe teardown order (crate::drm_display, rule 2): the swapchain
+/// The one safe teardown order (crate::drm_display, rule 2): the flip
+/// observer thread (joined; it holds a device handle), then the swapchain
 /// and every GPU object go first (dropping `App` drops the surface, the
 /// device and the overlay scenes' device handles), then the instance (where
 /// Mesa's display WSI joins the vblank wait thread that polls the card fd),
 /// and only then the card fd, which also releases DRM master and lets the
 /// kernel restore the console. Each step is logged so the journal shows the
 /// order on every stop.
-fn kms_teardown(app: App, pacer: VblankPacer, instance: wgpu::Instance, target: KmsTarget) {
+fn kms_teardown(app: App, pacer: FramePacer, instance: wgpu::Instance, target: KmsTarget) {
+    // First the flip observer: it holds a device handle (keeping the device
+    // alive past the app would break the order below) and a dup'd card fd.
+    info!("kms_teardown: stopping the flip observer");
+    drop(pacer);
     info!("kms_teardown: releasing swapchain and GPU objects");
     drop(app);
-    // The dup'd fd; any position before `target` is safe.
-    drop(pacer);
     info!("kms_teardown: destroying the wgpu instance");
     drop(instance);
     info!(card = %target.path, "kms_teardown: closing the card (releases DRM master)");
@@ -529,50 +556,291 @@ enum KmsCommand {
     Restart(String),
 }
 
-/// Times transition frames on the display's vblanks; see "Pacing model"
-/// and "Pacer failures" in the module docs.
-struct VblankPacer {
+/// The display handle the loop uses (power, connector checks, the anchor
+/// query) and the per-transition frame clock; see "Pacing law".
+struct FramePacer {
     display: KmsDisplay,
-    health: pacing::PacerHealth,
-    counter: pacing::VblankCounter,
+    observer: FlipObserver,
+    /// The transition being rendered: its clock and the next frame index.
+    transition: Option<TransitionPacing>,
 }
 
-impl VblankPacer {
-    fn new(display: KmsDisplay) -> Self {
+struct TransitionPacing {
+    clock: pacing::FrameClock,
+    next_index: u32,
+}
+
+impl FramePacer {
+    fn new(display: KmsDisplay, observer: FlipObserver) -> Self {
         Self {
             display,
-            health: pacing::PacerHealth::default(),
-            counter: pacing::VblankCounter::default(),
+            observer,
+            transition: None,
         }
     }
 
-    /// Wait for the next vblank; return its time on the `Instant` clock (the
-    /// clock the next transition frame is drawn for) and its sequence number.
-    /// `None` when vblank pacing is unavailable.
-    fn wait(&mut self) -> Option<(Instant, u64)> {
-        if !self.health.may_wait() {
-            return None;
-        }
-        match self.display.wait_next_vblank() {
-            Ok(vblank) => {
-                self.health.succeeded();
-                Some((
-                    monotonic_to_instant(vblank.monotonic),
-                    self.counter.extend(vblank.sequence),
-                ))
-            }
+    /// The first frame of a transition is about to be rendered: anchor its
+    /// clock on the vblank after the most recent one (a non-blocking query)
+    /// and start the audit.
+    fn open_transition(&mut self) {
+        let period = self.display.refresh_period();
+        let last = match self.display.last_vblank() {
+            Ok(vblank) => Some(self.observer.extend(vblank)),
             Err(err) => {
-                if self.health.failed() {
-                    warn!(
-                        error = %err,
-                        failures = pacing::PACER_FAILURES_TO_DISABLE,
-                        "kms_vblank_wait_failed; vblank pacing disabled for this process, FIFO alone paces transitions"
-                    );
-                } else {
-                    warn!(error = %err, "kms_vblank_wait_failed; FIFO pacing for the rest of this transition");
-                }
+                debug!(error = %err, "kms_vblank_query_failed; transition clock from now, not audited");
                 None
             }
+        };
+        let clock = match last {
+            Some(last) => pacing::FrameClock::after_vblank(last, period),
+            None => pacing::FrameClock::from_now(Instant::now(), period),
+        };
+        self.observer.begin(last.is_some());
+        self.transition = Some(TransitionPacing {
+            clock,
+            next_index: 0,
+        });
+    }
+
+    /// The clock for the next frame of the open transition.
+    fn next_frame(&self) -> Option<PacedFrame> {
+        self.transition.as_ref().map(|t| PacedFrame {
+            anchor: t.clock.anchor_time(),
+            index_time: t.clock.index_time(t.next_index),
+        })
+    }
+
+    /// A transition frame was presented (its completion flag, if the GPU
+    /// work was submitted).
+    fn presented(&mut self, done: Option<Arc<AtomicBool>>) {
+        let Some(t) = self.transition.as_mut() else {
+            return;
+        };
+        if let (Some(done), Some(target)) = (done, t.clock.target(t.next_index)) {
+            self.observer.submitted(target, done);
+        }
+        t.next_index += 1;
+    }
+
+    /// The transition's last frame has been rendered: wait (at most a few
+    /// refreshes) until the audit knows every frame's flip and report what
+    /// the panel showed.
+    fn close_transition(&mut self, app: &mut App) {
+        if self.transition.take().is_none() {
+            return;
+        }
+        let period = self.display.refresh_period();
+        let summary = self.observer.finish(period * CLOSE_AUDIT_REFRESHES);
+        log_resolved(self.observer.take_resolved());
+        app.set_kms_display_cadence(
+            summary.and_then(|summary| DisplayCadence::from_audit(summary, period)),
+        );
+    }
+
+    /// Stop timing and auditing the open transition without a result (a
+    /// display-power change interrupts it).
+    fn abandon_transition(&mut self, app: &mut App) {
+        if self.transition.take().is_some() {
+            self.observer.discard();
+            app.set_kms_display_cadence(None);
+        }
+    }
+}
+
+/// How long closing an audit may wait for the last frames to flip: with
+/// render-ahead at most two are queued behind the one flipping, so this is
+/// slack for a frame the GPU finishes late, not a time the loop normally
+/// spends.
+const CLOSE_AUDIT_REFRESHES: u32 = 8;
+
+fn log_resolved(frames: Vec<pacing::ResolvedFrame>) {
+    for frame in frames {
+        debug!(
+            target_vblank = frame.target,
+            flip_vblank = frame.flip,
+            late_refreshes = frame.flip.saturating_sub(frame.target),
+            gpu_ms_at_least = format_args!("{:.1}", frame.gpu_at_least.as_secs_f32() * 1000.0),
+            gpu_ms_at_most = ?frame.gpu_at_most.map(|d| format!("{:.1}", d.as_secs_f32() * 1000.0)),
+            "kms_frame"
+        );
+    }
+}
+
+/// Watches every vblank while a transition is audited, off the render path:
+/// a thread that blocks on the next vblank (its own dup of the card fd),
+/// polls the device so the frames' completion callbacks run, and feeds the
+/// observation to the shared `pacing::FlipAudit`. Parked outside
+/// transitions. See "Late frames" in the module docs.
+struct FlipObserver {
+    shared: Arc<ObserverShared>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+struct ObserverShared {
+    state: std::sync::Mutex<ObserverState>,
+    changed: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct ObserverState {
+    /// Observing (a transition is being audited).
+    active: bool,
+    quit: bool,
+    audit: pacing::FlipAudit,
+    /// Every observation of the audited transition succeeded.
+    complete: bool,
+    counter: pacing::VblankCounter,
+    /// The most recent vblank seen (sequence, time).
+    last: Option<(u64, Instant)>,
+    resolved: Vec<pacing::ResolvedFrame>,
+    health: pacing::PacerHealth,
+}
+
+impl FlipObserver {
+    fn spawn(mut display: KmsDisplay, device: wgpu::Device) -> Self {
+        let shared = Arc::new(ObserverShared {
+            state: std::sync::Mutex::new(ObserverState::default()),
+            changed: std::sync::Condvar::new(),
+        });
+        let thread_shared = Arc::clone(&shared);
+        let thread = std::thread::Builder::new()
+            .name("kms-flip-observer".into())
+            .spawn(move || {
+                let shared = thread_shared;
+                loop {
+                    {
+                        let mut state = shared.state.lock().expect("observer lock");
+                        while !state.active && !state.quit {
+                            state = shared.changed.wait(state).expect("observer lock");
+                        }
+                        if state.quit {
+                            return;
+                        }
+                    }
+                    let waited = display.wait_next_vblank();
+                    let _ = device.poll(wgpu::PollType::Poll);
+                    let now = Instant::now();
+                    let mut state = shared.state.lock().expect("observer lock");
+                    match waited {
+                        Ok(vblank) => {
+                            state.health.succeeded();
+                            let sequence = state.counter.extend(vblank.sequence);
+                            state.last = Some((sequence, monotonic_to_instant(vblank.monotonic)));
+                            if state.active {
+                                let resolved = state.audit.observe(sequence, now);
+                                state.resolved.extend(resolved);
+                            }
+                        }
+                        Err(err) => {
+                            let off_for_process = state.health.failed();
+                            state.complete = false;
+                            state.active = false;
+                            if off_for_process {
+                                warn!(error = %err, "kms_vblank_wait_failed; transitions are no longer audited in this process");
+                            } else {
+                                warn!(error = %err, "kms_vblank_wait_failed; this transition is not audited");
+                            }
+                        }
+                    }
+                    shared.changed.notify_all();
+                }
+            })
+            .expect("spawn the flip observer thread");
+        Self {
+            shared,
+            thread: Some(thread),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ObserverState> {
+        self.shared.state.lock().expect("observer lock")
+    }
+
+    /// Extend a vblank reading to 64 bits and place it on the `Instant`
+    /// clock (shared counter with the observer thread).
+    fn extend(&self, vblank: drm_display::Vblank) -> (u64, Instant) {
+        let mut state = self.lock();
+        let reading = (
+            state.counter.extend(vblank.sequence),
+            monotonic_to_instant(vblank.monotonic),
+        );
+        state.last = Some(reading);
+        reading
+    }
+
+    /// Start auditing a transition (when its clock could be anchored on a
+    /// vblank and auditing is not off for the process).
+    fn begin(&self, anchored: bool) {
+        let mut state = self.lock();
+        state.audit.discard();
+        state.resolved.clear();
+        state.health.transition_ended();
+        state.complete = anchored && state.health.may_wait();
+        state.active = state.complete;
+        drop(state);
+        self.shared.changed.notify_all();
+    }
+
+    fn submitted(&self, target: u64, done: Arc<AtomicBool>) {
+        let mut state = self.lock();
+        if !state.active {
+            return;
+        }
+        // The most recent vblank the observer or the anchor query saw: a
+        // frame cannot complete before the vblank after it.
+        let after = state.last.map_or(target.saturating_sub(1), |(seq, _)| seq);
+        state.audit.submitted(target, after, done, Instant::now());
+    }
+
+    /// Wait until every audited frame has flipped (or `limit` passes), then
+    /// close the audit. `None` when it was incomplete.
+    fn finish(&self, limit: Duration) -> Option<pacing::AuditSummary> {
+        let deadline = Instant::now() + limit;
+        let mut state = self.lock();
+        while state.active && state.audit.has_unresolved() {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            state = self
+                .shared
+                .changed
+                .wait_timeout(state, deadline - now)
+                .expect("observer lock")
+                .0;
+        }
+        let complete = state.complete && state.active;
+        let last = state.last.map_or(0, |(seq, _)| seq);
+        let (summary, resolved) = state.audit.finish(last, Instant::now());
+        state.resolved.extend(resolved);
+        state.active = false;
+        complete.then_some(summary)
+    }
+
+    fn discard(&self) {
+        let mut state = self.lock();
+        state.audit.discard();
+        state.active = false;
+        state.complete = false;
+    }
+
+    fn take_resolved(&self) -> Vec<pacing::ResolvedFrame> {
+        std::mem::take(&mut self.lock().resolved)
+    }
+}
+
+impl Drop for FlipObserver {
+    fn drop(&mut self) {
+        {
+            let mut state = self.lock();
+            state.quit = true;
+            state.active = false;
+        }
+        self.shared.changed.notify_all();
+        if let Some(thread) = self.thread.take() {
+            // At most one vblank wait (or the kernel's 3 s timeout if
+            // vblanks have stopped) before the thread sees `quit`.
+            let _ = thread.join();
         }
     }
 }
@@ -594,31 +862,38 @@ fn monotonic_to_instant(timestamp: Duration) -> Instant {
 }
 
 impl App {
-    /// Run the device's completion callbacks (the late-frame audit's input).
-    fn poll_device(&self) {
-        if let Some(gpu) = self.gpu.as_ref() {
-            let _ = gpu.device.poll(wgpu::PollType::Poll);
-        }
+    /// The open transition has a frame rendered (its clock is anchored).
+    fn transition_anchored(&self) -> bool {
+        self.mode()
+            .wake()
+            .transition_state()
+            .is_some_and(TransitionState::is_anchored)
     }
 
-    /// KMS: the audited late-frame count for the transition being measured;
-    /// `None` when vblank pacing was unavailable for part of it.
-    fn set_kms_late_frames(&mut self, late_frames: Option<u32>) {
+    /// KMS: what the panel showed during the transition being measured;
+    /// `None` when the audit was incomplete.
+    fn set_kms_display_cadence(&mut self, display: Option<DisplayCadence>) {
         if let Some(metric) = self.transition_frame_metric.as_mut() {
-            metric.late_frames = late_frames;
+            metric.display = display;
         }
     }
+}
+
+/// A control command on KMS. A display-power change first abandons the
+/// transition audit (nothing waits on a vblank around the power commit).
+fn handle_command(app: &mut App, pacer: &mut FramePacer, cmd: ViewerCommand) -> KmsCommand {
+    if matches!(cmd, ViewerCommand::DisplayPower { .. }) {
+        pacer.abandon_transition(app);
+    }
+    app.handle_kms_command(&mut pacer.display, cmd)
 }
 
 async fn drive(
     app: &mut App,
     control: &mut Receiver<ViewerCommand>,
-    pacer: &mut VblankPacer,
+    pacer: &mut FramePacer,
 ) -> anyhow::Result<()> {
     let mut loader_open = true;
-    let mut audit = pacing::FlipAudit::default();
-    // Every frame of the transition being audited was vblank-paced.
-    let mut audit_complete = true;
     // After a wake: when its modeset committed, until the connector
     // first reads connected again (logged for Pi gate 2).
     let mut wake_hpd_since: Option<Instant> = None;
@@ -631,7 +906,7 @@ async fn drive(
         // refresh of delay).
         loop {
             match control.try_recv() {
-                Ok(cmd) => match app.handle_kms_command(&mut pacer.display, cmd) {
+                Ok(cmd) => match handle_command(app, pacer, cmd) {
                     KmsCommand::Done => {}
                     KmsCommand::Lit => wake_hpd_since = Some(Instant::now()),
                     KmsCommand::Restart(reason) => anyhow::bail!("{reason}"),
@@ -650,40 +925,24 @@ async fn drive(
         // configured and the overlays never have a zero size), except after
         // an acquire timeout, which re-arms the request itself. While the
         // panel is dark nothing presents and the request stays armed.
+        // Transition frames render ahead, bounded by the FIFO acquire, on
+        // the frame clock of "Pacing law".
         let power = *app.presentation.power();
         if power.may_present() && app.take_kms_redraw_request() {
             let animating = app.transition_animating();
-            // Transition frames, and the first frame after a transition
-            // (it closes the audit), wait for the next vblank.
-            let paced = if animating || audit.has_unresolved() {
-                pacer.wait()
-            } else {
-                None
-            };
-            if let Some((_, vblank)) = paced {
-                app.poll_device();
-                if animating {
-                    audit.observe(vblank);
-                } else {
-                    let late = audit.finish(vblank);
-                    app.set_kms_late_frames(audit_complete.then_some(late));
-                }
-            } else if animating {
-                audit_complete = false;
-            } else if audit.has_unresolved() {
-                let _ = audit.finish(0);
-                app.set_kms_late_frames(None);
+            let starting = animating && !app.transition_anchored();
+            if pacer.transition.is_some() && (!animating || starting) {
+                // The previous transition's last frame is rendered.
+                pacer.close_transition(app);
             }
-            if !animating {
-                pacer.health.transition_ended();
-                audit_complete = true;
+            if animating && pacer.transition.is_none() {
+                // A new transition, or one resumed after a display-power
+                // change abandoned its clock (it then continues from wall
+                // time: its frames are drawn for when they are rendered).
+                pacer.open_transition();
             }
-            let frame_time = if animating {
-                paced.map(|(t, _)| t)
-            } else {
-                None
-            };
-            match app.redraw(frame_time) {
+            let paced = if animating { pacer.next_frame() } else { None };
+            match app.redraw(paced) {
                 Ok(()) => {}
                 Err(RedrawError::TimeoutStreak) => {
                     anyhow::bail!(
@@ -695,12 +954,13 @@ async fn drive(
                     anyhow::bail!("{reason}; exiting for a restart");
                 }
             }
-            if let Some(done) = app.paced_submission.take()
-                && let Some((_, vblank)) = paced
-                && animating
-            {
-                audit.submitted(vblank, done);
+            if paced.is_some() {
+                // Only a presented frame takes a vblank of the clock.
+                if let Some(done) = app.paced_submission.take() {
+                    pacer.presented(Some(done));
+                }
             }
+            log_resolved(pacer.observer.take_resolved());
         }
 
         let plan = app.wake_plan(Instant::now());
@@ -723,7 +983,7 @@ async fn drive(
                 info!("kms_viewer_cancelled");
                 return Ok(());
             }
-            WakeEvent::Command(cmd) => match app.handle_kms_command(&mut pacer.display, cmd) {
+            WakeEvent::Command(cmd) => match handle_command(app, pacer, cmd) {
                 KmsCommand::Done => {}
                 KmsCommand::Lit => wake_hpd_since = Some(Instant::now()),
                 KmsCommand::Restart(reason) => anyhow::bail!("{reason}"),
