@@ -489,6 +489,29 @@ full-screen passes are spent carefully:
 - **The main pass renders opaquely** (no blending) and composites letterbox
   regions over the background color in-shader, saving a destination read
   per pixel and keeping the surface eligible for direct scanout.
+- **One shader and one pipeline per transition kind.** Each kind has its
+  own fragment entry point in `viewer_quad.wgsl` (`fs_fade`, `fs_wipe`, …,
+  `fs_rest` for a resting photo), compiled into its own render pipeline,
+  and the CPU picks the pipeline (`DrawKind` in `viewer.rs`). Until
+  v1.2.0-rc1 one `fs_main` switched over every kind. The V3D compiler
+  sized its registers for the union of all cases: 975 instructions, 47
+  temporaries, and the iris petal arrays in the uniform block. It could
+  not allocate them at 4 threads per QPU and fell back to 2 threads.
+
+  V3D hides texture latency by switching among 4 threads, so every
+  transition ran its texture fetches at a fraction of the speed, even a
+  fade. Pi measurement, 2026-10-21: 33–50 ms of GPU time per frame at
+  transition scale 2, against a 4K fade in `frametest` at 4 threads that
+  holds 60.
+
+  The iris petal constants now live in their own uniform (`IrisPetals`),
+  read only by `fs_iris_layer`. The vertex stage draws one fullscreen
+  triangle computed from the vertex index, with no local array (V3D
+  demotes dynamically indexed local arrays to scratch).
+
+  To check on the Pi, run the viewer with `V3D_DEBUG=shaderdb`. Every
+  `MESA_SHADER_FRAGMENT` line must read `4 threads`, and the journal must
+  have no `Falling back to strategy` lines.
 
 ## Known limitation: direct scanout
 

@@ -2522,7 +2522,7 @@ pub enum TransitionKind {
 }
 
 impl TransitionKind {
-    const ALL: &'static [Self] = &[
+    pub(crate) const ALL: &'static [Self] = &[
         Self::Fade,
         Self::Wipe,
         Self::Push,

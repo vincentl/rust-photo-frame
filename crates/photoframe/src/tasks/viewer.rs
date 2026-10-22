@@ -1579,12 +1579,108 @@ struct TransitionUniforms {
     // letterbox regions over this itself so the pipeline can render
     // opaquely without a per-pixel destination read for blending.
     background: [f32; 4],
-    // Per-petal constants for the iris transition, solved on the CPU each
-    // frame so the fragment loop needs no transcendentals:
+}
+
+/// Per-petal constants for the iris transition, solved on the CPU each
+/// frame so the fragment loop needs no transcendentals. A uniform of its own
+/// (`@group(0) @binding(1)`), read only by `fs_iris_layer`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct IrisPetals {
     // petals_a[i] = (annulus_center.xy, tip_dir.xy)
-    // petals_b[i] = (trail_dir.xy, facing_cosine, unused)
     petals_a: [[f32; 4]; 16],
+    // petals_b[i] = (trail_dir.xy, facing_cosine, unused)
     petals_b: [[f32; 4]; 16],
+}
+
+/// What the main photo pass draws, one fragment entry point and one render
+/// pipeline each (`viewer_quad.wgsl`). Separate pipelines, not one shader
+/// with a `switch`, so each compiles with only its own register pressure:
+/// on V3D the union of every kind forced the shader to 2 threads per QPU
+/// and starved every transition's texture fetches (see the shader's header).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum DrawKind {
+    /// A resting photo (no transition).
+    Rest,
+    Fade,
+    Wipe,
+    Push,
+    EInk,
+    Dissolve,
+    RadialWipe,
+    VenetianBlinds,
+    CrossfadeZoom,
+    /// The iris composite (the petals are drawn by `fs_iris_layer`).
+    Iris,
+    /// `PHOTOFRAME_DEBUG_BEZIER`.
+    DebugBezier,
+}
+
+impl DrawKind {
+    const ALL: [DrawKind; 11] = [
+        DrawKind::Rest,
+        DrawKind::Fade,
+        DrawKind::Wipe,
+        DrawKind::Push,
+        DrawKind::EInk,
+        DrawKind::Dissolve,
+        DrawKind::RadialWipe,
+        DrawKind::VenetianBlinds,
+        DrawKind::CrossfadeZoom,
+        DrawKind::Iris,
+        DrawKind::DebugBezier,
+    ];
+
+    /// Exhaustive: a new `TransitionKind` does not compile until it has a
+    /// pipeline.
+    fn for_transition(kind: TransitionKind) -> DrawKind {
+        match kind {
+            TransitionKind::Fade => DrawKind::Fade,
+            TransitionKind::Wipe => DrawKind::Wipe,
+            TransitionKind::Push => DrawKind::Push,
+            TransitionKind::EInk => DrawKind::EInk,
+            TransitionKind::Dissolve => DrawKind::Dissolve,
+            TransitionKind::RadialWipe => DrawKind::RadialWipe,
+            TransitionKind::VenetianBlinds => DrawKind::VenetianBlinds,
+            TransitionKind::CrossfadeZoom => DrawKind::CrossfadeZoom,
+            TransitionKind::Iris => DrawKind::Iris,
+        }
+    }
+
+    /// The fragment entry point in `viewer_quad.wgsl`.
+    fn entry_point(self) -> &'static str {
+        match self {
+            DrawKind::Rest => "fs_rest",
+            DrawKind::Fade => "fs_fade",
+            DrawKind::Wipe => "fs_wipe",
+            DrawKind::Push => "fs_push",
+            DrawKind::EInk => "fs_eink",
+            DrawKind::Dissolve => "fs_dissolve",
+            DrawKind::RadialWipe => "fs_radial_wipe",
+            DrawKind::VenetianBlinds => "fs_venetian_blinds",
+            DrawKind::CrossfadeZoom => "fs_crossfade_zoom",
+            DrawKind::Iris => "fs_iris",
+            DrawKind::DebugBezier => "fs_debug_bezier",
+        }
+    }
+
+    fn index(self) -> usize {
+        DrawKind::ALL
+            .iter()
+            .position(|k| *k == self)
+            .expect("every DrawKind is in ALL")
+    }
+}
+
+/// The main pass's render pipelines, one per `DrawKind`.
+struct QuadPipelines {
+    pipelines: Vec<wgpu::RenderPipeline>,
+}
+
+impl QuadPipelines {
+    fn get(&self, kind: DrawKind) -> &wgpu::RenderPipeline {
+        &self.pipelines[kind.index()]
+    }
 }
 
 struct GpuCtx {
@@ -1594,10 +1690,12 @@ struct GpuCtx {
     config: wgpu::SurfaceConfiguration,
     limits: wgpu::Limits,
     uniform_buf: wgpu::Buffer,
+    /// `IrisPetals`, written only while an iris transition plays.
+    petal_buf: wgpu::Buffer,
     uniform_bind: wgpu::BindGroup,
     img_bind_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    pipeline: wgpu::RenderPipeline,
+    quad_pipelines: QuadPipelines,
     blank_plane: TexturePlane,
     iris_layer_pipeline: wgpu::RenderPipeline,
     iris_layer: Option<OffscreenTarget>,
@@ -2130,26 +2228,50 @@ fn build_gpu(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let petal_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("iris-petals"),
+        size: std::mem::size_of::<IrisPetals>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("uniform-layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
             },
-            count: None,
-        }],
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
     });
     let uniform_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("uniform-bind"),
         layout: &uniform_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: uniform_buf.as_entire_binding(),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: petal_buf.as_entire_binding(),
+            },
+        ],
     });
     let img_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("image-bind-layout"),
@@ -2261,35 +2383,45 @@ fn build_gpu(
         multiview: None,
         cache: None,
     });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("quad-pipeline"),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                // Opaque: the shader composites letterbox regions over
-                // U.background itself. Skipping blending avoids a
-                // destination read on every pixel (significant at 4K)
-                // and keeps the surface scanout-friendly.
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        multiview: None,
-        cache: None,
-    });
+    // One pipeline per DrawKind (see DrawKind for why), all on the same
+    // layout and vertex stage.
+    let quad_pipelines = QuadPipelines {
+        pipelines: DrawKind::ALL
+            .iter()
+            .map(|kind| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(kind.entry_point()),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    },
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some(kind.entry_point()),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            // Opaque: the shader composites letterbox
+                            // regions over U.background itself. Skipping
+                            // blending avoids a destination read on every
+                            // pixel (significant at 4K) and keeps the
+                            // surface scanout-friendly.
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    }),
+                    multiview: None,
+                    cache: None,
+                })
+            })
+            .collect(),
+    };
     let make_plane = |label: &str, width: u32, height: u32, data: &[u8]| -> TexturePlane {
         let w = width.max(1);
         let h = height.max(1);
@@ -2376,10 +2508,11 @@ fn build_gpu(
         config,
         limits,
         uniform_buf,
+        petal_buf,
         uniform_bind,
         img_bind_layout,
         sampler,
-        pipeline,
+        quad_pipelines,
         blank_plane,
         iris_layer_pipeline,
         iris_layer: None,
@@ -3548,9 +3681,9 @@ impl App {
                         self.clear_color.b as f32,
                         1.0,
                     ],
-                    petals_a: [[0.0; 4]; 16],
-                    petals_b: [[0.0; 4]; 16],
                 };
+                let mut petals = <IrisPetals as bytemuck::Zeroable>::zeroed();
+                let mut draw_kind = DrawKind::Rest;
                 let mut current_bind = &gpu.blank_plane.bind;
                 let mut next_bind = &gpu.blank_plane.bind;
                 let mut have_current = false;
@@ -3588,6 +3721,7 @@ impl App {
                 if debug_bezier {
                     // Draw current image and overlay a debug quadratic Bezier stroke.
                     uniforms.kind = 6; // bezier overlay
+                    draw_kind = DrawKind::DebugBezier;
                     // Control points in UV for a gentle arc across center
                     uniforms.params0 = [0.15, 0.60, 0.50, 0.25]; // P0.xy, P1.xy
                     uniforms.params1[0] = 0.85; // P2.x
@@ -3606,6 +3740,7 @@ impl App {
                         base_progress * base_progress * (3.0 - 2.0 * base_progress);
                     uniforms.progress = eased_progress;
                     uniforms.kind = state.kind().as_index();
+                    draw_kind = DrawKind::for_transition(state.kind());
                     match state.variant() {
                         ActiveTransition::Fade { through_black } => {
                             uniforms.params0[0] = if *through_black { 1.0 } else { 0.0 };
@@ -3725,8 +3860,8 @@ impl App {
                                 // petal. Baked raw here; the shader scales it by
                                 // petal_sheen and fades it near full closure.
                                 let facing = (ai + 0.5 * sigma + psi - 2.3).cos();
-                                uniforms.petals_a[i] = [center[0], center[1], tip.cos(), tip.sin()];
-                                uniforms.petals_b[i] = [trail.cos(), trail.sin(), facing, 0.0];
+                                petals.petals_a[i] = [center[0], center[1], tip.cos(), tip.sin()];
+                                petals.petals_b[i] = [trail.cos(), trail.sin(), facing, 0.0];
                             }
                         }
                     }
@@ -3735,7 +3870,7 @@ impl App {
                 }
 
                 if should_draw_quad {
-                    let iris_active = uniforms.kind == TransitionKind::Iris.as_index();
+                    let iris_active = draw_kind == DrawKind::Iris;
                     // Transitions render into the reduced-resolution
                     // intermediate and get upsampled; resting photos
                     // and the tail of a transition render natively so
@@ -3751,6 +3886,10 @@ impl App {
                     };
                     gpu.queue
                         .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+                    if iris_active {
+                        gpu.queue
+                            .write_buffer(&gpu.petal_buf, 0, bytemuck::bytes_of(&petals));
+                    }
                     // Render the petals into the reduced-resolution
                     // layer first; the main pass composites it.
                     if iris_active && let Some(layer) = gpu.iris_layer.as_ref() {
@@ -3771,7 +3910,7 @@ impl App {
                         });
                         lpass.set_pipeline(&gpu.iris_layer_pipeline);
                         lpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                        lpass.draw(0..6, 0..1);
+                        lpass.draw(0..3, 0..1);
                     }
                     let petal_bind = match gpu.iris_layer.as_ref() {
                         Some(layer) if iris_active => &layer.bind,
@@ -3794,12 +3933,12 @@ impl App {
                             occlusion_query_set: None,
                             timestamp_writes: None,
                         });
-                        rpass.set_pipeline(&gpu.pipeline);
+                        rpass.set_pipeline(gpu.quad_pipelines.get(draw_kind));
                         rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
                         rpass.set_bind_group(1, current_bind, &[]);
                         rpass.set_bind_group(2, next_bind, &[]);
                         rpass.set_bind_group(3, petal_bind, &[]);
-                        rpass.draw(0..6, 0..1);
+                        rpass.draw(0..3, 0..1);
                     }
                     if let Some(target) = half_target {
                         let mut bpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3820,7 +3959,7 @@ impl App {
                         bpass.set_pipeline(&gpu.blit_pipeline);
                         bpass.set_bind_group(0, &gpu.uniform_bind, &[]);
                         bpass.set_bind_group(1, &target.bind, &[]);
-                        bpass.draw(0..6, 0..1);
+                        bpass.draw(0..3, 0..1);
                     }
                 }
                 encoder.pop_debug_group();
@@ -5165,6 +5304,60 @@ mod tests {
         let last = *frames.last().unwrap();
         state.anchor_once(last + period);
         assert!(state.progress_at(last) > 0.0);
+    }
+
+    #[test]
+    fn every_transition_kind_has_its_own_pipeline() {
+        let mut seen = std::collections::HashSet::new();
+        for &kind in TransitionKind::ALL {
+            let draw = DrawKind::for_transition(kind);
+            assert!(DrawKind::ALL.contains(&draw), "{kind:?} -> {draw:?}");
+            assert!(seen.insert(draw), "{kind:?} shares {draw:?} with another kind");
+            assert_ne!(draw, DrawKind::Rest);
+            assert_ne!(draw, DrawKind::DebugBezier);
+        }
+        // DrawKind::ALL lists each kind once, in index order.
+        for (i, kind) in DrawKind::ALL.iter().enumerate() {
+            assert_eq!(kind.index(), i);
+        }
+    }
+
+    /// Each per-kind fragment entry point exists and compiles on its own
+    /// (WGSL -> naga IR -> SPIR-V for that entry point alone), the same unit
+    /// the driver compiles per pipeline.
+    #[test]
+    fn every_draw_kind_entry_point_compiles_alone() {
+        let source = include_str!("shaders/viewer_quad.wgsl");
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("viewer_quad.wgsl: {}", e.emit_to_string(source)));
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("viewer_quad.wgsl validates");
+        let mut entry_points: Vec<&str> = DrawKind::ALL.iter().map(|k| k.entry_point()).collect();
+        entry_points.extend(["fs_iris_layer", "fs_blit"]);
+        for name in entry_points {
+            let ep = module
+                .entry_points
+                .iter()
+                .find(|ep| ep.name == name)
+                .unwrap_or_else(|| panic!("viewer_quad.wgsl has no entry point {name}"));
+            assert_eq!(ep.stage, naga::ShaderStage::Fragment, "{name}");
+            let pipeline = naga::back::spv::PipelineOptions {
+                shader_stage: naga::ShaderStage::Fragment,
+                entry_point: name.to_string(),
+            };
+            let words = naga::back::spv::write_vec(
+                &module,
+                &info,
+                &naga::back::spv::Options::default(),
+                Some(&pipeline),
+            )
+            .unwrap_or_else(|e| panic!("{name} does not compile to SPIR-V: {e:?}"));
+            assert!(!words.is_empty(), "{name}");
+        }
     }
 
     #[test]

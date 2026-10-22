@@ -1,6 +1,19 @@
+// One fragment entry point per transition kind (`fs_<kind>`), each with
+// only its own math, compiled into its own render pipeline and chosen on the
+// CPU (`DrawKind` in viewer.rs). The V3D compiler allocates registers for the
+// whole shader: one `switch` over every kind made each kind pay the register
+// pressure of the heaviest (975 instructions, 47 temporaries), which forced
+// the shader down to 2 threads per QPU. V3D hides texture latency by
+// switching among 4 threads, so every transition, even a fade, ran its
+// texture fetches at a fraction of the speed (Pi measurement, 2026-10-21).
+// Keep each entry point small enough to compile at 4 threads; check with
+// V3D_DEBUG=shaderdb ("4 threads", no "Falling back" lines).
+
 struct TransitionUniforms {
   screen_size: vec2<f32>,
   progress: f32,
+  // TransitionKind::as_index (kept for the CPU's bookkeeping; the shaders
+  // do not branch on it).
   kind: u32,
   current_dest: vec4<f32>,
   next_dest: vec4<f32>,
@@ -10,16 +23,22 @@ struct TransitionUniforms {
   // Viewer background (linear RGB, alpha unused); letterbox regions are
   // composited over this in-shader so the pipeline can render opaquely.
   background: vec4<f32>,
-  // Per-petal constants for the iris transition, solved on the CPU each
-  // frame (see the Iris arm in viewer.rs):
-  // petals_a[i] = (annulus_center.xy, tip_dir.xy)
-  // petals_b[i] = (trail_dir.xy, facing_cosine, unused)
+};
+
+// Per-petal constants for the iris transition, solved on the CPU each frame
+// (see the Iris arm in viewer.rs). Only fs_iris_layer reads them; a separate
+// uniform so no other pipeline loads them.
+// petals_a[i] = (annulus_center.xy, tip_dir.xy)
+// petals_b[i] = (trail_dir.xy, facing_cosine, unused)
+struct IrisPetals {
   petals_a: array<vec4<f32>, 16>,
   petals_b: array<vec4<f32>, 16>,
 };
 
 @group(0) @binding(0)
 var<uniform> U: TransitionUniforms;
+@group(0) @binding(1)
+var<uniform> P: IrisPetals;
 
 @group(1) @binding(0)
 var cur_tex: texture_2d<f32>;
@@ -43,18 +62,13 @@ struct VSOut {
   @location(0) screen_uv: vec2<f32>,
 };
 
+// One triangle covering the screen (draw 3 vertices): (-1,-1), (3,-1),
+// (-1,3). Computed from the vertex index with bit operations, so there is
+// no dynamically indexed local array (V3D demotes those to scratch memory),
+// and no diagonal seam between two triangles.
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
-  var positions = array<vec2<f32>, 6>(
-    vec2<f32>(-1.0, -1.0),
-    vec2<f32>(1.0, -1.0),
-    vec2<f32>(1.0, 1.0),
-    vec2<f32>(-1.0, -1.0),
-    vec2<f32>(1.0, 1.0),
-    vec2<f32>(-1.0, 1.0),
-  );
-
-  let p = positions[vid];
+  let p = vec2<f32>(f32((vid << 1u) & 2u), f32(vid & 2u)) * 2.0 - 1.0;
   var out: VSOut;
   out.pos = vec4<f32>(p, 0.0, 1.0);
   out.screen_uv = vec2<f32>((p.x + 1.0) * 0.5, (1.0 - p.y) * 0.5);
@@ -79,12 +93,12 @@ fn sample_plane(
 }
 
 // Signed distance to iris petal `i` using the CPU-precomputed constants in
-// U.petals_a / U.petals_b. Returns (distance, radius about the petal's
+// P.petals_a / P.petals_b. Returns (distance, radius about the petal's
 // annulus center). On-screen the only petal boundaries are the inner arc and
 // the two end caps, so this band+cap distance is exact for visible pixels.
 fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> vec2<f32> {
-  let a = U.petals_a[i];
-  let b = U.petals_b[i];
+  let a = P.petals_a[i];
+  let b = P.petals_b[i];
   let v = p - a.xy;
   let r = length(v);
   var d: f32;
@@ -170,7 +184,7 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   let IRIS_SHEEN_MAX = 0.38;
   let enclosure = f32(covered_count) / f32(n);
   let var_scale = 1.0 - smoothstep(1.0 - 2.0 / f32(n), 1.0, enclosure);
-  let tone = max(1.0 + contrast * IRIS_SHEEN_MAX * U.petals_b[top].z * var_scale, 0.0);
+  let tone = max(1.0 + contrast * IRIS_SHEEN_MAX * P.petals_b[top].z * var_scale, 0.0);
   // Soft shadow cast by the petals stacked above the top one.
   let shadow_w = max(0.012 * r_in, 4.0);
   let dn1 = max(iris_petal(j1, p, r_mid, w).x, 0.0);
@@ -193,217 +207,284 @@ fn fs_blit(in: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(textureSample(cur_tex, cur_samp, in.screen_uv).rgb, 1.0);
 }
 
-@fragment
-fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-  let screen_pos = in.screen_uv * U.screen_size;
-  var current = sample_plane(cur_tex, cur_samp, U.current_dest, screen_pos);
-  var next = sample_plane(next_tex, next_samp, U.next_dest, screen_pos);
-  var color = current;
-  let progress = clamp(U.progress, 0.0, 1.0);
-switch (U.kind) {
-    case 0u: {
-      color = current;
-    }
-    case 1u: {
-      if (U.params0.x > 0.5) {
-        let half = progress * 2.0;
-        let fade_out = clamp(1.0 - half, 0.0, 1.0);
-        let fade_in = clamp(half - 1.0, 0.0, 1.0);
-        let black_weight = clamp(1.0 - fade_out - fade_in, 0.0, 1.0);
-        color = current * fade_out + next * fade_in + vec4<f32>(0.0, 0.0, 0.0, black_weight);
-      } else {
-        color = mix(current, next, progress);
-      }
-    }
-    case 2u: {
-      let min_proj = U.params0.z;
-      let inv_span = U.params0.w;
-      let softness = clamp(U.params1.x, 0.0, 0.5);
-      let normalized = clamp((dot(U.params0.xy, screen_pos) - min_proj) * inv_span, 0.0, 1.0);
-      var mask = 0.0;
-      if (progress <= 0.0) {
-        mask = 0.0;
-      } else if (progress >= 1.0) {
-        mask = 1.0;
-      } else {
-        let leading = clamp(progress - softness, 0.0, progress);
-        let trailing = clamp(progress + softness, progress, 1.0);
-        let end = max(trailing, leading + 1e-3);
-        let smooth_mask = smoothstep(leading, end, normalized);
-        mask = 1.0 - smooth_mask;
-      }
-      color = current * (1.0 - mask) + next * mask;
-    }
-    case 3u: {
-      let translation = U.params0.xy;
-      let cur_pos = screen_pos - translation * progress;
-      let next_pos = screen_pos + translation * (1.0 - progress);
-      current = sample_plane(cur_tex, cur_samp, U.current_dest, cur_pos);
-      next = sample_plane(next_tex, next_samp, U.next_dest, next_pos);
-      let mask = step(0.5, next.a);
-      color = current * (1.0 - mask) + next * mask;
-    }
-    case 4u: {
-      let flashes = max(U.params0.x, 0.0);
-      let reveal_start = clamp(U.params0.y, 0.05, 0.95);
-      let stripes = max(U.params0.z, 1.0);
-      let seed = vec2<f32>(U.params0.w, U.params1.x);
-      let flash_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
-      let prep_ratio = progress / max(reveal_start, 1e-3);
-      if (progress < reveal_start) {
-        let segments = flashes * 2.0 + 1.0;
-        let staged = clamp(floor(prep_ratio * segments), 0.0, segments);
-        let stage_u = u32(staged);
-        var flash_color = current;
-        if (stage_u > 0u) {
-          let toggle = (stage_u & 1u) == 1u;
-          if (toggle) {
-            flash_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-          } else {
-            flash_color = vec4<f32>(flash_rgb, 1.0);
-          }
-        }
-        let stage_pos = fract(prep_ratio * segments);
-        let flash_mix = smoothstep(0.15, 0.85, stage_pos);
-        color = mix(current, flash_color, clamp(flash_mix, 0.0, 1.0));
-      } else {
-        let reveal_ratio = (progress - reveal_start) / max(1.0 - reveal_start, 1e-3);
-        let stripe_idx = floor(in.screen_uv.y * stripes);
-        let stripe_phase = stripe_idx / stripes;
-        let noise_vec = vec2<f32>(stripe_idx, floor(in.screen_uv.x * stripes)) + seed;
-        let noise = fract(sin(dot(noise_vec, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-        // Stagger-normalized so the LAST stripe's gate reaches 1.0 by
-        // reveal_ratio ~0.9: the old form (1.15r - 0.85*phase) left bottom
-        // stripes only ~30-60% revealed at the end of the transition, which
-        // then popped to the clean photo on the first dwell frame.
-        let stagger = 0.45;
-        let gate = clamp(
-          (reveal_ratio - stripe_phase * stagger) / (1.0 - stagger) + noise * 0.15,
-          0.0,
-          1.0
-        );
-        let mask = smoothstep(0.05, 0.85, gate);
-        let ghost = mix(current, vec4<f32>(flash_rgb, 1.0), 0.55);
-        color = mix(ghost, next, mask);
-      }
-    }
-    case 5u: {
-      // dissolve: threshold value-noise by progress
-      let softness = clamp(U.params0.x, 0.0, 0.5);
-      let scale = max(U.params0.y, 1.0);
-      let cell = floor(screen_pos / scale);
-      let n = fract(sin(dot(cell, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-      let lo = clamp(progress - softness, 0.0, 1.0);
-      let hi = clamp(progress + softness, 0.0, 1.0);
-      let mask = smoothstep(lo, max(hi, lo + 1e-3), n);
-      color = mix(next, current, mask);
-    }
-    case 8u: {
-      // radial-wipe: circle or diamond reveal from center
-      let center = U.params0.xy * U.screen_size;
-      let softness = clamp(U.params0.z, 0.0, 0.5);
-      let diamond = U.params0.w > 0.5;
-      let dv = screen_pos - center;
-      let max_r = length(U.screen_size);
-      var dist = length(dv) / max(max_r, 1e-3);
-      if (diamond) { dist = (abs(dv.x) + abs(dv.y)) / max(max_r, 1e-3); }
-      let lo = clamp(progress - softness, 0.0, 1.0);
-      let hi = clamp(progress + softness, 0.0, 1.0);
-      let mask = 1.0 - smoothstep(lo, max(hi, lo + 1e-3), dist);
-      color = mix(current, next, mask);
-    }
-    case 9u: {
-      // venetian-blinds: stripe reveal
-      let stripes = max(U.params0.x, 1.0);
-      let softness = clamp(U.params0.y, 0.001, 0.5);
-      let vertical = U.params0.z > 0.5;
-      let axis = select(in.screen_uv.y, in.screen_uv.x, vertical);
-      let local = fract(axis * stripes);
-      let mask = smoothstep(progress - softness, progress + softness, 1.0 - local);
-      color = mix(current, next, 1.0 - mask);
-    }
-    case 10u: {
-      // crossfade-zoom: fade + a shared, gentle Ken-Burns scale.
-      // Both planes share ONE scale that is 0 at the ends and bumps up in the
-      // middle (1 + zoom*sin(pi*progress)). Locking both layers to the same
-      // scale avoids the double-image "swim" of opposing zoom directions, is
-      // pop-free at both ends, and keeps scale >= 1 so edges never go empty.
-      let zoom = U.params0.x;
-      let cur_in = U.params0.y > 0.5;
-      let next_in = U.params0.z > 0.5;
-      let center = U.screen_size * 0.5;
-      let bump = zoom * sin(3.14159265 * progress);
-      let cur_scale = select(1.0, 1.0 + bump, cur_in);
-      let next_scale = select(1.0, 1.0 + bump, next_in);
-      let cur_pos = center + (screen_pos - center) / max(cur_scale, 1e-3);
-      let next_pos = center + (screen_pos - center) / max(next_scale, 1e-3);
-      let c = sample_plane(cur_tex, cur_samp, U.current_dest, cur_pos);
-      let nxt = sample_plane(next_tex, next_samp, U.next_dest, next_pos);
-      color = mix(c, nxt, progress);
-    }
-    case 11u: {
-      // iris: mechanical camera-iris diaphragm. The petals (shape + shading)
-      // were rendered into the reduced-resolution petal layer by
-      // fs_iris_layer this frame; here we just composite it (premultiplied
-      // alpha) over the crossfading photos.
-      // params0.w = photo_swap_mix
-      let photo = mix(current, next, clamp(U.params0.w, 0.0, 1.0));
-      let petal = textureSample(petal_tex, petal_samp, in.screen_uv);
-      color = vec4<f32>(photo.rgb * (1.0 - petal.a) + petal.rgb, max(photo.a, petal.a));
-    }
-    case 6u: {
-      // Debug: stroke a single quadratic Bezier over the current image
-      // params0.xy = P0 (uv), params0.zw = P1 (uv), params1.xy = P2 (uv)
-      // params1.z = stroke width (px), params3 = stroke rgba
-      color = current;
-
-      // Control points in pixel space
-      let P0 = U.screen_size * clamp(U.params0.xy, vec2<f32>(0.0), vec2<f32>(1.0));
-      let P1 = U.screen_size * clamp(U.params0.zw, vec2<f32>(0.0), vec2<f32>(1.0));
-      let P2 = U.screen_size * clamp(U.params1.xy, vec2<f32>(0.0), vec2<f32>(1.0));
-      let stroke_px = max(U.params1.z, 0.0);
-      let stroke = vec4<f32>(
-        clamp(U.params3.xyz, vec3<f32>(0.0), vec3<f32>(1.0)),
-        clamp(U.params3.w, 0.0, 1.0)
-      );
-
-      // Distance from this pixel to the Bezier, approximated by a polyline
-      let p = in.screen_uv * U.screen_size;
-      let N: i32 = 32; // segments
-      var min_d = 1e9;
-      var a = P0;
-      for (var i: i32 = 1; i <= N; i = i + 1) {
-        let t = f32(i) / f32(N);
-        // Quadratic Bezier point via de Casteljau
-        let q0 = mix(P0, P1, t);
-        let q1 = mix(P1, P2, t);
-        let b = mix(q0, q1, t);
-        // Distance to segment a-b
-        let ab = b - a;
-        let ap = p - a;
-        let h = clamp(dot(ap, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
-        let d = length(ap - ab * h);
-        min_d = min(min_d, d);
-        a = b;
-      }
-
-      let half_w = max(0.5 * stroke_px, 0.0);
-      let aa = max(fwidth(min_d), 1.0);
-      let edge = 1.0 - smoothstep(half_w, half_w + aa, min_d);
-      let alpha = edge * stroke.a;
-      color = mix(color, vec4<f32>(stroke.rgb, 1.0), alpha);
-    }
-    default: {
-      color = current;
-    }
-  }
-  var alpha = max(max(current.a, next.a), color.a);
-  if ((U.kind == 1u && U.params0.x > 0.5) || U.kind == 4u) {
-    alpha = 1.0;
-  }
-  // Composite over the background here (previously done by alpha blending
-  // against the clear color): same result, no per-pixel destination read,
-  // and the output stays fully opaque for compositor direct scanout.
-  let a = clamp(alpha, 0.0, 1.0);
+// The common tail of every photo pass: composite over the background here
+// (previously done by alpha blending against the clear color): same result,
+// no per-pixel destination read, and the output stays fully opaque for
+// direct scanout. Coverage is the union of both photos and the result.
+fn over_background(color: vec4<f32>, current: vec4<f32>, next: vec4<f32>) -> vec4<f32> {
+  let a = clamp(max(max(current.a, next.a), color.a), 0.0, 1.0);
   return vec4<f32>(color.rgb * a + U.background.rgb * (1.0 - a), 1.0);
+}
+
+// For results that cover the whole screen by construction (fade through
+// black, e-ink).
+fn opaque(color: vec4<f32>) -> vec4<f32> {
+  return vec4<f32>(color.rgb, 1.0);
+}
+
+fn screen_pos_of(in: VSOut) -> vec2<f32> {
+  return in.screen_uv * U.screen_size;
+}
+
+fn current_at(pos: vec2<f32>) -> vec4<f32> {
+  return sample_plane(cur_tex, cur_samp, U.current_dest, pos);
+}
+
+fn next_at(pos: vec2<f32>) -> vec4<f32> {
+  return sample_plane(next_tex, next_samp, U.next_dest, pos);
+}
+
+fn progress01() -> f32 {
+  return clamp(U.progress, 0.0, 1.0);
+}
+
+// A resting photo (no transition).
+@fragment
+fn fs_rest(in: VSOut) -> @location(0) vec4<f32> {
+  let pos = screen_pos_of(in);
+  let current = current_at(pos);
+  let next = next_at(pos);
+  return over_background(current, current, next);
+}
+
+// params0.x > 0.5: through black.
+@fragment
+fn fs_fade(in: VSOut) -> @location(0) vec4<f32> {
+  let pos = screen_pos_of(in);
+  let current = current_at(pos);
+  let next = next_at(pos);
+  let progress = progress01();
+  if (U.params0.x > 0.5) {
+    let half = progress * 2.0;
+    let fade_out = clamp(1.0 - half, 0.0, 1.0);
+    let fade_in = clamp(half - 1.0, 0.0, 1.0);
+    let black_weight = clamp(1.0 - fade_out - fade_in, 0.0, 1.0);
+    let color = current * fade_out + next * fade_in + vec4<f32>(0.0, 0.0, 0.0, black_weight);
+    return opaque(color);
+  }
+  return over_background(mix(current, next, progress), current, next);
+}
+
+// params0 = (normal.xy, min_proj, inv_span), params1.x = softness.
+@fragment
+fn fs_wipe(in: VSOut) -> @location(0) vec4<f32> {
+  let pos = screen_pos_of(in);
+  let current = current_at(pos);
+  let next = next_at(pos);
+  let progress = progress01();
+  let min_proj = U.params0.z;
+  let inv_span = U.params0.w;
+  let softness = clamp(U.params1.x, 0.0, 0.5);
+  let normalized = clamp((dot(U.params0.xy, pos) - min_proj) * inv_span, 0.0, 1.0);
+  var mask = 0.0;
+  if (progress <= 0.0) {
+    mask = 0.0;
+  } else if (progress >= 1.0) {
+    mask = 1.0;
+  } else {
+    let leading = clamp(progress - softness, 0.0, progress);
+    let trailing = clamp(progress + softness, progress, 1.0);
+    let end = max(trailing, leading + 1e-3);
+    let smooth_mask = smoothstep(leading, end, normalized);
+    mask = 1.0 - smooth_mask;
+  }
+  return over_background(current * (1.0 - mask) + next * mask, current, next);
+}
+
+// params0.xy = translation (px).
+@fragment
+fn fs_push(in: VSOut) -> @location(0) vec4<f32> {
+  let pos = screen_pos_of(in);
+  let progress = progress01();
+  let translation = U.params0.xy;
+  let current = current_at(pos - translation * progress);
+  let next = next_at(pos + translation * (1.0 - progress));
+  let mask = step(0.5, next.a);
+  return over_background(current * (1.0 - mask) + next * mask, current, next);
+}
+
+// params0 = (flash_count, reveal_portion, stripe_count, seed.x),
+// params1 = (seed.y, flash_rgb).
+@fragment
+fn fs_eink(in: VSOut) -> @location(0) vec4<f32> {
+  let pos = screen_pos_of(in);
+  let current = current_at(pos);
+  let next = next_at(pos);
+  let progress = progress01();
+  let flashes = max(U.params0.x, 0.0);
+  let reveal_start = clamp(U.params0.y, 0.05, 0.95);
+  let stripes = max(U.params0.z, 1.0);
+  let seed = vec2<f32>(U.params0.w, U.params1.x);
+  let flash_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
+  let prep_ratio = progress / max(reveal_start, 1e-3);
+  if (progress < reveal_start) {
+    let segments = flashes * 2.0 + 1.0;
+    let staged = clamp(floor(prep_ratio * segments), 0.0, segments);
+    let stage_u = u32(staged);
+    var flash_color = current;
+    if (stage_u > 0u) {
+      let toggle = (stage_u & 1u) == 1u;
+      if (toggle) {
+        flash_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+      } else {
+        flash_color = vec4<f32>(flash_rgb, 1.0);
+      }
+    }
+    let stage_pos = fract(prep_ratio * segments);
+    let flash_mix = smoothstep(0.15, 0.85, stage_pos);
+    return opaque(mix(current, flash_color, clamp(flash_mix, 0.0, 1.0)));
+  }
+  let reveal_ratio = (progress - reveal_start) / max(1.0 - reveal_start, 1e-3);
+  let stripe_idx = floor(in.screen_uv.y * stripes);
+  let stripe_phase = stripe_idx / stripes;
+  let noise_vec = vec2<f32>(stripe_idx, floor(in.screen_uv.x * stripes)) + seed;
+  let noise = fract(sin(dot(noise_vec, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+  // Stagger-normalized so the LAST stripe's gate reaches 1.0 by
+  // reveal_ratio ~0.9: the old form (1.15r - 0.85*phase) left bottom
+  // stripes only ~30-60% revealed at the end of the transition, which
+  // then popped to the clean photo on the first dwell frame.
+  let stagger = 0.45;
+  let gate = clamp(
+    (reveal_ratio - stripe_phase * stagger) / (1.0 - stagger) + noise * 0.15,
+    0.0,
+    1.0
+  );
+  let mask = smoothstep(0.05, 0.85, gate);
+  let ghost = mix(current, vec4<f32>(flash_rgb, 1.0), 0.55);
+  return opaque(mix(ghost, next, mask));
+}
+
+// Threshold value-noise by progress. params0 = (softness, cell scale).
+@fragment
+fn fs_dissolve(in: VSOut) -> @location(0) vec4<f32> {
+  let pos = screen_pos_of(in);
+  let current = current_at(pos);
+  let next = next_at(pos);
+  let progress = progress01();
+  let softness = clamp(U.params0.x, 0.0, 0.5);
+  let scale = max(U.params0.y, 1.0);
+  let cell = floor(pos / scale);
+  let n = fract(sin(dot(cell, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+  let lo = clamp(progress - softness, 0.0, 1.0);
+  let hi = clamp(progress + softness, 0.0, 1.0);
+  let mask = smoothstep(lo, max(hi, lo + 1e-3), n);
+  return over_background(mix(next, current, mask), current, next);
+}
+
+// Circle or diamond reveal from a center.
+// params0 = (center.xy in uv, softness, diamond).
+@fragment
+fn fs_radial_wipe(in: VSOut) -> @location(0) vec4<f32> {
+  let pos = screen_pos_of(in);
+  let current = current_at(pos);
+  let next = next_at(pos);
+  let progress = progress01();
+  let center = U.params0.xy * U.screen_size;
+  let softness = clamp(U.params0.z, 0.0, 0.5);
+  let diamond = U.params0.w > 0.5;
+  let dv = pos - center;
+  let max_r = length(U.screen_size);
+  var dist = length(dv) / max(max_r, 1e-3);
+  if (diamond) { dist = (abs(dv.x) + abs(dv.y)) / max(max_r, 1e-3); }
+  let lo = clamp(progress - softness, 0.0, 1.0);
+  let hi = clamp(progress + softness, 0.0, 1.0);
+  let mask = 1.0 - smoothstep(lo, max(hi, lo + 1e-3), dist);
+  return over_background(mix(current, next, mask), current, next);
+}
+
+// Stripe reveal. params0 = (stripes, softness, vertical).
+@fragment
+fn fs_venetian_blinds(in: VSOut) -> @location(0) vec4<f32> {
+  let pos = screen_pos_of(in);
+  let current = current_at(pos);
+  let next = next_at(pos);
+  let progress = progress01();
+  let stripes = max(U.params0.x, 1.0);
+  let softness = clamp(U.params0.y, 0.001, 0.5);
+  let vertical = U.params0.z > 0.5;
+  let axis = select(in.screen_uv.y, in.screen_uv.x, vertical);
+  let local = fract(axis * stripes);
+  let mask = smoothstep(progress - softness, progress + softness, 1.0 - local);
+  return over_background(mix(current, next, 1.0 - mask), current, next);
+}
+
+// Fade + a shared, gentle Ken-Burns scale. Both planes share ONE scale that
+// is 0 at the ends and bumps up in the middle (1 + zoom*sin(pi*progress)).
+// Locking both layers to the same scale avoids the double-image "swim" of
+// opposing zoom directions, is pop-free at both ends, and keeps scale >= 1
+// so edges never go empty. params0 = (zoom, current_zooms_in, next_zooms_in).
+@fragment
+fn fs_crossfade_zoom(in: VSOut) -> @location(0) vec4<f32> {
+  let pos = screen_pos_of(in);
+  let progress = progress01();
+  let zoom = U.params0.x;
+  let cur_in = U.params0.y > 0.5;
+  let next_in = U.params0.z > 0.5;
+  let center = U.screen_size * 0.5;
+  let bump = zoom * sin(3.14159265 * progress);
+  let cur_scale = select(1.0, 1.0 + bump, cur_in);
+  let next_scale = select(1.0, 1.0 + bump, next_in);
+  // The composite's coverage uses the unzoomed planes, as it always has.
+  let current = current_at(pos);
+  let next = next_at(pos);
+  let c = current_at(center + (pos - center) / max(cur_scale, 1e-3));
+  let nxt = next_at(center + (pos - center) / max(next_scale, 1e-3));
+  return over_background(mix(c, nxt, progress), current, next);
+}
+
+// Mechanical camera-iris diaphragm. The petals (shape + shading) were
+// rendered into the reduced-resolution petal layer by fs_iris_layer this
+// frame; here they are composited (premultiplied alpha) over the
+// crossfading photos. params0.w = photo_swap_mix.
+@fragment
+fn fs_iris(in: VSOut) -> @location(0) vec4<f32> {
+  let pos = screen_pos_of(in);
+  let current = current_at(pos);
+  let next = next_at(pos);
+  let photo = mix(current, next, clamp(U.params0.w, 0.0, 1.0));
+  let petal = textureSample(petal_tex, petal_samp, in.screen_uv);
+  let color = vec4<f32>(photo.rgb * (1.0 - petal.a) + petal.rgb, max(photo.a, petal.a));
+  return over_background(color, current, next);
+}
+
+// Debug: stroke a single quadratic Bezier over the current image.
+// params0.xy = P0 (uv), params0.zw = P1 (uv), params1.xy = P2 (uv),
+// params1.z = stroke width (px), params3 = stroke rgba.
+@fragment
+fn fs_debug_bezier(in: VSOut) -> @location(0) vec4<f32> {
+  let pos = screen_pos_of(in);
+  let current = current_at(pos);
+  let next = next_at(pos);
+  // Control points in pixel space
+  let P0 = U.screen_size * clamp(U.params0.xy, vec2<f32>(0.0), vec2<f32>(1.0));
+  let P1 = U.screen_size * clamp(U.params0.zw, vec2<f32>(0.0), vec2<f32>(1.0));
+  let P2 = U.screen_size * clamp(U.params1.xy, vec2<f32>(0.0), vec2<f32>(1.0));
+  let stroke_px = max(U.params1.z, 0.0);
+  let stroke = vec4<f32>(
+    clamp(U.params3.xyz, vec3<f32>(0.0), vec3<f32>(1.0)),
+    clamp(U.params3.w, 0.0, 1.0)
+  );
+  // Distance from this pixel to the Bezier, approximated by a polyline
+  let N: i32 = 32; // segments
+  var min_d = 1e9;
+  var a = P0;
+  for (var i: i32 = 1; i <= N; i = i + 1) {
+    let t = f32(i) / f32(N);
+    // Quadratic Bezier point via de Casteljau
+    let q0 = mix(P0, P1, t);
+    let q1 = mix(P1, P2, t);
+    let b = mix(q0, q1, t);
+    // Distance to segment a-b
+    let ab = b - a;
+    let ap = pos - a;
+    let h = clamp(dot(ap, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+    let d = length(ap - ab * h);
+    min_d = min(min_d, d);
+    a = b;
+  }
+  let half_w = max(0.5 * stroke_px, 0.0);
+  let aa = max(fwidth(min_d), 1.0);
+  let edge = 1.0 - smoothstep(half_w, half_w + aa, min_d);
+  let alpha = edge * stroke.a;
+  return over_background(mix(current, vec4<f32>(stroke.rgb, 1.0), alpha), current, next);
 }

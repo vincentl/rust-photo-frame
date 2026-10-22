@@ -61,7 +61,7 @@ libc = "0.2"
 [dev-dependencies]
 # Paused clock for the viewer wake-loop tests (tokio::test(start_paused)).
 tokio = { version = "1.47.1", features = ["test-util"] }
-naga = { version = "27", features = ["wgsl-in"] }
+naga = { version = "27", features = ["wgsl-in", "spv-out"] }
 tempfile = "3.23.0"
 base64 = "0.22.1"
 jpeg-encoder = "0.6"
