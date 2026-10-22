@@ -542,6 +542,28 @@ full-screen passes are spent carefully:
 
   The cubic cuts the error by a fifth on every photo; what remains is the
   detail mip 1 never held. The 5-tap form is as close as the exact one.
+  Every transition kind gains, push included: push reads its photos from
+  level 0, but its frame is drawn into the intermediate and upscaled like
+  the others.
+
+  **The mip stays a box filter.** A sharper-looking downsample, Catmull-Rom
+  stretched to 2:1 (16 bilinear taps, at upload), was measured against it
+  on the same photos and on synthetic gratings and edges:
+
+  | Mip 1 from | Upscale | Mean abs error | Pixels off by > 8 LSB |
+  |---|---|---|---|
+  | box | bilinear | 4.32 LSB | 15.8% |
+  | box | bicubic | 3.47 LSB | 12.7% |
+  | Catmull-Rom | bilinear | 4.41 LSB | 16.1% |
+  | Catmull-Rom | bicubic | 3.64 LSB | 13.5% |
+
+  The stretched cubic is the better anti-aliasing filter but the softer one
+  where it matters: a grating at 0.20 cycles per source pixel (below the
+  mip's Nyquist of 0.25) keeps 0.71 of its amplitude against the box's
+  0.81, while above Nyquist it leaves 0.27 of a 0.30 grating where the box
+  leaves 0.59 (moiré on fine stripes). Its negative lobes also ring: a
+  0.2 to 0.8 step (linear) undershoots to 0.175 and overshoots to 0.831,
+  where the box has none. It lost on every photo, so the box stays.
 - **Iris petals are a signed-distance layer at 1/`IRIS_LAYER_SCALE`
   (default 16)** (`PHOTOFRAME_IRIS_LAYER_SCALE`, 1–16, to override). The
   petal math runs on CPU-precomputed per-frame constants and avoids
