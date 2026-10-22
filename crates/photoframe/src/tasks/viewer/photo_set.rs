@@ -1,14 +1,15 @@
 //! A photo as a set of windows (`local-markdown/p1-pairing-design.md` §5).
 //!
-//! Every mat kind places `n ≥ 1` windows inside the rectangle it already
-//! computes for the photo. `n = 1` is the solo code path, bit-identical to
-//! the matting worker before pairing (invariant C1, tested against goldens);
-//! `n = 2` is a pair screen. The rules, by name:
+//! Every mat kind draws `n ≥ 1` windows in the photo space it already
+//! computes. `n = 1` is the solo code path, bit-identical to the matting
+//! worker before pairing (invariant C1, tested against goldens); `n = 2` is a
+//! pair screen, laid out explicitly in that space. The rules, by name:
 //!
-//! - **Height.** With `a_L`, `a_R` the members' aspects, `b` the mat border
-//!   (`minimum-mat-percentage` of the canvas's shorter side), `r` =
-//!   `pairing.bar-ratio` and `β` the bevel a studio or passe-partout mat cuts
-//!   around each window (0 elsewhere), the pair's height is the solo fit's
+//! - **Height.** With `a_L`, `a_R` the members' aspects, `b` the mat's side
+//!   margin (`minimum-mat-percentage` of the canvas width, as the solo fit
+//!   reserves it), `r` = `pairing.bar-ratio` and `β` the bevel a studio or
+//!   passe-partout mat cuts around each window (0 elsewhere), the pair's
+//!   height is the solo fit's
 //!   `H = min(avail_h, (W_c − (2 + r)·b − 4β) / (a_L + a_R), u·h₀)`: the
 //!   mat's own available height (so a pairable member keeps its solo height,
 //!   C2), the width that leaves each side margin at least `b`, and the
@@ -19,8 +20,9 @@
 //!   `S = W_c − w_L − w_R − 4β` is shared between the left margin, the bar and
 //!   the right margin with weights `1 : r : 1`: the bar is `round(r·S/(2 + r))`
 //!   (plus `⌈2β⌉` for the two inner bevels), the rounding of the widths goes
-//!   to the outer mat (at most a pixel a side), and `r = 0` puts the photos
-//!   edge to edge. The aspects `a_i` are each photo's own (`source_size`),
+//!   to the outer mat (so a margin can fall up to a pixel short of `b` at the
+//!   width bound), and `r = 0` puts the photos edge to edge. The aspects
+//!   `a_i` are each photo's own (`source_size`),
 //!   never its decoded buffer's, so a DCT-scaled decode lays out exactly as a
 //!   full one. The first appearance goes on the left. **No cropping**:
 //!   different aspects keep their full frame.
@@ -58,9 +60,9 @@ pub(super) struct PhotoSet {
 }
 
 /// A pair's share of the mat: `r` = `pairing.bar-ratio`, the bar's weight
-/// against each side margin, and `b`, the mat border in canvas pixels
-/// (`minimum-mat-percentage` of the canvas's shorter side), the floor under
-/// each side margin.
+/// against each side margin, and `b`, the mat's side margin in canvas pixels
+/// (`minimum-mat-percentage` of the canvas width, what the solo fit reserves
+/// on each side), the floor under each side margin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct PairSpacing {
     pub bar_ratio: f32,
@@ -73,7 +75,7 @@ impl PairSpacing {
     pub(super) fn new(bar_ratio: f32, margin: f32, canvas: (u32, u32)) -> Self {
         Self {
             bar_ratio: bar_ratio.max(0.0),
-            border: margin.max(0.0) * canvas.0.min(canvas.1) as f32,
+            border: margin.max(0.0) * canvas.0 as f32,
         }
     }
 }
@@ -643,10 +645,11 @@ mod tests {
         assert_eq!(layout(&w, 3840), ((495, 1425, 0, 1425, 495), 1900));
     }
 
-    /// Width-bound: two squares on a 4:3 canvas (1600x1200, 6%, border 72)
-    /// cannot stand 1056 tall; the width `1600 − 2.618 × 72 = 1411.5` leaves
-    /// them 706 each, the side margins exactly the border and the bar
-    /// `round(0.618 × 188 / 2.618) = 44`, centred in the leftover height.
+    /// Width-bound: two squares on a 4:3 canvas (1600x1200, 6%, side margin
+    /// 96) cannot stand 1056 tall; the width `1600 − 2.618 × 96 = 1348.7`
+    /// leaves them 674 each, the side margins the mat's own (the odd pixel to
+    /// the right) and the bar `round(0.618 × 252 / 2.618) = 59`, centred in
+    /// the leftover height.
     #[test]
     fn a_width_bound_pair_keeps_its_margins_at_the_border() {
         let set = PhotoSet::pair(
@@ -661,8 +664,8 @@ mod tests {
             bevel_px: 0.0,
             max_upscale: 1.0,
         });
-        assert_eq!(layout(&w, 1600), ((72, 706, 44, 706, 72), 706));
-        assert_eq!(w[0].y, 247, "(1200 − 706) / 2");
+        assert_eq!(layout(&w, 1600), ((96, 674, 59, 674, 97), 674));
+        assert_eq!(w[0].y, 263, "(1200 − 674) / 2");
     }
 
     /// A 2% fixed-colour mat: the overlay fit stands the photos

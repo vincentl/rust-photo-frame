@@ -448,14 +448,14 @@ nothing already handed to the loader is ever moved. What changes and what does n
 
 **Which portraits pair.** A photo is *pairable* when both hold:
 
-- **Shape:** it is narrow enough for two to fit side by side at full height with a
-  border on each side: `width / height ≤ (A − (2 + bar-ratio) × m) / (2 × (1 − 2m))`,
-  where `A` is the canvas aspect (width / height) and `m` is the `minimum-mat-percentage`
-  (as a fraction) of the mat that makes this tightest, the smallest non-zero one on
-  landscape canvases wider than 4:3 and the largest on narrower ones. On 16:9 with the
-  default bar ratio and a 6% mat the limit is 0.921: 4:5, 3:4, 2:3 and 9:16 portraits
-  pair, squares never do; with a 2% mat it is 0.899. On 16:10 it is 0.820, so 4:5 pairs
-  there too, 5:6 does not. Studio and passe-partout mats cut a bevel around each photo,
+- **Shape:** it is narrow enough for two to fit side by side at full height with the
+  mat's own side margin outside each:
+  `width / height ≤ A × (1 − (2 + bar-ratio) × m) / (2 × (1 − 2m))`, less a pixel's
+  allowance for rounding, where `A` is the canvas aspect (width / height) and `m` is the
+  largest non-zero `minimum-mat-percentage` (as a fraction), which is always the one that
+  binds. On 16:9 with the default bar ratio and a 6% mat the limit is 0.851: 4:5, 3:4,
+  2:3 and 9:16 portraits pair, squares never do; with 2% mats only it is 0.877. On 16:10
+  it is 0.765, which leaves out 4:5. Studio and passe-partout mats cut a bevel around each photo,
   and the bar holds the two inner ones while the margins hold the outer two, so with
   those mats the limit is lower by `2 × bevel-width-px / (canvas height × (1 − 2m))`
   (about 0.004 for a 4 px bevel on 4K).
@@ -487,16 +487,17 @@ bar and the right margin with weights 1 : `bar-ratio` : 1. The default 1/φ ≈ 
 the bar a little over half a side margin: two 3:4 portraits on a 6% mat at 4K stand
 1901 px tall and 1426 px wide, and the 988 px left over become margins of 377 px and a
 bar of 233 px. A pair of narrower photos gets wider margins and a wider bar in the same
-proportion; the side margins never fall below the mat border (`minimum-mat-percentage`
-of the canvas's shorter side). Blurred mats are drawn from the two photos side by side,
-studio and passe-partout bevels frame each window, and a drop shadow falls under both.
-On studio and passe-partout mats the bar also holds the two inner bevels, and the flat
-boards on either side of them share the slack with the flat bar in the same 1 : `bar-ratio`
-: 1. `bar-ratio: 0` puts the two photos edge to edge (on studio and passe-partout, bevel
-to bevel) with all the slack in the margins. `fill-when-fits` never applies to a pair.
-If the canvas changes after a pair was planned (a new display mode) and the two no
-longer qualify on it, they are shown one after the other instead. Because the margins
-are measured from the border, pairing needs mats that have one:
+proportion; the side margins never fall below the mat's own side margin
+(`minimum-mat-percentage` of the canvas width), give or take a pixel of rounding.
+Blurred mats are drawn from the two photos side by side, studio and passe-partout bevels
+frame each window, and a drop shadow falls under both. On studio and passe-partout mats
+the bar also holds the two inner bevels, and the flat boards on either side of them
+share the slack with the flat bar in the same proportion. `bar-ratio: 0` puts the two
+photos edge to edge (on studio and passe-partout, bevel to bevel) with all the slack in
+the margins. `fill-when-fits` never applies to a pair. If the canvas changes after a
+pair was planned (a new display mode) and the two no longer qualify on it, they are
+shown one after the other instead. Because the margins are measured from the border,
+pairing needs mats that have one:
 
 - With pairing enabled, at least one matting option must have `minimum-mat-percentage`
   above 0; otherwise the configuration is rejected.

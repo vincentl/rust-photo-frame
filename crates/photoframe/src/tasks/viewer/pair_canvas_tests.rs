@@ -293,8 +293,8 @@ fn k2_pair_layout_bar_and_solo_height() {
             "{pct}%: margin {left_margin} vs {side}"
         );
         assert!(
-            side >= SCREEN.1 as f32 * pct / 100.0,
-            "{pct}%: margins at least the border"
+            side >= SCREEN.0 as f32 * pct / 100.0,
+            "{pct}%: margins at least the mat's own"
         );
         let (top, bottom) = (l.y, SCREEN.1 - (l.y + l.h));
         assert!(top.abs_diff(bottom) <= 1, "{pct}%: centred vertically");
