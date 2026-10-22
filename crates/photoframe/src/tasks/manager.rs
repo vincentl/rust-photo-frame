@@ -1021,6 +1021,34 @@ mod live_loop_tests {
     /// Look-ahead in the live loop: the same `LoadPhoto` shapes (a pair, then
     /// solos), commits in sequence order, the shifted photos sent next without
     /// any scheduler call, and a removed queued photo dropped (B4).
+    /// **Review C3, live timing.** (A, B) is planned at k = 3 with Q =
+    /// [L1, A] and waits for a loader slot; L1 is removed during the wait;
+    /// the pair is then sent. The next screen must not lead with A: C (the
+    /// scheduler's front) goes first by today's path, then A.
+    #[test]
+    fn a_removal_while_the_pair_is_pending_does_not_repeat_its_head() {
+        let (mut screens, log, _) = live_with("A L1 A B C", Some(1.0), 3);
+        assert_eq!(request(&mut screens), "A+B");
+        take(&log);
+        screens.on_inventory(InventoryEvent::PhotoRemoved(PathBuf::from("L1")));
+        assert_eq!(request(&mut screens), "A+B", "the planned pair stays");
+        screens.sent();
+        assert_eq!(request(&mut screens), "C");
+        assert_eq!(take(&log), ["remove L1", "peek C"]);
+        // The blocked send re-plans identically.
+        assert_eq!(request(&mut screens), "C");
+        screens.sent();
+        assert_eq!(take(&log), ["peek C", "commit C"]);
+        assert_eq!(request(&mut screens), "A");
+        screens.sent();
+        assert_eq!(
+            take(&log),
+            ["peek -"],
+            "A was already committed; its scan only finds the scheduler empty"
+        );
+        assert!(screens.next_request().is_none());
+    }
+
     #[test]
     fn lookahead_sends_the_pair_then_the_shifted_queue_in_order() {
         let (mut screens, log, _) = live_with("a L1 L2 b c", Some(1.0), 3);

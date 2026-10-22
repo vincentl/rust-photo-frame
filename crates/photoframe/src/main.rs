@@ -389,7 +389,9 @@ fn run_playlist_dry_run(
         format_rfc3339(now),
         iterations,
         match seed {
-            Some(s) if drawn => format!("{s} (drawn; pass --playlist-seed {s} to repeat)"),
+            Some(s) if drawn => format!(
+                "{s} (drawn; to repeat, pass --playlist-seed {s} with a fixed startup-shuffle-seed)"
+            ),
             Some(s) => s.to_string(),
             None => "(random)".to_string(),
         },

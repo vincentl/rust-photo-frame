@@ -523,7 +523,8 @@ pairable photos, `π`, screens vs photos, the measured paired share beside
 `2πp / (1 + πp)` (with `lookahead`, beside `2q / (1 + q)` for the configured depth and
 the back-to-back figure), how often a photo meets the same partner again, the largest
 shift of any photo from the unpaired order (0 without `lookahead`, at most `W − 1` with
-it; both sequences come from one seed, drawn and printed when none is given), and photos
+it; both sequences come from one seed, drawn and printed when none is given, and a run
+repeats only with that seed and a fixed `startup-shuffle-seed`), and photos
 on consecutive screens (0 in the dry run,
 except where the unpaired playlist itself repeats a photo). Pass `--canvas WxH` for a
 panel other than 4K; the default is 3840x2160

@@ -137,11 +137,16 @@ pub struct ScreenPlanner {
     /// (after a B4 degrade it is the degraded screen; a dropped empty screen
     /// leaves it unchanged).
     previous: Vec<Arc<PathBuf>>,
-    /// A `PhotoRemoved` arrived since the last screen was sent: the next head
-    /// may be on the previous screen and is repaired (review C3). Without a
-    /// removal that only happens where the sequence itself has `Z, Z`, which
-    /// is left as it is (rc2).
+    /// A `PhotoRemoved` arrived after the last sent screen was planned
+    /// (review C3): the next head may be on that screen and is repaired. The
+    /// live loop plans the next screen right after a send, so the removal
+    /// that matters lands while the screen is still pending; `on_removed`
+    /// sets `removed_after_plan`, `plan` clears it, and `record_sent` carries
+    /// it into this flag. Without a removal a repeated head is the sequence's
+    /// own `Z, Z` (a debut), left as rc2 shows it; with one, that too is
+    /// repaired, harmlessly.
     removed_since_sent: bool,
+    removed_after_plan: bool,
     /// `p`, `pairing.probability`.
     probability: f64,
     /// `W`, the look-ahead window: positions after the head a partner may
@@ -158,6 +163,7 @@ impl ScreenPlanner {
             held: None,
             previous: Vec::new(),
             removed_since_sent: false,
+            removed_after_plan: false,
             probability,
             lookahead: 1,
             coin: coin_rng(seed),
@@ -191,11 +197,14 @@ impl ScreenPlanner {
         };
 
         // Step 1b. Repair after a removal (review C3). Every plan keeps the
-        // next head off its own screen, so a committed head that is on the
-        // previous screen can only follow a `PhotoRemoved` of what stood
-        // between them (A, L1, A, B, C at W = 3: (A, B) is sent, L1 is
-        // removed, A would lead the next screen). Only after a removal: the
-        // sequence's own Z, Z (a debut) stays as rc2 shows it.
+        // next head off its own screen, so a committed head on the previous
+        // screen follows a `PhotoRemoved` of what stood between them (A, L1,
+        // A, B, C at W = 3: (A, B) is planned and pending, L1 is removed, A
+        // would lead the next screen) or is the sequence's own Z, Z. Only
+        // after a removal; the repair can move a photo W places (not W − 1),
+        // the one place where the dry run's P1-move bound, which never sees a
+        // removal, is exceeded live.
+        self.removed_after_plan = false;
         let (first, first_committed) =
             if first_committed && self.removed_since_sent && self.previous.contains(&first.path) {
                 match self.repair_head(sched, first) {
@@ -362,7 +371,7 @@ impl ScreenPlanner {
     /// Record the screen that was actually sent (rule 4's previous screen).
     pub fn record_sent(&mut self, screen: &PlannedScreen) {
         self.previous = screen.members().map(|m| Arc::clone(&m.path)).collect();
-        self.removed_since_sent = false;
+        self.removed_since_sent = self.removed_after_plan;
     }
 
     /// **What invalidates H (step 6, B7):** only `PhotoAdded` and
@@ -379,6 +388,7 @@ impl ScreenPlanner {
     pub fn on_removed(&mut self, path: &Path) {
         self.committed.retain(|c| c.path.as_path() != path);
         self.removed_since_sent = true;
+        self.removed_after_plan = true;
         self.invalidate_held();
     }
 
