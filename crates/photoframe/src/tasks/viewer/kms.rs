@@ -77,7 +77,10 @@
 //!   few refreshes, until every frame has flipped); with `late_frames=0`
 //!   the panel showed every frame on consecutive refreshes. Each frame's
 //!   flip and the bounds on its GPU time are logged at debug level
-//!   (`kms_frame`), for T4.
+//!   (`kms_frame`), for T4. With debug on, and where the device offers
+//!   timestamp queries, the line also carries the GPU time of the frame's
+//!   draw and upscale passes (`gpu_draw_ms`, `gpu_upscale_ms`; `PassTimer`
+//!   in viewer.rs), read back off the render path by the observer's poll.
 //! * **Observer failures.** The observer's blocking vblank waits run off the
 //!   render path, so they never stall a frame. A failed wait (disabled CRTC:
 //!   immediate EINVAL; vblanks stopped: the kernel's 3 s timeout) ends that
@@ -590,6 +593,8 @@ struct FramePacer {
     observer: FlipObserver,
     /// The transition being rendered: its clock and the next frame index.
     transition: Option<TransitionPacing>,
+    /// Pass times of submitted frames not yet logged, by target vblank.
+    pass_times: VecDeque<(u64, PassTimesCell)>,
 }
 
 struct TransitionPacing {
@@ -603,6 +608,7 @@ impl FramePacer {
             display,
             observer,
             transition: None,
+            pass_times: VecDeque::new(),
         }
     }
 
@@ -623,6 +629,7 @@ impl FramePacer {
             None => pacing::FrameClock::from_now(Instant::now(), period),
         };
         self.observer.begin(last.is_some());
+        self.pass_times.clear();
         self.transition = Some(TransitionPacing {
             clock,
             next_index: 0,
@@ -634,19 +641,45 @@ impl FramePacer {
         self.transition.as_ref().map(|t| PacedFrame {
             anchor: t.clock.anchor_time(),
             index_time: t.clock.index_time(t.next_index),
+            time_passes: tracing::enabled!(Level::DEBUG),
         })
     }
 
-    /// A transition frame was presented (its completion flag, if the GPU
-    /// work was submitted).
-    fn presented(&mut self, done: Option<Arc<AtomicBool>>) {
+    /// A transition frame was presented (its completion flag and pass
+    /// times, if the GPU work was submitted).
+    fn presented(&mut self, submission: Option<PacedSubmission>) {
         let Some(t) = self.transition.as_mut() else {
             return;
         };
-        if let (Some(done), Some(target)) = (done, t.clock.target(t.next_index)) {
-            self.observer.submitted(target, done);
+        if let (Some(submission), Some(target)) = (submission, t.clock.target(t.next_index)) {
+            self.observer.submitted(target, submission.done);
+            if let Some(passes) = submission.passes {
+                self.pass_times.push_back((target, passes));
+            }
         }
         t.next_index += 1;
+    }
+
+    /// Log the frames whose flip is now known, each with its pass times.
+    fn log_resolved(&mut self) {
+        for frame in self.observer.take_resolved() {
+            while self
+                .pass_times
+                .front()
+                .is_some_and(|(target, _)| *target < frame.target)
+            {
+                self.pass_times.pop_front();
+            }
+            let passes = match self.pass_times.front() {
+                Some((target, cell)) if *target == frame.target => {
+                    let passes = cell.get().copied();
+                    self.pass_times.pop_front();
+                    passes
+                }
+                _ => None,
+            };
+            log_resolved_frame(frame, passes);
+        }
     }
 
     /// The transition's last frame has been rendered: wait (at most a few
@@ -658,7 +691,8 @@ impl FramePacer {
         }
         let period = self.display.refresh_period();
         let summary = self.observer.finish(period * CLOSE_AUDIT_REFRESHES);
-        log_resolved(self.observer.take_resolved());
+        self.log_resolved();
+        self.pass_times.clear();
         app.set_kms_display_cadence(
             summary.and_then(|summary| DisplayCadence::from_audit(summary, period)),
         );
@@ -669,6 +703,7 @@ impl FramePacer {
     fn abandon_transition(&mut self, app: &mut App) {
         if self.transition.take().is_some() {
             self.observer.discard();
+            self.pass_times.clear();
             app.set_kms_display_cadence(None);
         }
     }
@@ -680,17 +715,23 @@ impl FramePacer {
 /// spends.
 const CLOSE_AUDIT_REFRESHES: u32 = 8;
 
-fn log_resolved(frames: Vec<pacing::ResolvedFrame>) {
-    for frame in frames {
-        debug!(
-            target_vblank = frame.target,
-            flip_vblank = frame.flip,
-            late_refreshes = frame.flip.saturating_sub(frame.target),
-            gpu_ms_at_least = format_args!("{:.1}", frame.gpu_at_least.as_secs_f32() * 1000.0),
-            gpu_ms_at_most = ?frame.gpu_at_most.map(|d| format!("{:.1}", d.as_secs_f32() * 1000.0)),
-            "kms_frame"
-        );
-    }
+/// One `kms_frame` line. `gpu_draw_ms` and `gpu_upscale_ms` are measured
+/// (timestamp queries; `-` when not available or, for the upscale, when the
+/// frame was drawn natively); the `gpu_ms_at_*` pair bounds the whole
+/// submission from vblank-granular observations.
+fn log_resolved_frame(frame: pacing::ResolvedFrame, passes: Option<PassTimes>) {
+    let ms = |d: Duration| format!("{:.2}", d.as_secs_f64() * 1000.0);
+    let dash = || "-".to_string();
+    debug!(
+        target_vblank = frame.target,
+        flip_vblank = frame.flip,
+        late_refreshes = frame.flip.saturating_sub(frame.target),
+        gpu_ms_at_least = format_args!("{:.1}", frame.gpu_at_least.as_secs_f32() * 1000.0),
+        gpu_ms_at_most = ?frame.gpu_at_most.map(|d| format!("{:.1}", d.as_secs_f32() * 1000.0)),
+        gpu_draw_ms = %passes.map_or_else(dash, |p| ms(p.draw)),
+        gpu_upscale_ms = %passes.and_then(|p| p.upscale).map_or_else(dash, ms),
+        "kms_frame"
+    );
 }
 
 /// Watches every vblank while a transition is audited, off the render path:
@@ -983,11 +1024,11 @@ async fn drive(
             }
             if paced.is_some() {
                 // Only a presented frame takes a vblank of the clock.
-                if let Some(done) = app.paced_submission.take() {
-                    pacer.presented(Some(done));
+                if let Some(submission) = app.paced_submission.take() {
+                    pacer.presented(Some(submission));
                 }
             }
-            log_resolved(pacer.observer.take_resolved());
+            pacer.log_resolved();
         }
 
         let plan = app.wake_plan(Instant::now());

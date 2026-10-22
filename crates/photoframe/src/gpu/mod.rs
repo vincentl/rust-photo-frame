@@ -20,6 +20,20 @@ pub(crate) fn test_device(
     wgpu::Device,
     wgpu::Queue,
 )> {
+    test_device_with(label, wgpu::Features::empty())
+}
+
+/// `test_device` with whichever of `features` the adapter offers enabled
+/// (check `device.features()`).
+#[cfg(test)]
+pub(crate) fn test_device_with(
+    label: &str,
+    features: wgpu::Features,
+) -> Option<(
+    std::sync::MutexGuard<'static, ()>,
+    wgpu::Device,
+    wgpu::Queue,
+)> {
     // A test that panicked while holding the lock does not make the device
     // any less usable for the next one.
     let guard = GPU_TEST_LOCK
@@ -34,7 +48,7 @@ pub(crate) fn test_device(
     .ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some(label),
-        required_features: wgpu::Features::empty(),
+        required_features: adapter.features() & features,
         required_limits: adapter.limits(),
         experimental_features: wgpu::ExperimentalFeatures::default(),
         memory_hints: wgpu::MemoryHints::default(),

@@ -344,10 +344,31 @@ every transition frame logs a `kms_frame` line, with:
   `late_refreshes`;
 - bounds on its GPU time: `gpu_ms_at_least` comes from the last vblank
   at which it was still running, `gpu_ms_at_most` from the first at which
-  it was seen done.
+  it was seen done;
+- the measured GPU time of its passes, from timestamp queries:
+  `gpu_draw_ms` from the start of the first pass that draws the frame (the
+  iris petal layer, when there is one) to the end of the main draw pass,
+  and `gpu_upscale_ms` for the pass that upsamples the intermediate to 4K
+  (`-` for a frame drawn natively, such as a transition's final frame).
 
-The bounds are one refresh apart. They are enough to tell whether a
-transition kind fits in a refresh at a given `PHOTOFRAME_TRANSITION_SCALE`.
+The bounds are one refresh apart: enough to tell whether a kind fits in a
+refresh, not by how much. The pass times give the margin and say which
+pass a kind loses on. The acceptance for a transition kind at scale 2 is
+`gpu_draw_ms + gpu_upscale_ms` ≤ 14 ms on every frame: 2.7 ms short of a
+60 Hz refresh, left for the work around the passes (uniform uploads, the
+caption overlay, submission).
+
+Pass timing needs the device's `TIMESTAMP_QUERY` feature. The viewer
+requests it where the adapter offers it (`viewer_gpu_pass_timing
+available=…` at debug on startup) and runs without it otherwise; the two
+fields then read `-`. Frames are timed only while `kms_frame` is logged, so
+a deployment at info level pays nothing. The timestamps of a frame are
+resolved in its own submission and read back asynchronously, through the
+flip observer's poll at the next vblank, never on the render path. A
+timestamp may add a small sync point between passes in the driver, so the
+pass times are, if anything, slightly pessimistic. A pair whose end reads
+before its start (Metal now and then leaves an end sample at 0) is
+dropped and logs `-`.
 
 **Panel off (`display-power off`).** Before switching off, the viewer
 lets submitted frames reach the screen: GPU idle, then two vblanks, about

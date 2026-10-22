@@ -462,6 +462,32 @@ pub(super) struct PacedFrame {
     pub(super) anchor: Instant,
     /// The time of the vblank this frame is meant for.
     pub(super) index_time: Instant,
+    /// Time the frame's passes on the GPU (`PassTimer`): set while the
+    /// per-frame audit is logged.
+    pub(super) time_passes: bool,
+}
+
+/// GPU time of one transition frame's passes, from timestamp queries:
+/// `draw` from the start of the first pass that draws the frame (the iris
+/// petal layer, when there is one) to the end of the main draw pass, and
+/// `upscale` around the pass that upsamples the intermediate (`None` for a
+/// frame drawn natively).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PassTimes {
+    pub(super) draw: Duration,
+    pub(super) upscale: Option<Duration>,
+}
+
+/// Filled once the frame's timestamps are read back (a device poll after
+/// the frame completes); empty if they never are.
+pub(super) type PassTimesCell = Arc<std::sync::OnceLock<PassTimes>>;
+
+/// DRM/KMS: what the loop learns about a transition frame it submitted.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // read by the KMS loop
+pub(super) struct PacedSubmission {
+    /// Set by the queue's submitted-work-done callback.
+    pub(super) done: Arc<AtomicBool>,
+    pub(super) passes: Option<PassTimesCell>,
 }
 
 /// Convert one sRGB channel (0..1) to linear light, the space the transition
@@ -1749,6 +1775,164 @@ struct GpuCtx {
     /// bilinear = box filter, in linear light), at upload.
     mip_pipeline: wgpu::RenderPipeline,
     half_target: Option<OffscreenTarget>,
+    /// GPU timestamps around a transition frame's passes, when the device
+    /// offers `TIMESTAMP_QUERY`.
+    pass_timer: Option<PassTimer>,
+}
+
+/// Timestamp queries around a transition frame's draw and upscale passes,
+/// for the KMS per-frame audit (`kms_frame`). Each timed frame takes the
+/// next of `SLOTS` slots, its own four queries and its own region of the
+/// resolve buffer, so a frame rendered ahead never resets queries an
+/// earlier frame has not resolved yet (nothing orders a query set between
+/// submissions). A frame resolves its queries in its own submission and
+/// copies them to a small buffer of its own, mapped asynchronously; the
+/// callback runs on whichever thread polls the device next (the flip
+/// observer, every vblank), never blocking the render path. Only frames the
+/// audit logs are timed.
+struct PassTimer {
+    queries: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    /// Nanoseconds per timestamp tick.
+    period_ns: f64,
+    next_slot: std::sync::atomic::AtomicU32,
+}
+
+/// One frame's slot of a `PassTimer`.
+struct TimedFrame<'a> {
+    timer: &'a PassTimer,
+    slot: u32,
+}
+
+impl PassTimer {
+    /// Query indices within a slot.
+    const DRAW_BEGIN: u32 = 0;
+    const DRAW_END: u32 = 1;
+    const UPSCALE_BEGIN: u32 = 2;
+    const UPSCALE_END: u32 = 3;
+    const PER_FRAME: u32 = 4;
+    /// Frames that may be in flight at once, with room to spare: the FIFO
+    /// swapchain bounds render-ahead to its images, and a slot is only
+    /// reused `SLOTS` timed frames later.
+    const SLOTS: u32 = 8;
+    /// A slot's region of the resolve buffer (resolves start aligned).
+    const SLOT_STRIDE: u64 = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
+
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Self> {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return None;
+        }
+        Some(Self {
+            queries: device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("pass-timestamps"),
+                ty: wgpu::QueryType::Timestamp,
+                count: Self::PER_FRAME * Self::SLOTS,
+            }),
+            resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pass-timestamps-resolve"),
+                size: Self::SLOT_STRIDE * u64::from(Self::SLOTS),
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            period_ns: f64::from(queue.get_timestamp_period()),
+            next_slot: std::sync::atomic::AtomicU32::new(0),
+        })
+    }
+
+    /// Time one frame.
+    fn frame(&self) -> TimedFrame<'_> {
+        let slot = self.next_slot.fetch_add(1, Ordering::Relaxed) % Self::SLOTS;
+        TimedFrame { timer: self, slot }
+    }
+}
+
+impl TimedFrame<'_> {
+    fn query(&self, index: u32) -> u32 {
+        self.slot * PassTimer::PER_FRAME + index
+    }
+
+    fn writes(&self, begin: Option<u32>, end: Option<u32>) -> wgpu::RenderPassTimestampWrites<'_> {
+        wgpu::RenderPassTimestampWrites {
+            query_set: &self.timer.queries,
+            beginning_of_pass_write_index: begin.map(|i| self.query(i)),
+            end_of_pass_write_index: end.map(|i| self.query(i)),
+        }
+    }
+
+    /// After the frame's passes: resolve the queries they wrote (only
+    /// those: resolving one never written would wait forever) into a
+    /// buffer for `read`.
+    fn resolve(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        upscaled: bool,
+    ) -> wgpu::Buffer {
+        let count = if upscaled {
+            PassTimer::PER_FRAME
+        } else {
+            PassTimer::DRAW_END + 1
+        };
+        let bytes = u64::from(count) * 8;
+        let offset = u64::from(self.slot) * PassTimer::SLOT_STRIDE;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pass-timestamps-readback"),
+            size: bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let first = self.query(0);
+        encoder.resolve_query_set(
+            &self.timer.queries,
+            first..first + count,
+            &self.timer.resolve,
+            offset,
+        );
+        encoder.copy_buffer_to_buffer(&self.timer.resolve, offset, &readback, 0, bytes);
+        readback
+    }
+
+    /// After the frame is submitted: map its timestamps; the cell fills
+    /// when they arrive.
+    fn read(&self, readback: wgpu::Buffer) -> PassTimesCell {
+        let cell = PassTimesCell::default();
+        let out = Arc::clone(&cell);
+        let period_ns = self.timer.period_ns;
+        let buffer = readback.clone();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                if result.is_err() {
+                    return;
+                }
+                let ticks: Vec<u64> = {
+                    let view = buffer.slice(..).get_mapped_range();
+                    view.chunks_exact(8)
+                        .map(|b| u64::from_le_bytes(b.try_into().expect("8 bytes")))
+                        .collect()
+                };
+                if let Some(times) = pass_times(&ticks, period_ns) {
+                    let _ = out.set(times);
+                }
+            });
+        cell
+    }
+}
+
+/// Durations from resolved timestamps (`PassTimer` order), `None` when the
+/// draw pair is missing or runs backwards.
+fn pass_times(ticks: &[u64], period_ns: f64) -> Option<PassTimes> {
+    let span = |begin: u32, end: u32| {
+        let (begin, end) = (ticks.get(begin as usize)?, ticks.get(end as usize)?);
+        let ticks = end.checked_sub(*begin)?;
+        Some(Duration::from_nanos(
+            (ticks as f64 * period_ns).round() as u64
+        ))
+    };
+    Some(PassTimes {
+        draw: span(PassTimer::DRAW_BEGIN, PassTimer::DRAW_END)?,
+        upscale: span(PassTimer::UPSCALE_BEGIN, PassTimer::UPSCALE_END),
+    })
 }
 
 /// Reduced-resolution offscreen render target that can also be sampled.
@@ -2352,7 +2536,9 @@ fn build_gpu(
     );
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("viewer-device"),
-        required_features: wgpu::Features::empty(),
+        // Timestamps for the KMS per-frame audit, where offered; nothing
+        // else depends on them.
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
         required_limits: limits.clone(),
         experimental_features: wgpu::ExperimentalFeatures::default(),
         memory_hints: wgpu::MemoryHints::default(),
@@ -2721,6 +2907,12 @@ fn build_gpu(
         format,
         cfg.greeting_screen.screen(),
     );
+    let pass_timer = PassTimer::new(&device, &queue);
+    debug!(
+        context = reason,
+        available = pass_timer.is_some(),
+        "viewer_gpu_pass_timing"
+    );
     let gpu = GpuCtx {
         device,
         queue,
@@ -2739,6 +2931,7 @@ fn build_gpu(
         blit_pipeline,
         mip_pipeline,
         half_target: None,
+        pass_timer,
     };
     Ok(GpuParts {
         gpu,
@@ -2786,9 +2979,10 @@ struct App {
     caption_overlay: Option<scenes::CaptionOverlay>,
     /// Frame cadence of the transition currently being presented.
     transition_frame_metric: Option<TransitionFrameMetric>,
-    /// DRM/KMS: completion flag of the transition frame just submitted,
-    /// taken by the KMS loop for `pacing::FlipAudit`. Never set on Wayland.
-    paced_submission: Option<Arc<AtomicBool>>,
+    /// DRM/KMS: the transition frame just submitted (its completion flag
+    /// and pass times), taken by the KMS loop for `pacing::FlipAudit`.
+    /// Never set on Wayland.
+    paced_submission: Option<PacedSubmission>,
     /// The Wi-Fi overlay lease and panel power, and so the layer on screen
     /// (`presentation.rs`).
     presentation: presentation::Presentation,
@@ -4151,6 +4345,7 @@ impl App {
                 uniforms.current_xform = draw_params::plane_xform(current_dest, screen);
                 uniforms.next_xform = draw_params::plane_xform(next_dest, screen);
 
+                let mut timestamps = None;
                 if should_draw_quad {
                     let iris_active = draw_kind == DrawKind::Iris;
                     // Transitions render into the reduced-resolution
@@ -4178,6 +4373,13 @@ impl App {
                         gpu.queue
                             .write_buffer(&gpu.petal_buf, 0, bytemuck::bytes_of(&petals));
                     }
+                    // Audited KMS frames time their passes on the GPU.
+                    let timer = gpu
+                        .pass_timer
+                        .as_ref()
+                        .filter(|_| paced.is_some_and(|p| p.time_passes))
+                        .map(PassTimer::frame);
+                    let layer_pass = iris_active && gpu.iris_layer.is_some();
                     // Render the petals into the reduced-resolution
                     // layer first; the main pass composites it.
                     if iris_active && let Some(layer) = gpu.iris_layer.as_ref() {
@@ -4194,7 +4396,9 @@ impl App {
                             })],
                             depth_stencil_attachment: None,
                             occlusion_query_set: None,
-                            timestamp_writes: None,
+                            timestamp_writes: timer
+                                .as_ref()
+                                .map(|t| t.writes(Some(PassTimer::DRAW_BEGIN), None)),
                         });
                         lpass.set_pipeline(&gpu.iris_layer_pipeline);
                         lpass.set_bind_group(0, &gpu.uniform_bind, &[]);
@@ -4219,7 +4423,12 @@ impl App {
                             })],
                             depth_stencil_attachment: None,
                             occlusion_query_set: None,
-                            timestamp_writes: None,
+                            timestamp_writes: timer.as_ref().map(|t| {
+                                t.writes(
+                                    (!layer_pass).then_some(PassTimer::DRAW_BEGIN),
+                                    Some(PassTimer::DRAW_END),
+                                )
+                            }),
                         });
                         rpass.set_pipeline(gpu.quad_pipelines.get(draw_kind));
                         rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
@@ -4242,13 +4451,22 @@ impl App {
                             })],
                             depth_stencil_attachment: None,
                             occlusion_query_set: None,
-                            timestamp_writes: None,
+                            timestamp_writes: timer.as_ref().map(|t| {
+                                t.writes(
+                                    Some(PassTimer::UPSCALE_BEGIN),
+                                    Some(PassTimer::UPSCALE_END),
+                                )
+                            }),
                         });
                         bpass.set_pipeline(&gpu.blit_pipeline);
                         bpass.set_bind_group(0, &gpu.uniform_bind, &[]);
                         bpass.set_bind_group(1, &target.bind, &[]);
                         bpass.draw(0..3, 0..1);
                     }
+                    timestamps = timer.map(|t| {
+                        let readback = t.resolve(&gpu.device, &mut encoder, half_target.is_some());
+                        (t, readback)
+                    });
                 }
                 encoder.pop_debug_group();
 
@@ -4268,13 +4486,16 @@ impl App {
 
                 gpu.queue.submit(Some(encoder.finish()));
                 // KMS transition frames (the only paced ones): learn when the
-                // GPU finished, for the late-frame audit.
+                // GPU finished, for the late-frame audit, and what its passes
+                // took. The map is requested first, so the poll that reports
+                // the frame done has its timestamps too.
                 if paced.is_some() {
+                    let passes = timestamps.map(|(timer, readback)| timer.read(readback));
                     let done = Arc::new(AtomicBool::new(false));
                     let flag = Arc::clone(&done);
                     gpu.queue
                         .on_submitted_work_done(move || flag.store(true, Ordering::Release));
-                    self.paced_submission = Some(done);
+                    self.paced_submission = Some(PacedSubmission { done, passes });
                 }
                 // Wayland: frame-callback pacing; KMS: nothing (the FIFO
                 // acquire bounds how far ahead the loop renders). See
@@ -5608,6 +5829,154 @@ mod tests {
         let last = *frames.last().unwrap();
         state.anchor_once(last + period);
         assert!(state.progress_at(last) > 0.0);
+    }
+
+    #[test]
+    fn pass_times_read_the_timestamp_pairs() {
+        // A 1 ns tick: 4 ms draw, 1.5 ms upscale.
+        let times = pass_times(&[1_000, 4_001_000, 4_100_000, 5_600_000], 1.0).unwrap();
+        assert_eq!(times.draw, Duration::from_millis(4));
+        assert_eq!(times.upscale, Some(Duration::from_micros(1_500)));
+        // A native frame resolves the draw pair only.
+        let native = pass_times(&[0, 2_000_000], 1.0).unwrap();
+        assert_eq!(native.upscale, None);
+        // Ticks of another length are scaled.
+        let scaled = pass_times(&[0, 1_000], 52.08).unwrap();
+        assert_eq!(scaled.draw, Duration::from_nanos(52_080));
+        // A pair that runs backwards is no measurement.
+        assert_eq!(pass_times(&[10, 5], 1.0), None);
+    }
+
+    /// The timer's writes, resolve, copy and mapped read on a real device
+    /// (skipped where the adapter has no timestamp queries), over more
+    /// frames than the timer has slots: frames drawn into the intermediate
+    /// yield both pass times, native ones the draw time only. Metal now and
+    /// then leaves a pass's end sample at 0 (Apple silicon, a few frames in a
+    /// few hundred); `pass_times` rejects that pair and the
+    /// viewer logs `-`, so the test asserts on what was read, not on every
+    /// frame.
+    #[test]
+    fn pass_timer_reads_back_both_passes() {
+        let Some((_gpu, device, queue)) =
+            crate::gpu::test_device_with("pass-timer-test", wgpu::Features::TIMESTAMP_QUERY)
+        else {
+            return;
+        };
+        let Some(timer) = PassTimer::new(&device, &queue) else {
+            eprintln!("no TIMESTAMP_QUERY on this adapter; skipped");
+            return;
+        };
+        // Two targets, as in the viewer (intermediate, then the surface).
+        let target = || {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("pass-timer-target"),
+                size: wgpu::Extent3d {
+                    width: 64,
+                    height: 64,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+        };
+        let views =
+            [target(), target()].map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
+        // Each pass draws a triangle, as the viewer's do (Metal does not
+        // sample the end of a pass that only clears).
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pass-timer-test"),
+            source: wgpu::ShaderSource::Wgsl(
+                "@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+                     let p = vec2<f32>(f32(i & 1u) * 4.0 - 1.0, f32(i >> 1u) * 4.0 - 1.0);
+                     return vec4<f32>(p, 0.0, 1.0);
+                 }
+                 @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"
+                    .into(),
+            ),
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("pass-timer-test"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
+            }),
+            multiview: None,
+            cache: None,
+        });
+        let frame = |upscaled: bool| {
+            let timer = timer.frame();
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            let mut pass = |view, writes| {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: writes,
+                });
+                pass.set_pipeline(&pipeline);
+                pass.draw(0..3, 0..1);
+            };
+            pass(
+                &views[0],
+                Some(timer.writes(Some(PassTimer::DRAW_BEGIN), Some(PassTimer::DRAW_END))),
+            );
+            if upscaled {
+                pass(
+                    &views[1],
+                    Some(
+                        timer.writes(Some(PassTimer::UPSCALE_BEGIN), Some(PassTimer::UPSCALE_END)),
+                    ),
+                );
+            }
+            let readback = timer.resolve(&device, &mut encoder, upscaled);
+            queue.submit(Some(encoder.finish()));
+            let cell = timer.read(readback);
+            let _ = device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_secs(5)),
+            });
+            cell.get().copied()
+        };
+        let (mut upscaled, mut native) = (Vec::new(), Vec::new());
+        for _ in 0..2 * PassTimer::SLOTS {
+            upscaled.extend(frame(true));
+            native.extend(frame(false));
+        }
+        assert!(
+            upscaled.iter().filter(|t| t.upscale.is_some()).count() > upscaled.len() / 2,
+            "upscale times read back: {upscaled:?}"
+        );
+        assert!(
+            native.len() > PassTimer::SLOTS as usize,
+            "draw times read back: {native:?}"
+        );
+        assert!(native.iter().all(|t| t.upscale.is_none()));
     }
 
     #[test]
