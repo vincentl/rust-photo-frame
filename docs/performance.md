@@ -270,7 +270,8 @@ and 33.3 ms frames, and none reached 60. Means at transition scale 2:
 
 Waiting for vblank V before starting frame k leaves less than one
 refresh before the flip at V+1. In that time the frame needs its CPU
-work, the transition pass, the 4K upscale and Mesa's display copy.
+work, the transition pass and the 4K upscale, written straight into the
+linear image the panel scans out (see "The 4K write floor").
 
 With the loop and the GPU in series around the present, the cost
 compounds:
@@ -334,9 +335,12 @@ How the fields are known:
 refreshes shows up both as a `worst_frame_ms` of 33.3 and as one late
 frame.
 
-**When `late_frames` is missing.** It is missing if the audit failed in
-that transition. The journal then shows `kms_vblank_wait_failed`. In
-that case the other fields are the loop's own timings.
+**`audited=false`.** An audited line says `audited=true` and carries
+`late_frames`. If the audit failed in that transition (the journal then
+shows `kms_vblank_wait_failed`, or the vblank query failed when it
+started), the line says `audited=false` and carries only the frame count:
+on KMS the loop's own intervals are render-ahead spacing, not what the
+panel showed.
 
 **Per-frame detail for T4.** With `RUST_LOG=debug` (or `photoframe=debug`)
 every transition frame logs a `kms_frame` line, with:
@@ -348,8 +352,9 @@ every transition frame logs a `kms_frame` line, with:
 - the measured GPU time of its passes, from timestamp queries:
   `gpu_draw_ms` from the start of the first pass that draws the frame (the
   iris petal layer, when there is one) to the end of the main draw pass;
-  for iris also `gpu_layer_ms` (both petal-layer passes) and `gpu_main_ms`
-  (the composite), `-` for other kinds; and `gpu_upscale_ms` for the pass
+  for kinds with a pass before the main one, `gpu_layer_ms` (iris: both
+  petal-layer passes; e-ink: its reveal-mask pass) and `gpu_main_ms` (the
+  main pass), `-` for the others; and `gpu_upscale_ms` for the pass
   that upsamples the intermediate to 4K (`-` for a frame drawn natively,
   such as a transition's final frame).
 
@@ -689,9 +694,12 @@ full-screen passes are spent carefully:
     (`fs_eink_mask`, one texel per cell, timed as `gpu_layer_ms`; about
     0.02 ms) computes each cell's mask once, stored as a half float plus
     its rounding remainder, and `fs_eink` reads its cell's texel;
-  - radial-wipe, e-ink and iris composite with `over_background_rgb`: a
-    mix of the two photos never covers more than the larger of their
-    coverages, so the mix's alpha is not computed.
+  - radial-wipe and iris composite with `over_background_rgb`: a mix of
+    the two photos never covers more than the larger of their coverages,
+    so the mix's alpha is not computed (e-ink's result is opaque by
+    construction);
+  - crossfade-zoom reads the unzoomed planes' coverage without fetching
+    their colors, which only the zoomed planes show.
 
   The iris layer passes keep their early-outs (inside the aperture,
   beyond the outline's reach): they run at 240x135, where the loop over

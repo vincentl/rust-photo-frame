@@ -2799,9 +2799,7 @@ impl TransitionOptions {
                     ));
                 }
                 eink.reveal_portion = eink.reveal_portion.clamp(0.05, 0.95);
-                if eink.stripe_count == 0 {
-                    eink.stripe_count = 1;
-                }
+                eink.stripe_count = eink.stripe_count.clamp(1, EINK_MAX_STRIPES);
                 eink.flash_count = eink.flash_count.min(6);
             }
             TransitionMode::Dissolve(d) => {
@@ -3000,9 +2998,7 @@ impl TransitionOptions {
                     ));
                 }
                 eink.reveal_portion = eink.reveal_portion.clamp(0.05, 0.95);
-                if eink.stripe_count == 0 {
-                    eink.stripe_count = 1;
-                }
+                eink.stripe_count = eink.stripe_count.clamp(1, EINK_MAX_STRIPES);
                 eink.flash_count = eink.flash_count.min(6);
             }
             TransitionMode::Dissolve(_)
@@ -3101,6 +3097,13 @@ pub struct EInkTransition {
     pub stripe_count: u32,
     pub flash_color: [u8; 3],
 }
+
+/// The most stripes an e-ink transition reveals in. The viewer decides the
+/// reveal per cell of a stripes x stripes grid in a texture of that size
+/// (`fs_eink_mask`), so the count must stay far below any GPU's texture
+/// limit; at 256 a cell is about 4 pixels tall at 1080p, finer than the
+/// effect can show.
+pub const EINK_MAX_STRIPES: u32 = 256;
 
 impl Default for EInkTransition {
     fn default() -> Self {

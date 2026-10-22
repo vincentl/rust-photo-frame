@@ -176,10 +176,15 @@ pub struct ModeCandidate {
     pub height: u32,
     pub refresh_hz: u32,
     pub preferred: bool,
+    /// An interlaced mode: never picked. The pacing clock is one refresh per
+    /// frame (`refresh_period`, from the full-frame timings), while the
+    /// kernel times vblanks per field on such a mode.
+    pub interlaced: bool,
 }
 
 fn mode_matches(m: &ModeCandidate, req: ModeRequest) -> bool {
-    m.width == req.width
+    !m.interlaced
+        && m.width == req.width
         && m.height == req.height
         && req.refresh_hz.is_none_or(|hz| m.refresh_hz == hz)
 }
@@ -192,6 +197,9 @@ fn mode_matches(m: &ModeCandidate, req: ModeRequest) -> bool {
 ///    the sway kiosk config pins, so both stacks drive the panel the same
 ///    way);
 /// 3. else the connector's EDID-preferred mode, else its first mode.
+///
+/// Interlaced modes are never picked (see `ModeCandidate::interlaced`); a
+/// connector that lists nothing else is an error.
 ///
 /// Among several modes that match a request or preference (e.g. 60 and
 /// 59.94 Hz, both reported as 60 by KMS), the EDID-preferred one wins, then
@@ -217,7 +225,11 @@ pub fn pick_mode(
     if let Some(index) = prefer.and_then(best_match) {
         return Ok(index);
     }
-    Ok(modes.iter().position(|m| m.preferred).unwrap_or(0))
+    modes
+        .iter()
+        .position(|m| m.preferred && !m.interlaced)
+        .or_else(|| modes.iter().position(|m| !m.interlaced))
+        .ok_or_else(|| KmsError::failed("connector reports only interlaced modes"))
 }
 
 /// From Vulkan's display-mode list (`(width, height, refresh in mHz)`), the
@@ -298,6 +310,36 @@ pub async fn wait_for_display<T>(
     }
 }
 
+/// Retry `attempt` on any error, every `step`, until it has been failing for
+/// `limit`; return its value, its last error, or `Ok(None)` once `cancel`
+/// fires.
+///
+/// The KMS viewer takes DRM master with it at startup: during a deploy the
+/// first start can find the outgoing process still releasing the display
+/// (Pi, 2026-10-22: one "not DRM master" restart). A non-root process only
+/// becomes master by opening the card while no one holds it, so each
+/// attempt opens the card afresh.
+pub async fn retry_for<T>(
+    mut attempt: impl FnMut() -> Result<T, KmsError>,
+    limit: std::time::Duration,
+    step: std::time::Duration,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Option<T>, KmsError> {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        match attempt() {
+            Ok(value) => return Ok(Some(value)),
+            Err(err) if tokio::time::Instant::now() + step > deadline => return Err(err),
+            Err(_) => {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(None),
+                    _ = tokio::time::sleep(step) => {}
+                }
+            }
+        }
+    }
+}
+
 /// The first plane that shows or can show the target display.
 pub fn pick_plane(planes: &[PlaneCandidate]) -> Option<u32> {
     planes
@@ -310,7 +352,7 @@ pub fn pick_plane(planes: &[PlaneCandidate]) -> Option<u32> {
 mod device {
     use super::*;
     use drm::Device;
-    use drm::control::{Device as ControlDevice, ModeTypeFlags, connector};
+    use drm::control::{Device as ControlDevice, ModeFlags, ModeTypeFlags, connector};
     use std::fs::{File, OpenOptions};
     use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
     use std::path::PathBuf;
@@ -472,6 +514,7 @@ mod device {
                         height: u32::from(h),
                         refresh_hz: m.vrefresh(),
                         preferred: m.mode_type().contains(ModeTypeFlags::PREFERRED),
+                        interlaced: m.flags().contains(ModeFlags::INTERLACE),
                     }
                 })
                 .collect();
@@ -1019,7 +1062,30 @@ mod tests {
             height: h,
             refresh_hz: hz,
             preferred,
+            interlaced: false,
         }
+    }
+
+    #[test]
+    fn interlaced_modes_are_never_picked() {
+        let interlaced = |w, h, hz, preferred| ModeCandidate {
+            interlaced: true,
+            ..mode(w, h, hz, preferred)
+        };
+        let req = |s: &str| Some(s.parse::<ModeRequest>().unwrap());
+        // A preferred interlaced mode loses to the first progressive one.
+        let m = [interlaced(1920, 1080, 60, true), mode(1280, 720, 60, false)];
+        assert_eq!(pick_mode(&m, None, None).unwrap(), 1);
+        // A request or preference only matches progressive modes.
+        let m = [
+            interlaced(1920, 1080, 60, false),
+            mode(1920, 1080, 60, false),
+        ];
+        assert_eq!(pick_mode(&m, req("1920x1080@60"), None).unwrap(), 1);
+        assert_eq!(pick_mode(&m, None, req("1920x1080")).unwrap(), 1);
+        let m = [interlaced(1920, 1080, 60, true)];
+        assert!(pick_mode(&m, req("1920x1080"), None).is_err());
+        assert!(pick_mode(&m, None, None).is_err());
     }
 
     #[test]
@@ -1210,6 +1276,61 @@ mod tests {
         assert_eq!(got, Some("target"));
         assert_eq!((attempts, waits), (4, 3));
         assert_eq!(start.elapsed(), poll * 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_for_retries_until_the_limit() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let step = std::time::Duration::from_millis(100);
+        let limit = std::time::Duration::from_secs(2);
+        // Succeeds on the fourth attempt, 300 ms in.
+        let start = tokio::time::Instant::now();
+        let mut attempts = 0;
+        let got = retry_for(
+            || {
+                attempts += 1;
+                if attempts < 4 {
+                    Err(KmsError::failed("not DRM master"))
+                } else {
+                    Ok(attempts)
+                }
+            },
+            limit,
+            step,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, Some(4));
+        assert_eq!(start.elapsed(), step * 3);
+        // Never succeeds: the last error, after the limit and no later.
+        let start = tokio::time::Instant::now();
+        let mut attempts = 0;
+        let err = retry_for(
+            || -> Result<(), KmsError> {
+                attempts += 1;
+                Err(KmsError::failed("not DRM master"))
+            },
+            limit,
+            step,
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.kind(), KmsErrorKind::Failed);
+        assert_eq!(attempts, 21);
+        assert!(start.elapsed() <= limit);
+        // Cancelled while waiting.
+        cancel.cancel();
+        let got = retry_for(
+            || -> Result<(), KmsError> { Err(KmsError::failed("not DRM master")) },
+            limit,
+            step,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, None);
     }
 
     #[tokio::test(start_paused = true)]

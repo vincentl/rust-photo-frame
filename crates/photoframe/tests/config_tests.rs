@@ -2164,3 +2164,34 @@ fn solo_screens_keep_every_mat() {
     // Three of six slots are zero-margin.
     assert!((1_300..1_700).contains(&zero_margin), "{zero_margin}");
 }
+
+#[test]
+fn eink_stripe_count_is_clamped_to_the_mask_texture_limit() {
+    for (given, expected) in [
+        (0u32, 1u32),
+        (24, 24),
+        (4096, photoframe::config::EINK_MAX_STRIPES),
+    ] {
+        let yaml = format!(
+            r#"
+photo-library-path: "/photos"
+transition:
+  selection: fixed
+  active:
+    - kind: e-ink
+      stripe-count: {given}
+"#
+        );
+        let cfg: Configuration = serde_yaml::from_str(&yaml).unwrap();
+        let selected = cfg
+            .transition
+            .primary_selected()
+            .expect("expected e-ink transition option");
+        match selected.option.mode() {
+            photoframe::config::TransitionMode::EInk(eink) => {
+                assert_eq!(eink.stripe_count, expected, "stripe-count {given}");
+            }
+            _ => panic!("expected e-ink transition"),
+        }
+    }
+}

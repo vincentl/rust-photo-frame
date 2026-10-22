@@ -545,7 +545,7 @@ The remaining knobs depend on the family:
 - **`e-ink`**
   - **`flash-count`** (integer, default `0`, capped at `6`): alternating black/flash pulses before the reveal.
   - **`reveal-portion`** (float, default `0.55`, clamped `0.05–0.95`): fraction of the timeline spent flashing before stripes start uncovering.
-  - **`stripe-count`** (integer ≥ 1, default `24`): horizontal bands sweeping in.
+  - **`stripe-count`** (integer, default `24`, clamped `1–256`): horizontal bands sweeping in.
   - **`flash-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB color for the bright flash phases. Channels outside `0–255` are clamped.
 - **`dissolve`** — threshold a value-noise field by progress (classic film dissolve).
   - **`softness`** (float 0–0.5, default `0.1`): width of the smoothstep band around the threshold. `0` = hard per-pixel pop.

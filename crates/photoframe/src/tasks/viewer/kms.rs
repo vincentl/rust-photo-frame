@@ -55,8 +55,8 @@
 //!   33.3 ms frames and none reached 60, while `frametest --drm` (render
 //!   ahead) held 60 on the same build. Waiting for vblank V and only then
 //!   starting frame k leaves frame k less than one refresh for CPU work,
-//!   the transition pass, the 4K upscale and Mesa's display copy before its
-//!   flip at V+1; with the loop and GPU in series around the present, a
+//!   the transition pass and the 4K upscale (written straight into the
+//!   linear image the panel scans out) before its flip at V+1; with the loop and GPU in series around the present, a
 //!   frame of slightly over one refresh costs two, and the next frame cannot
 //!   start before the vblank after that. Rendering ahead starts frame k+1
 //!   as soon as an image is free, so a frame over budget loses only its
@@ -85,14 +85,16 @@
 //! * **Observer failures.** The observer's blocking vblank waits run off the
 //!   render path, so they never stall a frame. A failed wait (disabled CRTC:
 //!   immediate EINVAL; vblanks stopped: the kernel's 3 s timeout) ends that
-//!   transition's audit (its metric line has no `late_frames`); two in a
+//!   transition's audit (its metric line says `audited=false`); two in a
 //!   row stop auditing for the process (`pacing::PacerHealth`). The observer
 //!   is idle (parked, no vblank waits) outside transitions and while dark.
 //! * **Runtime display changes.** Every idle wake checks that the connector
 //!   is still connected and still offers the mode in use
-//!   (`KmsDisplay::check_unchanged`; the dwell-deadline wake, once per
-//!   photo, forces a probe so a panel swapped between two checks is seen
-//!   too); if not, the process exits with an
+//!   (`KmsDisplay::check_unchanged`, the kernel's cached state); once per
+//!   photo, the first time the loop goes idle with it on screen, it forces
+//!   a full probe (a blocking DDC/EDID read) so a panel swapped between two
+//!   checks is seen too, away from the lead-in and its drain, which must
+//!   not stall; if not, the process exits with an
 //!   error and `Restart=always` brings it back, and the restart waits for a
 //!   connected display and re-enumerates its mode. A lost or outdated
 //!   swapchain, any other surface error, or a streak of acquire timeouts
@@ -197,6 +199,11 @@ const CONNECTOR_REPORT_LIMIT: Duration = Duration::from_secs(60);
 /// within a second.
 const DISPLAY_POLL: Duration = Duration::from_secs(1);
 
+/// How long startup retries DRM master another process still holds (the
+/// outgoing viewer during a deploy), and how often.
+const MASTER_WAIT: Duration = Duration::from_secs(2);
+const MASTER_RETRY: Duration = Duration::from_millis(100);
+
 fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -291,7 +298,37 @@ pub async fn run_kms(
         }
     };
     info!(target = %target.describe(), "kms_target");
-    target.assert_master()?;
+    // Master: during a deploy the outgoing viewer may still be releasing
+    // the display, so a refusal is retried for a moment, each time with the
+    // card opened afresh (`drm_display::retry_for`).
+    let target = match target.assert_master() {
+        Ok(()) => target,
+        Err(err) => {
+            warn!(error = %err, "kms_waiting_for_master: retrying for {MASTER_WAIT:?}");
+            drop(target);
+            let retried = drm_display::retry_for(
+                || {
+                    let target = drm_display::open_target(&request, &mut |_| {})?;
+                    target.assert_master()?;
+                    Ok(target)
+                },
+                MASTER_WAIT,
+                MASTER_RETRY,
+                &cancel,
+            )
+            .await?;
+            match retried {
+                Some(target) => {
+                    info!(target = %target.describe(), "kms_master_acquired");
+                    target
+                }
+                None => {
+                    info!("kms_viewer_cancelled before DRM master");
+                    return Ok(());
+                }
+            }
+        }
+    };
     // A dup of the card fd for vblank waits and connector checks; dropping
     // it never releases master (the original fd in `target` stays open).
     let display = target.display_handle()?;
@@ -399,6 +436,16 @@ impl App {
         }) = &self.output
         {
             redraw_requested.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// When the photo resting on the slideshow was shown (`None` outside the
+    /// slideshow, or with no photo yet).
+    fn resting_photo_since(&self) -> Option<Instant> {
+        if self.mode_kind() == ViewerModeKind::Wake {
+            self.mode().wake().displayed_at()
+        } else {
+            None
         }
     }
 
@@ -753,6 +800,21 @@ struct FlipObserver {
 struct ObserverShared {
     state: std::sync::Mutex<ObserverState>,
     changed: std::sync::Condvar,
+    /// The observer thread is running. Cleared when it exits for any reason
+    /// (a panic in a device poll included), so audits stop waiting on it
+    /// and read as incomplete instead of reporting stale state.
+    alive: AtomicBool,
+}
+
+/// Clears `ObserverShared::alive` when the observer thread exits, however
+/// it exits.
+struct ObserverAlive(Arc<ObserverShared>);
+
+impl Drop for ObserverAlive {
+    fn drop(&mut self) {
+        self.0.alive.store(false, Ordering::Release);
+        self.0.changed.notify_all();
+    }
 }
 
 #[derive(Default)]
@@ -775,11 +837,13 @@ impl FlipObserver {
         let shared = Arc::new(ObserverShared {
             state: std::sync::Mutex::new(ObserverState::default()),
             changed: std::sync::Condvar::new(),
+            alive: AtomicBool::new(true),
         });
         let thread_shared = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
             .name("kms-flip-observer".into())
             .spawn(move || {
+                let _alive = ObserverAlive(Arc::clone(&thread_shared));
                 let shared = thread_shared;
                 loop {
                     {
@@ -826,8 +890,18 @@ impl FlipObserver {
         }
     }
 
+    /// The shared state. A lock the observer thread poisoned by panicking
+    /// is taken anyway: the thread is gone (`alive` is false), so every
+    /// audit from here on reads as incomplete, and the slideshow goes on.
     fn lock(&self) -> std::sync::MutexGuard<'_, ObserverState> {
-        self.shared.state.lock().expect("observer lock")
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn alive(&self) -> bool {
+        self.shared.alive.load(Ordering::Acquire)
     }
 
     /// Extend a vblank reading to 64 bits and place it on the `Instant`
@@ -849,7 +923,7 @@ impl FlipObserver {
         state.audit.discard();
         state.resolved.clear();
         state.health.transition_ended();
-        state.complete = anchored && state.health.may_wait();
+        state.complete = anchored && state.health.may_wait() && self.alive();
         state.active = state.complete;
         drop(state);
         self.shared.changed.notify_all();
@@ -871,7 +945,7 @@ impl FlipObserver {
     fn finish(&self, limit: Duration) -> Option<pacing::AuditSummary> {
         let deadline = Instant::now() + limit;
         let mut state = self.lock();
-        while state.active && state.audit.has_unresolved() {
+        while state.active && state.audit.has_unresolved() && self.alive() {
             let now = Instant::now();
             if now >= deadline {
                 break;
@@ -880,10 +954,10 @@ impl FlipObserver {
                 .shared
                 .changed
                 .wait_timeout(state, deadline - now)
-                .expect("observer lock")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }
-        let complete = state.complete && state.active;
+        let complete = state.complete && state.active && self.alive();
         let last = state.last.map_or(0, |(seq, _)| seq);
         let (summary, resolved) = state.audit.finish(last, Instant::now());
         state.resolved.extend(resolved);
@@ -953,10 +1027,19 @@ impl App {
     }
 }
 
-/// A control command on KMS. A display-power change first abandons the
-/// transition audit (nothing waits on a vblank around the power commit).
+/// A control command on KMS. A display-power command that switches the
+/// panel first abandons the transition audit (nothing waits on a vblank
+/// around the power commit); a query or a repeat of the current state
+/// leaves the transition and its clock alone (`power_command_switches`).
 fn handle_command(app: &mut App, pacer: &mut FramePacer, cmd: ViewerCommand) -> KmsCommand {
-    if matches!(cmd, ViewerCommand::DisplayPower { .. }) {
+    if let ViewerCommand::DisplayPower { state, output, .. } = &cmd
+        && super::presentation::power_command_switches(
+            *state,
+            app.presentation.power().is_dark(),
+            output.as_deref(),
+            pacer.display.connector_name(),
+        )
+    {
         pacer.abandon_transition(app);
     }
     app.handle_kms_command(&mut pacer.display, cmd)
@@ -971,6 +1054,9 @@ async fn drive(
     // After a wake: when its modeset committed, until the connector
     // first reads connected again (logged for Pi gate 2).
     let mut wake_hpd_since: Option<Instant> = None;
+    // The photo (by when it was shown) whose dwell has had its forced
+    // connector probe.
+    let mut probed_photo: Option<Instant> = None;
     loop {
         if app.cancel.is_cancelled() {
             info!("kms_viewer_cancelled");
@@ -1047,6 +1133,24 @@ async fn drive(
             continue;
         }
 
+        // Once per photo, the first time the loop goes idle with it resting
+        // on screen (just after its transition, nothing due for a while):
+        // a forced probe, a blocking DDC/EDID read, which must not land on
+        // the lead-in or its drain before the next transition.
+        let resting = app.resting_photo_since();
+        if resting.is_some()
+            && resting != probed_photo
+            && app
+                .presentation
+                .power()
+                .may_check_connector(Instant::now(), CONNECTOR_SETTLE_AFTER_WAKE)
+        {
+            probed_photo = resting;
+            if let Err(err) = pacer.display.check_unchanged(true) {
+                anyhow::bail!("kms_display_changed: {err}; exiting for a restart");
+            }
+        }
+
         let loader = loader_open.then_some(&mut app.from_loader);
         let event = wake::next_wake_event(
             &plan,
@@ -1056,7 +1160,6 @@ async fn drive(
             loader,
         )
         .await;
-        let dwell_elapsed = matches!(event, WakeEvent::DwellElapsed);
         match event {
             WakeEvent::Cancelled => {
                 info!("kms_viewer_cancelled");
@@ -1098,10 +1201,9 @@ async fn drive(
         // Runtime display changes: the loop only waits while idle, so every
         // wait ends here. An unplugged connector or a panel that no longer
         // offers the mode ends this process; the restart waits for a
-        // display and picks its mode again. The dwell deadline (once per
-        // photo, just before the next transition) forces a probe; other
-        // wakes read the kernel's cached state. Not while the panel is dark
-        // or settling after a wake (see "Display power").
+        // display and picks its mode again. These checks read the kernel's
+        // cached state (the forced probe is once per photo, above). Not while
+        // the panel is dark or settling after a wake (see "Display power").
         let now = Instant::now();
         if let Some(since) = wake_hpd_since {
             if pacer.display.is_connected() {
@@ -1119,7 +1221,7 @@ async fn drive(
             .presentation
             .power()
             .may_check_connector(now, CONNECTOR_SETTLE_AFTER_WAKE)
-            && let Err(err) = pacer.display.check_unchanged(dwell_elapsed)
+            && let Err(err) = pacer.display.check_unchanged(false)
         {
             anyhow::bail!("kms_display_changed: {err}; exiting for a restart");
         }

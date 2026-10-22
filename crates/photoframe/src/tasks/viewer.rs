@@ -368,8 +368,12 @@ pub(super) struct TransitionFrameMetric {
     best_frame_ms: f32,
     /// DRM/KMS only: what the panel showed, from the flip audit. `None` on
     /// Wayland, or when the audit was incomplete (no vblank information for
-    /// part of the transition); the line then has no `late_frames` field.
+    /// part of the transition).
     display: Option<DisplayCadence>,
+    /// Presented on DRM/KMS, where the loop's own intervals only say how
+    /// far ahead frames were rendered: without the audit the line carries
+    /// `audited=false` and the frame count, not those intervals.
+    kms: bool,
 }
 
 /// DRM/KMS: a transition as the panel showed it (`pacing::FlipAudit`).
@@ -401,7 +405,7 @@ impl DisplayCadence {
 }
 
 impl TransitionFrameMetric {
-    fn begin(kind: TransitionKind, now: Instant) -> Self {
+    fn begin(kind: TransitionKind, now: Instant, kms: bool) -> Self {
         Self {
             kind,
             started: now,
@@ -410,6 +414,7 @@ impl TransitionFrameMetric {
             worst_frame_ms: 0.0,
             best_frame_ms: f32::INFINITY,
             display: None,
+            kms,
         }
     }
 
@@ -445,6 +450,18 @@ impl TransitionFrameMetric {
                 best_frame_ms = format_args!("{:.1}", shown.best.as_secs_f32() * 1000.0),
                 worst_frame_ms = format_args!("{:.1}", shown.worst.as_secs_f32() * 1000.0),
                 late_frames = shown.late_frames,
+                audited = true,
+                "transition_frame_metric"
+            );
+            return;
+        }
+        if self.kms {
+            // Render-ahead spacing (a millisecond or two), not the panel's
+            // cadence: name what is missing instead of logging it.
+            info!(
+                transition = %self.kind,
+                frames = self.frames,
+                audited = false,
                 "transition_frame_metric"
             );
             return;
@@ -1628,7 +1645,7 @@ fn with_photo_app_id(attrs: WindowAttributes) -> WindowAttributes {
     ))]
     {
         use winit::platform::wayland::WindowAttributesExtWayland;
-        return attrs.with_name("photoframe", "photoframe");
+        attrs.with_name("photoframe", "photoframe")
     }
 
     #[cfg(not(any(
@@ -3734,7 +3751,8 @@ impl App {
                 }
             }
             // Priority results (operator-requested) still upload
-            // immediately; everything else waits out the animation.
+            // immediately, mip generation included, so at most one frame
+            // of the animation can slip; everything else waits it out.
             self.ready_results = priority_now;
             if !self.ready_results.is_empty() {
                 self.upload_results_now(wake);
@@ -4720,9 +4738,10 @@ impl App {
     /// cadence rather than how quickly frames were queued.
     fn note_transition_frame(&mut self, active: Option<TransitionKind>, now: Instant) {
         let metrics = self.full_config.metrics;
+        let kms = matches!(self.output, Some(Output::Kms { .. }));
         match (self.transition_frame_metric.take(), active) {
             (None, Some(kind)) => {
-                self.transition_frame_metric = Some(TransitionFrameMetric::begin(kind, now));
+                self.transition_frame_metric = Some(TransitionFrameMetric::begin(kind, now, kms));
             }
             (Some(mut stats), Some(kind)) if stats.kind == kind => {
                 stats.record(now);
@@ -4730,7 +4749,7 @@ impl App {
             }
             (Some(stats), Some(kind)) => {
                 stats.log(metrics);
-                self.transition_frame_metric = Some(TransitionFrameMetric::begin(kind, now));
+                self.transition_frame_metric = Some(TransitionFrameMetric::begin(kind, now, kms));
             }
             (Some(stats), None) => stats.log(metrics),
             (None, None) => {}
@@ -5997,7 +6016,7 @@ mod tests {
             state.anchor_once(t);
             progress.push(state.progress_at(t));
             match metric.as_mut() {
-                None => metric = Some(TransitionFrameMetric::begin(state.kind(), t)),
+                None => metric = Some(TransitionFrameMetric::begin(state.kind(), t, true)),
                 Some(m) => m.record(t),
             }
         }

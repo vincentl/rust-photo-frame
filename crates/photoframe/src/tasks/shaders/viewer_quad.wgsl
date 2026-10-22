@@ -505,11 +505,12 @@ fn fs_venetian_blinds(in: VSOut) -> @location(0) vec4<f32> {
 // Locking both layers to the same scale avoids the double-image "swim" of
 // opposing zoom directions, is pop-free at both ends, and keeps scale >= 1
 // so edges never go empty. The zoomed planes' texture maps are params1 /
-// params3 (draw_params::crossfade_zoom); coverage uses the unzoomed planes.
+// params3 (draw_params::crossfade_zoom); coverage uses the unzoomed planes
+// (over_background reads only their alpha, so they are not fetched).
 @fragment
 fn fs_crossfade_zoom(in: VSOut) -> @location(0) vec4<f32> {
-  let current = current_of(in);
-  let next = next_of(in);
+  let current = vec4<f32>(0.0, 0.0, 0.0, covered(in.current_uv));
+  let next = vec4<f32>(0.0, 0.0, 0.0, covered(in.next_uv));
   let c = current_plane(in.screen_uv * U.params1.xy + U.params1.zw);
   let nxt = next_plane(in.screen_uv * U.params3.xy + U.params3.zw);
   return over_background(mix(c, nxt, progress01()), current, next);

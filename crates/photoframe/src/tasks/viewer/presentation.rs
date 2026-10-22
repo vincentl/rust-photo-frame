@@ -180,6 +180,25 @@ pub(super) fn power_commit(on: bool, mesa_has_presented: bool) -> PowerCommit {
     }
 }
 
+/// Whether a `display-power` command switches the panel: only `off` while
+/// lit and `on` while dark do, and only for this connector (an `output` of
+/// `*` or none means this one). A query (no state, which buttond and
+/// `powerctl state` send on every press), a repeat of the current state, or
+/// a command for another output changes nothing, so a transition carries on
+/// with its clock and audit (rc2 review C1).
+pub(super) fn power_command_switches(
+    state: Option<PowerState>,
+    dark: bool,
+    output: Option<&str>,
+    connector: &str,
+) -> bool {
+    let ours = output.is_none_or(|o| o == "*" || o.eq_ignore_ascii_case(connector));
+    ours && matches!(
+        (state, dark),
+        (Some(PowerState::Off), false) | (Some(PowerState::On), true)
+    )
+}
+
 /// Why a wake could not light the panel in this process.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum WakeFailure<E> {
@@ -284,6 +303,24 @@ impl PanelPower {
 mod tests {
     use super::*;
     use ViewerModeKind::{Greeting, Sleep, Wake};
+
+    #[test]
+    fn only_a_real_switch_interrupts_a_transition() {
+        let switches =
+            |state, dark, output| power_command_switches(state, dark, output, "HDMI-A-1");
+        // The query (buttond, powerctl state) and repeats change nothing.
+        for dark in [false, true] {
+            assert!(!switches(None, dark, None));
+        }
+        assert!(!switches(Some(PowerState::On), false, None));
+        assert!(!switches(Some(PowerState::Off), true, None));
+        // Real switches, for this connector however it is named.
+        assert!(switches(Some(PowerState::Off), false, None));
+        assert!(switches(Some(PowerState::On), true, Some("*")));
+        assert!(switches(Some(PowerState::Off), false, Some("hdmi-a-1")));
+        // Another output's command does not touch this panel.
+        assert!(!switches(Some(PowerState::Off), false, Some("HDMI-A-2")));
+    }
 
     fn overlay(ttl_sec: u64) -> WifiOverlay {
         WifiOverlay {

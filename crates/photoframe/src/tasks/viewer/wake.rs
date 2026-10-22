@@ -169,14 +169,22 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
     // which blocks on the swapchain for up to a refresh, carried the clock
     // past the dwell's end), and after the end there is no deadline left to
     // wake for. That tick starts the transition (the conditions are
-    // `maybe_start_transition`'s), so it cannot repeat.
+    // `maybe_start_transition`'s), so it cannot repeat; except without a
+    // configured surface, where no scene step runs (`with_active_scene`), so
+    // it waits for the surface (whose handshake keeps steps coming:
+    // `tick_fast`) instead of asking for owed steps on every batch.
     let mut lead_in_frame = false;
     let mut dwell_over_and_ready = false;
     let mut deadline = match inputs.displayed_at {
         Some(shown) if inputs.slideshow_active && !inputs.transition_active => {
             let dwell_end = shown + inputs.dwell;
             if now >= dwell_end {
-                dwell_over_and_ready = inputs.photo_staged;
+                // A photo staged only now (startup, after a wake, a slow
+                // decode) starts its transition without a lead-in, on a cold
+                // GPU clock: its first frames may be late. Accepted for
+                // v1.2 (rc2 review P1); a "not before ready + lead-in" gate
+                // shared with `maybe_start_transition` would fix it.
+                dwell_over_and_ready = inputs.photo_staged && inputs.surface_ready;
                 None
             } else {
                 let lead_in = if inputs.photo_staged {
@@ -648,6 +656,15 @@ mod tests {
         // Nothing ready: the next photo's arrival (an event) starts it.
         let plan = plan_wake(resting(shown), shown + DWELL + Duration::from_millis(16));
         assert!(!plan.tick_now);
+        // No surface yet (Wayland's handshake): no scene step can start it,
+        // so no owed steps; the handshake's fast ticks keep it moving.
+        let waiting = WakeInputs {
+            photo_staged: true,
+            surface_ready: false,
+            ..resting(shown)
+        };
+        let plan = plan_wake(waiting, shown + DWELL + Duration::from_millis(16));
+        assert!(!plan.tick_now && plan.tick_fast);
     }
 
     #[test]
