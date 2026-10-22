@@ -382,7 +382,7 @@ Prints the **weight** (relative show frequency; equilibrium = 1.0) for each disc
 | `half-life`        | Optional  | `1 day`           | Positive duration string parsed by [`humantime`](https://docs.rs/humantime) | Controls how quickly the weight decays back to equilibrium; shorter half-lives return to normal faster.     |
 | `order`            | Optional  | `weighted-spread` | `weighted-spread`, `weighted-random`                                        | Scheduling algorithm. `weighted-spread` (default) adds a minimum-wait floor before a photo can recur; `weighted-random` is plain exponential-gap (i.i.d. random). Weighting (average frequency) is identical for both. |
 | `min-spacing`      | Optional  | `0.7`             | Float in `[0.0, 1.0)`                                                       | For `weighted-spread` only: minimum wait before a photo repeats, as a fraction of one library lap. `0.0` equals `weighted-random`; `0.5` waits half the library. Preserves show frequency; only spacing changes. Ignored by `weighted-random`. |
-| `pairing`          | Optional  | off               | Mapping; see [Portrait pairing](#portrait-pairing)                          | Shows two back-to-back portraits side by side on one screen. |
+| `pairing`          | Optional  | off               | Mapping; see [Portrait pairing](#portrait-pairing)                          | Shows two back-to-back portraits side by side on one screen (optionally looking ahead through the preload queue). |
 
 ## Portrait pairing
 
@@ -398,6 +398,7 @@ playlist:
     probability: 1.0        # chance that two back-to-back pairable portraits share a screen
     bar-ratio: 0.618        # center bar = this × the mat border (1/φ)
     dwell-multiplier: 1.5   # a pair stays up dwell-ms × this
+    lookahead: false        # true: pair across the next viewer-preload-count positions
 ```
 
 **The playlist is unchanged.** Pairing never reorders, skips or adds a showing. It only
@@ -406,13 +407,40 @@ in [Playlist weighting](#playlist-weighting) carries over exactly: each photo's 
 share, the `min-spacing` floor (counted in photos shown), the spread, the prompt debut of
 new photos. The dry run checks the paired sequence against the unpaired one photo for
 photo. With pairing on, `photo_display_metric` still logs one line per photo shown, so
-`seq` and `gap` mean what they always meant.
+`seq` and `gap` mean what they always meant. (`lookahead`, below, relaxes this by a
+bounded amount; it is off by default.)
 
 **No photo on two screens in a row.** Two back-to-back portraits are not paired when the
 second one was on the previous screen, or when the photo after the second is the first
 one again (in A, B, A, pairing A with B would put A on two screens in a row). With these
 two rules a photo appears on consecutive screens only where the unpaired playlist itself
 shows it twice in a row, which only a just-added photo's debut can do.
+
+**Looking ahead.** Back to back alone pairs only part of the portraits: on a library that
+is 34% portraits by weight, about 4 in 10 portrait showings, one pair screen per 13 or so.
+With `lookahead: true` the next photo, when it is a pairable portrait, may pair with a
+pairable portrait anywhere in the next `viewer-preload-count` playlist positions (the
+screens the pipeline already has queued or in flight, 3 by default), and the photos
+between them are each shown one position later. There is no window to tune: the window
+*is* the preload depth. What changes and what does not:
+
+- **The scheduler is untouched.** Every commit still happens in playlist order, so each
+  photo's long-run share, the debut of new photos and the random order itself are exactly
+  those of pairing off. Only the order photos reach the screen moves.
+- **Bounded moves.** Every showing lands within `viewer-preload-count − 1` positions of
+  where the unpaired playlist had it (2 places by default). So the gap between two
+  showings of the same photo changes by at most twice that, and the `min-spacing` floor
+  is perturbed by at most 4 photos on the default depth (0.3% of the floor on a
+  2000-photo library). The dry run prints the largest shift it measured.
+- **No photo on two screens in a row** still holds exactly in the planner: a pull is
+  refused when it would put the next screen's first photo on this screen, or when
+  removing the pulled photo would leave a photo next to its own other showing.
+- **Rate.** With `π` the pairable share and `W` the depth, about `2q / (1 + q)` of the
+  pairable showings pair, where `q = 1 − (1 − πp)^W`: for 34% portraits, 51% back to
+  back (`W = 1`) becomes 83% at `W = 3`, about one pair screen per 5. The dry run prints
+  the measured share beside both figures.
+- A photo added while its neighbours are already queued waits at most `viewer-preload-count`
+  screens longer for its debut than with `lookahead` off.
 
 **Which portraits pair.** A photo is *pairable* when both hold:
 
@@ -483,13 +511,17 @@ proportionally more often per hour; the shares stay the same.
 | `probability`      | `1.0`   | `[0.0, 1.0]`    | Chance that two back-to-back pairable portraits share a screen. Never changes the playlist order. |
 | `bar-ratio`        | `0.618` | `[0.0, 1.0]`    | Center bar between the two photos, as a fraction of the mat border (studio and passe-partout add their two bevels). `0` puts the photos edge to edge. |
 | `dwell-multiplier` | `1.5`   | `[0.5, 4.0]`    | A pair screen stays up `dwell-ms ×` this. |
+| `lookahead`        | `false` | `true`, `false` | Pair a portrait with the first pairable portrait in the next `viewer-preload-count` playlist positions, shifting the photos between one position later. Every showing moves at most `viewer-preload-count − 1` places; the scheduler itself is unchanged. |
 
 **Checking it.** With pairing enabled, `--playlist-dry-run N` reads every header, plans
 `N` photos as screens (pairs print as `a.jpg + b.jpg`), and ends with a `# pairing` block:
 pairable photos, `π`, screens vs photos, the measured paired share beside
-`2πp / (1 + πp)`, how often a photo meets the same partner again, and photos on
-consecutive screens (0 in the dry run, except where the unpaired playlist itself repeats
-a photo). Pass `--canvas WxH` for a panel other than 4K; the default is 3840x2160
+`2πp / (1 + πp)` (with `lookahead`, beside `2q / (1 + q)` for the configured depth and
+the back-to-back figure), how often a photo meets the same partner again, the largest
+shift of any photo from the unpaired order (0 without `lookahead`, at most
+`viewer-preload-count − 1` with it), and photos on consecutive screens (0 in the dry run,
+except where the unpaired playlist itself repeats a photo). Pass `--canvas WxH` for a
+panel other than 4K; the default is 3840x2160
 times `oversample`. On the frame, `metrics: true` adds the pairing fields to
 `photo_display_metric` (see [Performance → Measuring](performance.md#measuring)) and
 `developer/analyze-playlist-metrics.py` reports them in its `# PAIRING` section.

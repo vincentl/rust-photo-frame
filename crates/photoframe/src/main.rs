@@ -438,12 +438,16 @@ fn print_paired_dry_run(
     seed: Option<u64>,
 ) -> Result<()> {
     use std::collections::HashMap;
-    use tasks::manager::planner::ScreenStats;
+    use tasks::manager::planner::{Displacement, ScreenStats};
 
     let pairing = &cfg.playlist.pairing;
     println!(
-        "\n# pairing: probability {} bar-ratio {} dwell-multiplier {}",
-        pairing.probability, pairing.bar_ratio, pairing.dwell_multiplier
+        "\n# pairing: probability {} bar-ratio {} dwell-multiplier {} lookahead {} (window {})",
+        pairing.probability,
+        pairing.bar_ratio,
+        pairing.dwell_multiplier,
+        pairing.lookahead,
+        rules.lookahead
     );
     println!(
         "# canvas: {}x{} (max-upscale {}, non-zero mats {:.1}%..{:.1}%)",
@@ -506,21 +510,24 @@ fn print_paired_dry_run(
         pairable.values().filter(|ok| **ok).count(),
         photos.len()
     );
-    println!("#   pi (pairable weight share): {pi:.3}");
-    println!(
-        "#   screens: {} for {} appearances ({} pairs)",
-        stats.screens, stats.appearances, stats.pair_screens
+    // P1 / P1-move: the sent order against the unpaired scheduler's, photo
+    // for photo. 0 with look-ahead off; at most W - 1 with it on.
+    let planned: Vec<std::path::PathBuf> = screens
+        .iter()
+        .flat_map(tasks::manager::planner::PlannedScreen::members)
+        .map(|m| (*m.path).clone())
+        .collect();
+    let unpaired = tasks::manager::simulate_playlist(
+        photos.iter().cloned(),
+        cfg.playlist.clone(),
+        now,
+        planned.len(),
+        seed,
     );
-    println!(
-        "#   paired share of pairable appearances: {:.3} (2*pi*p/(1+pi*p) = {:.3}, an approximation)",
-        stats.paired_share,
-        ScreenStats::predicted_share(pi, rules.probability)
-    );
-    println!("#   repeat-partner rate: {:.3}", stats.repeat_partner_rate);
-    println!(
-        "#   consecutive-screen repeats: {} (must be 0 unless the unpaired sequence repeats a photo back to back; I5)",
-        stats.consecutive_repeats
-    );
+    let moved = Displacement::measure(&planned, &unpaired);
+    for line in stats.report_lines(pi, rules.probability, rules.lookahead, moved) {
+        println!("{line}");
+    }
     Ok(())
 }
 

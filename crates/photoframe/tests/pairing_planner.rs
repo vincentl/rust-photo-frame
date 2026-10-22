@@ -5,7 +5,7 @@
 use photoframe::config::{PlaylistOptions, PlaylistOrder};
 use photoframe::events::{CreatedSource, PhotoInfo};
 use photoframe::tasks::manager::pairing::PairingRules;
-use photoframe::tasks::manager::planner::{PlannedScreen, ScreenStats};
+use photoframe::tasks::manager::planner::{Displacement, PlannedScreen, ScreenStats};
 use photoframe::tasks::manager::{simulate_playlist, simulate_screens};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,10 @@ fn options(f: f64) -> PlaylistOptions {
 }
 
 fn rules(probability: f64) -> PairingRules {
+    rules_with(probability, 1)
+}
+
+fn rules_with(probability: f64, lookahead: usize) -> PairingRules {
     PairingRules {
         probability,
         bar_ratio: 0.618,
@@ -37,6 +41,7 @@ fn rules(probability: f64) -> PairingRules {
         m_min: 0.02,
         m_max: 0.06,
         bevel_max: 0.0,
+        lookahead,
     }
 }
 
@@ -186,7 +191,17 @@ fn pairable_set(photos: &[PhotoInfo]) -> HashSet<PathBuf> {
 }
 
 fn screens(lib: &Lib, probability: Option<f64>, n: usize, seed: u64) -> Vec<PlannedScreen> {
-    let rules = probability.map(rules);
+    screens_with(lib, probability, 1, n, seed)
+}
+
+fn screens_with(
+    lib: &Lib,
+    probability: Option<f64>,
+    lookahead: usize,
+    n: usize,
+    seed: u64,
+) -> Vec<PlannedScreen> {
+    let rules = probability.map(|p| rules_with(p, lookahead));
     simulate_screens(
         lib.photos.clone(),
         options(lib.f),
@@ -346,6 +361,124 @@ fn s6_no_photo_on_consecutive_screens_beyond_the_sequences_own_z_z() {
         }
     }
     assert!(z_z_seen > 0, "no library exercised the Z, Z exception");
+}
+
+// ── Look-ahead (design "Look-ahead pairing", 2026-10-22) ────────────────────
+
+/// **L1 Bounded moves (P1-move).** With a window W on the real scheduler,
+/// every library and seed: the flattened screens are the unpaired sequence
+/// with each appearance moved at most W − 1 places (and only the tail of a
+/// truncated run unmatched, at most W − 1 of it). W = 1 is S1's identity.
+#[test]
+fn l1_lookahead_moves_every_appearance_at_most_w_minus_1() {
+    for lib in s1_libraries() {
+        for seed in 0..3 {
+            for w in [1usize, 2, 3, 5] {
+                let planned = flatten(&screens_with(&lib, Some(1.0), w, 3_000, seed));
+                let unpaired = simulate_playlist(
+                    lib.photos.clone(),
+                    options(lib.f),
+                    now(),
+                    planned.len(),
+                    Some(seed),
+                );
+                let moved = Displacement::measure(&planned, &unpaired);
+                assert!(
+                    moved.max < w && moved.unmatched < w,
+                    "{} seed {seed} W {w}: {moved:?}",
+                    lib.label
+                );
+                if w == 1 {
+                    assert_eq!(planned, unpaired, "{} seed {seed}", lib.label);
+                }
+            }
+        }
+    }
+}
+
+/// **L2 No consecutive repeats (I5) under shifts.** On S6's libraries and the
+/// FIFO ones, with W = 3: every photo on consecutive screens is a Z, Z of the
+/// sent sequence, and the sent sequence has no more Z, Z than the unpaired
+/// one (a shift never puts a photo next to its own other appearance).
+#[test]
+fn l2_lookahead_keeps_i5_exactly() {
+    let fifo = Lib {
+        label: "12 portraits, 6 FIFO debuts, f=0",
+        photos: library(&specs(12, |i| Spec {
+            runtime: i >= 6,
+            weight3: true,
+            ..plain(true)
+        })),
+        f: 0.0,
+    };
+    for lib in s6_libraries().into_iter().chain([fifo]) {
+        let pairable = pairable_set(&lib.photos);
+        let is_pairable = |path: &Path| pairable.contains(path);
+        for seed in 0..3 {
+            for p in [0.5, 1.0] {
+                let planned = screens_with(&lib, Some(p), 3, 50_000, seed);
+                let stats = ScreenStats::measure(&planned, &is_pairable);
+                assert!(stats.pair_screens > 0, "{} seed {seed}", lib.label);
+                let flat = flatten(&planned);
+                let unpaired = simulate_playlist(
+                    lib.photos.clone(),
+                    options(lib.f),
+                    now(),
+                    flat.len(),
+                    Some(seed),
+                );
+                let zz = |seq: &[PathBuf]| seq.windows(2).filter(|w| w[0] == w[1]).count();
+                assert!(
+                    zz(&flat) <= zz(&unpaired),
+                    "{} seed {seed} p {p}: {} Z,Z sent vs {} unpaired",
+                    lib.label,
+                    zz(&flat),
+                    zz(&unpaired)
+                );
+                assert_eq!(stats.consecutive_repeats, zz(&flat), "{}", lib.label);
+                for w in planned.windows(2) {
+                    for z in w[1].members().filter(|m| w[0].contains(&m.path)) {
+                        let last = w[0].members().last().unwrap();
+                        assert!(
+                            last.path == z.path && w[1].primary.path == z.path,
+                            "{} seed {seed} p {p}: {:?} then {:?} is not a Z, Z",
+                            lib.label,
+                            w[0],
+                            w[1]
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// **L3 Rate.** On the 400 + 600 library (π = 0.4) the paired share with
+/// W = 3 is near 2q/(1+q), q = 1 − (1 − πp)^3 (0.80 at p = 1), and well above
+/// the back-to-back share (0.57); p = 0 still pairs nothing.
+#[test]
+fn l3_lookahead_paired_share_matches_the_window_rate_model() {
+    let lib = Lib {
+        label: "400 + 600",
+        photos: library(&specs(1000, |i| plain(i < 400))),
+        f: 0.7,
+    };
+    let pairable = pairable_set(&lib.photos);
+    let is_pairable = |path: &Path| pairable.contains(path);
+    for (w, p) in [(3usize, 1.0), (3, 0.5), (5, 1.0)] {
+        let planned = screens_with(&lib, Some(p), w, 100_000, 3);
+        let stats = ScreenStats::measure(&planned[1_000..], &is_pairable);
+        let predicted = ScreenStats::predicted_share_lookahead(0.4, p, w);
+        let relative = (stats.paired_share - predicted).abs() / predicted;
+        assert!(
+            relative <= 0.05,
+            "W {w} p {p}: measured {:.3} vs predicted {predicted:.3}",
+            stats.paired_share
+        );
+        assert!(stats.paired_share > ScreenStats::predicted_share(0.4, p) * 1.1);
+    }
+    let planned = screens_with(&lib, Some(0.0), 3, 20_000, 3);
+    assert_eq!(ScreenStats::measure(&planned, &is_pairable).pair_screens, 0);
 }
 
 /// Before the canvas is published nothing pairs, and the sequence is today's.

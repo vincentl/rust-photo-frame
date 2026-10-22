@@ -200,6 +200,11 @@ mod pairing {
         /// A paired screen rests `dwell-ms x dwell-multiplier`; `2 +
         /// transition/dwell` is wall-clock neutral.
         pub dwell_multiplier: f32,
+        /// Look-ahead pairing: a pairable head may pair with a pairable
+        /// portrait anywhere in the next `viewer-preload-count` playlist
+        /// positions (the screens already queued or in flight), shifting the
+        /// photos between them one position later. Off: back to back only.
+        pub lookahead: bool,
     }
 
     impl PairingOptions {
@@ -235,6 +240,7 @@ mod pairing {
                 probability: Self::DEFAULT_PROBABILITY,
                 bar_ratio: Self::DEFAULT_BAR_RATIO,
                 dwell_multiplier: Self::DEFAULT_DWELL_MULTIPLIER,
+                lookahead: false,
             }
         }
     }

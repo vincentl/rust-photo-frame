@@ -219,10 +219,11 @@ impl LiveScreens {
         seed: Option<u64>,
     ) -> Self {
         let probability = pairing.as_ref().map_or(0.0, |p| p.rules.probability);
+        let lookahead = pairing.as_ref().map_or(1, |p| p.rules.lookahead);
         Self {
             playlist,
             sizes: DisplaySizes::default(),
-            planner: ScreenPlanner::new(probability, seed),
+            planner: ScreenPlanner::new(probability, seed).with_lookahead(lookahead),
             planned: None,
             pairing,
             sent_count: 0,
@@ -883,7 +884,8 @@ where
 /// (`None` = not yet published, so nothing pairs). Runs until at least
 /// `iterations` appearances are planned. With pairing off every screen is
 /// solo and the flattened sequence is `simulate_playlist`'s; with pairing on
-/// it is too (P1), only grouped.
+/// it is too (P1), only grouped, unless `rules.lookahead > 1`, where every
+/// appearance moves by at most `lookahead − 1` positions (P1-move).
 pub fn simulate_screens<I>(
     photos: I,
     options: PlaylistOptions,
@@ -903,7 +905,8 @@ where
         pl.record_add(info);
     }
     let probability = pairing.map_or(0.0, |rules| rules.probability);
-    let mut planner = ScreenPlanner::new(probability, seed);
+    let lookahead = pairing.map_or(1, |rules| rules.lookahead);
+    let mut planner = ScreenPlanner::new(probability, seed).with_lookahead(lookahead);
     let is_pairable =
         |path: &Path| pairing.is_some_and(|rules| rules.is_pairable(sizes.get(path), canvas));
     let pairable: Option<&dyn Fn(&Path) -> bool> =
@@ -947,6 +950,15 @@ mod live_loop_tests {
     /// `seq` played by a scripted scheduler; names starting with `L` are
     /// landscapes, the rest pairable portraits. `pairing` off when `None`.
     fn live(seq: &str, probability: Option<f64>) -> (LiveScreens, Log, CanvasShape) {
+        live_with(seq, probability, 1)
+    }
+
+    /// [`live`] with a look-ahead window of `lookahead` positions.
+    fn live_with(
+        seq: &str,
+        probability: Option<f64>,
+        lookahead: usize,
+    ) -> (LiveScreens, Log, CanvasShape) {
         let (sched, log) = Scripted::new(seq);
         let canvas = CanvasShape::default();
         canvas.publish(3840, 2160);
@@ -958,6 +970,7 @@ mod live_loop_tests {
                 m_min: 0.02,
                 m_max: 0.06,
                 bevel_max: 0.0,
+                lookahead,
             },
             canvas: canvas.clone(),
         });
@@ -1001,6 +1014,45 @@ mod live_loop_tests {
         // The held peek (c) is the next screen's first member, not redrawn.
         assert_eq!(request(&mut screens), "c+d");
         assert_eq!(take(&log), ["commit c", "peek d", "commit d", "peek -"]);
+    }
+
+    /// Look-ahead in the live loop: the same `LoadPhoto` shapes (a pair, then
+    /// solos), commits in sequence order, the shifted photos sent next without
+    /// any scheduler call, and a removed queued photo dropped (B4).
+    #[test]
+    fn lookahead_sends_the_pair_then_the_shifted_queue_in_order() {
+        let (mut screens, log, _) = live_with("a L1 L2 b c", Some(1.0), 3);
+        assert_eq!(request(&mut screens), "a+b");
+        assert_eq!(
+            take(&log),
+            [
+                "peek a",
+                "commit a",
+                "peek L1",
+                "commit L1",
+                "peek L2",
+                "commit L2",
+                "peek b",
+                "commit b",
+                "peek c"
+            ]
+        );
+        screens.sent();
+        assert_eq!(request(&mut screens), "L1");
+        assert!(take(&log).is_empty(), "already committed");
+        screens.sent();
+        // L2 is removed while queued: dropped, c (held) re-peeked.
+        screens.on_inventory(InventoryEvent::PhotoRemoved(PathBuf::from("L2")));
+        assert_eq!(take(&log), ["remove L2"]);
+        assert_eq!(request(&mut screens), "c");
+        assert_eq!(
+            take(&log),
+            ["peek c", "commit c", "peek -"],
+            "H was re-peeked (L2 never sent); c is pairable, so commit before send"
+        );
+        screens.sent();
+        assert!(take(&log).is_empty());
+        assert!(screens.next_request().is_none());
     }
 
     #[test]
@@ -1104,6 +1156,7 @@ mod live_loop_tests {
                 m_min: 0.02,
                 m_max: 0.06,
                 bevel_max: 0.0,
+                lookahead: 1,
             },
             canvas: CanvasShape::default(),
         };

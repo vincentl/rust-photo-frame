@@ -5653,6 +5653,7 @@ mod tests {
             m_min: 0.06,
             m_max: 0.06,
             bevel_max: 0.0,
+            lookahead: 1,
         };
         // Pairing off and on; with it on, the deferred screens are pairs
         // (two photos each, review M4).

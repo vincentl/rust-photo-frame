@@ -316,6 +316,7 @@ fn k2_low_resolution_fixture_is_excluded_because_pairing_would_shrink() {
         m_min: 0.02,
         m_max: 0.02,
         bevel_max: 0.0,
+        lookahead: 1,
     };
     assert!(!rules.is_pairable(Some(low.dimensions()), Some(SCREEN)));
     assert!(rules.is_pairable(Some(tall.dimensions()), Some(SCREEN)));
@@ -803,6 +804,7 @@ fn k2_solo_height_at_the_threshold_with_upscale_and_reduced_decodes() {
         m_min: 0.02,
         m_max: 0.02,
         bevel_max: 0.0,
+        lookahead: 1,
     };
     // 540 x 0.96 = 518.4: 519 px is the shortest pairable height at u = 1,
     // 260 px at u = 2.

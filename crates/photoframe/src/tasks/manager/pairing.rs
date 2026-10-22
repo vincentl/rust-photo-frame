@@ -95,6 +95,10 @@ pub struct PairingRules {
     pub m_max: f64,
     /// `b_max`, in canvas pixels.
     pub bevel_max: f64,
+    /// `W`, the look-ahead window in playlist positions after the head
+    /// (design "Look-ahead pairing"): 1 is back to back only (rc2);
+    /// `pairing.lookahead` sets it to `viewer-preload-count`.
+    pub lookahead: usize,
 }
 
 impl PairingRules {
@@ -105,16 +109,25 @@ impl PairingRules {
         if !pairing.enabled {
             return None;
         }
-        Self::from_parts(
+        let rules = Self::from_parts(
             pairing,
             &cfg.matting,
             cfg.global_photo_settings.max_upscale_factor,
-        )
+        )?;
+        Some(Self {
+            lookahead: if pairing.lookahead {
+                cfg.viewer_preload_count.max(1)
+            } else {
+                1
+            },
+            ..rules
+        })
     }
 
     /// The rules for `pairing` with these mats and max-upscale factor (the
     /// viewer's check before drawing a pair, and test harnesses). `None` when
-    /// no non-zero mat is configured.
+    /// no non-zero mat is configured. The look-ahead window is 1 here (it
+    /// needs `viewer-preload-count`; see [`Self::from_config`]).
     pub fn from_parts(
         pairing: &PairingOptions,
         matting: &MattingConfig,
@@ -128,6 +141,7 @@ impl PairingRules {
             m_min: f64::from(m_min),
             m_max: f64::from(m_max),
             bevel_max: f64::from(matting.nonzero_bevel_max()),
+            lookahead: 1,
         })
     }
 
@@ -203,6 +217,7 @@ mod tests {
             m_min,
             m_max,
             bevel_max: 0.0,
+            lookahead: 1,
         }
     }
 

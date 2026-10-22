@@ -1999,6 +1999,31 @@ fn pairing_defaults_to_off() {
     assert_eq!(pairing.probability, 1.0);
     assert_eq!(pairing.bar_ratio, 0.618);
     assert_eq!(pairing.dwell_multiplier, 1.5);
+    assert!(!pairing.lookahead, "rc2 behaviour unless asked");
+}
+
+/// `lookahead: true` sets the planner's window to `viewer-preload-count`;
+/// off it is 1 (back to back).
+#[test]
+fn pairing_lookahead_window_is_the_viewer_preload_count() {
+    use photoframe::tasks::manager::pairing::PairingRules;
+    let mat = "    - kind: fixed-color\n      minimum-mat-percentage: 5\n";
+    let cfg = pairing_config("    enabled: true\n    lookahead: true\n", mat).expect("valid");
+    assert!(cfg.playlist.pairing.lookahead);
+    assert_eq!(cfg.viewer_preload_count, 3, "default preload depth");
+    assert_eq!(PairingRules::from_config(&cfg).unwrap().lookahead, 3);
+
+    let yaml = format!(
+        "photo-library-path: /photos\nviewer-preload-count: 5\nplaylist:\n  pairing:\n    enabled: true\n    lookahead: true\nmatting:\n  selection: random\n  active:\n{mat}"
+    );
+    let cfg = serde_yaml::from_str::<Configuration>(&yaml)
+        .unwrap()
+        .validated()
+        .unwrap();
+    assert_eq!(PairingRules::from_config(&cfg).unwrap().lookahead, 5);
+
+    let cfg = pairing_config("    enabled: true\n", mat).expect("valid");
+    assert_eq!(PairingRules::from_config(&cfg).unwrap().lookahead, 1);
 }
 
 #[test]

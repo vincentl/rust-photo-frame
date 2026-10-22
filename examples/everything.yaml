@@ -123,6 +123,7 @@ playlist:
     probability: 1.0
     bar-ratio: 0.618
     dwell-multiplier: 1.5
+    lookahead: false
 
 # Every mat kind, plus palettes/photo-average/photo-cluster and parameter variants.
 matting:

@@ -562,7 +562,10 @@ async fn manager_churn_tombstone_and_generation() {
     // branch can win many times in a row before the add is taken. Wait for A against a
     // deadline instead of counting receives; the other photos in between are B.
     drain_until(&mut to_load_rx, &path_a, |p| {
-        assert_eq!(*p, path_b, "unexpected path while waiting for A to reappear");
+        assert_eq!(
+            *p, path_b,
+            "unexpected path while waiting for A to reappear"
+        );
     })
     .await;
 
@@ -583,6 +586,7 @@ fn live_pairing() -> manager::pairing::LivePairing {
             m_min: 0.02,
             m_max: 0.06,
             bevel_max: 0.0,
+            lookahead: 1,
         },
         canvas,
     }
