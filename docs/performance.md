@@ -749,11 +749,27 @@ scale 2: draw plus upscale has to fit 16.7 ms.
 
 So the only layout the GPU can write and the display can scan out is
 linear: no tiled scanout path exists on this hardware. Whether V3D stores
-a raster target more slowly than UIF is not documented in Mesa; `frametest
-solid --drm` (clear and one constant color per pixel, no texture read)
-now reports its pass's GPU time and measures the pure store cost into the
-same linear images. Comparing it with `tex` (one 4K read) and with the
-viewer's `gpu_upscale_ms` splits the floor into store and read.
+a raster target more slowly than UIF is not documented in Mesa.
+
+**Measured: the floor is the linear 4K write itself.** `frametest --drm`
+reports its single pass's GPU time (timestamp queries). Pi 5, 3840x2160@60,
+FIFO, 12 s per mode, 2026-10-22:
+
+| `frametest` mode | What the pass does | GPU time median (max) |
+|---|---|---|
+| `solid` | one constant color per pixel, no texture read | 11.82 ms (12.2) |
+| `tex` | one 4K texture read per pixel | 11.96 ms (12.7) |
+| `fade` | two 4K texture reads mixed per pixel | 15.41 ms (16.4) |
+
+A fullscreen pass that reads nothing costs 11.8 ms on the display
+swapchain: 33 MB in about 12 ms, roughly 2.8 GB/s, so the store into the
+linear image is the floor, and one texture read adds almost nothing on
+top of it. The viewer's upscale (10.9 ms median, one bilinear read of the
+1920x1080 intermediate) is already as cheap as writing a 4K frame gets
+here: no shading change can lower it. What remains for a transition is
+its main pass, which has to fit the rest of the refresh (about 5.2 ms at
+p90 at scale 2; see "The main-pass budget" above). Only the display
+scaling below removes the 4K write from transition frames.
 
 **Longer term: let the display scale.** The HVS can scale an RGB plane
 (`vc4_plane.c`: any factor through the atomic plane check; a 2× upscale
