@@ -79,8 +79,9 @@
 //!   flip and the bounds on its GPU time are logged at debug level
 //!   (`kms_frame`), for T4. With debug on, and where the device offers
 //!   timestamp queries, the line also carries the GPU time of the frame's
-//!   draw and upscale passes (`gpu_draw_ms`, `gpu_upscale_ms`; `PassTimer`
-//!   in viewer.rs), read back off the render path by the observer's poll.
+//!   draw and upscale passes (`gpu_draw_ms`, `gpu_upscale_ms`; for iris the
+//!   draw split into `gpu_layer_ms` and `gpu_main_ms`; `PassTimer` in
+//!   viewer.rs), read back off the render path by the observer's poll.
 //! * **Observer failures.** The observer's blocking vblank waits run off the
 //!   render path, so they never stall a frame. A failed wait (disabled CRTC:
 //!   immediate EINVAL; vblanks stopped: the kernel's 3 s timeout) ends that
@@ -715,10 +716,11 @@ impl FramePacer {
 /// spends.
 const CLOSE_AUDIT_REFRESHES: u32 = 8;
 
-/// One `kms_frame` line. `gpu_draw_ms` and `gpu_upscale_ms` are measured
-/// (timestamp queries; `-` when not available or, for the upscale, when the
-/// frame was drawn natively); the `gpu_ms_at_*` pair bounds the whole
-/// submission from vblank-granular observations.
+/// One `kms_frame` line. The `gpu_*_ms` pass times are measured
+/// (timestamp queries; `-` when not available, for the layer and main split
+/// on a frame without an iris petal layer, and for the upscale on a frame
+/// drawn natively); the `gpu_ms_at_*` pair bounds the whole submission from
+/// vblank-granular observations.
 fn log_resolved_frame(frame: pacing::ResolvedFrame, passes: Option<PassTimes>) {
     let ms = |d: Duration| format!("{:.2}", d.as_secs_f64() * 1000.0);
     let dash = || "-".to_string();
@@ -729,6 +731,10 @@ fn log_resolved_frame(frame: pacing::ResolvedFrame, passes: Option<PassTimes>) {
         gpu_ms_at_least = format_args!("{:.1}", frame.gpu_at_least.as_secs_f32() * 1000.0),
         gpu_ms_at_most = ?frame.gpu_at_most.map(|d| format!("{:.1}", d.as_secs_f32() * 1000.0)),
         gpu_draw_ms = %passes.map_or_else(dash, |p| ms(p.draw)),
+        gpu_layer_ms = %passes.and_then(|p| p.layer).map_or_else(dash, ms),
+        gpu_main_ms = %passes
+            .filter(|p| p.layer.is_some())
+            .map_or_else(dash, |p| ms(p.main)),
         gpu_upscale_ms = %passes.and_then(|p| p.upscale).map_or_else(dash, ms),
         "kms_frame"
     );

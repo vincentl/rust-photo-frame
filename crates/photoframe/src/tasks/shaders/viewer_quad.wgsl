@@ -181,42 +181,50 @@ fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> f32 {
   return d;
 }
 
-// Renders the iris petals (shape + shading, premultiplied alpha) into a
-// reduced-resolution offscreen layer. Coordinates derive from screen_uv and
-// U.screen_size, so the same math works at any target resolution; the main
-// pass upsamples the result. At 4K the petal arithmetic is far too heavy to
-// run per native pixel on the Pi, and the petals are large smooth shapes that
-// survive upscaling — params3.x carries the upscale factor so edge feathering
-// stays at least one layer texel wide.
+// The iris petals (shape + shading, premultiplied alpha) render into a
+// reduced-resolution offscreen layer in two passes: fs_iris_cover finds, per
+// layer pixel, the nearest petal edge and which petals cover it (the loop
+// over petals); fs_iris_layer shades from that (no loop). Coordinates derive
+// from screen_uv and U.screen_size, so the same math works at any target
+// resolution; the main pass upsamples the result. At 4K the petal
+// arithmetic is far too heavy to run per native pixel on the Pi, and the
+// petals are large smooth shapes that survive upscaling; params3.x carries
+// the upscale factor so edge feathering stays at least one layer texel wide.
 // params0 = (blades, petal_sheen, overlap_shadow, photo_swap_mix)
 // params1 = (open_radius_px, color.r, color.g, color.b)
 // params3 = (layer_scale, r_mid, half band width w, r_in): the petal ring's
 // geometry, the same for every pixel, from the CPU.
 //
-// Register pressure decides this shader's speed on V3D (it compiled at 2
-// threads with 33 temporaries, Pi 2026-10-21), so the loop over petals
-// carries only the nearest distance and a bitmask of covered petals. The
-// topmost petal and the covered count come from the mask afterwards with
-// bit operations; they equal the old per-iteration bookkeeping exactly.
+// Register pressure decides these shaders' speed on V3D: as one shader the
+// layer compiled at 2 threads (191 instructions, 33 temporaries, Pi
+// 2026-10-21). Split, the loop carries only what it needs (the position,
+// the nearest distance and a bitmask of covered petals) and the shading
+// starts from four stored numbers, so each pass is small enough for 4.
+
+// A cover texel's distance where no petal is near (inside the aperture):
+// far beyond any feather, so the shading pass returns transparent.
+const IRIS_FAR: f32 = 1.0e4;
+
+// Per layer pixel: (nearest petal edge distance d_min, topmost covered
+// petal, number of covered petals, 0), into an Rgba16Float cover target.
+// Half floats hold the two counts exactly and the distance to well under a
+// hundredth of a pixel where the shading reads it (within a few feather
+// widths of an edge).
 @fragment
-fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
+fn fs_iris_cover(in: VSOut) -> @location(0) vec4<f32> {
   let screen_pos = in.screen_uv * U.screen_size;
   let n = max(i32(U.params0.x), 1);
-  let contrast = clamp(U.params0.y, 0.0, 1.0);
-  let shadow_amt = clamp(U.params0.z, 0.0, 1.0);
   let aa = max(U.params3.x, 1.0);
   let p = screen_pos - 0.5 * U.screen_size;
   // Pixels inside the inscribed aperture circle are provably petal-free;
   // at the ends of the transition that is the entire screen.
   if (length(p) < U.params1.x - aa) {
-    return vec4<f32>(0.0);
+    return vec4<f32>(IRIS_FAR, 0.0, 0.0, 0.0);
   }
   let r_mid = U.params3.y;
   let w = U.params3.z;
-  let r_in = U.params3.w;
   // No local arrays: dynamically indexed function-scope arrays get demoted
-  // to per-pixel scratch memory on V3D, which costs far more than
-  // recomputing the few distances needed after the loop.
+  // to per-pixel scratch memory on V3D.
   // Petals shingle cyclically (each rests on the next); the covering petals
   // always form one contiguous run, so the topmost is the covered petal
   // whose successor is uncovered.
@@ -229,19 +237,37 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
     covered = covered | (select(0u, 1u, d < 0.0) << u32(i));
   }
   // Bit j of `succ` is petal (j + 1) mod n covered; the candidates are
-  // covered petals with an uncovered successor. The old loop kept the last
-  // candidate in index order, with the wrap-around candidate n - 1 winning,
-  // which is the highest set bit; none (all or no petals covered) gives 0.
+  // covered petals with an uncovered successor. The topmost is the highest
+  // candidate (the wrap-around candidate n - 1 wins); none (all or no
+  // petals covered) gives 0.
   let un = u32(n);
   let all_petals = (1u << un) - 1u;
   let succ = ((covered >> 1u) | (covered << (un - 1u))) & all_petals;
   let candidates = covered & ~succ;
   let top = select(0, i32(firstLeadingBit(candidates)), candidates != 0u);
-  let covered_count = i32(countOneBits(covered));
+  return vec4<f32>(d_min, f32(top), f32(countOneBits(covered)), 0.0);
+}
+
+// Shades the petals from this pixel's cover texel (bound at group 1, same
+// resolution as this target).
+@fragment
+fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
+  let cover = textureLoad(cur_tex, vec2<i32>(in.pos.xy), 0);
+  let d_min = cover.x;
+  let aa = max(U.params3.x, 1.0);
   let cov = 1.0 - smoothstep(-aa, aa, d_min);
   if (cov <= 0.0) {
     return vec4<f32>(0.0);
   }
+  let n = max(i32(U.params0.x), 1);
+  let contrast = clamp(U.params0.y, 0.0, 1.0);
+  let shadow_amt = clamp(U.params0.z, 0.0, 1.0);
+  let r_mid = U.params3.y;
+  let w = U.params3.z;
+  let r_in = U.params3.w;
+  let p = in.screen_uv * U.screen_size - 0.5 * U.screen_size;
+  let top = i32(cover.y);
+  let covered_count = i32(cover.z);
   var j1 = top + 1;
   if (j1 >= n) { j1 -= n; }
   var j2 = top + 2;
@@ -473,12 +499,31 @@ fn fs_crossfade_zoom(in: VSOut) -> @location(0) vec4<f32> {
 // rendered into the reduced-resolution petal layer by fs_iris_layer this
 // frame; here they are composited (premultiplied alpha) over the
 // crossfading photos. params0.w = photo_swap_mix.
+//
+// A photo's color is fetched only where it can show: not under fully opaque
+// petals (most of the screen around full close), and not while its share of
+// the swap is zero (the whole transition but the swap window around full
+// close). Skipped colors would be multiplied by zero, so the result is the
+// same; coverage is always computed (the composite needs it).
 @fragment
 fn fs_iris(in: VSOut) -> @location(0) vec4<f32> {
-  let current = current_of(in);
-  let next = next_of(in);
-  let photo = mix(current, next, clamp(U.params0.w, 0.0, 1.0));
   let petal = textureSample(petal_tex, petal_samp, in.screen_uv);
+  let swap = clamp(U.params0.w, 0.0, 1.0);
+  let cur_a = covered(in.current_uv);
+  let next_a = covered(in.next_uv);
+  var cur_rgb = vec3<f32>(0.0);
+  var next_rgb = vec3<f32>(0.0);
+  if (petal.a < 1.0) {
+    if (swap < 1.0) {
+      cur_rgb = fetch_current(in.current_uv) * cur_a;
+    }
+    if (swap > 0.0) {
+      next_rgb = fetch_next(in.next_uv) * next_a;
+    }
+  }
+  let current = vec4<f32>(cur_rgb, cur_a);
+  let next = vec4<f32>(next_rgb, next_a);
+  let photo = mix(current, next, swap);
   let color = vec4<f32>(photo.rgb * (1.0 - petal.a) + petal.rgb, max(photo.a, petal.a));
   return over_background(color, current, next);
 }

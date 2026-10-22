@@ -468,13 +468,17 @@ pub(super) struct PacedFrame {
 }
 
 /// GPU time of one transition frame's passes, from timestamp queries:
-/// `draw` from the start of the first pass that draws the frame (the iris
-/// petal layer, when there is one) to the end of the main draw pass, and
-/// `upscale` around the pass that upsamples the intermediate (`None` for a
-/// frame drawn natively).
+/// `main` around the main draw pass; `layer` from the start of the iris
+/// petal layer's first pass to the end of its last (`None` without one);
+/// `draw` from the start of the first pass that draws the frame to the end
+/// of the main pass (`main`, or layer through main); `upscale` around the
+/// pass that upsamples the intermediate (`None` for a frame drawn
+/// natively).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct PassTimes {
     pub(super) draw: Duration,
+    pub(super) main: Duration,
+    pub(super) layer: Option<Duration>,
     pub(super) upscale: Option<Duration>,
 }
 
@@ -1768,7 +1772,12 @@ struct GpuCtx {
     sampler: wgpu::Sampler,
     quad_pipelines: QuadPipelines,
     blank_plane: TexturePlane,
+    /// The petal layer's first pass (`fs_iris_cover`, the loop over
+    /// petals) into `iris_cover`; the second (`fs_iris_layer`, shading)
+    /// reads it into `iris_layer`.
+    iris_cover_pipeline: wgpu::RenderPipeline,
     iris_layer_pipeline: wgpu::RenderPipeline,
+    iris_cover: Option<OffscreenTarget>,
     iris_layer: Option<OffscreenTarget>,
     blit_pipeline: wgpu::RenderPipeline,
     /// Writes one canvas mip level from the level above it (`fs_blit`, 2:1
@@ -1780,16 +1789,16 @@ struct GpuCtx {
     pass_timer: Option<PassTimer>,
 }
 
-/// Timestamp queries around a transition frame's draw and upscale passes,
-/// for the KMS per-frame audit (`kms_frame`). Each timed frame takes the
-/// next of `SLOTS` slots, its own four queries and its own region of the
-/// resolve buffer, so a frame rendered ahead never resets queries an
-/// earlier frame has not resolved yet (nothing orders a query set between
-/// submissions). A frame resolves its queries in its own submission and
-/// copies them to a small buffer of its own, mapped asynchronously; the
-/// callback runs on whichever thread polls the device next (the flip
-/// observer, every vblank), never blocking the render path. Only frames the
-/// audit logs are timed.
+/// Timestamp queries around a transition frame's passes, for the KMS
+/// per-frame audit (`kms_frame`): a begin/end pair per `TimedPass`. Each
+/// timed frame takes the next of `SLOTS` slots, its own queries and its own
+/// region of the resolve buffer, so a frame rendered ahead never resets
+/// queries an earlier frame has not resolved yet (nothing orders a query set
+/// between submissions). A frame resolves the pairs it wrote in its own
+/// submission and copies them to a small buffer of its own, mapped
+/// asynchronously; the callback runs on whichever thread polls the device
+/// next (the flip observer, every vblank), never blocking the render path.
+/// Only frames the audit logs are timed.
 struct PassTimer {
     queries: wgpu::QuerySet,
     resolve: wgpu::Buffer,
@@ -1798,25 +1807,31 @@ struct PassTimer {
     next_slot: std::sync::atomic::AtomicU32,
 }
 
-/// One frame's slot of a `PassTimer`.
+/// What a begin/end query pair times. A pair may span several passes (the
+/// petal layer's): its begin is written by the first, its end by the last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimedPass {
+    Main = 0,
+    Upscale = 1,
+    Layer = 2,
+}
+
+/// One frame's slot of a `PassTimer`, and which queries its passes wrote.
 struct TimedFrame<'a> {
     timer: &'a PassTimer,
     slot: u32,
+    /// Bit 2k: pair k's begin was written; bit 2k + 1: its end.
+    written: std::cell::Cell<u8>,
 }
 
 impl PassTimer {
-    /// Query indices within a slot.
-    const DRAW_BEGIN: u32 = 0;
-    const DRAW_END: u32 = 1;
-    const UPSCALE_BEGIN: u32 = 2;
-    const UPSCALE_END: u32 = 3;
-    const PER_FRAME: u32 = 4;
+    const PAIRS: u32 = 3;
     /// Frames that may be in flight at once, with room to spare: the FIFO
     /// swapchain bounds render-ahead to its images, and a slot is only
     /// reused `SLOTS` timed frames later.
     const SLOTS: u32 = 8;
-    /// A slot's region of the resolve buffer (resolves start aligned).
-    const SLOT_STRIDE: u64 = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
+    /// A pair's region of the resolve buffer (each resolve starts aligned).
+    const PAIR_STRIDE: u64 = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
 
     fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Self> {
         if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
@@ -1826,11 +1841,11 @@ impl PassTimer {
             queries: device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("pass-timestamps"),
                 ty: wgpu::QueryType::Timestamp,
-                count: Self::PER_FRAME * Self::SLOTS,
+                count: 2 * Self::PAIRS * Self::SLOTS,
             }),
             resolve: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pass-timestamps-resolve"),
-                size: Self::SLOT_STRIDE * u64::from(Self::SLOTS),
+                size: Self::PAIR_STRIDE * u64::from(Self::PAIRS * Self::SLOTS),
                 usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             }),
@@ -1842,53 +1857,77 @@ impl PassTimer {
     /// Time one frame.
     fn frame(&self) -> TimedFrame<'_> {
         let slot = self.next_slot.fetch_add(1, Ordering::Relaxed) % Self::SLOTS;
-        TimedFrame { timer: self, slot }
+        TimedFrame {
+            timer: self,
+            slot,
+            written: std::cell::Cell::new(0),
+        }
     }
 }
 
 impl TimedFrame<'_> {
-    fn query(&self, index: u32) -> u32 {
-        self.slot * PassTimer::PER_FRAME + index
+    /// The query index of `pass`'s begin (`end` false) or end.
+    fn query(&self, pass: TimedPass, end: bool) -> u32 {
+        (self.slot * PassTimer::PAIRS + pass as u32) * 2 + u32::from(end)
     }
 
-    fn writes(&self, begin: Option<u32>, end: Option<u32>) -> wgpu::RenderPassTimestampWrites<'_> {
+    /// Timestamp writes for a render pass: `pass`'s begin at its start
+    /// and/or its end at its end.
+    fn writes(
+        &self,
+        pass: TimedPass,
+        begin: bool,
+        end: bool,
+    ) -> wgpu::RenderPassTimestampWrites<'_> {
+        let bits = (u8::from(begin) | (u8::from(end) << 1)) << (2 * pass as u8);
+        self.written.set(self.written.get() | bits);
         wgpu::RenderPassTimestampWrites {
             query_set: &self.timer.queries,
-            beginning_of_pass_write_index: begin.map(|i| self.query(i)),
-            end_of_pass_write_index: end.map(|i| self.query(i)),
+            beginning_of_pass_write_index: begin.then(|| self.query(pass, false)),
+            end_of_pass_write_index: end.then(|| self.query(pass, true)),
         }
     }
 
-    /// After the frame's passes: resolve the queries they wrote (only
-    /// those: resolving one never written would wait forever) into a
-    /// buffer for `read`.
-    fn resolve(
-        &self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        upscaled: bool,
-    ) -> wgpu::Buffer {
-        let count = if upscaled {
-            PassTimer::PER_FRAME
-        } else {
-            PassTimer::DRAW_END + 1
-        };
-        let bytes = u64::from(count) * 8;
-        let offset = u64::from(self.slot) * PassTimer::SLOT_STRIDE;
+    /// The pairs whose begin and end were both written.
+    fn complete(&self) -> [bool; PassTimer::PAIRS as usize] {
+        let w = self.written.get();
+        [0, 1, 2].map(|k| (w >> (2 * k)) & 0b11 == 0b11)
+    }
+
+    /// After the frame's passes: resolve the pairs they wrote (only those:
+    /// resolving a query never written would wait forever) into a buffer
+    /// for `read`, 16 bytes per pair in `TimedPass` order.
+    fn resolve(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) -> wgpu::Buffer {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pass-timestamps-readback"),
-            size: bytes,
+            size: 16 * u64::from(PassTimer::PAIRS),
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let first = self.query(0);
-        encoder.resolve_query_set(
-            &self.timer.queries,
-            first..first + count,
-            &self.timer.resolve,
-            offset,
-        );
-        encoder.copy_buffer_to_buffer(&self.timer.resolve, offset, &readback, 0, bytes);
+        for (k, pass) in [TimedPass::Main, TimedPass::Upscale, TimedPass::Layer]
+            .into_iter()
+            .enumerate()
+        {
+            if !self.complete()[k] {
+                continue;
+            }
+            let first = self.query(pass, false);
+            let offset =
+                u64::from(self.slot * PassTimer::PAIRS + pass as u32) * PassTimer::PAIR_STRIDE;
+            encoder.resolve_query_set(
+                &self.timer.queries,
+                first..first + 2,
+                &self.timer.resolve,
+                offset,
+            );
+            encoder.copy_buffer_to_buffer(
+                &self.timer.resolve,
+                offset,
+                &readback,
+                16 * k as u64,
+                16,
+            );
+        }
         readback
     }
 
@@ -1898,6 +1937,7 @@ impl TimedFrame<'_> {
         let cell = PassTimesCell::default();
         let out = Arc::clone(&cell);
         let period_ns = self.timer.period_ns;
+        let complete = self.complete();
         let buffer = readback.clone();
         readback
             .slice(..)
@@ -1905,13 +1945,14 @@ impl TimedFrame<'_> {
                 if result.is_err() {
                     return;
                 }
-                let ticks: Vec<u64> = {
+                let pairs: [Option<(u64, u64)>; PassTimer::PAIRS as usize] = {
                     let view = buffer.slice(..).get_mapped_range();
-                    view.chunks_exact(8)
-                        .map(|b| u64::from_le_bytes(b.try_into().expect("8 bytes")))
-                        .collect()
+                    let tick = |i: usize| {
+                        u64::from_le_bytes(view[8 * i..8 * i + 8].try_into().expect("8 bytes"))
+                    };
+                    [0, 1, 2].map(|k| complete[k].then(|| (tick(2 * k), tick(2 * k + 1))))
                 };
-                if let Some(times) = pass_times(&ticks, period_ns) {
+                if let Some(times) = pass_times(pairs, period_ns) {
                     let _ = out.set(times);
                 }
             });
@@ -1919,19 +1960,26 @@ impl TimedFrame<'_> {
     }
 }
 
-/// Durations from resolved timestamps (`PassTimer` order), `None` when the
-/// draw pair is missing or runs backwards.
-fn pass_times(ticks: &[u64], period_ns: f64) -> Option<PassTimes> {
-    let span = |begin: u32, end: u32| {
-        let (begin, end) = (ticks.get(begin as usize)?, ticks.get(end as usize)?);
-        let ticks = end.checked_sub(*begin)?;
-        Some(Duration::from_nanos(
-            (ticks as f64 * period_ns).round() as u64
-        ))
+/// Durations from resolved (begin, end) ticks in `TimedPass` order, `None`
+/// when the main pair is missing or runs backwards. A pair whose end reads
+/// before its begin (Metal now and then leaves an end sample at 0) is no
+/// measurement.
+fn pass_times(pairs: [Option<(u64, u64)>; 3], period_ns: f64) -> Option<PassTimes> {
+    let ns = |ticks: u64| Duration::from_nanos((ticks as f64 * period_ns).round() as u64);
+    let span = |(begin, end): (u64, u64)| end.checked_sub(begin).map(ns);
+    let [main, upscale, layer] = pairs;
+    let (main_begin, main_end) = main?;
+    let main_time = span((main_begin, main_end))?;
+    let layer_time = layer.and_then(span);
+    let draw = match (layer, layer_time) {
+        (Some((layer_begin, _)), Some(_)) => span((layer_begin, main_end))?,
+        _ => main_time,
     };
     Some(PassTimes {
-        draw: span(PassTimer::DRAW_BEGIN, PassTimer::DRAW_END)?,
-        upscale: span(PassTimer::UPSCALE_BEGIN, PassTimer::UPSCALE_END),
+        draw,
+        main: main_time,
+        layer: layer_time,
+        upscale: upscale.and_then(span),
     })
 }
 
@@ -2006,6 +2054,10 @@ impl GpuCtx {
         // negligible.
         self.iris_layer =
             Some(self.make_offscreen("iris-petal-layer", w, h, wgpu::TextureFormat::Rgba16Float));
+        // The cover pass's output, read texel for texel by the shading pass
+        // (see fs_iris_cover for what half floats hold).
+        self.iris_cover =
+            Some(self.make_offscreen("iris-petal-cover", w, h, wgpu::TextureFormat::Rgba16Float));
     }
 
     /// Create (or re-create after a resize) the reduced-resolution
@@ -2053,24 +2105,64 @@ fn canvas_lod(into_intermediate: bool) -> f32 {
     }
 }
 
-/// PHOTOFRAME_PROBE=single-sample: a diagnostic build-free switch that
-/// makes every transition read one photo per pixel (the next plane's color
-/// is a constant), to measure what the second fetch costs. Read once.
-fn probe_single_sample() -> bool {
-    static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *PROBE.get_or_init(|| match std::env::var("PHOTOFRAME_PROBE") {
-        Ok(v) if v == "single-sample" => {
+/// `PHOTOFRAME_PROBE`: diagnostic, build-free switches for measuring on
+/// the device, comma-separated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Probes {
+    /// `single-sample`: every transition reads one photo per pixel (the
+    /// next plane's color is a constant), to measure what the second fetch
+    /// costs. Transitions look wrong on purpose.
+    single_sample: bool,
+    /// `native-mip`: every kind but iris draws its transition frames at
+    /// native resolution, sampling the canvas mip level the intermediate
+    /// would have read (push stays at level 0, as it does into the
+    /// intermediate): one pass instead of a reduced-resolution draw plus
+    /// the upscale, at the same softness.
+    native_mip: bool,
+}
+
+/// The probes named in `value`, and the names it has that are not probes.
+fn parse_probes(value: &str) -> (Probes, Vec<&str>) {
+    let mut probes = Probes::default();
+    let mut unknown = Vec::new();
+    for name in value.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        match name {
+            "single-sample" => probes.single_sample = true,
+            "native-mip" => probes.native_mip = true,
+            other => unknown.push(other),
+        }
+    }
+    (probes, unknown)
+}
+
+/// The `PHOTOFRAME_PROBE` probes, read once.
+fn probes() -> Probes {
+    static PROBES: std::sync::OnceLock<Probes> = std::sync::OnceLock::new();
+    *PROBES.get_or_init(|| {
+        let Ok(value) = std::env::var("PHOTOFRAME_PROBE") else {
+            return Probes::default();
+        };
+        let (probes, unknown) = parse_probes(&value);
+        for name in unknown {
+            warn!(value = %name, "unknown PHOTOFRAME_PROBE; ignored");
+        }
+        if probes.single_sample {
             warn!(
                 "PHOTOFRAME_PROBE=single-sample: transitions show a flat next photo (diagnostic)"
             );
-            true
         }
-        Ok(other) => {
-            warn!(value = %other, "unknown PHOTOFRAME_PROBE; ignored");
-            false
+        if probes.native_mip {
+            warn!(
+                "PHOTOFRAME_PROBE=native-mip: transitions draw at native resolution from the mips, \
+                 no intermediate (diagnostic)"
+            );
         }
-        Err(_) => false,
+        probes
     })
+}
+
+fn probe_single_sample() -> bool {
+    probes().single_sample
 }
 
 fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
@@ -2687,39 +2779,59 @@ fn build_gpu(
         ],
         push_constant_ranges: &[],
     });
-    let iris_layer_pipeline_layout =
+    let iris_cover_pipeline_layout =
         device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("iris-layer-pipeline-layout"),
+            label: Some("iris-cover-pipeline-layout"),
             bind_group_layouts: &[&uniform_layout],
             push_constant_ranges: &[],
         });
-    let iris_layer_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("iris-layer-pipeline"),
-        layout: Some(&iris_layer_pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_iris_layer"),
-            targets: &[Some(wgpu::ColorTargetState {
-                // Must match the iris layer texture (Rgba16Float):
-                // dark petals band in 8-bit, see ensure_iris_layer.
-                format: wgpu::TextureFormat::Rgba16Float,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        multiview: None,
-        cache: None,
-    });
+    // The shading pass reads the cover texel at group 1.
+    let iris_layer_pipeline_layout =
+        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("iris-layer-pipeline-layout"),
+            bind_group_layouts: &[&uniform_layout, &img_bind_layout],
+            push_constant_ranges: &[],
+        });
+    // Both petal-layer passes write Rgba16Float: the layer because dark
+    // petals band in 8-bit (see ensure_iris_layer), the cover for its
+    // distances.
+    let petal_pipeline = |label: &str, layout: &wgpu::PipelineLayout, entry_point: &str| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some(entry_point),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        })
+    };
+    let iris_cover_pipeline = petal_pipeline(
+        "iris-cover-pipeline",
+        &iris_cover_pipeline_layout,
+        "fs_iris_cover",
+    );
+    let iris_layer_pipeline = petal_pipeline(
+        "iris-layer-pipeline",
+        &iris_layer_pipeline_layout,
+        "fs_iris_layer",
+    );
     let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("blit-pipeline-layout"),
         bind_group_layouts: &[&uniform_layout, &img_bind_layout],
@@ -2926,7 +3038,9 @@ fn build_gpu(
         sampler,
         quad_pipelines,
         blank_plane,
+        iris_cover_pipeline,
         iris_layer_pipeline,
+        iris_cover: None,
         iris_layer: None,
         blit_pipeline,
         mip_pipeline,
@@ -4351,11 +4465,12 @@ impl App {
                     // Transitions render into the reduced-resolution
                     // intermediate and get upsampled; resting photos and a
                     // transition's final frame render natively.
-                    let half_target = if active_transition.is_some()
-                        && !debug_bezier
-                        && !final_frame
-                        && transition_scale() > 1
-                    {
+                    let transition_frame =
+                        active_transition.is_some() && !debug_bezier && !final_frame;
+                    // PHOTOFRAME_PROBE=native-mip: natively, from the mips.
+                    let native_mip =
+                        transition_frame && probes().native_mip && draw_kind != DrawKind::Iris;
+                    let half_target = if transition_frame && !native_mip && transition_scale() > 1 {
                         gpu.half_target.as_ref()
                     } else {
                         None
@@ -4366,7 +4481,9 @@ impl App {
                     // 2:1 level softens fine detail; it reads one real plane
                     // per pixel and holds 60 at level 0, so it stays exact
                     // there (Pi, 94094b0).
-                    uniforms.lod = canvas_lod(half_target.is_some() && draw_kind != DrawKind::Push);
+                    uniforms.lod = canvas_lod(
+                        (half_target.is_some() || native_mip) && draw_kind != DrawKind::Push,
+                    );
                     gpu.queue
                         .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
                     if iris_active {
@@ -4379,30 +4496,59 @@ impl App {
                         .as_ref()
                         .filter(|_| paced.is_some_and(|p| p.time_passes))
                         .map(PassTimer::frame);
-                    let layer_pass = iris_active && gpu.iris_layer.is_some();
                     // Render the petals into the reduced-resolution
-                    // layer first; the main pass composites it.
-                    if iris_active && let Some(layer) = gpu.iris_layer.as_ref() {
-                        let mut lpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("iris-layer-pass"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &layer.view,
-                                depth_slice: None,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: None,
-                            occlusion_query_set: None,
-                            timestamp_writes: timer
-                                .as_ref()
-                                .map(|t| t.writes(Some(PassTimer::DRAW_BEGIN), None)),
-                        });
-                        lpass.set_pipeline(&gpu.iris_layer_pipeline);
-                        lpass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                        lpass.draw(0..3, 0..1);
+                    // layer first, in two passes (cover, then shading);
+                    // the main pass composites it.
+                    if iris_active
+                        && let (Some(cover), Some(layer)) =
+                            (gpu.iris_cover.as_ref(), gpu.iris_layer.as_ref())
+                    {
+                        let petal_pass = |encoder: &mut wgpu::CommandEncoder,
+                                          label: &'static str,
+                                          target: &wgpu::TextureView,
+                                          pipeline: &wgpu::RenderPipeline,
+                                          input: Option<&wgpu::BindGroup>,
+                                          first: bool| {
+                            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some(label),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: target,
+                                    depth_slice: None,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                occlusion_query_set: None,
+                                timestamp_writes: timer
+                                    .as_ref()
+                                    .map(|t| t.writes(TimedPass::Layer, first, !first)),
+                            });
+                            pass.set_pipeline(pipeline);
+                            pass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                            if let Some(input) = input {
+                                pass.set_bind_group(1, input, &[]);
+                            }
+                            pass.draw(0..3, 0..1);
+                        };
+                        petal_pass(
+                            &mut encoder,
+                            "iris-cover-pass",
+                            &cover.view,
+                            &gpu.iris_cover_pipeline,
+                            None,
+                            true,
+                        );
+                        petal_pass(
+                            &mut encoder,
+                            "iris-layer-pass",
+                            &layer.view,
+                            &gpu.iris_layer_pipeline,
+                            Some(&cover.bind),
+                            false,
+                        );
                     }
                     let petal_bind = match gpu.iris_layer.as_ref() {
                         Some(layer) if iris_active => &layer.bind,
@@ -4423,12 +4569,9 @@ impl App {
                             })],
                             depth_stencil_attachment: None,
                             occlusion_query_set: None,
-                            timestamp_writes: timer.as_ref().map(|t| {
-                                t.writes(
-                                    (!layer_pass).then_some(PassTimer::DRAW_BEGIN),
-                                    Some(PassTimer::DRAW_END),
-                                )
-                            }),
+                            timestamp_writes: timer
+                                .as_ref()
+                                .map(|t| t.writes(TimedPass::Main, true, true)),
                         });
                         rpass.set_pipeline(gpu.quad_pipelines.get(draw_kind));
                         rpass.set_bind_group(0, &gpu.uniform_bind, &[]);
@@ -4451,12 +4594,9 @@ impl App {
                             })],
                             depth_stencil_attachment: None,
                             occlusion_query_set: None,
-                            timestamp_writes: timer.as_ref().map(|t| {
-                                t.writes(
-                                    Some(PassTimer::UPSCALE_BEGIN),
-                                    Some(PassTimer::UPSCALE_END),
-                                )
-                            }),
+                            timestamp_writes: timer
+                                .as_ref()
+                                .map(|t| t.writes(TimedPass::Upscale, true, true)),
                         });
                         bpass.set_pipeline(&gpu.blit_pipeline);
                         bpass.set_bind_group(0, &gpu.uniform_bind, &[]);
@@ -4464,7 +4604,7 @@ impl App {
                         bpass.draw(0..3, 0..1);
                     }
                     timestamps = timer.map(|t| {
-                        let readback = t.resolve(&gpu.device, &mut encoder, half_target.is_some());
+                        let readback = t.resolve(&gpu.device, &mut encoder);
                         (t, readback)
                     });
                 }
@@ -5832,19 +5972,47 @@ mod tests {
     }
 
     #[test]
+    fn probes_parse_a_comma_list() {
+        assert_eq!(parse_probes(""), (Probes::default(), vec![]));
+        let (probes, unknown) = parse_probes("native-mip");
+        assert!(probes.native_mip && !probes.single_sample && unknown.is_empty());
+        let (probes, unknown) = parse_probes(" single-sample , native-mip,bogus,");
+        assert!(probes.native_mip && probes.single_sample);
+        assert_eq!(unknown, vec!["bogus"]);
+    }
+
+    #[test]
     fn pass_times_read_the_timestamp_pairs() {
-        // A 1 ns tick: 4 ms draw, 1.5 ms upscale.
-        let times = pass_times(&[1_000, 4_001_000, 4_100_000, 5_600_000], 1.0).unwrap();
-        assert_eq!(times.draw, Duration::from_millis(4));
+        let ms = Duration::from_millis;
+        // A 1 ns tick: 4 ms main, 1.5 ms upscale, no layer.
+        let times = pass_times(
+            [Some((1_000, 4_001_000)), Some((4_100_000, 5_600_000)), None],
+            1.0,
+        )
+        .unwrap();
+        assert_eq!((times.draw, times.main), (ms(4), ms(4)));
         assert_eq!(times.upscale, Some(Duration::from_micros(1_500)));
-        // A native frame resolves the draw pair only.
-        let native = pass_times(&[0, 2_000_000], 1.0).unwrap();
-        assert_eq!(native.upscale, None);
+        assert_eq!(times.layer, None);
+        // With a layer, draw runs from the layer's start to the main end.
+        let iris = pass_times(
+            [Some((3_000_000, 5_000_000)), None, Some((0, 2_500_000))],
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(iris.layer, Some(Duration::from_micros(2_500)));
+        assert_eq!((iris.main, iris.draw), (ms(2), ms(5)));
+        assert_eq!(iris.upscale, None);
         // Ticks of another length are scaled.
-        let scaled = pass_times(&[0, 1_000], 52.08).unwrap();
+        let scaled = pass_times([Some((0, 1_000)), None, None], 52.08).unwrap();
         assert_eq!(scaled.draw, Duration::from_nanos(52_080));
-        // A pair that runs backwards is no measurement.
-        assert_eq!(pass_times(&[10, 5], 1.0), None);
+        // A pair that runs backwards is no measurement; a bad layer pair
+        // leaves draw = main.
+        assert_eq!(pass_times([Some((10, 5)), None, None], 1.0), None);
+        let bad_layer = pass_times([Some((10, 20)), None, Some((5, 0))], 1.0).unwrap();
+        assert_eq!(
+            (bad_layer.layer, bad_layer.draw),
+            (None, Duration::from_nanos(10))
+        );
     }
 
     /// The timer's writes, resolve, copy and mapped read on a real device
@@ -5942,19 +6110,17 @@ mod tests {
                 pass.set_pipeline(&pipeline);
                 pass.draw(0..3, 0..1);
             };
-            pass(
-                &views[0],
-                Some(timer.writes(Some(PassTimer::DRAW_BEGIN), Some(PassTimer::DRAW_END))),
-            );
+            // A petal layer drawn as two passes, as the viewer does.
+            pass(&views[1], Some(timer.writes(TimedPass::Layer, true, false)));
+            pass(&views[1], Some(timer.writes(TimedPass::Layer, false, true)));
+            pass(&views[0], Some(timer.writes(TimedPass::Main, true, true)));
             if upscaled {
                 pass(
                     &views[1],
-                    Some(
-                        timer.writes(Some(PassTimer::UPSCALE_BEGIN), Some(PassTimer::UPSCALE_END)),
-                    ),
+                    Some(timer.writes(TimedPass::Upscale, true, true)),
                 );
             }
-            let readback = timer.resolve(&device, &mut encoder, upscaled);
+            let readback = timer.resolve(&device, &mut encoder);
             queue.submit(Some(encoder.finish()));
             let cell = timer.read(readback);
             let _ = device.poll(wgpu::PollType::Wait {
@@ -5977,6 +6143,15 @@ mod tests {
             "draw times read back: {native:?}"
         );
         assert!(native.iter().all(|t| t.upscale.is_none()));
+        assert!(
+            native
+                .iter()
+                .chain(&upscaled)
+                .filter(|t| t.layer.is_some())
+                .count()
+                > native.len(),
+            "layer times read back"
+        );
     }
 
     #[test]
@@ -6033,7 +6208,7 @@ mod tests {
         .validate(&module)
         .expect("viewer_quad.wgsl validates");
         let mut entry_points: Vec<&str> = DrawKind::ALL.iter().map(|k| k.entry_point()).collect();
-        entry_points.extend(["fs_iris_layer", "fs_blit"]);
+        entry_points.extend(["fs_iris_cover", "fs_iris_layer", "fs_blit"]);
         for name in entry_points {
             let ep = module
                 .entry_points

@@ -37,6 +37,11 @@
 //!   reports the chosen display
 //! * `--seconds N`: exit after N seconds (default: run until Ctrl-C)
 //!
+//! Where the device offers timestamp queries, each once-a-second line also
+//! reports the GPU time of the frame's pass (median and max over that
+//! second, read back asynchronously): with `solid` that is the cost of
+//! storing a full frame, with `tex` one texture read on top.
+//!
 //! Honors `WGPU_BACKEND=gl|vulkan` like the main binary (`--drm` needs
 //! Vulkan).
 
@@ -98,6 +103,112 @@ struct Gpu {
     pipeline: wgpu::RenderPipeline,
     bind: wgpu::BindGroup,
     params_buf: wgpu::Buffer,
+    timer: Option<GpuTimer>,
+}
+
+/// Timestamps around each frame's pass: one begin/end pair per slot of a
+/// ring, so a frame rendered ahead never resets an unresolved pair; each
+/// frame resolves its own pair and maps a small copy, whose callback adds
+/// the duration to `samples` at a later device poll.
+struct GpuTimer {
+    queries: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    period_ns: f64,
+    next: u32,
+    samples: Arc<std::sync::Mutex<Vec<f32>>>,
+}
+
+impl GpuTimer {
+    const SLOTS: u32 = 8;
+
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Self> {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return None;
+        }
+        Some(Self {
+            queries: device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("frametest-timestamps"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 2 * Self::SLOTS,
+            }),
+            resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("frametest-timestamps-resolve"),
+                size: wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT * u64::from(Self::SLOTS),
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            period_ns: f64::from(queue.get_timestamp_period()),
+            next: 0,
+            samples: Arc::default(),
+        })
+    }
+
+    /// The next slot's query pair.
+    fn slot(&mut self) -> u32 {
+        let slot = self.next;
+        self.next = (self.next + 1) % Self::SLOTS;
+        slot
+    }
+
+    fn writes(&self, slot: u32) -> wgpu::RenderPassTimestampWrites<'_> {
+        wgpu::RenderPassTimestampWrites {
+            query_set: &self.queries,
+            beginning_of_pass_write_index: Some(2 * slot),
+            end_of_pass_write_index: Some(2 * slot + 1),
+        }
+    }
+
+    fn resolve(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        slot: u32,
+    ) -> wgpu::Buffer {
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("frametest-timestamps-readback"),
+            size: 16,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let offset = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT * u64::from(slot);
+        encoder.resolve_query_set(&self.queries, 2 * slot..2 * slot + 2, &self.resolve, offset);
+        encoder.copy_buffer_to_buffer(&self.resolve, offset, &readback, 0, 16);
+        readback
+    }
+
+    fn read(&self, readback: wgpu::Buffer) {
+        let samples = Arc::clone(&self.samples);
+        let period_ns = self.period_ns;
+        let buffer = readback.clone();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                if result.is_err() {
+                    return;
+                }
+                let view = buffer.slice(..).get_mapped_range();
+                let tick =
+                    |i: usize| u64::from_le_bytes(view[8 * i..8 * i + 8].try_into().unwrap());
+                if let Some(ticks) = tick(1).checked_sub(tick(0)) {
+                    let ms = (ticks as f64 * period_ns / 1e6) as f32;
+                    samples.lock().unwrap().push(ms);
+                }
+            });
+    }
+
+    /// Median and max of the samples since the last call, and how many.
+    fn take_summary(&self) -> Option<(f32, f32, usize)> {
+        let mut samples = std::mem::take(&mut *self.samples.lock().unwrap());
+        if samples.is_empty() {
+            return None;
+        }
+        samples.sort_by(f32::total_cmp);
+        Some((
+            samples[samples.len() / 2],
+            samples[samples.len() - 1],
+            samples.len(),
+        ))
+    }
 }
 
 /// Parsed command line.
@@ -223,7 +334,7 @@ impl App {
         println!("adapter: {:?}", adapter.get_info());
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("frametest-device"),
-            required_features: wgpu::Features::empty(),
+            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
             required_limits: adapter.limits(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::default(),
@@ -381,6 +492,11 @@ impl App {
             cache: None,
         });
 
+        let timer = GpuTimer::new(&device, &queue);
+        println!(
+            "gpu pass timing: {}",
+            if timer.is_some() { "on" } else { "unavailable" }
+        );
         Gpu {
             surface,
             device,
@@ -389,6 +505,7 @@ impl App {
             pipeline,
             bind,
             params_buf,
+            timer,
         }
     }
 
@@ -407,7 +524,7 @@ impl App {
     }
 
     fn draw(&mut self) {
-        let Some(gpu) = self.gpu.as_ref() else { return };
+        let Some(gpu) = self.gpu.as_mut() else { return };
         let frame = match gpu.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(err) => {
@@ -428,6 +545,7 @@ impl App {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frametest"),
             });
+        let slot = gpu.timer.as_mut().map(GpuTimer::slot);
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("frametest-pass"),
@@ -442,13 +560,26 @@ impl App {
                 })],
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
-                timestamp_writes: None,
+                timestamp_writes: slot.map(|slot| {
+                    gpu.timer
+                        .as_ref()
+                        .expect("slot implies a timer")
+                        .writes(slot)
+                }),
             });
             rpass.set_pipeline(&gpu.pipeline);
             rpass.set_bind_group(0, &gpu.bind, &[]);
             rpass.draw(0..3, 0..1);
         }
+        let readback = gpu
+            .timer
+            .as_ref()
+            .zip(slot)
+            .map(|(timer, slot)| timer.resolve(&gpu.device, &mut encoder, slot));
         gpu.queue.submit(Some(encoder.finish()));
+        if let (Some(timer), Some(readback)) = (gpu.timer.as_ref(), readback) {
+            timer.read(readback);
+        }
         // Same pacing as the viewer: request a frame callback on this commit
         // so winit holds the next RedrawRequested until the compositor has
         // consumed the frame (one per output refresh under sway). Under any
@@ -478,13 +609,21 @@ impl App {
         let span = now.duration_since(self.window_start).as_secs_f32();
         if span >= 1.0 {
             let intervals = self.frames as f32;
+            let gpu_time = self.gpu.as_ref().and_then(|gpu| {
+                let _ = gpu.device.poll(wgpu::PollType::Poll);
+                gpu.timer.as_ref().and_then(GpuTimer::take_summary)
+            });
+            let gpu_time = gpu_time.map_or_else(String::new, |(median, max, n)| {
+                format!("  gpu median {median:6.2}ms  max {max:6.2}ms  ({n} timed)")
+            });
             println!(
-                "fps {:6.1}  avg {:6.2}ms  best {:6.2}ms  worst {:6.2}ms  ({} frames)",
+                "fps {:6.1}  avg {:6.2}ms  best {:6.2}ms  worst {:6.2}ms  ({} frames){}",
                 intervals / span,
                 1000.0 * span / intervals,
                 self.best_ms,
                 self.worst_ms,
-                self.frames
+                self.frames,
+                gpu_time
             );
             self.window_start = now;
             self.frames = 0;

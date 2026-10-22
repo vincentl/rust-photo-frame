@@ -347,9 +347,11 @@ every transition frame logs a `kms_frame` line, with:
   it was seen done;
 - the measured GPU time of its passes, from timestamp queries:
   `gpu_draw_ms` from the start of the first pass that draws the frame (the
-  iris petal layer, when there is one) to the end of the main draw pass,
-  and `gpu_upscale_ms` for the pass that upsamples the intermediate to 4K
-  (`-` for a frame drawn natively, such as a transition's final frame).
+  iris petal layer, when there is one) to the end of the main draw pass;
+  for iris also `gpu_layer_ms` (both petal-layer passes) and `gpu_main_ms`
+  (the composite), `-` for other kinds; and `gpu_upscale_ms` for the pass
+  that upsamples the intermediate to 4K (`-` for a frame drawn natively,
+  such as a transition's final frame).
 
 The bounds are one refresh apart: enough to tell whether a kind fits in a
 refresh, not by how much. The pass times give the margin and say which
@@ -513,14 +515,39 @@ full-screen passes are spent carefully:
   premultiplied layer (`PHOTOFRAME_IRIS_LAYER_SCALE` to override). The
   petal SDF math runs on CPU-precomputed per-frame constants and avoids
   dynamically indexed local arrays, which the V3D compiler demotes to slow
-  per-pixel scratch memory. The full-screen `fs_iris` is a plain composite
-  of the two photos and the layer, with no loop; everything petal-related
-  is in `fs_iris_layer`. Its petal loop carries only the nearest edge
-  distance and a 16-bit "inside" mask; which petal is on top and how many
-  cover the pixel are read from the mask after the loop (`firstLeadingBit`,
-  `countOneBits`), so few values stay live across iterations and the layer
-  can compile at 4 threads. Output is bit-identical to the earlier loop
-  (Mac GPU, 36 frames across petal counts and progress). The layer is `Rgba16Float`, not 8-bit: petals
+  per-pixel scratch memory. Everything petal-related is in the layer, in
+  two passes:
+  - `fs_iris_cover` is the loop over petals. It carries only the nearest
+    edge distance and a 16-bit "inside" mask, reads which petal is on top
+    and how many cover the pixel from the mask afterwards
+    (`firstLeadingBit`, `countOneBits`), and stores the three numbers in
+    an `Rgba16Float` cover target;
+  - `fs_iris_layer` shades from that texel, with no loop.
+
+  As one shader the layer compiled at 2 threads on the Pi (191
+  instructions, 33 temporaries, one loop; Pi, 2026-10-21), the only entry
+  point that did; split, each pass holds far fewer live values. Against the
+  one-pass layer the output differs only by the half-float rounding of the
+  stored distance: at most 0.0005 in linear light, under a third of an
+  8-bit step (Mac GPU, 24 frames across 5, 9 and 14 blades and the whole
+  progress range).
+
+  `fs_iris` composites the two photos and the layer, with no petal work
+  beyond the one layer sample. It fetches a photo only where it can show:
+  not under fully opaque petals, most of the screen around full close,
+  and not while its share of the swap is zero, every frame but the swap
+  window. Bit-identical to the version that always fetched both.
+
+  Pi measurement, 2026-10-21, before the split: the layer plus the main
+  pass grew from 5.8 ms (open) to 16.9 ms (closed) per frame, so iris ran
+  at about 51 fps at scale 2. `kms_frame` reports the layer and the main
+  pass separately (`gpu_layer_ms`, `gpu_main_ms`). The layer's cost is
+  layer pixels × blades: near full close nearly every pixel is outside the
+  aperture and runs the loop. Coarser petals (`PHOTOFRAME_IRIS_LAYER_SCALE=8`)
+  quarter that at the price of softer petal edges; drawing the petals as
+  geometry (a fan of triangles each) would remove the per-pixel loop, but
+  their cyclic stacking (each petal rests on the next) has no draw order,
+  so that is a redesign, not a tweak. The layer is `Rgba16Float`, not 8-bit: petals
   are very dark in linear light, so a smooth shading gradient spans only a
   few 8-bit levels and visibly bands — half-float has the dark-range
   precision to keep it smooth, at negligible cost on a quarter-res layer.
@@ -613,12 +640,19 @@ full-screen passes are spent carefully:
   from the front a pixel shows one photo, and whole tiles lie on one side,
   so the other fetch is skipped. Coverage is always computed. Fade,
   dissolve, crossfade and e-ink need both photos everywhere.
-- **`PHOTOFRAME_PROBE=single-sample`** (diagnostic) compiles the
-  transition shaders with the next photo's color replaced by a constant,
-  so every kind reads one photo per pixel. Transitions look wrong on
-  purpose. The probe measures what the second fetch costs on the device,
-  with no rebuild. Set it in the unit (`systemctl edit`) and remove it
-  afterwards.
+- **`PHOTOFRAME_PROBE`** (diagnostic, comma-separated; set it in the unit
+  with `systemctl edit` and remove it afterwards):
+  - `single-sample` compiles the transition shaders with the next photo's
+    color replaced by a constant, so every kind reads one photo per pixel.
+    Transitions look wrong on purpose. It measures what the second fetch
+    costs on the device, with no rebuild.
+  - `native-mip` draws every kind's transition frames except iris at
+    native resolution, sampling the mip level the intermediate would have
+    read (push stays at level 0): one 4K pass instead of a reduced draw
+    plus the 4K upscale, at the same softness. It tests whether one pass
+    beats two: at scale 2 every transition frame costs its draw plus about
+    10.6 ms of upscale, and `fs_rest` at 4K (one read, one 4K write) costs
+    12–13 ms.
 - **Lead-in frames before a transition (KMS).** The V3D clock idles at
   500 MHz through a dwell and needs 150–200 ms of load to reach 960 MHz.
   The kernel has no devfreq knob for v3d, so this has to be handled in the
@@ -645,6 +679,53 @@ scan-out decisions), or no compositor at all. `frametest --drm` (above)
 measures the second option without touching the viewer. The KMS stack, the
 default, is that second option for the viewer itself (see
 [The viewer on KMS](#the-viewer-on-kms)).
+
+## The 4K write floor (KMS)
+
+Pi measurement, 2026-10-21 (`gpu_upscale_ms`): writing one 4K frame from a
+fullscreen triangle with one bilinear read of the half-res intermediate
+costs 10.3–10.8 ms, whatever the transition. That is 33 MB in about
+10.6 ms, roughly 3 GB/s, and it is the real ceiling for every kind at
+scale 2: draw plus upscale has to fit 16.7 ms.
+
+**The swapchain images are linear.** From the sources (Mesa 26.2,
+`rpi-6.12.y`):
+- Mesa's `VK_KHR_display` path reads the plane's `IN_FORMATS` and offers
+  those modifiers to the driver (`wsi_common_display.c`,
+  `wsi_display_surface_create_swapchain`). v3dv advertises only `LINEAR`
+  and `BROADCOM_UIF` (`v3dv_formats.c`) and takes UIF only when the plane
+  lists it (`v3dv_image.c`).
+- The Pi 5's planes list `{VC4_T_TILED, SAND128, SAND64, SAND256, LINEAR}`
+  (`vc4_plane.c`); for RGB only `LINEAR` and T-tiled are accepted, and the
+  BCM2712 path (`vc6_plane_mode_set`) handles only `LINEAR` and the
+  YUV-only SAND layouts.
+- V3D cannot render T-tiled at all (its store formats are raster,
+  lineartile, UB-linear and UIF; `v3d_packet.xml`), and the GL driver also
+  forces linear for scanout (`v3d_resource.c`).
+- wgpu-hal passes no modifier list of its own.
+
+So the only layout the GPU can write and the display can scan out is
+linear: no tiled scanout path exists on this hardware. Whether V3D stores
+a raster target more slowly than UIF is not documented in Mesa; `frametest
+solid --drm` (clear and one constant color per pixel, no texture read)
+now reports its pass's GPU time and measures the pure store cost into the
+same linear images. Comparing it with `tex` (one 4K read) and with the
+viewer's `gpu_upscale_ms` splits the floor into store and read.
+
+**Longer term: let the display scale.** The HVS can scale an RGB plane
+(`vc4_plane.c`: any factor through the atomic plane check; a 2× upscale
+uses the PPF scaler) and stacks up to 16 overlay planes by zpos. A
+transition frame could then be a 1920×1080 framebuffer on a plane the HVS
+scales to the mode, and the resting photo a 4K framebuffer on another
+plane, which removes the 10.6 ms upscale entirely and leaves the draw
+alone in the budget. Mesa's display WSI cannot do it: its atomic commit
+pins the plane's source and destination to the mode size
+(`wsi_common_display.c`, `SRC_W = CRTC_W = hdisplay`). It needs the
+viewer's own atomic commits on dma-bufs exported from wgpu-hal images, the
+framebuffers added with `drmModeAddFB2WithModifiers` and their fences
+waited on, so the swapchain and its pacing become ours. Unverified: the
+HVS clock and bandwidth limits for a scaled 4K plane on the Pi 5 (the
+kernel enforces load limits only on the Pi 3 generation).
 
 ## Environment knobs
 
