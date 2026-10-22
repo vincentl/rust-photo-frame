@@ -522,13 +522,18 @@ full-screen passes are spent carefully:
   at 4K), but from the 2x upscale of the intermediate: the photos are read
   from their mip 1 at 1920x1080 and reconstructed to 4K. The eye tracks a
   slow front and sees that softness, then the native final frame snaps the
-  photo to full sharpness. The upscale reconstructs with a Catmull-Rom
-  cubic (`PHOTOFRAME_UPSCALE`, default `bicubic`: 5 bilinear taps, the
-  corner taps of the exact 9-tap form left out and the rest renormalized;
-  `bicubic-9` is exact; `bilinear` is the single tap of v1.2.0-rc2). The
-  upscale pass is bound by its 4K write, not its reads (`frametest --drm`:
-  a 4K pass with one texture read costs 0.14 ms more than one with none),
-  so the extra taps should be nearly free.
+  photo to full sharpness. The upscale (`PHOTOFRAME_UPSCALE`, shared by
+  the Wayland and KMS outputs) is one bilinear tap by default. A
+  Catmull-Rom cubic is an opt-in (`bicubic`: 5 bilinear taps, the corner
+  taps of the exact 9-tap form left out and the rest renormalized;
+  `bicubic-9` is exact), but it is not usable at 4K60 on this GPU. Pi
+  measurement, 2026-10-22, scale 2, `gpu_upscale_ms` median / p90:
+  bilinear 11.02 / 11.43 ms, `bicubic` 18.03 / 18.58, `bicubic-9`
+  25.48 / 25.90, and with either cubic every transition dropped frames.
+  Each 4K tap costs about 1.75 ms: the pass is bound by V3D's texture
+  sample rate (about 4.7 G bilinear fetches a second) once it takes more
+  than one, not by memory. (`frametest --drm`'s 0.14 ms for one 4K read
+  was the memory cost of a read, not the cost of a tap.)
 
   Mac GPU, five project photos (two native 4K showcase photos, a 3600x2000
   one, two 4032x3024 library photos; each cover-cropped to 3840x2160), the
@@ -542,13 +547,15 @@ full-screen passes are spent carefully:
 
   The cubic cuts the error by a fifth on every photo; what remains is the
   detail mip 1 never held. The 5-tap form is as close as the exact one.
+  Sharper transitions at no runtime cost have to come from the mip itself:
+  see "The mip transitions read is pre-sharpened" below.
   Every transition kind gains, push included: push reads its photos from
   level 0, but its frame is drawn into the intermediate and upscaled like
   the others.
 
-  **The mip stays a box filter.** A sharper-looking downsample, Catmull-Rom
-  stretched to 2:1 (16 bilinear taps, at upload), was measured against it
-  on the same photos and on synthetic gratings and edges:
+  **Not a sharper downsample.** A sharper-looking downsample than the box,
+  Catmull-Rom stretched to 2:1 (16 bilinear taps, at upload), was measured
+  against it on the same photos and on synthetic gratings and edges:
 
   | Mip 1 from | Upscale | Mean abs error | Pixels off by > 8 LSB |
   |---|---|---|---|
@@ -564,6 +571,42 @@ full-screen passes are spent carefully:
   leaves 0.59 (moiré on fine stripes). Its negative lobes also ring: a
   0.2 to 0.8 step (linear) undershoots to 0.175 and overshoots to 0.831,
   where the box has none. It lost on every photo, so the box stays.
+
+  **The mip transitions read is pre-sharpened.** The 2x bilinear upscale
+  is a known low-pass, so the level transitions read (level 1 at scale 2)
+  is box filtered and then unsharp-masked at upload (`fs_mip_sharpen`):
+  box + a (box - blur), the blur the [1 2 1] / 4 binomial over the level's
+  own pixels, clamped to the range of the taps it was built from. It is 9
+  bilinear taps per pixel of a 1920x1080 level, once per photo, off the
+  transition path (uploads wait out transitions); at the Pi's measured
+  sample rate (about 4.7 G bilinear fetches a second) that is about 4 ms
+  of GPU time per photo against about 0.5 ms for the plain box. Nothing
+  changes per frame. The clamp is what makes it usable: unclamped, the mask
+  rings on every edge.
+
+  Mac GPU, the same five photos, mip 1 upscaled 2x bilinear against the
+  native canvas, plus a 0.2 to 0.8 step and a one-pixel 0.8 line on 0.2
+  (linear light; halos in sRGB 8-bit LSB beyond the plateaus):
+
+  | Mip 1 | Mean abs error | Pixels off by > 8 LSB | Step under / over | Line halo |
+  |---|---|---|---|---|
+  | box | 4.32 LSB | 15.8% | 0 / 0 | 0 |
+  | unsharp a = 0.25, unclamped | 3.88 | 14.1% | 4 / 2 | 4 |
+  | unsharp a = 0.75, unclamped | 3.47 | 12.8% | 13 / 5 | 13 |
+  | unsharp a = 1.0, unclamped | 3.49 | 13.1% | 17 / 7 | 17 |
+  | clamped a = 0.25 | 4.03 | 14.6% | 0 / 0 | 0 |
+  | clamped a = 0.5 | 3.88 | 14.0% | 0 / 0 | 0 |
+  | clamped a = 0.75 | 3.81 | 13.8% | 0 / 0 | 0 |
+  | **clamped a = 1.0** | **3.79** | **13.8%** | **0 / 0** | **0** |
+  | clamped a = 1.25 | 3.80 | 13.9% | 0 / 0 | 0 |
+  | clamped a = 1.5 | 3.82 | 14.0% | 0 / 0 | 0 |
+
+  Clamped a = 1 (`MIP_SHARPEN`) takes back 12% of the error at no cost
+  per frame and with no halo, about 60% of what the 5-tap cubic upscale
+  recovered (3.47) at 7 ms a frame. Per photo: 5.14 to 4.38, 9.96 to 8.84,
+  3.39 to 3.12, 1.35 to 1.15, 1.77 to 1.45 LSB. A thin line is not
+  sharpened (the clamp keeps it within its neighborhood), only kept
+  halo-free; at scale 4 only level 2 is sharpened, from a plain level 1.
 - **Iris petals are a signed-distance layer at 1/`IRIS_LAYER_SCALE`
   (default 16)** (`PHOTOFRAME_IRIS_LAYER_SCALE`, 1–16, to override). The
   petal math runs on CPU-precomputed per-frame constants and avoids
@@ -702,7 +745,7 @@ full-screen passes are spent carefully:
   canvases): the RSS difference between the two runs should be
   `live_canvases` × 8.3 MB.
 - **The main-pass budget.** Pi measurement, 2026-10-22: at scale 2 the
-  upscale costs 10.9 ms median and 11.5 ms at p90 on every frame, so a
+  bilinear upscale costs 10.9 ms median and 11.5 ms at p90 on every frame, so a
   kind holds 60 with no late frames only while its main pass stays under
   about 5.2 ms at p90. At 1920x1080 a two-photo pass with almost no
   arithmetic (fade) costs about 4.5 ms.
@@ -830,9 +873,10 @@ FIFO, 12 s per mode, 2026-10-22:
 A fullscreen pass that reads nothing costs 11.8 ms on the display
 swapchain: 33 MB in about 12 ms, roughly 2.8 GB/s, so the store into the
 linear image is the floor, and one texture read adds almost nothing on
-top of it. The viewer's upscale (10.9 ms median, one bilinear read of the
+top of it. The viewer's bilinear upscale (10.9 ms median, one read of the
 1920x1080 intermediate) is already as cheap as writing a 4K frame gets
-here: no shading change can lower it. What remains for a transition is
+here: no shading change can lower it, and more taps only add to it (see
+the cubic upscale's costs above). What remains for a transition is
 its main pass, which has to fit the rest of the refresh (about 5.2 ms at
 p90 at scale 2; see "The main-pass budget" above). Only the display
 scaling below removes the 4K write from transition frames.
@@ -842,7 +886,7 @@ scaling below removes the 4K write from transition frames.
 uses the PPF scaler) and stacks up to 16 overlay planes by zpos. A
 transition frame could then be a 1920×1080 framebuffer on a plane the HVS
 scales to the mode, and the resting photo a 4K framebuffer on another
-plane, which removes the 10.6 ms upscale entirely and leaves the draw
+plane, which removes the 10.6 ms bilinear upscale entirely and leaves the draw
 alone in the budget. Mesa's display WSI cannot do it: its atomic commit
 pins the plane's source and destination to the mode size
 (`wsi_common_display.c`, `SRC_W = CRTC_W = hdisplay`). It needs the

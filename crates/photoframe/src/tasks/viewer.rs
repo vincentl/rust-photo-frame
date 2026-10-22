@@ -98,23 +98,26 @@ fn iris_layer_scale() -> u32 {
 }
 
 /// How the reduced-resolution intermediate is upscaled to the surface
-/// (`PHOTOFRAME_UPSCALE`). The upscale pass is bound by its 4K write, not
-/// by its texture reads (Pi, 2026-10-22: a 4K pass with one read costs
-/// 0.14 ms more than one with none), so a sharper reconstruction is cheap.
+/// (`PHOTOFRAME_UPSCALE`), on both outputs (Wayland and KMS share the
+/// upscale pipeline). Each 4K tap costs about 1.75 ms on the Pi 5 (V3D's
+/// sample rate, not memory): the upscale takes 11.0 ms bilinear, 18.0 ms
+/// with the 5-tap cubic and 25.5 ms with the 9-tap one (Pi, 2026-10-22,
+/// scale 2), so only bilinear fits 4K60 there; the cubics are opt-ins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpscaleFilter {
-    /// One bilinear tap: the softest; motion hides it, but the eye tracks a
-    /// slow front (a wide radial wipe) and sees it.
+    /// One bilinear tap: the softest; the eye tracks a slow front (a wide
+    /// radial wipe) and sees it. The only one that fits 4K60 on the Pi 5.
     Bilinear,
     /// Catmull-Rom from 5 bilinear taps (the corner taps left out and the
-    /// rest renormalized): nearly the exact cubic.
+    /// rest renormalized): nearly the exact cubic. 18.0 ms at 4K on the Pi.
     Bicubic,
-    /// Catmull-Rom from 9 bilinear taps: the exact cubic.
+    /// Catmull-Rom from 9 bilinear taps: the exact cubic. 25.5 ms at 4K on
+    /// the Pi.
     Bicubic9,
 }
 
 impl UpscaleFilter {
-    const DEFAULT: Self = Self::Bicubic;
+    const DEFAULT: Self = Self::Bilinear;
 
     fn parse(value: &str) -> Option<Self> {
         match value.trim() {
@@ -144,9 +147,17 @@ fn upscale_filter() -> UpscaleFilter {
                 warn!(value = %raw, "unknown PHOTOFRAME_UPSCALE; using the default");
                 UpscaleFilter::DEFAULT
             }),
-            Err(_) => UpscaleFilter::DEFAULT,
+            Err(std::env::VarError::NotUnicode(raw)) => {
+                warn!(value = ?raw, "PHOTOFRAME_UPSCALE is not UTF-8; using the default");
+                UpscaleFilter::DEFAULT
+            }
+            Err(std::env::VarError::NotPresent) => UpscaleFilter::DEFAULT,
         };
-        info!(filter = ?filter, "viewer_upscale_filter");
+        if transition_scale() > 1 {
+            info!(filter = ?filter, "viewer_upscale_filter");
+        } else {
+            info!("viewer_upscale_filter: scale=1 (no upscale)");
+        }
         filter
     })
 }
@@ -1865,6 +1876,10 @@ struct GpuCtx {
     /// Writes one canvas mip level from the level above it (`fs_blit`, 2:1
     /// bilinear = box filter, in linear light), at upload.
     mip_pipeline: wgpu::RenderPipeline,
+    /// The same, unsharp-masked within the taps' range (`fs_mip_sharpen`):
+    /// for the level transitions read, to pre-compensate the bilinear
+    /// upscale of the intermediate.
+    mip_sharpen_pipeline: wgpu::RenderPipeline,
     half_target: Option<OffscreenTarget>,
     /// GPU timestamps around a transition frame's passes, when the device
     /// offers `TIMESTAMP_QUERY`.
@@ -2363,8 +2378,11 @@ fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
 /// pass per level with `fs_blit`, whose bilinear sample at a target pixel's
 /// center lands on the shared corner of a 2x2 source block, so it is that
 /// block's average (a box filter), taken in linear light (the sRGB view
-/// decodes, the sRGB target encodes). Runs at upload, which the viewer keeps
-/// off a transition's frames.
+/// decodes, the sRGB target encodes). The last level, the one transitions
+/// read, is box filtered and unsharp-masked within its taps' range
+/// (`fs_mip_sharpen`) to pre-compensate the intermediate's bilinear
+/// upscale. Runs at upload, which the viewer keeps off a transition's
+/// frames.
 fn generate_canvas_mips(gpu: &GpuCtx, tex: &wgpu::Texture, mip_levels: u32) {
     let level_view = |level: u32| {
         tex.create_view(&wgpu::TextureViewDescriptor {
@@ -2411,7 +2429,11 @@ fn generate_canvas_mips(gpu: &GpuCtx, tex: &wgpu::Texture, mip_levels: u32) {
             occlusion_query_set: None,
             timestamp_writes: None,
         });
-        pass.set_pipeline(&gpu.mip_pipeline);
+        pass.set_pipeline(if level + 1 == mip_levels {
+            &gpu.mip_sharpen_pipeline
+        } else {
+            &gpu.mip_pipeline
+        });
         pass.set_bind_group(0, &gpu.uniform_bind, &[]);
         pass.set_bind_group(1, &source_bind, &[]);
         pass.draw(0..3, 0..1);
@@ -2960,31 +2982,35 @@ fn build_gpu(
         multiview: None,
         cache: None,
     });
-    let mip_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("canvas-mip-pipeline"),
-        layout: Some(&blit_pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_blit"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: CANVAS_FORMAT,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        multiview: None,
-        cache: None,
-    });
+    let canvas_mip_pipeline = |label: &str, entry_point: &str| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&blit_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some(entry_point),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: CANVAS_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        })
+    };
+    let mip_pipeline = canvas_mip_pipeline("canvas-mip-pipeline", "fs_blit");
+    let mip_sharpen_pipeline = canvas_mip_pipeline("canvas-mip-sharpen-pipeline", "fs_mip_sharpen");
     // PHOTOFRAME_PROBE=single-sample (diagnostic): see the
     // shader.
     let probe_constants = probe_pipeline_constants(probes());
@@ -3142,6 +3168,7 @@ fn build_gpu(
         eink_mask: None,
         blit_pipeline,
         mip_pipeline,
+        mip_sharpen_pipeline,
         half_target: None,
         pass_timer,
     };
@@ -6102,7 +6129,7 @@ mod tests {
 
     #[test]
     fn upscale_filters_parse_to_their_entry_points() {
-        assert_eq!(UpscaleFilter::DEFAULT, UpscaleFilter::Bicubic);
+        assert_eq!(UpscaleFilter::DEFAULT, UpscaleFilter::Bilinear);
         for (value, entry) in [
             ("bilinear", "fs_blit"),
             (" bicubic ", "fs_upscale_bicubic"),
@@ -6360,6 +6387,7 @@ mod tests {
             "fs_blit",
             "fs_upscale_bicubic",
             "fs_upscale_bicubic9",
+            "fs_mip_sharpen",
         ]);
         for name in entry_points {
             let ep = module

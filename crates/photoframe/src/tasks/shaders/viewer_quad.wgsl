@@ -297,15 +297,72 @@ fn fs_blit(in: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(textureSample(cur_tex, cur_samp, in.screen_uv).rgb, 1.0);
 }
 
+// The level of a canvas that transitions read (bound at group 1: the level
+// above it), 2:1, box filtered and then unsharp-masked:
+// box + MIP_SHARPEN * (box - blur), where blur is the [1 2 1] / 4 binomial
+// over the box-filtered level's own pixels, and the result clamped to the
+// range of the taps it was built from. The bilinear upscale of the
+// intermediate is a known low-pass; sharpening the level transitions read
+// pre-compensates it at upload, at no cost per frame. The clamp keeps edges
+// and thin lines at their own plateaus (an unclamped mask rings: 4 LSB at
+// a = 0.25, 17 at a = 1 on a step), while texture, whose local range is
+// wide, still sharpens.
+//
+// Both filters are read from the source level with bilinear taps: the box
+// is one tap between the output's 2 x 2 source texels, and the blur of the
+// box is, per axis, weights 1/4, 1/2, 1/4 at -2, 0, +2 source texels (six
+// texels, paired), so the whole filter is 3 x 3 = 9 taps: 1 + 3/4 a at the
+// center, -a/8 at the four edges, -a/16 at the four corners (a =
+// MIP_SHARPEN; the weights sum to 1). Branch-free.
+//
+// a = 1 minimised the error of the 2x bilinear round trip against the
+// native canvas on five photos (Mac GPU; see docs/performance.md).
+override MIP_SHARPEN: f32 = 1.0;
+
+fn mip_tap(center: vec2<f32>, texel: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
+  return textureSampleLevel(cur_tex, cur_samp, (center + vec2<f32>(dx, dy)) * texel, 0.0).rgb;
+}
+
+@fragment
+fn fs_mip_sharpen(in: VSOut) -> @location(0) vec4<f32> {
+  let size = vec2<f32>(textureDimensions(cur_tex));
+  let texel = 1.0 / size;
+  let center = in.screen_uv * size;
+  let a = MIP_SHARPEN;
+  let c0 = mip_tap(center, texel, 0.0, 0.0);
+  let e0 = mip_tap(center, texel, -2.0, 0.0);
+  let e1 = mip_tap(center, texel, 2.0, 0.0);
+  let e2 = mip_tap(center, texel, 0.0, -2.0);
+  let e3 = mip_tap(center, texel, 0.0, 2.0);
+  let k0 = mip_tap(center, texel, -2.0, -2.0);
+  let k1 = mip_tap(center, texel, 2.0, -2.0);
+  let k2 = mip_tap(center, texel, -2.0, 2.0);
+  let k3 = mip_tap(center, texel, 2.0, 2.0);
+  let sharp = c0 * (1.0 + 0.75 * a)
+    - (e0 + e1 + e2 + e3) * (0.125 * a)
+    - (k0 + k1 + k2 + k3) * (0.0625 * a);
+  // Never past the darkest or brightest of the taps it was built from:
+  // edges and lines keep their plateaus (no halo), texture still sharpens.
+  let lo = min(min(min(c0, e0), min(e1, e2)), min(min(e3, k0), min(min(k1, k2), k3)));
+  let hi = max(max(max(c0, e0), max(e1, e2)), max(max(e3, k0), max(max(k1, k2), k3)));
+  return vec4<f32>(clamp(sharp, lo, hi), 1.0);
+}
+
 // Catmull-Rom (bicubic) reconstruction of the intermediate, from bilinear
 // taps of the linear-filtering, edge-clamped sampler. Per axis the cubic
 // weighs the four texels around `uv` by w0 < 0, w1 > 0, w2 > 0, w3 < 0; the two
 // inner texels share one tap placed between them in proportion to their
 // weights (w1 + w2 at offset w2 / (w1 + w2)), the outer two get a tap each,
 // so 3 x 3 = 9 taps reproduce the 16-texel cubic exactly. The four corner
-// taps carry the products of two outer weights (at most 1/64 each, and
-// positive), so leaving them out and renormalizing (5 taps) is the common
-// close approximation. Branch-free: the taps are fixed.
+// taps carry the products of two outer weights (each at most (2/27)^2, the
+// four together at most 1/64, all positive), so leaving them out and
+// renormalizing (5 taps) is the common close approximation. Branch-free:
+// the taps are fixed.
+//
+// Not usable at 4K60 on the Pi 5: each tap of the 4K pass costs about
+// 1.75 ms (V3D's sample rate, not memory), so the upscale takes 18.0 ms
+// with 5 taps and 25.5 ms with 9 against 11.0 ms bilinear (Pi,
+// 2026-10-22). Kept as opt-ins (PHOTOFRAME_UPSCALE).
 struct CatmullRomTaps {
   t0: vec2<f32>,
   t12: vec2<f32>,
@@ -356,11 +413,11 @@ fn catmull_rom_cross(t: CatmullRomTaps) -> vec4<f32> {
   return vec4<f32>(c, w);
 }
 
-// PHOTOFRAME_UPSCALE=bicubic (the default): 5 taps, renormalized.
+// PHOTOFRAME_UPSCALE=bicubic: 5 taps, renormalized.
 @fragment
 fn fs_upscale_bicubic(in: VSOut) -> @location(0) vec4<f32> {
-  let cross = catmull_rom_cross(catmull_rom_taps(in.screen_uv));
-  return vec4<f32>(cross.rgb / cross.a, 1.0);
+  let taps = catmull_rom_cross(catmull_rom_taps(in.screen_uv));
+  return vec4<f32>(taps.rgb / taps.a, 1.0);
 }
 
 // PHOTOFRAME_UPSCALE=bicubic-9: all 9 taps, the exact cubic (the weights
@@ -368,12 +425,12 @@ fn fs_upscale_bicubic(in: VSOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_upscale_bicubic9(in: VSOut) -> @location(0) vec4<f32> {
   let t = catmull_rom_taps(in.screen_uv);
-  let cross = catmull_rom_cross(t);
+  let edge = catmull_rom_cross(t);
   let corners = intermediate_tap(t.t0.x, t.t0.y) * (t.w0.x * t.w0.y)
     + intermediate_tap(t.t3.x, t.t0.y) * (t.w3.x * t.w0.y)
     + intermediate_tap(t.t0.x, t.t3.y) * (t.w0.x * t.w3.y)
     + intermediate_tap(t.t3.x, t.t3.y) * (t.w3.x * t.w3.y);
-  return vec4<f32>(cross.rgb + corners, 1.0);
+  return vec4<f32>(edge.rgb + corners, 1.0);
 }
 
 // The common tail of every photo pass: composite over the background here
