@@ -535,6 +535,43 @@ full-screen passes are spent carefully:
   rest, the CPU draws a fade at progress 0 instead. Output is unchanged
   except for pixels whose center lies exactly on a plane edge, where the
   interpolated coordinate can round one ulp the other way.
+- **Mipmapped canvases.** Pi measurement, 2026-10-21: wipe, fade, dissolve
+  and radial cost about 17.7 ms per frame at every transition scale. Push,
+  which reads one real plane per pixel, held 60. That is memory traffic,
+  not ALU: a transition into the half-res intermediate minified both 4K
+  canvases (2 × 33 MB a frame).
+
+  Each canvas now carries the mip levels the transition scale needs:
+  level 1 at scale 2, levels 1–2 at scale 4, none at scale 1. They are
+  generated at upload, off a transition's frames: 2:1 box filtered in
+  linear light, one `fs_blit` pass per level. Transition passes sample the
+  level that matches the intermediate (`textureSampleLevel` at
+  `U.lod = log2(scale)`). Native frames (resting photos, a transition's
+  tail) stay at level 0, unchanged.
+
+  Output, checked on the Mac's GPU against v1.2 builds:
+  - native frames are identical;
+  - a screen-sized canvas drawn full-screen (the default layout) is within
+    1 LSB for every kind whose planes stay put;
+  - planes that move (push) or zoom (crossfade-zoom) land between canvas
+    texels, where the old 2:1 bilinear read undersampled level 0 and the
+    mip is a proper prefilter. Those frames are slightly softer, by up to
+    about 20 LSB on fine detail.
+
+  Memory: +25% per canvas at scale 2 (8.3 MB on a 33 MB 4K canvas), +31% at
+  scale 4. That is about +40 MB with the default preload of three plus the
+  current and next photos.
+- **Fetching only what a pixel shows.** Wipe, radial-wipe and venetian
+  blinds fetch a plane's color only where its weight is not zero. Away
+  from the front a pixel shows one photo, and whole tiles lie on one side,
+  so the other fetch is skipped. Coverage is always computed. Fade,
+  dissolve, crossfade and e-ink need both photos everywhere.
+- **`PHOTOFRAME_PROBE=single-sample`** (diagnostic) compiles the
+  transition shaders with the next photo's color replaced by a constant,
+  so every kind reads one photo per pixel. Transitions look wrong on
+  purpose. The probe measures what the second fetch costs on the device,
+  with no rebuild. Set it in the unit (`systemctl edit`) and remove it
+  afterwards.
 - **Lead-in frames before a transition (KMS).** The V3D clock idles at
   500 MHz through a dwell and needs 150–200 ms of load to reach 960 MHz.
   The kernel has no devfreq knob for v3d, so this has to be handled in the

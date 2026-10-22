@@ -2558,23 +2558,6 @@ impl TransitionKind {
             Self::Iris => "iris",
         }
     }
-
-    pub const fn as_index(&self) -> u32 {
-        match self {
-            Self::Fade => 1,
-            Self::Wipe => 2,
-            Self::Push => 3,
-            Self::EInk => 4,
-            Self::Dissolve => 5,
-            // 7 was the old SVG-path iris (removed); leaving the gap is fine —
-            // indices only need to match the shader `case` integers, which need
-            // not be contiguous.
-            Self::RadialWipe => 8,
-            Self::VenetianBlinds => 9,
-            Self::CrossfadeZoom => 10,
-            Self::Iris => 11,
-        }
-    }
 }
 
 impl fmt::Display for TransitionKind {

@@ -19,9 +19,12 @@
 struct TransitionUniforms {
   screen_size: vec2<f32>,
   progress: f32,
-  // TransitionKind::as_index (kept for the CPU's bookkeeping; the shaders
-  // do not branch on it).
-  kind: u32,
+  // The canvas mip level the photo planes are sampled at: log2 of the
+  // transition intermediate's downscale while one is drawn (the canvases
+  // carry that many 2:1 box-filtered levels, generated at upload), 0 for
+  // native frames. Sampling a level whose texels match the target's pixels
+  // reads a quarter (scale 2) of the memory of minifying level 0.
+  lod: f32,
   // Where the current / next photo plane lands: texture coordinate =
   // screen_uv * xform.xy + xform.zw (a plane that is not there maps every
   // pixel outside 0..1).
@@ -91,13 +94,67 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
   return out;
 }
 
-// A photo plane at texture coordinate `uv`: its color with coverage 1
-// inside the plane, transparent outside. Branchless: the sample is always
-// taken (the sampler clamps to the edge) and the coverage is a select.
-fn plane(tex: texture_2d<f32>, samp: sampler, uv: vec2<f32>) -> vec4<f32> {
-  let c = textureSample(tex, samp, uv);
-  let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
-  return select(vec4<f32>(0.0), vec4<f32>(c.rgb, 1.0), inside);
+// Diagnostic (PHOTOFRAME_PROBE=single-sample, set as a pipeline constant):
+// the next plane's color is a constant instead of a texture fetch, so every
+// kind reads one photo per pixel. The output is wrong by design; it only
+// measures what the second fetch costs. Off (and compiled out) otherwise.
+override PROBE_SINGLE_SAMPLE: bool = false;
+
+// 1 inside a photo plane (texture coordinate in 0..1), 0 outside.
+fn covered(uv: vec2<f32>) -> f32 {
+  return select(0.0, 1.0, all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0)));
+}
+
+// The color of a plane at `uv`, from the mip level U.lod. An explicit level
+// needs no derivatives, so a fetch may sit in a branch (see fs_wipe).
+fn fetch_current(uv: vec2<f32>) -> vec3<f32> {
+  return textureSampleLevel(cur_tex, cur_samp, uv, U.lod).rgb;
+}
+
+fn fetch_next(uv: vec2<f32>) -> vec3<f32> {
+  if (PROBE_SINGLE_SAMPLE) {
+    return vec3<f32>(0.5);
+  }
+  return textureSampleLevel(next_tex, next_samp, uv, U.lod).rgb;
+}
+
+// A photo plane: its color with coverage 1 inside, transparent outside.
+// Branchless: the fetch is always taken (the sampler clamps to the edge) and
+// the coverage is a select.
+fn current_plane(uv: vec2<f32>) -> vec4<f32> {
+  let a = covered(uv);
+  return vec4<f32>(fetch_current(uv) * a, a);
+}
+
+fn next_plane(uv: vec2<f32>) -> vec4<f32> {
+  let a = covered(uv);
+  return vec4<f32>(fetch_next(uv) * a, a);
+}
+
+// Both planes for a kind whose result is `current * (1 - t) + next * t`,
+// fetching a plane's color only where its weight is not zero. Where t is
+// exactly 0 or 1 (everywhere but the band around a wipe's front) the
+// skipped plane's color is multiplied by zero anyway, so the result is the
+// same; its coverage is always computed (the composite needs both). The
+// branch is per pixel but coherent: whole tiles lie on one side of the
+// front, so their fetch is skipped, not just masked.
+struct PlanePair {
+  current: vec4<f32>,
+  next: vec4<f32>,
+};
+
+fn planes_for_weight(in: VSOut, t: f32) -> PlanePair {
+  let cur_a = covered(in.current_uv);
+  let next_a = covered(in.next_uv);
+  var cur_rgb = vec3<f32>(0.0);
+  var next_rgb = vec3<f32>(0.0);
+  if (t < 1.0) {
+    cur_rgb = fetch_current(in.current_uv) * cur_a;
+  }
+  if (t > 0.0) {
+    next_rgb = fetch_next(in.next_uv) * next_a;
+  }
+  return PlanePair(vec4<f32>(cur_rgb, cur_a), vec4<f32>(next_rgb, next_a));
 }
 
 // Signed distance to iris petal `i` using the CPU-precomputed constants in
@@ -235,11 +292,11 @@ fn screen_pos_of(in: VSOut) -> vec2<f32> {
 }
 
 fn current_of(in: VSOut) -> vec4<f32> {
-  return plane(cur_tex, cur_samp, in.current_uv);
+  return current_plane(in.current_uv);
 }
 
 fn next_of(in: VSOut) -> vec4<f32> {
-  return plane(next_tex, next_samp, in.next_uv);
+  return next_plane(in.next_uv);
 }
 
 fn progress01() -> f32 {
@@ -279,10 +336,11 @@ fn fs_fade(in: VSOut) -> @location(0) vec4<f32> {
 // params1.xy (draw_params::wipe).
 @fragment
 fn fs_wipe(in: VSOut) -> @location(0) vec4<f32> {
-  let current = current_of(in);
-  let next = next_of(in);
   let normalized = clamp(dot(U.params0.xy, in.screen_uv) + U.params0.z, 0.0, 1.0);
   let mask = 1.0 - smoothstep(U.params1.x, U.params1.y, normalized);
+  let planes = planes_for_weight(in, mask);
+  let current = planes.current;
+  let next = planes.next;
   return over_background(current * (1.0 - mask) + next * mask, current, next);
 }
 
@@ -367,11 +425,12 @@ fn fs_dissolve(in: VSOut) -> @location(0) vec4<f32> {
 // (draw_params::radial_wipe).
 @fragment
 fn fs_radial_wipe(in: VSOut) -> @location(0) vec4<f32> {
-  let current = current_of(in);
-  let next = next_of(in);
   let dv = in.screen_uv * U.params0.xy - U.params0.zw;
   let dist = select(length(dv), abs(dv.x) + abs(dv.y), U.params1.z > 0.5);
   let mask = 1.0 - smoothstep(U.params1.x, U.params1.y, dist);
+  let planes = planes_for_weight(in, mask);
+  let current = planes.current;
+  let next = planes.next;
   return over_background(mix(current, next, mask), current, next);
 }
 
@@ -379,11 +438,13 @@ fn fs_radial_wipe(in: VSOut) -> @location(0) vec4<f32> {
 // params0.yz (draw_params::venetian_blinds).
 @fragment
 fn fs_venetian_blinds(in: VSOut) -> @location(0) vec4<f32> {
-  let current = current_of(in);
-  let next = next_of(in);
   let local = fract(dot(in.screen_uv, U.params1.xy) * U.params0.x);
   let mask = smoothstep(U.params0.y, U.params0.z, 1.0 - local);
-  return over_background(mix(current, next, 1.0 - mask), current, next);
+  let t = 1.0 - mask;
+  let planes = planes_for_weight(in, t);
+  let current = planes.current;
+  let next = planes.next;
+  return over_background(mix(current, next, t), current, next);
 }
 
 // Fade + a shared, gentle Ken-Burns scale. Both planes share ONE scale that
@@ -396,8 +457,8 @@ fn fs_venetian_blinds(in: VSOut) -> @location(0) vec4<f32> {
 fn fs_crossfade_zoom(in: VSOut) -> @location(0) vec4<f32> {
   let current = current_of(in);
   let next = next_of(in);
-  let c = plane(cur_tex, cur_samp, in.screen_uv * U.params1.xy + U.params1.zw);
-  let nxt = plane(next_tex, next_samp, in.screen_uv * U.params3.xy + U.params3.zw);
+  let c = current_plane(in.screen_uv * U.params1.xy + U.params1.zw);
+  let nxt = next_plane(in.screen_uv * U.params3.xy + U.params3.zw);
   return over_background(mix(c, nxt, progress01()), current, next);
 }
 

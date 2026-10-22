@@ -1581,7 +1581,8 @@ fn with_photo_app_id(attrs: WindowAttributes) -> WindowAttributes {
 struct TransitionUniforms {
     screen_size: [f32; 2],
     progress: f32,
-    kind: u32,
+    // Canvas mip level the photo planes are sampled at (`canvas_lod`).
+    lod: f32,
     // Texture-coordinate maps of the current / next plane
     // (`draw_params::plane_xform`), applied by the vertex stage.
     current_xform: [f32; 4],
@@ -1714,6 +1715,9 @@ struct GpuCtx {
     iris_layer_pipeline: wgpu::RenderPipeline,
     iris_layer: Option<OffscreenTarget>,
     blit_pipeline: wgpu::RenderPipeline,
+    /// Writes one canvas mip level from the level above it (`fs_blit`, 2:1
+    /// bilinear = box filter, in linear light), at upload.
+    mip_pipeline: wgpu::RenderPipeline,
     half_target: Option<OffscreenTarget>,
 }
 
@@ -1807,6 +1811,52 @@ impl GpuCtx {
     }
 }
 
+/// The photo canvases' texture format.
+const CANVAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// Mip levels a canvas carries: level 0 plus one 2:1 level per halving of
+/// the transition intermediate (`transition_scale`), so a transition reads
+/// the level whose texels match the intermediate's pixels (`canvas_lod`)
+/// instead of minifying level 0: at scale 2 a quarter of the memory per
+/// fetch, which on the Pi is the transition's cost (Pi measurement,
+/// 2026-10-21: wipe/fade/dissolve flat at ~17.7 ms per frame across scales;
+/// push, which fetches one real plane per pixel, held 60). Native transitions
+/// (scale 1) need none. Memory: +25% per canvas at scale 2, +31% at 4.
+fn canvas_mip_levels(width: u32, height: u32, transition_scale: u32) -> u32 {
+    let wanted = transition_scale.max(1).next_power_of_two().trailing_zeros();
+    let possible = width.min(height).max(1).ilog2();
+    1 + wanted.min(possible)
+}
+
+/// The level the photo planes are sampled at: log2 of the intermediate's
+/// downscale while drawing into it, 0 for native frames (resting photos and
+/// a transition's tail), so those are unchanged.
+fn canvas_lod(into_intermediate: bool) -> f32 {
+    if into_intermediate {
+        (transition_scale().max(1) as f32).log2()
+    } else {
+        0.0
+    }
+}
+
+/// PHOTOFRAME_PROBE=single-sample: a diagnostic build-free switch that
+/// makes every transition read one photo per pixel (the next plane's color
+/// is a constant), to measure what the second fetch costs. Read once.
+fn probe_single_sample() -> bool {
+    static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(|| match std::env::var("PHOTOFRAME_PROBE") {
+        Ok(v) if v == "single-sample" => {
+            warn!("PHOTOFRAME_PROBE=single-sample: transitions show a flat next photo (diagnostic)");
+            true
+        }
+        Ok(other) => {
+            warn!(value = %other, "unknown PHOTOFRAME_PROBE; ignored");
+            false
+        }
+        Err(_) => false,
+    })
+}
+
 fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
     let ImagePlane {
         width,
@@ -1816,6 +1866,11 @@ fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
     if width == 0 || height == 0 {
         return None;
     }
+    let mip_levels = canvas_mip_levels(width, height, transition_scale());
+    let mut usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+    if mip_levels > 1 {
+        usage |= wgpu::TextureUsages::RENDER_ATTACHMENT;
+    }
     let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("photo-texture"),
         size: wgpu::Extent3d {
@@ -1823,11 +1878,11 @@ fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
             height,
             depth_or_array_layers: 1,
         },
-        mip_level_count: 1,
+        mip_level_count: mip_levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        format: CANVAS_FORMAT,
+        usage,
         view_formats: &[],
     });
     let stride = 4 * width;
@@ -1864,6 +1919,9 @@ fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
             depth_or_array_layers: 1,
         },
     );
+    if mip_levels > 1 {
+        generate_canvas_mips(gpu, &tex, mip_levels);
+    }
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("image-bind"),
@@ -1884,6 +1942,66 @@ fn upload_plane(gpu: &GpuCtx, plane: ImagePlane) -> Option<TexturePlane> {
         w: width,
         h: height,
     })
+}
+
+/// Fill levels 1.. of a canvas, each from the one above: one fullscreen
+/// pass per level with `fs_blit`, whose bilinear sample at a target pixel's
+/// center lands on the shared corner of a 2x2 source block, so it is that
+/// block's average (a box filter), taken in linear light (the sRGB view
+/// decodes, the sRGB target encodes). Runs at upload, which the viewer keeps
+/// off a transition's frames.
+fn generate_canvas_mips(gpu: &GpuCtx, tex: &wgpu::Texture, mip_levels: u32) {
+    let level_view = |level: u32| {
+        tex.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("canvas-mip"),
+            base_mip_level: level,
+            mip_level_count: Some(1),
+            ..Default::default()
+        })
+    };
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("canvas-mips"),
+        });
+    for level in 1..mip_levels {
+        let source = level_view(level - 1);
+        let target = level_view(level);
+        let source_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("canvas-mip-source"),
+            layout: &gpu.img_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("canvas-mip-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&gpu.mip_pipeline);
+        pass.set_bind_group(0, &gpu.uniform_bind, &[]);
+        pass.set_bind_group(1, &source_bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    gpu.queue.submit(Some(encoder.finish()));
 }
 
 fn upload_mat_result(gpu: &GpuCtx, result: MatResult) -> Option<ImgTex> {
@@ -2399,6 +2517,37 @@ fn build_gpu(
         multiview: None,
         cache: None,
     });
+    let mip_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("canvas-mip-pipeline"),
+        layout: Some(&blit_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_blit"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: CANVAS_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        multiview: None,
+        cache: None,
+    });
+    // PHOTOFRAME_PROBE=single-sample (diagnostic): see the shader.
+    let probe_constants: &[(&str, f64)] = if probe_single_sample() {
+        &[("PROBE_SINGLE_SAMPLE", 1.0)]
+    } else {
+        &[]
+    };
     // One pipeline per DrawKind (see DrawKind for why), all on the same
     // layout and vertex stage.
     let quad_pipelines = QuadPipelines {
@@ -2430,7 +2579,10 @@ fn build_gpu(
                             blend: None,
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            constants: probe_constants,
+                            ..Default::default()
+                        },
                     }),
                     multiview: None,
                     cache: None,
@@ -2533,6 +2685,7 @@ fn build_gpu(
         iris_layer_pipeline,
         iris_layer: None,
         blit_pipeline,
+        mip_pipeline,
         half_target: None,
     };
     Ok(GpuParts {
@@ -3685,7 +3838,7 @@ impl App {
                 let mut uniforms = TransitionUniforms {
                     screen_size: [screen_w, screen_h],
                     progress: 0.0,
-                    kind: 0,
+                    lod: 0.0,
                     current_xform: draw_params::plane_xform([0.0; 4], [screen_w, screen_h]),
                     next_xform: draw_params::plane_xform([0.0; 4], [screen_w, screen_h]),
                     params0: [0.0; 4],
@@ -3742,7 +3895,6 @@ impl App {
 
                 if debug_bezier {
                     // Draw current image and overlay a debug quadratic Bezier stroke.
-                    uniforms.kind = 6; // bezier overlay
                     draw_kind = DrawKind::DebugBezier;
                     // Control points in UV for a gentle arc across center
                     uniforms.params0 = [0.15, 0.60, 0.50, 0.25]; // P0.xy, P1.xy
@@ -3761,7 +3913,6 @@ impl App {
                     let eased_progress =
                         base_progress * base_progress * (3.0 - 2.0 * base_progress);
                     uniforms.progress = eased_progress;
-                    uniforms.kind = state.kind().as_index();
                     draw_kind = DrawKind::for_transition(state.kind());
                     match state.variant() {
                         ActiveTransition::Fade { through_black } => {
@@ -3939,6 +4090,9 @@ impl App {
                     } else {
                         None
                     };
+                    // Into the intermediate the planes are read from the
+                    // mip level that matches its resolution.
+                    uniforms.lod = canvas_lod(half_target.is_some());
                     gpu.queue
                         .write_buffer(&gpu.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
                     if iris_active {
@@ -5378,6 +5532,17 @@ mod tests {
     }
 
     #[test]
+    fn canvases_carry_the_levels_the_transition_scale_reads() {
+        assert_eq!(canvas_mip_levels(3840, 2160, 1), 1);
+        assert_eq!(canvas_mip_levels(3840, 2160, 2), 2);
+        assert_eq!(canvas_mip_levels(3840, 2160, 3), 3);
+        assert_eq!(canvas_mip_levels(3840, 2160, 4), 3);
+        // Never more levels than the canvas can halve.
+        assert_eq!(canvas_mip_levels(3, 2, 4), 2);
+        assert_eq!(canvas_mip_levels(1, 1, 4), 1);
+    }
+
+    #[test]
     fn every_transition_kind_has_its_own_pipeline() {
         let mut seen = std::collections::HashSet::new();
         for &kind in TransitionKind::ALL {
@@ -5416,18 +5581,33 @@ mod tests {
                 .find(|ep| ep.name == name)
                 .unwrap_or_else(|| panic!("viewer_quad.wgsl has no entry point {name}"));
             assert_eq!(ep.stage, naga::ShaderStage::Fragment, "{name}");
-            let pipeline = naga::back::spv::PipelineOptions {
-                shader_stage: naga::ShaderStage::Fragment,
-                entry_point: name.to_string(),
-            };
-            let words = naga::back::spv::write_vec(
-                &module,
-                &info,
-                &naga::back::spv::Options::default(),
-                Some(&pipeline),
-            )
-            .unwrap_or_else(|e| panic!("{name} does not compile to SPIR-V: {e:?}"));
-            assert!(!words.is_empty(), "{name}");
+            // Resolve the pipeline constants as wgpu does at pipeline
+            // creation: the default, and PHOTOFRAME_PROBE=single-sample.
+            for probe in [None, Some(1.0)] {
+                let mut constants = naga::back::PipelineConstants::default();
+                if let Some(value) = probe {
+                    constants.insert("PROBE_SINGLE_SAMPLE".to_string(), value);
+                }
+                let (resolved, resolved_info) = naga::back::pipeline_constants::process_overrides(
+                    &module,
+                    &info,
+                    Some((naga::ShaderStage::Fragment, name)),
+                    &constants,
+                )
+                .unwrap_or_else(|e| panic!("{name}: overrides {probe:?}: {e:?}"));
+                let pipeline = naga::back::spv::PipelineOptions {
+                    shader_stage: naga::ShaderStage::Fragment,
+                    entry_point: name.to_string(),
+                };
+                let words = naga::back::spv::write_vec(
+                    &resolved,
+                    &resolved_info,
+                    &naga::back::spv::Options::default(),
+                    Some(&pipeline),
+                )
+                .unwrap_or_else(|e| panic!("{name} ({probe:?}) does not compile to SPIR-V: {e:?}"));
+                assert!(!words.is_empty(), "{name}");
+            }
         }
     }
 
