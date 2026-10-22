@@ -1786,6 +1786,10 @@ struct GpuCtx {
     iris_layer_pipeline: wgpu::RenderPipeline,
     iris_cover: Option<OffscreenTarget>,
     iris_layer: Option<OffscreenTarget>,
+    /// E-ink's per-cell reveal mask (`fs_eink_mask`), stripes x stripes,
+    /// read by `fs_eink` at group 3.
+    eink_mask_pipeline: wgpu::RenderPipeline,
+    eink_mask: Option<OffscreenTarget>,
     blit_pipeline: wgpu::RenderPipeline,
     /// Writes one canvas mip level from the level above it (`fs_blit`, 2:1
     /// bilinear = box filter, in linear light), at upload.
@@ -2065,6 +2069,24 @@ impl GpuCtx {
         // (see fs_iris_cover for what half floats hold).
         self.iris_cover =
             Some(self.make_offscreen("iris-petal-cover", w, h, wgpu::TextureFormat::Rgba16Float));
+    }
+
+    /// Create (or re-create for another stripe count) e-ink's reveal mask,
+    /// one texel per cell: the mask as a half float plus its rounding
+    /// remainder (see `fs_eink_mask`).
+    fn ensure_eink_mask(&mut self, stripes: u32) {
+        if let Some(mask) = self.eink_mask.as_ref()
+            && mask.w == stripes
+            && mask.h == stripes
+        {
+            return;
+        }
+        self.eink_mask = Some(self.make_offscreen(
+            "eink-reveal-mask",
+            stripes,
+            stripes,
+            wgpu::TextureFormat::Rgba16Float,
+        ));
     }
 
     /// Create (or re-create after a resize) the reduced-resolution
@@ -2839,6 +2861,11 @@ fn build_gpu(
         &iris_layer_pipeline_layout,
         "fs_iris_layer",
     );
+    let eink_mask_pipeline = petal_pipeline(
+        "eink-mask-pipeline",
+        &iris_cover_pipeline_layout,
+        "fs_eink_mask",
+    );
     let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("blit-pipeline-layout"),
         bind_group_layouts: &[&uniform_layout, &img_bind_layout],
@@ -3049,6 +3076,8 @@ fn build_gpu(
         iris_layer_pipeline,
         iris_cover: None,
         iris_layer: None,
+        eink_mask_pipeline,
+        eink_mask: None,
         blit_pipeline,
         mip_pipeline,
         half_target: None,
@@ -4200,6 +4229,11 @@ impl App {
                         gpu.ensure_iris_layer();
                     }
                 }
+                if let Some(ActiveTransition::EInk { stripe_count, .. }) =
+                    wake.transition_state().map(|s| s.variant())
+                {
+                    gpu.ensure_eink_mask((*stripe_count).max(1));
+                }
                 let screen_w = gpu.config.width as f32;
                 let screen_h = gpu.config.height as f32;
                 let mut uniforms = TransitionUniforms {
@@ -4342,6 +4376,7 @@ impl App {
                                 uniforms.progress,
                                 screen,
                             );
+                            uniforms.params3 = draw_params::radial_wipe_band(uniforms.params1);
                         }
                         ActiveTransition::VenetianBlinds {
                             stripe_count,
@@ -4508,6 +4543,40 @@ impl App {
                         .as_ref()
                         .filter(|_| paced.is_some_and(|p| p.time_passes))
                         .map(PassTimer::frame);
+                    // A pass that renders a layer the main pass reads at
+                    // group 3, timed with the layer pair: `begin` and `end`
+                    // say whether it opens and/or closes it.
+                    let layer_pass = |encoder: &mut wgpu::CommandEncoder,
+                                      label: &'static str,
+                                      target: &wgpu::TextureView,
+                                      pipeline: &wgpu::RenderPipeline,
+                                      input: Option<&wgpu::BindGroup>,
+                                      begin: bool,
+                                      end: bool| {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some(label),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: target,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            occlusion_query_set: None,
+                            timestamp_writes: timer
+                                .as_ref()
+                                .map(|t| t.writes(TimedPass::Layer, begin, end)),
+                        });
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &gpu.uniform_bind, &[]);
+                        if let Some(input) = input {
+                            pass.set_bind_group(1, input, &[]);
+                        }
+                        pass.draw(0..3, 0..1);
+                    };
                     // Render the petals into the reduced-resolution
                     // layer first, in two passes (cover, then shading);
                     // the main pass composites it.
@@ -4515,55 +4584,44 @@ impl App {
                         && let (Some(cover), Some(layer)) =
                             (gpu.iris_cover.as_ref(), gpu.iris_layer.as_ref())
                     {
-                        let petal_pass = |encoder: &mut wgpu::CommandEncoder,
-                                          label: &'static str,
-                                          target: &wgpu::TextureView,
-                                          pipeline: &wgpu::RenderPipeline,
-                                          input: Option<&wgpu::BindGroup>,
-                                          first: bool| {
-                            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: Some(label),
-                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: target,
-                                    depth_slice: None,
-                                    resolve_target: None,
-                                    ops: wgpu::Operations {
-                                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                        store: wgpu::StoreOp::Store,
-                                    },
-                                })],
-                                depth_stencil_attachment: None,
-                                occlusion_query_set: None,
-                                timestamp_writes: timer
-                                    .as_ref()
-                                    .map(|t| t.writes(TimedPass::Layer, first, !first)),
-                            });
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(0, &gpu.uniform_bind, &[]);
-                            if let Some(input) = input {
-                                pass.set_bind_group(1, input, &[]);
-                            }
-                            pass.draw(0..3, 0..1);
-                        };
-                        petal_pass(
+                        layer_pass(
                             &mut encoder,
                             "iris-cover-pass",
                             &cover.view,
                             &gpu.iris_cover_pipeline,
                             None,
                             true,
+                            false,
                         );
-                        petal_pass(
+                        layer_pass(
                             &mut encoder,
                             "iris-layer-pass",
                             &layer.view,
                             &gpu.iris_layer_pipeline,
                             Some(&cover.bind),
                             false,
+                            true,
                         );
                     }
-                    let petal_bind = match gpu.iris_layer.as_ref() {
-                        Some(layer) if iris_active => &layer.bind,
+                    // E-ink's per-cell reveal mask.
+                    let eink_mask = gpu
+                        .eink_mask
+                        .as_ref()
+                        .filter(|_| draw_kind == DrawKind::EInk);
+                    if let Some(mask) = eink_mask {
+                        layer_pass(
+                            &mut encoder,
+                            "eink-mask-pass",
+                            &mask.view,
+                            &gpu.eink_mask_pipeline,
+                            None,
+                            true,
+                            true,
+                        );
+                    }
+                    let petal_bind = match (gpu.iris_layer.as_ref(), eink_mask) {
+                        (Some(layer), _) if iris_active => &layer.bind,
+                        (_, Some(mask)) => &mask.bind,
                         _ => &gpu.blank_plane.bind,
                     };
                     {
@@ -6220,7 +6278,7 @@ mod tests {
         .validate(&module)
         .expect("viewer_quad.wgsl validates");
         let mut entry_points: Vec<&str> = DrawKind::ALL.iter().map(|k| k.entry_point()).collect();
-        entry_points.extend(["fs_iris_cover", "fs_iris_layer", "fs_blit"]);
+        entry_points.extend(["fs_iris_cover", "fs_iris_layer", "fs_eink_mask", "fs_blit"]);
         for name in entry_points {
             let ep = module
                 .entry_points

@@ -156,6 +156,22 @@ pub(super) fn radial_wipe(
     )
 }
 
+/// Radial wipe: bounds of the band where the mask is strictly between 0 and
+/// 1, from `radial_wipe`'s `params1`, as `params3`. For a circle they bound
+/// the squared distance, so the shader takes the square root only in the
+/// band; they are moved inward by a relative 1e-6 (far beyond the square
+/// root's rounding), so a pixel classed outside the band is outside it for
+/// the distance the shader would compute, and its mask is exactly 0 or 1.
+/// For a diamond they are the edges themselves.
+pub(super) fn radial_wipe_band(params1: [f32; 4]) -> [f32; 4] {
+    let (lo, hi) = (params1[0], params1[1]);
+    if params1[2] > 0.5 {
+        [lo, hi, 0.0, 0.0]
+    } else {
+        [lo * lo * (1.0 - 1e-6), hi * hi * (1.0 + 1e-6), 0.0, 0.0]
+    }
+}
+
 /// Venetian blinds. Replaces, per pixel, picking the axis
 /// (`select(uv.y, uv.x, vertical)`) and the edges `progress -/+ softness`.
 /// Returns `(params0, params1)`: `params0 = (stripes, e0, e1)`,
@@ -313,6 +329,33 @@ mod tests {
                     ];
                     let new = [uv[0] * x[0] + x[2], uv[1] * x[1] + x[3]];
                     assert!(close(old[0], new[0], 1e-4) && close(old[1], new[1], 1e-4));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn radial_wipe_band_classes_pixels_as_the_mask_does() {
+        let smooth = |lo: f32, hi: f32, x: f32| {
+            let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        for progress in [0.0f32, 0.05, 0.3, 0.7, 1.0] {
+            let (_, p1) = radial_wipe([0.5, 0.5], 0.1, false, progress, SCREEN);
+            let band = radial_wipe_band(p1);
+            // Distances around both edges, a few ulps apart.
+            for edge in [p1[0], p1[1]] {
+                let mut x = (edge - 1e-4).max(0.0);
+                while x < edge + 1e-4 {
+                    let q = x * x;
+                    let mask = 1.0 - smooth(p1[0], p1[1], q.sqrt());
+                    if q <= band[0] {
+                        assert_eq!(mask, 1.0, "q {q} below the band");
+                    }
+                    if q >= band[1] {
+                        assert_eq!(mask, 0.0, "q {q} above the band");
+                    }
+                    x = f32::from_bits(x.to_bits() + 7);
                 }
             }
         }

@@ -650,11 +650,39 @@ full-screen passes are spent carefully:
   `PHOTOFRAME_TRANSITION_SCALE=1` (no mips, no render-target usage on the
   canvases): the RSS difference between the two runs should be
   `live_canvases` × 8.3 MB.
-- **Fetching only what a pixel shows.** Wipe, radial-wipe and venetian
-  blinds fetch a plane's color only where its weight is not zero. Away
-  from the front a pixel shows one photo, and whole tiles lie on one side,
-  so the other fetch is skipped. Coverage is always computed. Fade,
-  dissolve, crossfade and e-ink need both photos everywhere.
+- **Fetching only what a pixel shows.** Wipe, radial-wipe, venetian
+  blinds and e-ink's reveal fetch a plane's color only where its weight is
+  not zero. Away from the front a pixel shows one photo, and whole tiles
+  lie on one side, so the other fetch is skipped. Coverage is always
+  computed. Fade, dissolve and crossfade need both photos everywhere.
+- **The main-pass budget.** Pi measurement, 2026-10-22: at scale 2 the
+  upscale costs 10.9 ms median and 11.5 ms at p90 on every frame, so a
+  kind holds 60 with no late frames only while its main pass stays under
+  about 5.2 ms at p90. At 1920x1080 the main pass costs about 4.5 ms with
+  almost no arithmetic (fade), and each instruction per pixel adds roughly
+  0.05 ms, so the kinds over budget (radial, e-ink, iris; 5.9–6.4 ms at
+  p90) are trimmed by instructions, not memory:
+  - radial-wipe computes only the distance its shape uses, compares the
+    squared distance against the soft band's bounds
+    (`draw_params::radial_wipe_band`), and takes the square root and the
+    smoothstep only inside the band;
+  - e-ink's reveal is decided per cell of its stripes x stripes grid
+    (the row's stagger, a sine hash of the cell, the progress), so a tiny
+    pass (`fs_eink_mask`, one texel per cell, timed as `gpu_layer_ms`)
+    computes each cell's mask once; `fs_eink` reads its cell's texel and
+    fetches a photo only where its weight is not zero. Its flash frames
+    no longer fetch the next photo, nor the current one under a full
+    flash;
+  - iris computes the outline's smoothstep and the highlight only within
+    the highlight's reach of the outline;
+  - the three composite with `over_background_rgb`: a mix of the two
+    photos never covers more than the larger of their coverages, so its
+    alpha is not computed.
+
+  Checked on the Mac's GPU against the previous shaders over the whole
+  progress range: radial-wipe identical (circle and diamond, 328 frames);
+  iris 2 pixels and e-ink 105 pixels of 64 million 1 LSB away (e-ink's
+  mask is stored as a half float plus its rounding remainder).
 - **`PHOTOFRAME_PROBE`** (diagnostic, comma-separated; set it in the unit
   with `systemctl edit` and remove it afterwards):
   - `single-sample` compiles the transition shaders with the next photo's

@@ -325,6 +325,14 @@ fn over_background(color: vec4<f32>, current: vec4<f32>, next: vec4<f32>) -> vec
   return vec4<f32>(color.rgb * a + U.background.rgb * (1.0 - a), 1.0);
 }
 
+// over_background for a result whose coverage `a` is known: the union of
+// the photos' (and a layer's) coverage. For a mix of the two photos the
+// mixed coverage never exceeds the larger of the two, so the union is just
+// max(current.a, next.a), and the mix's alpha need not be computed.
+fn over_background_rgb(rgb: vec3<f32>, a: f32) -> vec4<f32> {
+  return vec4<f32>(rgb * a + U.background.rgb * (1.0 - a), 1.0);
+}
+
 // For results that cover the whole screen by construction (fade through
 // black, e-ink).
 fn opaque(color: vec4<f32>) -> vec4<f32> {
@@ -399,38 +407,24 @@ fn fs_push(in: VSOut) -> @location(0) vec4<f32> {
 
 // params0 = (flash_count, reveal_portion, stripe_count, seed.x),
 // params1 = (seed.y, flash_rgb).
+//
+// The reveal is decided per cell of a stripe_count x stripe_count grid: a
+// cell's gate depends only on its row (the stagger), a hash of the cell
+// and the progress. fs_eink_mask computes each cell's mask once per frame
+// into a stripes x stripes texture (bound at group 3); fs_eink reads its
+// cell's texel and fetches a photo only where its weight is not zero.
 @fragment
-fn fs_eink(in: VSOut) -> @location(0) vec4<f32> {
-  let current = current_of(in);
-  let next = next_of(in);
+fn fs_eink_mask(in: VSOut) -> @location(0) vec4<f32> {
   let progress = progress01();
-  let flashes = max(U.params0.x, 0.0);
   let reveal_start = clamp(U.params0.y, 0.05, 0.95);
   let stripes = max(U.params0.z, 1.0);
   let seed = vec2<f32>(U.params0.w, U.params1.x);
-  let flash_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
-  let prep_ratio = progress / max(reveal_start, 1e-3);
-  if (progress < reveal_start) {
-    let segments = flashes * 2.0 + 1.0;
-    let staged = clamp(floor(prep_ratio * segments), 0.0, segments);
-    let stage_u = u32(staged);
-    var flash_color = current;
-    if (stage_u > 0u) {
-      let toggle = (stage_u & 1u) == 1u;
-      if (toggle) {
-        flash_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-      } else {
-        flash_color = vec4<f32>(flash_rgb, 1.0);
-      }
-    }
-    let stage_pos = fract(prep_ratio * segments);
-    let flash_mix = smoothstep(0.15, 0.85, stage_pos);
-    return opaque(mix(current, flash_color, clamp(flash_mix, 0.0, 1.0)));
-  }
+  // This texel's cell: (column, stripe).
+  let cell = floor(in.pos.xy);
   let reveal_ratio = (progress - reveal_start) / max(1.0 - reveal_start, 1e-3);
-  let stripe_idx = floor(in.screen_uv.y * stripes);
+  let stripe_idx = cell.y;
   let stripe_phase = stripe_idx / stripes;
-  let noise_vec = vec2<f32>(stripe_idx, floor(in.screen_uv.x * stripes)) + seed;
+  let noise_vec = vec2<f32>(stripe_idx, cell.x) + seed;
   let noise = fract(sin(dot(noise_vec, vec2<f32>(12.9898, 78.233))) * 43758.5453);
   // Stagger-normalized so the LAST stripe's gate reaches 1.0 by
   // reveal_ratio ~0.9: the old form (1.15r - 0.85*phase) left bottom
@@ -443,8 +437,57 @@ fn fs_eink(in: VSOut) -> @location(0) vec4<f32> {
     1.0
   );
   let mask = smoothstep(0.05, 0.85, gate);
-  let ghost = mix(current, vec4<f32>(flash_rgb, 1.0), 0.55);
-  return opaque(mix(ghost, next, mask));
+  // A half float rounds the mask to about a 2048th, a step or two of the
+  // result: store that value and, in the second channel, what it rounded
+  // off, so their sum restores the mask to near f32 precision.
+  let hi = unpack2x16float(pack2x16float(vec2<f32>(mask, 0.0))).x;
+  return vec4<f32>(hi, mask - hi, 0.0, 0.0);
+}
+
+@fragment
+fn fs_eink(in: VSOut) -> @location(0) vec4<f32> {
+  let progress = progress01();
+  let flashes = max(U.params0.x, 0.0);
+  let reveal_start = clamp(U.params0.y, 0.05, 0.95);
+  let stripes = max(U.params0.z, 1.0);
+  let flash_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
+  if (progress < reveal_start) {
+    // Flashes: the same for every pixel but the current photo, which is
+    // fetched only while it shows.
+    let prep_ratio = progress / max(reveal_start, 1e-3);
+    let segments = flashes * 2.0 + 1.0;
+    let staged = clamp(floor(prep_ratio * segments), 0.0, segments);
+    let stage_u = u32(staged);
+    let stage_pos = fract(prep_ratio * segments);
+    let flash_mix = clamp(smoothstep(0.15, 0.85, stage_pos), 0.0, 1.0);
+    var current = vec4<f32>(0.0);
+    if (stage_u == 0u || flash_mix < 1.0) {
+      current = current_of(in);
+    }
+    var flash_color = current;
+    if (stage_u > 0u) {
+      let toggle = (stage_u & 1u) == 1u;
+      if (toggle) {
+        flash_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+      } else {
+        flash_color = vec4<f32>(flash_rgb, 1.0);
+      }
+    }
+    return opaque(mix(current, flash_color, flash_mix));
+  }
+  // Reveal: this pixel's cell mask (fs_eink_mask).
+  let cell = vec2<i32>(floor(in.screen_uv * stripes));
+  let stored = textureLoad(petal_tex, cell, 0);
+  let mask = stored.r + stored.g;
+  var ghost = vec3<f32>(0.0);
+  var next = vec3<f32>(0.0);
+  if (mask < 1.0) {
+    ghost = mix(current_of(in).rgb, flash_rgb, 0.55);
+  }
+  if (mask > 0.0) {
+    next = next_of(in).rgb;
+  }
+  return vec4<f32>(mix(ghost, next, mask), 1.0);
 }
 
 // Threshold value-noise by progress. params0 = (softness, cell scale).
@@ -466,16 +509,25 @@ fn fs_dissolve(in: VSOut) -> @location(0) vec4<f32> {
 // Circle or diamond reveal from a center, as a function of screen_uv:
 // the offset from the center in units of the screen diagonal is
 // screen_uv * params0.xy - params0.zw; params1 = (mask edges, diamond)
-// (draw_params::radial_wipe).
+// (draw_params::radial_wipe). params3.xy bound the band where the mask is
+// strictly between 0 and 1, on the squared distance for a circle (so only
+// pixels in the band take the square root) or on the distance for a
+// diamond (draw_params::radial_wipe_band).
 @fragment
 fn fs_radial_wipe(in: VSOut) -> @location(0) vec4<f32> {
   let dv = in.screen_uv * U.params0.xy - U.params0.zw;
-  let dist = select(length(dv), abs(dv.x) + abs(dv.y), U.params1.z > 0.5);
-  let mask = 1.0 - smoothstep(U.params1.x, U.params1.y, dist);
+  let diamond = U.params1.z > 0.5;
+  let manhattan = abs(dv.x) + abs(dv.y);
+  let q = select(dot(dv, dv), manhattan, diamond);
+  var mask = select(0.0, 1.0, q <= U.params3.x);
+  if (q > U.params3.x && q < U.params3.y) {
+    let dist = select(length(dv), manhattan, diamond);
+    mask = 1.0 - smoothstep(U.params1.x, U.params1.y, dist);
+  }
   let planes = planes_for_weight(in, mask);
   let current = planes.current;
   let next = planes.next;
-  return over_background(mix(current, next, mask), current, next);
+  return over_background_rgb(mix(current.rgb, next.rgb, mask), max(current.a, next.a));
 }
 
 // Stripe reveal: stripes along dot(screen_uv, params1.xy), mask edges
@@ -518,34 +570,41 @@ fn fs_crossfade_zoom(in: VSOut) -> @location(0) vec4<f32> {
 // the swap is zero (the whole transition but the swap window around full
 // close). Skipped colors would be multiplied by zero, so the result is the
 // same; coverage is always computed (the composite needs it).
+//
+// The outline and the highlight are computed only within the highlight's
+// reach of the outline (a coherent band: whole tiles lie inside or outside
+// the petals), where the same smoothsteps give exactly 1 or 0 coverage and
+// no highlight anyway.
 @fragment
 fn fs_iris(in: VSOut) -> @location(0) vec4<f32> {
   let layer = textureSample(petal_tex, petal_samp, in.screen_uv);
   let d = layer.a;
-  let band = U.params3.w;
-  let cov = 1.0 - smoothstep(-band, band, d);
-  // Thin edge highlight, under petal_sheen so 0 is perfectly flat.
-  let rim = smoothstep(3.5 * IRIS_RIM_PX, 0.5 * IRIS_RIM_PX, abs(d))
-    * clamp(U.params0.y, 0.0, 1.0) * 0.2;
-  let petal = vec4<f32>((layer.rgb + vec3<f32>(rim)) * cov, cov);
-  let swap = clamp(U.params0.w, 0.0, 1.0);
+  var cov = select(0.0, 1.0, d < 0.0);
+  var rim = 0.0;
+  if (abs(d) < 3.5 * IRIS_RIM_PX) {
+    let band = U.params3.w;
+    cov = 1.0 - smoothstep(-band, band, d);
+    // Thin edge highlight, under petal_sheen so 0 is perfectly flat.
+    rim = smoothstep(3.5 * IRIS_RIM_PX, 0.5 * IRIS_RIM_PX, abs(d))
+      * clamp(U.params0.y, 0.0, 1.0) * 0.2;
+  }
   let cur_a = covered(in.current_uv);
   let next_a = covered(in.next_uv);
-  var cur_rgb = vec3<f32>(0.0);
-  var next_rgb = vec3<f32>(0.0);
-  if (petal.a < 1.0) {
+  var photo = vec3<f32>(0.0);
+  if (cov < 1.0) {
+    let swap = clamp(U.params0.w, 0.0, 1.0);
+    var cur_rgb = vec3<f32>(0.0);
+    var next_rgb = vec3<f32>(0.0);
     if (swap < 1.0) {
       cur_rgb = fetch_current(in.current_uv) * cur_a;
     }
     if (swap > 0.0) {
       next_rgb = fetch_next(in.next_uv) * next_a;
     }
+    photo = mix(cur_rgb, next_rgb, swap);
   }
-  let current = vec4<f32>(cur_rgb, cur_a);
-  let next = vec4<f32>(next_rgb, next_a);
-  let photo = mix(current, next, swap);
-  let color = vec4<f32>(photo.rgb * (1.0 - petal.a) + petal.rgb, max(photo.a, petal.a));
-  return over_background(color, current, next);
+  let rgb = photo * (1.0 - cov) + (layer.rgb + vec3<f32>(rim)) * cov;
+  return over_background_rgb(rgb, max(max(cur_a, next_a), cov));
 }
 
 // Debug: stroke a single quadratic Bezier over the current image.
