@@ -511,46 +511,61 @@ full-screen passes are spent carefully:
   progress-1 image on a full-screen canvas is the next photo; dissolve and
   venetian blinds, whose soft edges never quite close at progress 1, now
   reach it one frame earlier instead of on the first dwell frame.
-- **Iris petals render at 1/`IRIS_LAYER_SCALE` (default 4)** in their own
-  premultiplied layer (`PHOTOFRAME_IRIS_LAYER_SCALE` to override). The
-  petal SDF math runs on CPU-precomputed per-frame constants and avoids
+- **Iris petals are a signed-distance layer at 1/`IRIS_LAYER_SCALE`
+  (default 16)** (`PHOTOFRAME_IRIS_LAYER_SCALE`, 1–16, to override). The
+  petal math runs on CPU-precomputed per-frame constants and avoids
   dynamically indexed local arrays, which the V3D compiler demotes to slow
-  per-pixel scratch memory. Everything petal-related is in the layer, in
-  two passes:
+  per-pixel scratch memory. The layer is drawn in two passes:
   - `fs_iris_cover` is the loop over petals. It carries only the nearest
-    edge distance and a 16-bit "inside" mask, reads which petal is on top
-    and how many cover the pixel from the mask afterwards
-    (`firstLeadingBit`, `countOneBits`), and stores the three numbers in
-    an `Rgba16Float` cover target;
-  - `fs_iris_layer` shades from that texel, with no loop.
+    edge distance and petal and a 16-bit "inside" mask, reads which petal
+    is on top and how many cover the pixel from the mask afterwards
+    (`firstLeadingBit`, `countOneBits`), and stores the distance, the
+    petal whose shade shows (the top one, or just outside the petals the
+    nearest) and the count in an `Rgba16Float` cover target;
+  - `fs_iris_layer` shades from that texel, with no loop, and writes the
+    shade (rgb) and the signed distance (alpha).
 
-  As one shader the layer compiled at 2 threads on the Pi (191
-  instructions, 33 temporaries, one loop; Pi, 2026-10-21), the only entry
-  point that did; split, each pass holds far fewer live values. Against the
-  one-pass layer the output differs only by the half-float rounding of the
-  stored distance: at most 0.0005 in linear light, under a third of an
-  8-bit step (Mac GPU, 24 frames across 5, 9 and 14 blades and the whole
-  progress range).
+  `fs_iris`, the main pass, samples the layer bilinearly and draws the
+  petals' outline itself: coverage is a smoothstep of the interpolated
+  distance over ±0.75 of its own pixel, and the edge highlight is added
+  from the same distance. A signed distance interpolates cleanly, so the
+  outline stays crisp however coarse the layer; the layer's resolution
+  sets only how finely the shading is sampled (sheen, the overlap shadows,
+  and where one petal's edge lies over another, whose two sides belong to
+  different petals and so cannot be interpolated). Inside the aperture the
+  cover pass stores the aperture circle's distance, a lower bound on every
+  petal's, wherever no texel's reach can bring a petal into view.
 
-  `fs_iris` composites the two photos and the layer, with no petal work
-  beyond the one layer sample. It fetches a photo only where it can show:
-  not under fully opaque petals, most of the screen around full close,
-  and not while its share of the swap is zero, every frame but the swap
-  window. Bit-identical to the version that always fetched both.
+  Mac GPU check against the 1/4 layer of v1.2 rc (21 frames at 4K geometry,
+  5, 9 and 14 blades, open through closed; the main pass at 1920x1080):
 
-  Pi measurement, 2026-10-21, before the split: the layer plus the main
-  pass grew from 5.8 ms (open) to 16.9 ms (closed) per frame, so iris ran
-  at about 51 fps at scale 2. `kms_frame` reports the layer and the main
-  pass separately (`gpu_layer_ms`, `gpu_main_ms`). The layer's cost is
-  layer pixels × blades: near full close nearly every pixel is outside the
-  aperture and runs the loop. Coarser petals (`PHOTOFRAME_IRIS_LAYER_SCALE=8`)
-  quarter that at the price of softer petal edges; drawing the petals as
-  geometry (a fan of triangles each) would remove the per-pixel loop, but
-  their cyclic stacking (each petal rests on the next) has no draw order,
-  so that is a redesign, not a tweak. The layer is `Rgba16Float`, not 8-bit: petals
-  are very dark in linear light, so a smooth shading gradient spans only a
-  few 8-bit levels and visibly bands — half-float has the dark-range
-  precision to keep it smooth, at negligible cost on a quarter-res layer.
+  | Layer scale | Photo | Petal interior, max (pixels > 1 LSB) | Near overlap edges, max | Outline position error p99 / max |
+  |---|---|---|---|---|
+  | 4 | identical | 1 LSB (0) | 1 LSB | 0.09 / 1.4 px |
+  | 8 | identical | 2 LSB (110 of 29M) | 15 LSB | 0.38 / 4.2 px |
+  | 16 | identical | 5 LSB (11k of 27M) | 18 LSB | 1.2 / 7.2 px |
+
+  The outline is crisper than before at every scale (±1.5 screen px
+  instead of the old ±1 layer texel feather), so the edge band differs by
+  design. The interior differences sit in the tails of the overlap-shadow
+  ramps (27 px wide at 4K, sampled every 16 px); the outline error peaks
+  where two petal edges meet at an angle (the interpolated distance rounds
+  the corner). The overlap edges are sampled at the layer's resolution.
+
+  Pi measurement, 2026-10-22, before this layer: the cover loop is the
+  cost, layer pixels × blades, peaking where the petal band is widest
+  (12.4 ms at scale 4, 3.5 ms at 8), so 16 is the scale that fits a frame.
+  All iris entry points compile at 4 threads (`fs_iris_cover` 188
+  instructions; the one 2-thread shader in the build is `fs_debug_bezier`,
+  used only with `PHOTOFRAME_DEBUG_BEZIER`).
+
+  `fs_iris` fetches a photo only where it can show: not under fully opaque
+  petals, most of the screen around full close, and not while its share
+  of the swap is zero, every frame but the swap window. `kms_frame`
+  reports the layer and the main pass separately (`gpu_layer_ms`,
+  `gpu_main_ms`). The layer is `Rgba16Float`, not 8-bit: petals are very
+  dark in linear light, so a smooth shading gradient spans only a few
+  8-bit levels and visibly bands; half floats also hold the distance.
 - **The main pass renders opaquely** (no blending) and composites letterbox
   regions over the background color in-shader, saving a destination read
   per pixel and keeping the surface eligible for direct scanout.

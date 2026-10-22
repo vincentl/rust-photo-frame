@@ -49,10 +49,17 @@ use tracing::{Level, debug, info, warn};
 const IRIS_EXTRA_WIDTH_RAD: f32 = 1.308_997;
 
 /// Linear downscale factor of the iris petal layer relative to the surface.
-/// 4 → 1/16 of the petal-shading cost; at 4K the layer is 960x540, and the
-/// petal edge feather widens to ~4 native pixels, which reads as natural
-/// blade softness. Override with PHOTOFRAME_IRIS_LAYER_SCALE for tuning.
-const IRIS_LAYER_SCALE: u32 = 4;
+/// The layer holds the petals' signed distance and shade; the main pass
+/// draws the outline from the interpolated distance at its own resolution,
+/// so the outline stays crisp at any layer scale and the scale sets only
+/// how finely the shading is sampled. The layer's cost is its pixels × the
+/// blades (Pi, 2026-10-22: up to 12.4 ms at 4, 3.5 ms at 8), so 16 (240x135
+/// at 4K) is what fits the frame. Against the 1/4 layer on the Mac GPU,
+/// petal interiors are within 5 LSB (0.04% of pixels over 1, all in the
+/// overlap-shadow ramps), and where one petal's edge lies over another the
+/// step is sampled at 16 px; 8 keeps interiors within 2 LSB. Override with
+/// PHOTOFRAME_IRIS_LAYER_SCALE (1..=16).
+const IRIS_LAYER_SCALE: u32 = 16;
 
 /// Linear downscale factor for the intermediate that transition frames
 /// render into (resting photos always render at native resolution). 2 →
@@ -87,7 +94,7 @@ fn transition_scale() -> u32 {
 /// Effective iris petal-layer scale (env-overridable, read once).
 fn iris_layer_scale() -> u32 {
     static SCALE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *SCALE.get_or_init(|| scale_from_env("PHOTOFRAME_IRIS_LAYER_SCALE", IRIS_LAYER_SCALE, 8))
+    *SCALE.get_or_init(|| scale_from_env("PHOTOFRAME_IRIS_LAYER_SCALE", IRIS_LAYER_SCALE, 16))
 }
 
 /// DRM/KMS: how long before a transition the viewer starts rendering the
@@ -4395,9 +4402,14 @@ impl App {
                             // Inscribed aperture radius: pixels closer to
                             // center than this are provably petal-free.
                             uniforms.params1 = [r_in - e, color[0], color[1], color[2]];
-                            // Petal-layer upscale factor: keeps the edge
-                            // feather at least one layer texel wide.
-                            uniforms.params3 = [iris_layer_scale() as f32, r_mid, 0.5 * r_in, r_in];
+                            // The layer's scale (how far its texels reach),
+                            // the ring geometry, and the main pass's edge
+                            // anti-aliasing half-width: 0.75 of its pixel,
+                            // in screen pixels (iris frames always draw
+                            // into the intermediate when there is one).
+                            let edge_band = 0.75 * transition_scale().max(1) as f32;
+                            uniforms.params3 =
+                                [iris_layer_scale() as f32, r_mid, 0.5 * r_in, edge_band];
                             let (s_psi, c_psi) = psi.sin_cos();
                             for i in 0..n {
                                 let ai = std::f32::consts::TAU * i as f32 / n as f32 + spin;

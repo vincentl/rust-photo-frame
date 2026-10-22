@@ -181,45 +181,57 @@ fn iris_petal(i: i32, p: vec2<f32>, r_mid: f32, w: f32) -> f32 {
   return d;
 }
 
-// The iris petals (shape + shading, premultiplied alpha) render into a
-// reduced-resolution offscreen layer in two passes: fs_iris_cover finds, per
-// layer pixel, the nearest petal edge and which petals cover it (the loop
-// over petals); fs_iris_layer shades from that (no loop). Coordinates derive
-// from screen_uv and U.screen_size, so the same math works at any target
-// resolution; the main pass upsamples the result. At 4K the petal
-// arithmetic is far too heavy to run per native pixel on the Pi, and the
-// petals are large smooth shapes that survive upscaling; params3.x carries
-// the upscale factor so edge feathering stays at least one layer texel wide.
+// The iris petals render into a reduced-resolution offscreen layer as a
+// signed distance and a shade, in two passes: fs_iris_cover finds, per layer
+// pixel, the nearest petal edge and which petals cover it (the loop over
+// petals); fs_iris_layer shades from that (no loop). The main pass (fs_iris)
+// samples the layer bilinearly and draws the petals' outline itself from
+// the interpolated distance, with an anti-aliasing band of its own pixel
+// size: a signed distance interpolates cleanly, so the outline stays crisp
+// however coarse the layer, and the layer resolution only sets how finely
+// the shading (sheen, overlap shadows, and where one petal's edge lies over
+// another) is sampled. Coordinates derive from screen_uv and U.screen_size,
+// so the same math works at any target resolution.
 // params0 = (blades, petal_sheen, overlap_shadow, photo_swap_mix)
 // params1 = (open_radius_px, color.r, color.g, color.b)
-// params3 = (layer_scale, r_mid, half band width w, r_in): the petal ring's
-// geometry, the same for every pixel, from the CPU.
+// params3 = (layer_scale, r_mid, half band width w = r_in / 2, edge band):
+// the petal ring's geometry, the same for every pixel, from the CPU; the
+// edge band is the main pass's anti-aliasing half-width, in screen pixels.
 //
-// Register pressure decides these shaders' speed on V3D: as one shader the
-// layer compiled at 2 threads (191 instructions, 33 temporaries, Pi
-// 2026-10-21). Split, the loop carries only what it needs (the position,
-// the nearest distance and a bitmask of covered petals) and the shading
-// starts from four stored numbers, so each pass is small enough for 4.
+// Register pressure decides these shaders' speed on V3D. Split, the loop
+// carries only what it needs (the position, the nearest distance and petal,
+// and a bitmask of covered petals) and the shading starts from four stored
+// numbers; both compile at 4 threads (Pi, 2026-10-22).
 
-// A cover texel's distance where no petal is near (inside the aperture):
-// far beyond any feather, so the shading pass returns transparent.
-const IRIS_FAR: f32 = 1.0e4;
+// The edge highlight's scale, in screen pixels: the rim spans 0.5 to 3.5 of
+// these inside a petal's outline (the look of the 1/4-resolution layer this
+// replaced, whose feather was one layer texel).
+const IRIS_RIM_PX: f32 = 4.0;
 
-// Per layer pixel: (nearest petal edge distance d_min, topmost covered
-// petal, number of covered petals, 0), into an Rgba16Float cover target.
-// Half floats hold the two counts exactly and the distance to well under a
-// hundredth of a pixel where the shading reads it (within a few feather
-// widths of an edge).
+// How far outside the petals the layer must hold a true distance and a
+// shade: a bilinear sample reads texels up to one texel (layer_scale screen
+// pixels) per axis away, and the rim reaches 3.5 IRIS_RIM_PX in.
+fn iris_reach(layer_scale: f32) -> f32 {
+  return 2.0 * layer_scale + 3.5 * IRIS_RIM_PX;
+}
+
+// Per layer pixel: (signed distance to the petals' outline d_min, the petal
+// whose shade shows, number of covered petals, 0), into an Rgba16Float
+// cover target. The petal shown is the topmost covered one or, just outside
+// the outline, the nearest, so the shade extends past the edge for the main
+// pass to interpolate. Half floats hold the counts exactly and the distance
+// to well under a hundredth of a pixel near an edge.
 @fragment
 fn fs_iris_cover(in: VSOut) -> @location(0) vec4<f32> {
   let screen_pos = in.screen_uv * U.screen_size;
   let n = max(i32(U.params0.x), 1);
-  let aa = max(U.params3.x, 1.0);
   let p = screen_pos - 0.5 * U.screen_size;
-  // Pixels inside the inscribed aperture circle are provably petal-free;
-  // at the ends of the transition that is the entire screen.
-  if (length(p) < U.params1.x - aa) {
-    return vec4<f32>(IRIS_FAR, 0.0, 0.0, 0.0);
+  // The aperture circle is inscribed in the petals' opening, so its
+  // distance bounds every petal's from below; far enough inside it, that
+  // bound is all the main pass needs (it reads only that no petal is near).
+  let free = U.params1.x - length(p);
+  if (free > iris_reach(max(U.params3.x, 1.0))) {
+    return vec4<f32>(free, 0.0, 0.0, 0.0);
   }
   let r_mid = U.params3.y;
   let w = U.params3.z;
@@ -229,42 +241,44 @@ fn fs_iris_cover(in: VSOut) -> @location(0) vec4<f32> {
   // always form one contiguous run, so the topmost is the covered petal
   // whose successor is uncovered.
   var d_min = 1e9;
+  var nearest = 0;
   var covered = 0u;
   for (var i: i32 = 0; i < 16; i++) {
     if (i >= n) { break; }
     let d = iris_petal(i, p, r_mid, w);
+    nearest = select(nearest, i, d < d_min);
     d_min = min(d_min, d);
     covered = covered | (select(0u, 1u, d < 0.0) << u32(i));
   }
   // Bit j of `succ` is petal (j + 1) mod n covered; the candidates are
   // covered petals with an uncovered successor. The topmost is the highest
-  // candidate (the wrap-around candidate n - 1 wins); none (all or no
-  // petals covered) gives 0.
+  // candidate (the wrap-around candidate n - 1 wins); none (every petal
+  // covers the pixel) gives 0.
   let un = u32(n);
   let all_petals = (1u << un) - 1u;
   let succ = ((covered >> 1u) | (covered << (un - 1u))) & all_petals;
   let candidates = covered & ~succ;
   let top = select(0, i32(firstLeadingBit(candidates)), candidates != 0u);
-  return vec4<f32>(d_min, f32(top), f32(countOneBits(covered)), 0.0);
+  let shown = select(nearest, top, covered != 0u);
+  return vec4<f32>(d_min, f32(shown), f32(countOneBits(covered)), 0.0);
 }
 
-// Shades the petals from this pixel's cover texel (bound at group 1, same
-// resolution as this target).
+// The petals' shade (linear rgb, not premultiplied) and the signed distance
+// (alpha), from this pixel's cover texel (bound at group 1, same resolution
+// as this target). Beyond the main pass's reach only the distance matters.
 @fragment
 fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   let cover = textureLoad(cur_tex, vec2<i32>(in.pos.xy), 0);
   let d_min = cover.x;
-  let aa = max(U.params3.x, 1.0);
-  let cov = 1.0 - smoothstep(-aa, aa, d_min);
-  if (cov <= 0.0) {
-    return vec4<f32>(0.0);
+  if (d_min > iris_reach(max(U.params3.x, 1.0))) {
+    return vec4<f32>(0.0, 0.0, 0.0, d_min);
   }
   let n = max(i32(U.params0.x), 1);
   let contrast = clamp(U.params0.y, 0.0, 1.0);
   let shadow_amt = clamp(U.params0.z, 0.0, 1.0);
   let r_mid = U.params3.y;
   let w = U.params3.z;
-  let r_in = U.params3.w;
+  let r_in = 2.0 * w;
   let p = in.screen_uv * U.screen_size - 0.5 * U.screen_size;
   let top = i32(cover.y);
   let covered_count = i32(cover.z);
@@ -289,11 +303,8 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   let dn2 = max(iris_petal(j2, p, r_mid, w), 0.0);
   let occ = 0.5 * (1.0 - smoothstep(0.0, shadow_w, dn1))
     + 0.22 * (1.0 - smoothstep(0.0, shadow_w * 0.6, dn2));
-  // Thin edge highlight, also under petal_sheen so 0 is perfectly flat.
-  let rim = smoothstep(3.5 * aa, 0.5 * aa, abs(d_min)) * contrast * 0.2;
   let blade_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
-  let blade_col = blade_rgb * tone * (1.0 - shadow_amt * occ) + vec3<f32>(rim);
-  return vec4<f32>(blade_col * cov, cov);
+  return vec4<f32>(blade_rgb * tone * (1.0 - shadow_amt * occ), d_min);
 }
 
 // Upscales the half-resolution transition intermediate (bound at group 1)
@@ -495,9 +506,11 @@ fn fs_crossfade_zoom(in: VSOut) -> @location(0) vec4<f32> {
   return over_background(mix(c, nxt, progress01()), current, next);
 }
 
-// Mechanical camera-iris diaphragm. The petals (shape + shading) were
-// rendered into the reduced-resolution petal layer by fs_iris_layer this
-// frame; here they are composited (premultiplied alpha) over the
+// Mechanical camera-iris diaphragm. The petals' shade and signed distance
+// were rendered into the reduced-resolution petal layer by fs_iris_layer
+// this frame; here the outline is drawn from the interpolated distance with
+// an anti-aliasing band of this pass's pixel size (params3.w, screen px),
+// the edge highlight added inside it, and the petals composited over the
 // crossfading photos. params0.w = photo_swap_mix.
 //
 // A photo's color is fetched only where it can show: not under fully opaque
@@ -507,7 +520,14 @@ fn fs_crossfade_zoom(in: VSOut) -> @location(0) vec4<f32> {
 // same; coverage is always computed (the composite needs it).
 @fragment
 fn fs_iris(in: VSOut) -> @location(0) vec4<f32> {
-  let petal = textureSample(petal_tex, petal_samp, in.screen_uv);
+  let layer = textureSample(petal_tex, petal_samp, in.screen_uv);
+  let d = layer.a;
+  let band = U.params3.w;
+  let cov = 1.0 - smoothstep(-band, band, d);
+  // Thin edge highlight, under petal_sheen so 0 is perfectly flat.
+  let rim = smoothstep(3.5 * IRIS_RIM_PX, 0.5 * IRIS_RIM_PX, abs(d))
+    * clamp(U.params0.y, 0.0, 1.0) * 0.2;
+  let petal = vec4<f32>((layer.rgb + vec3<f32>(rim)) * cov, cov);
   let swap = clamp(U.params0.w, 0.0, 1.0);
   let cur_a = covered(in.current_uv);
   let next_a = covered(in.next_uv);
