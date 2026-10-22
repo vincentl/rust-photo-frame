@@ -316,7 +316,8 @@ fn fs_blit(in: VSOut) -> @location(0) vec4<f32> {
 // MIP_SHARPEN; the weights sum to 1). Branch-free.
 //
 // a = 1 minimised the error of the 2x bilinear round trip against the
-// native canvas on five photos (Mac GPU; see docs/performance.md).
+// native canvas on five photos (Mac GPU; see docs/performance.md); the
+// viewer sets it from PHOTOFRAME_MIP_SHARPEN (0 = the plain box).
 override MIP_SHARPEN: f32 = 1.0;
 
 fn mip_tap(center: vec2<f32>, texel: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {

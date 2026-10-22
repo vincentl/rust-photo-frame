@@ -601,7 +601,8 @@ full-screen passes are spent carefully:
   | clamped a = 1.25 | 3.80 | 13.9% | 0 / 0 | 0 |
   | clamped a = 1.5 | 3.82 | 14.0% | 0 / 0 | 0 |
 
-  Clamped a = 1 (`MIP_SHARPEN`) takes back 12% of the error at no cost
+  Clamped a = 1 (`PHOTOFRAME_MIP_SHARPEN`, 0 to 2, default 1; 0 is the
+  plain box) takes back 12% of the error at no cost
   per frame and with no halo, about 60% of what the 5-tap cubic upscale
   recovered (3.47) at 7 ms a frame. Per photo: 5.14 to 4.38, 9.96 to 8.84,
   3.39 to 3.12, 1.35 to 1.15, 1.77 to 1.45 LSB. A thin line is not

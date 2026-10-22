@@ -162,6 +162,51 @@ fn upscale_filter() -> UpscaleFilter {
     })
 }
 
+/// How strongly the canvas level transitions read is unsharp-masked at
+/// upload (`fs_mip_sharpen`'s `MIP_SHARPEN`): 1 by default (the lowest
+/// error of the 2x bilinear round trip, docs/performance.md), 0 a plain box
+/// filter. The range-clamped mask keeps edges halo-free at any strength.
+const MIP_SHARPEN_DEFAULT: f32 = 1.0;
+const MIP_SHARPEN_MAX: f32 = 2.0;
+
+/// A `PHOTOFRAME_MIP_SHARPEN` value: a finite number, clamped to
+/// 0..=`MIP_SHARPEN_MAX` (the second value says whether it was clamped);
+/// `None` for anything else.
+fn parse_mip_sharpen(raw: &str) -> Option<(f32, bool)> {
+    let value: f32 = raw.trim().parse().ok().filter(|v: &f32| v.is_finite())?;
+    let clamped = value.clamp(0.0, MIP_SHARPEN_MAX);
+    Some((clamped, clamped != value))
+}
+
+/// `PHOTOFRAME_MIP_SHARPEN`, read once. It applies to photos uploaded after
+/// the process starts (mips are made at upload).
+fn mip_sharpen() -> f32 {
+    static SHARPEN: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SHARPEN.get_or_init(|| {
+        let sharpen = match std::env::var("PHOTOFRAME_MIP_SHARPEN") {
+            Ok(raw) => match parse_mip_sharpen(&raw) {
+                Some((value, clamped)) => {
+                    if clamped {
+                        warn!(raw, value, "PHOTOFRAME_MIP_SHARPEN out of 0..=2; clamped");
+                    }
+                    value
+                }
+                None => {
+                    warn!(raw, "invalid PHOTOFRAME_MIP_SHARPEN; using the default");
+                    MIP_SHARPEN_DEFAULT
+                }
+            },
+            Err(std::env::VarError::NotUnicode(raw)) => {
+                warn!(value = ?raw, "PHOTOFRAME_MIP_SHARPEN is not UTF-8; using the default");
+                MIP_SHARPEN_DEFAULT
+            }
+            Err(std::env::VarError::NotPresent) => MIP_SHARPEN_DEFAULT,
+        };
+        info!(sharpen, "viewer_mip_sharpen");
+        sharpen
+    })
+}
+
 /// DRM/KMS: how long before a transition the viewer starts rendering the
 /// resting photo on every refresh (`wake::plan_wake`, "lead-in"). The V3D
 /// clock idles at its lowest step (500 MHz) through a dwell and reaches
@@ -2982,7 +3027,7 @@ fn build_gpu(
         multiview: None,
         cache: None,
     });
-    let canvas_mip_pipeline = |label: &str, entry_point: &str| {
+    let canvas_mip_pipeline = |label: &str, entry_point: &str, constants: &[(&str, f64)]| {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&blit_pipeline_layout),
@@ -3003,14 +3048,22 @@ fn build_gpu(
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants,
+                    ..Default::default()
+                },
             }),
             multiview: None,
             cache: None,
         })
     };
-    let mip_pipeline = canvas_mip_pipeline("canvas-mip-pipeline", "fs_blit");
-    let mip_sharpen_pipeline = canvas_mip_pipeline("canvas-mip-sharpen-pipeline", "fs_mip_sharpen");
+    let mip_pipeline = canvas_mip_pipeline("canvas-mip-pipeline", "fs_blit", &[]);
+    // PHOTOFRAME_MIP_SHARPEN, as the shader's MIP_SHARPEN.
+    let mip_sharpen_pipeline = canvas_mip_pipeline(
+        "canvas-mip-sharpen-pipeline",
+        "fs_mip_sharpen",
+        &[("MIP_SHARPEN", f64::from(mip_sharpen()))],
+    );
     // PHOTOFRAME_PROBE=single-sample (diagnostic): see the
     // shader.
     let probe_constants = probe_pipeline_constants(probes());
@@ -6125,6 +6178,18 @@ mod tests {
         let last = *frames.last().unwrap();
         state.anchor_once(last + period);
         assert!(state.progress_at(last) > 0.0);
+    }
+
+    #[test]
+    fn mip_sharpen_parses_a_clamped_finite_number() {
+        assert_eq!(parse_mip_sharpen("1"), Some((1.0, false)));
+        assert_eq!(parse_mip_sharpen(" 0.5 "), Some((0.5, false)));
+        assert_eq!(parse_mip_sharpen("0"), Some((0.0, false)));
+        assert_eq!(parse_mip_sharpen("3"), Some((MIP_SHARPEN_MAX, true)));
+        assert_eq!(parse_mip_sharpen("-1"), Some((0.0, true)));
+        for bad in ["", "sharp", "NaN", "inf"] {
+            assert_eq!(parse_mip_sharpen(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
