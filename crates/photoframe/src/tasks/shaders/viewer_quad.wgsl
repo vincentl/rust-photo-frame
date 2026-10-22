@@ -320,33 +320,44 @@ fn fs_blit(in: VSOut) -> @location(0) vec4<f32> {
 // viewer sets it from PHOTOFRAME_MIP_SHARPEN (0 = the plain box).
 override MIP_SHARPEN: f32 = 1.0;
 
-fn mip_tap(center: vec2<f32>, texel: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
-  return textureSampleLevel(cur_tex, cur_samp, (center + vec2<f32>(dx, dy)) * texel, 0.0).rgb;
+// The mask's running state: the weighted sum and the darkest and brightest
+// tap so far. Each tap is folded in as it is read, so only these three
+// stay live instead of all nine taps (as nine values held to the end the
+// shader compiled at 2 threads on the Pi: 112 instructions, 2026-10-22).
+struct MipSharpen {
+  sum: vec3<f32>,
+  lo: vec3<f32>,
+  hi: vec3<f32>,
+};
+
+fn mip_fold(acc: MipSharpen, uv: vec2<f32>, w: f32) -> MipSharpen {
+  let tap = textureSampleLevel(cur_tex, cur_samp, uv, 0.0).rgb;
+  return MipSharpen(acc.sum + tap * w, min(acc.lo, tap), max(acc.hi, tap));
 }
 
 @fragment
 fn fs_mip_sharpen(in: VSOut) -> @location(0) vec4<f32> {
-  let size = vec2<f32>(textureDimensions(cur_tex));
-  let texel = 1.0 / size;
-  let center = in.screen_uv * size;
+  let texel = 1.0 / vec2<f32>(textureDimensions(cur_tex));
+  // The output pixel's center in the source, and two source texels.
+  let uv = in.screen_uv;
+  let dx = vec2<f32>(2.0 * texel.x, 0.0);
+  let dy = vec2<f32>(0.0, 2.0 * texel.y);
   let a = MIP_SHARPEN;
-  let c0 = mip_tap(center, texel, 0.0, 0.0);
-  let e0 = mip_tap(center, texel, -2.0, 0.0);
-  let e1 = mip_tap(center, texel, 2.0, 0.0);
-  let e2 = mip_tap(center, texel, 0.0, -2.0);
-  let e3 = mip_tap(center, texel, 0.0, 2.0);
-  let k0 = mip_tap(center, texel, -2.0, -2.0);
-  let k1 = mip_tap(center, texel, 2.0, -2.0);
-  let k2 = mip_tap(center, texel, -2.0, 2.0);
-  let k3 = mip_tap(center, texel, 2.0, 2.0);
-  let sharp = c0 * (1.0 + 0.75 * a)
-    - (e0 + e1 + e2 + e3) * (0.125 * a)
-    - (k0 + k1 + k2 + k3) * (0.0625 * a);
+  let edge = -0.125 * a;
+  let corner = -0.0625 * a;
+  let c0 = textureSampleLevel(cur_tex, cur_samp, uv, 0.0).rgb;
+  var acc = MipSharpen(c0 * (1.0 + 0.75 * a), c0, c0);
+  acc = mip_fold(acc, uv - dx, edge);
+  acc = mip_fold(acc, uv + dx, edge);
+  acc = mip_fold(acc, uv - dy, edge);
+  acc = mip_fold(acc, uv + dy, edge);
+  acc = mip_fold(acc, uv - dx - dy, corner);
+  acc = mip_fold(acc, uv + dx - dy, corner);
+  acc = mip_fold(acc, uv - dx + dy, corner);
+  acc = mip_fold(acc, uv + dx + dy, corner);
   // Never past the darkest or brightest of the taps it was built from:
   // edges and lines keep their plateaus (no halo), texture still sharpens.
-  let lo = min(min(min(c0, e0), min(e1, e2)), min(min(e3, k0), min(min(k1, k2), k3)));
-  let hi = max(max(max(c0, e0), max(e1, e2)), max(max(e3, k0), max(max(k1, k2), k3)));
-  return vec4<f32>(clamp(sharp, lo, hi), 1.0);
+  return vec4<f32>(clamp(acc.sum, acc.lo, acc.hi), 1.0);
 }
 
 // Catmull-Rom (bicubic) reconstruction of the intermediate, from bilinear
