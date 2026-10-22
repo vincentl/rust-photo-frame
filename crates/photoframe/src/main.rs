@@ -361,6 +361,11 @@ fn run_playlist_dry_run(
     canvas: Option<(u32, u32)>,
 ) -> Result<()> {
     let now = now_override.unwrap_or_else(SystemTime::now);
+    // One seed for everything the dry run simulates (review C2): the paired
+    // screens and the unpaired sequence they are compared with must come
+    // from the same scheduler run, so a missing seed is drawn once here.
+    let drawn = seed.is_none();
+    let seed = Some(seed.unwrap_or_else(rand::random::<u64>));
     let mut photos = tasks::files::discover_startup_photos(cfg)?;
     let pairing = tasks::manager::pairing::PairingRules::from_config(cfg);
     // The matting canvas is the screen times the oversample factor.
@@ -383,7 +388,11 @@ fn run_playlist_dry_run(
         photos.len(),
         format_rfc3339(now),
         iterations,
-        seed.map_or_else(|| "(random)".to_string(), |s| s.to_string()),
+        match seed {
+            Some(s) if drawn => format!("{s} (drawn; pass --playlist-seed {s} to repeat)"),
+            Some(s) => s.to_string(),
+            None => "(random)".to_string(),
+        },
         cfg.playlist.order,
         cfg.playlist.refractory_fraction(),
     );

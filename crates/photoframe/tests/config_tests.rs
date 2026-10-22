@@ -2002,10 +2002,10 @@ fn pairing_defaults_to_off() {
     assert!(!pairing.lookahead, "rc2 behaviour unless asked");
 }
 
-/// `lookahead: true` sets the planner's window to `viewer-preload-count`;
-/// off it is 1 (back to back).
+/// `lookahead: true` sets the planner's window to `viewer-preload-count`,
+/// capped at 3 (review C6); off it is 1 (back to back).
 #[test]
-fn pairing_lookahead_window_is_the_viewer_preload_count() {
+fn pairing_lookahead_window_follows_the_preload_count_up_to_three() {
     use photoframe::tasks::manager::pairing::PairingRules;
     let mat = "    - kind: fixed-color\n      minimum-mat-percentage: 5\n";
     let cfg = pairing_config("    enabled: true\n    lookahead: true\n", mat).expect("valid");
@@ -2020,7 +2020,16 @@ fn pairing_lookahead_window_is_the_viewer_preload_count() {
         .unwrap()
         .validated()
         .unwrap();
-    assert_eq!(PairingRules::from_config(&cfg).unwrap().lookahead, 5);
+    assert_eq!(
+        PairingRules::from_config(&cfg).unwrap().lookahead,
+        3,
+        "a deeper preload does not widen the reorder"
+    );
+    let cfg = serde_yaml::from_str::<Configuration>(&yaml.replace("count: 5", "count: 2"))
+        .unwrap()
+        .validated()
+        .unwrap();
+    assert_eq!(PairingRules::from_config(&cfg).unwrap().lookahead, 2);
 
     let cfg = pairing_config("    enabled: true\n", mat).expect("valid");
     assert_eq!(PairingRules::from_config(&cfg).unwrap().lookahead, 1);

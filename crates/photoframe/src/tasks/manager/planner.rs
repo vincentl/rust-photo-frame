@@ -6,10 +6,12 @@
 //! of the sequence it already produces: **when the scheduler's next two
 //! appearances are both pairable, they share one screen.** With
 //! `pairing.lookahead` the partner may instead sit anywhere in the next `W`
-//! positions (`W` = `viewer-preload-count`, the screens already queued or in
-//! flight); the photos between are shifted one appearance later. Between
+//! unsent positions (`W` follows `viewer-preload-count`, capped at
+//! `pairing::LOOKAHEAD_MAX`); the photos between are shifted one appearance
+//! later. Nothing already handed to the loader is ever moved. Between
 //! screens the planner keeps `Q`, the committed but unsent appearances in
-//! sequence order (rc2's single `C`; at most `W − 1`), and `H`, one held peek
+//! sequence order (rc2's single `C`; at most `W` long, since a refused pull
+//! at position `W` leaves its candidate committed), and `H`, one held peek
 //! (not committed). Each step below is named as in the design.
 //!
 //! Invariants (proofs in the design):
@@ -123,8 +125,10 @@ pub fn coin_rng(seed: Option<u64>) -> StdRng {
 /// Plans one screen at a time from a [`PlaylistScheduler`].
 pub struct ScreenPlanner {
     /// `Q`: committed but unsent, in sequence order; always sent, in order,
-    /// on the next screens. rc2's single `C`; with look-ahead at most
-    /// `W − 1` long.
+    /// on the next screens (a removal repair may swap its first two, below).
+    /// rc2's single `C`; with look-ahead at most `W` long: a pull formed at
+    /// position `k` leaves `k − 1 ≤ W − 1` queued, a pull refused after its
+    /// candidate was committed leaves up to `W`.
     committed: VecDeque<Appearance>,
     /// `H`: the held peek (not committed), the scheduler's current front.
     held: Option<Appearance>,
@@ -133,6 +137,11 @@ pub struct ScreenPlanner {
     /// (after a B4 degrade it is the degraded screen; a dropped empty screen
     /// leaves it unchanged).
     previous: Vec<Arc<PathBuf>>,
+    /// A `PhotoRemoved` arrived since the last screen was sent: the next head
+    /// may be on the previous screen and is repaired (review C3). Without a
+    /// removal that only happens where the sequence itself has `Z, Z`, which
+    /// is left as it is (rc2).
+    removed_since_sent: bool,
     /// `p`, `pairing.probability`.
     probability: f64,
     /// `W`, the look-ahead window: positions after the head a partner may
@@ -148,6 +157,7 @@ impl ScreenPlanner {
             committed: VecDeque::new(),
             held: None,
             previous: Vec::new(),
+            removed_since_sent: false,
             probability,
             lookahead: 1,
             coin: coin_rng(seed),
@@ -179,6 +189,22 @@ impl ScreenPlanner {
         } else {
             (peek(sched)?, false)
         };
+
+        // Step 1b. Repair after a removal (review C3). Every plan keeps the
+        // next head off its own screen, so a committed head that is on the
+        // previous screen can only follow a `PhotoRemoved` of what stood
+        // between them (A, L1, A, B, C at W = 3: (A, B) is sent, L1 is
+        // removed, A would lead the next screen). Only after a removal: the
+        // sequence's own Z, Z (a debut) stays as rc2 shows it.
+        let (first, first_committed) =
+            if first_committed && self.removed_since_sent && self.previous.contains(&first.path) {
+                match self.repair_head(sched, first) {
+                    Ok(head) => head,
+                    Err(plan) => return Some(plan),
+                }
+            } else {
+                (first, first_committed)
+            };
 
         // Step 2. Today's path: A alone if pairing is off, p = 0, the canvas is
         // not yet published (`pairable` is None), or A is not pairable. An A
@@ -255,6 +281,45 @@ impl ScreenPlanner {
         Some(Plan::Committed(PlannedScreen::solo(first)))
     }
 
+    /// The committed head `first` is on the previous screen (only a removal
+    /// can do this). Send something else first when it is at hand and is
+    /// itself off the previous screen and distinct from `first`: the next
+    /// queued appearance, swapped ahead (`Ok`, the new head; `first` goes back
+    /// to the front of `Q`, and the swap must not put `first` next to an equal
+    /// third entry), else the scheduler's front, uncommitted, by today's path
+    /// (`Err(SendThenCommit)`, re-planned identically on every blocked-send
+    /// iteration, since the flag clears only when a screen is sent). Otherwise
+    /// the repeat stands and the analyzer attributes it to the removal (V1).
+    fn repair_head(
+        &mut self,
+        sched: &mut dyn PlaylistScheduler,
+        first: Appearance,
+    ) -> Result<(Appearance, bool), Plan> {
+        let fits =
+            |this: &Self, x: &Appearance| !this.previous.contains(&x.path) && x.path != first.path;
+        if let Some(second) = self.committed.front() {
+            let third_differs = self
+                .committed
+                .get(1)
+                .is_none_or(|third| third.path != first.path);
+            if fits(self, second) && third_differs {
+                let second = self.committed.pop_front().expect("front");
+                self.committed.push_front(first);
+                return Ok((second, true));
+            }
+        }
+        match self.held.take().or_else(|| peek(sched)) {
+            Some(front) if fits(self, &front) => {
+                self.committed.push_front(first);
+                Err(Plan::SendThenCommit(front))
+            }
+            front => {
+                self.held = front;
+                Ok((first, true))
+            }
+        }
+    }
+
     /// Make position `k` (1-based, after the head) visible: `Q[k−1]` if it is
     /// committed, else `H` once it is the `k`-th appearance, committing `H`
     /// into `Q` and peeking again as often as needed. `None` when the
@@ -297,6 +362,7 @@ impl ScreenPlanner {
     /// Record the screen that was actually sent (rule 4's previous screen).
     pub fn record_sent(&mut self, screen: &PlannedScreen) {
         self.previous = screen.members().map(|m| Arc::clone(&m.path)).collect();
+        self.removed_since_sent = false;
     }
 
     /// **What invalidates H (step 6, B7):** only `PhotoAdded` and
@@ -312,6 +378,7 @@ impl ScreenPlanner {
     /// planned, unsent screen with [`PlannedScreen::without`].)
     pub fn on_removed(&mut self, path: &Path) {
         self.committed.retain(|c| c.path.as_path() != path);
+        self.removed_since_sent = true;
         self.invalidate_held();
     }
 
@@ -1095,6 +1162,72 @@ mod tests {
             off.contains("max shift from the unpaired order: 0 appearances (bound W-1 = 0;"),
             "{off}"
         );
+    }
+
+    /// **Review C3.** A removal of what stood between a sent screen and a
+    /// queued photo from that screen would put the photo on consecutive
+    /// screens. The planner sends another appearance first: the scheduler's
+    /// front by today's path when the queue holds nothing else, or the next
+    /// queued photo swapped ahead.
+    #[test]
+    fn a_removal_that_would_repeat_the_head_sends_another_photo_first() {
+        // A L1 A B C: (A, B) at k = 3, Q = [L1, A]; L1 removed; C (the
+        // scheduler's front) goes first, then A.
+        let (mut sched, log) = Scripted::new("A L1 A B C");
+        let mut planner = ScreenPlanner::new(1.0, Some(1)).with_lookahead(3);
+        let plan = planner.plan(&mut sched, Some(&not_l)).unwrap();
+        assert_eq!(names(&plan.screen()), "A+B");
+        planner.record_sent(&plan.screen());
+        planner.on_removed(Path::new("L1"));
+        assert_eq!(planner.queued(), ["A"]);
+        log.lock().unwrap().clear();
+        let plan = planner.plan(&mut sched, Some(&not_l)).unwrap();
+        assert_eq!(plan.screen().primary.path.to_str(), Some("C"));
+        assert!(
+            matches!(plan, Plan::SendThenCommit(_)),
+            "today's path for C"
+        );
+        assert_eq!(planner.queued(), ["A"], "A stays queued");
+        // A blocked send re-plans identically.
+        let again = planner.plan(&mut sched, Some(&not_l)).unwrap();
+        assert_eq!(again, plan);
+        assert_eq!(*log.lock().unwrap(), ["peek C", "peek C"]);
+        planner.commit_after_send(&mut sched);
+        planner.record_sent(&plan.screen());
+        let plan = planner.plan(&mut sched, Some(&not_l)).unwrap();
+        assert_eq!(names(&plan.screen()), "A");
+        assert!(matches!(plan, Plan::Committed(_)));
+        planner.record_sent(&plan.screen());
+        assert!(planner.plan(&mut sched, Some(&not_l)).is_none());
+
+        // A L1 A L2 B at W = 4: (A, B), Q = [L1, A, L2]; L1 removed; L2 is
+        // swapped ahead of A.
+        let (mut sched, _) = Scripted::new("A L1 A L2 B");
+        let mut planner = ScreenPlanner::new(1.0, Some(1)).with_lookahead(4);
+        let plan = planner.plan(&mut sched, Some(&not_l)).unwrap();
+        assert_eq!(names(&plan.screen()), "A+B");
+        assert_eq!(planner.queued(), ["L1", "A", "L2"]);
+        planner.record_sent(&plan.screen());
+        planner.on_removed(Path::new("L1"));
+        let plan = planner.plan(&mut sched, Some(&not_l)).unwrap();
+        assert_eq!(names(&plan.screen()), "L2");
+        assert!(matches!(plan, Plan::Committed(_)));
+        assert_eq!(planner.queued(), ["A"]);
+        planner.record_sent(&plan.screen());
+        let plan = planner.plan(&mut sched, Some(&not_l)).unwrap();
+        assert_eq!(names(&plan.screen()), "A");
+    }
+
+    /// **Review C4.** The queue reaches W (not W − 1) when the candidate at
+    /// position W is committed and then refused: a, c, a, b, a, a, a, a, a
+    /// at W = 3 pulls nothing at k = 3 (b's successor equals its predecessor).
+    #[test]
+    fn the_queue_can_hold_w_entries_after_a_refused_pull_at_w() {
+        let (mut sched, _) = Scripted::new("a c a b a a a a a");
+        let mut planner = ScreenPlanner::new(1.0, Some(1)).with_lookahead(3);
+        let plan = planner.plan(&mut sched, Some(&all)).unwrap();
+        assert_eq!(names(&plan.screen()), "a");
+        assert_eq!(planner.queued(), ["c", "a", "b"], "|Q| = W");
     }
 
     /// Removal (B4) drops a queued, shifted photo and keeps the rest in order.

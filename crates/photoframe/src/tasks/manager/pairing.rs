@@ -95,11 +95,18 @@ pub struct PairingRules {
     pub m_max: f64,
     /// `b_max`, in canvas pixels.
     pub bevel_max: f64,
-    /// `W`, the look-ahead window in playlist positions after the head
-    /// (design "Look-ahead pairing"): 1 is back to back only (rc2);
-    /// `pairing.lookahead` sets it to `viewer-preload-count`.
+    /// `W`, the look-ahead window: unsent playlist positions after the head a
+    /// partner may come from (design "Look-ahead pairing"). 1 is back to back
+    /// only (rc2); `pairing.lookahead` sets it to `viewer-preload-count`
+    /// capped at [`LOOKAHEAD_MAX`].
     pub lookahead: usize,
 }
+
+/// The widest look-ahead window, the default `viewer-preload-count`. The
+/// window follows a shallower preload down (W = preload) but never exceeds
+/// this: a deeper preload is a decode buffer, not a licence to move photos
+/// further from their playlist slot (review C6).
+pub const LOOKAHEAD_MAX: usize = 3;
 
 impl PairingRules {
     /// `None` when pairing is disabled (or, impossible after validation, no
@@ -116,7 +123,7 @@ impl PairingRules {
         )?;
         Some(Self {
             lookahead: if pairing.lookahead {
-                cfg.viewer_preload_count.max(1)
+                cfg.viewer_preload_count.clamp(1, LOOKAHEAD_MAX)
             } else {
                 1
             },

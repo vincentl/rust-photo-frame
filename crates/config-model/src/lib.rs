@@ -201,9 +201,10 @@ mod pairing {
         /// transition/dwell` is wall-clock neutral.
         pub dwell_multiplier: f32,
         /// Look-ahead pairing: a pairable head may pair with a pairable
-        /// portrait anywhere in the next `viewer-preload-count` playlist
-        /// positions (the screens already queued or in flight), shifting the
-        /// photos between them one position later. Off: back to back only.
+        /// portrait anywhere in the next W unsent playlist positions, shifting
+        /// the photos between them one position later. W follows
+        /// `viewer-preload-count`, capped at 3 (the default preload depth).
+        /// Off: back to back only.
         pub lookahead: bool,
     }
 
@@ -528,13 +529,14 @@ mod tests {
         assert_eq!(options.probability, 1.0);
         assert_eq!(options.bar_ratio, 0.618);
         assert_eq!(options.dwell_multiplier, 1.5);
+        assert!(!options.lookahead);
         options.validate().expect("defaults validate");
     }
 
     #[test]
     fn pairing_round_trips_every_key() {
         let options: PairingOptions = serde_yaml::from_str(
-            "enabled: true\nprobability: 0.25\nbar-ratio: 0.5\ndwell-multiplier: 2.0\n",
+            "enabled: true\nprobability: 0.25\nbar-ratio: 0.5\ndwell-multiplier: 2.0\nlookahead: true\n",
         )
         .expect("valid pairing block");
         assert_eq!(
@@ -544,6 +546,7 @@ mod tests {
                 probability: 0.25,
                 bar_ratio: 0.5,
                 dwell_multiplier: 2.0,
+                lookahead: true,
             }
         );
         options.validate().expect("in range");

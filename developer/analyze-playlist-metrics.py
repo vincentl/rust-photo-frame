@@ -57,7 +57,8 @@ uploaded photos debut via the priority FIFO.
                  tens of minutes to fully surface. That's the frame's one-photo-
                  per-dwell limit, not a scheduler fault.
    PAIRING       (only with playlist.pairing enabled) screens vs appearances; the
-                 measured paired share next to the 2*pi*p/(1+pi*p) approximation;
+                 measured paired share next to the model 2q/(1+q), q = 1-(1-pi*p)^W
+                 (W = pairing_lookahead from the stamp; W=1 is 2*pi*p/(1+pi*p));
                  the repeat-partner rate; photos on consecutive screens, each
                  attributed to its cause (a debut's own Z, Z; an add or removal
                  between planning and display; a sleep/wake gap; a skipped
@@ -177,6 +178,7 @@ def main():
             if s.get("pairing") is not None:
                 print(
                     f"  pairing={s.get('pairing')} probability={s.get('pairing_probability')} "
+                    f"lookahead={s.get('pairing_lookahead', '1')} "
                     f"bar_ratio={s.get('pairing_bar_ratio')} dwell_multiplier={s.get('pairing_dwell_multiplier')}"
                 )
                 break
@@ -327,14 +329,14 @@ def pairing_section(displays, schedulers):
     Only sessions that ran with pairing on (stamp `pairing=true`, or lines
     carrying `pair=`) are counted; with pairing off the section is silent."""
     sessions = []
-    probabilities = set()
+    models = set()  # (p, W) per stamp
     for stamp, rows in split_sessions(displays, schedulers):
         rows = [d for d in rows if "pair" in d and "screen" in d]
         on = stamp.get("pairing") == "true" if stamp is not None else bool(rows)
         if not on or not rows:
             continue
         if stamp is not None and stamp.get("pairing_probability") is not None:
-            probabilities.add(float(stamp["pairing_probability"]))
+            models.add((float(stamp["pairing_probability"]), int(stamp.get("pairing_lookahead") or 1)))
         screens = OrderedDict()
         for d in rows:
             screens.setdefault(d["screen"], []).append(d)
@@ -351,12 +353,16 @@ def pairing_section(displays, schedulers):
 
     print("\n# PAIRING  (good: unattributed consecutive repeats = 0; equal gaps for pairable and not)")
     print(f"  sessions={len(sessions)} screens={n_screens} appearances={appearances} pair screens={paired_apps // 2}")
-    predicted = ", ".join(
-        f"{2 * pi * p / (1 + pi * p):.3f} (p={p:g})" for p in sorted(probabilities or {1.0})
-    )
+    def model(p, w):
+        # Look-ahead design: a pairable head pairs when any of the W unsent
+        # positions after it is pairable and wins the coin; W=1 is 2*pi*p/(1+pi*p).
+        q = 1 - (1 - pi * p) ** max(1, w)
+        return 2 * q / (1 + q)
+
+    predicted = ", ".join(f"{model(p, w):.3f} (p={p:g}, W={w})" for p, w in sorted(models or {(1.0, 1)}))
     print(
         f"  pi (pairable share of appearances)={pi:.3f}  paired share={share:.3f}  "
-        f"2*pi*p/(1+pi*p)={predicted} (an approximation)"
+        f"model={predicted} (2q/(1+q), q=1-(1-pi*p)^W; an approximation)"
     )
 
     last, rep, tot = {}, 0, 0

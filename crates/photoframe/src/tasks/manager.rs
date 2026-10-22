@@ -75,7 +75,7 @@ pub async fn run(
     pairing: Option<LivePairing>,
 ) -> Result<()> {
     if metrics {
-        log_scheduler_stamp(&options, pairing.is_some());
+        log_scheduler_stamp(&options, pairing.as_ref().map(|p| p.rules.lookahead));
     }
     let playlist = build_scheduler(options, seed_override, now_override);
     let mut screens = LiveScreens::new(playlist, pairing, seed_override);
@@ -144,9 +144,10 @@ pub async fn run(
 /// photo_display_metric series can be interpreted (and segmented across
 /// sessions / config changes) without guessing what produced it. With
 /// portrait pairing off the line is exactly the line before pairing; with it
-/// on, the pairing parameters follow (as configured, e.g. `0.618`).
-fn log_scheduler_stamp(options: &PlaylistOptions, pairing: bool) {
-    if pairing {
+/// on (`pairing` = the look-ahead window W, 1 for back to back), the pairing
+/// parameters follow (as configured, e.g. `0.618`).
+fn log_scheduler_stamp(options: &PlaylistOptions, pairing: Option<usize>) {
+    if let Some(lookahead) = pairing {
         info!(
             order = %options.order,
             refractory = format_args!("{:.3}", options.refractory_fraction()),
@@ -155,6 +156,7 @@ fn log_scheduler_stamp(options: &PlaylistOptions, pairing: bool) {
             half_life_secs = options.half_life.as_secs(),
             pairing = true,
             pairing_probability = format_args!("{}", options.pairing.probability),
+            pairing_lookahead = lookahead,
             pairing_bar_ratio = format_args!("{}", options.pairing.bar_ratio),
             pairing_dwell_multiplier = format_args!("{}", options.pairing.dwell_multiplier),
             "playlist_scheduler"
@@ -1265,7 +1267,7 @@ mod live_loop_tests {
         let evidence = screens.on_displayed(Path::new("a"));
         let mut log = DisplayLog::default();
         let out = capture(|| {
-            log_scheduler_stamp(&PlaylistOptions::default(), false);
+            log_scheduler_stamp(&PlaylistOptions::default(), None);
             log.log_screen(Path::new("a"), None, evidence, &screens);
         });
         assert_eq!(
@@ -1302,7 +1304,7 @@ mod live_loop_tests {
         let evidence = screens.on_displayed(Path::new("a"));
         let mut log = DisplayLog::default();
         let out = capture(|| {
-            log_scheduler_stamp(&PlaylistOptions::default(), true);
+            log_scheduler_stamp(&PlaylistOptions::default(), Some(3));
             log.log_screen(Path::new("a"), Some(Path::new("b")), evidence, &screens);
         });
         let fields = field_names(&out, "photo_display_metric");
@@ -1316,5 +1318,6 @@ mod live_loop_tests {
         assert!(out.contains(" pairing_bar_ratio=0.618 "), "{out}");
         assert!(out.contains(" pairing_dwell_multiplier=1.5\n"), "{out}");
         assert!(out.contains(" pairing_probability=1 "), "{out}");
+        assert!(out.contains(" pairing_lookahead=3 "), "{out}");
     }
 }

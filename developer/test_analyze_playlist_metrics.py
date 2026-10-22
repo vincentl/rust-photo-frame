@@ -28,8 +28,13 @@ class Log:
         self.lines = []
         self.t = 0
 
-    def stamp(self, pid, pairing):
-        extra = " pairing=true pairing_probability=1 pairing_bar_ratio=0.618 pairing_dwell_multiplier=1.5" if pairing else ""
+    def stamp(self, pid, pairing, lookahead=1):
+        extra = (
+            f" pairing=true pairing_probability=1 pairing_lookahead={lookahead}"
+            " pairing_bar_ratio=0.618 pairing_dwell_multiplier=1.5"
+            if pairing
+            else ""
+        )
         self.lines.append(
             f"Oct 20 frame photoframe[{pid}]: {self.ts()}  INFO playlist_scheduler order=weighted-spread "
             f"refractory=0.700 min_spacing=0.700 new_multiplicity=3 half_life_secs=86400{extra}"
@@ -99,6 +104,25 @@ class PairingSection(unittest.TestCase):
         out = log.run()
         self.assertIn("sessions=2 screens=6", out)
         self.assertIn("photos on consecutive screens: 0", out)
+
+    def test_pairing_model_uses_the_lookahead_window_from_the_stamp(self):
+        # Review C5: with lookahead on, the model is 2q/(1+q), q = 1-(1-pi*p)^W.
+        # 2 pairs + 2 solos = 6 appearances, all pairable: pi = 1, so the model
+        # is 1.000 for any W; the label shows which W was read.
+        log = Log()
+        log.stamp(100, pairing=True, lookahead=3)
+        log.screen_of(100, ["/p/a.jpg", "/p/b.jpg"])
+        log.screen_of(100, ["/p/c.jpg"])
+        log.screen_of(100, ["/p/d.jpg", "/p/e.jpg"])
+        log.screen_of(100, ["/p/f.jpg"])
+        out = log.run()
+        self.assertIn("lookahead=3", out)
+        self.assertIn("model=1.000 (p=1, W=3)", out)
+        log = Log()
+        log.stamp(100, pairing=True)
+        log.screen_of(100, ["/p/a.jpg", "/p/b.jpg"])
+        out = log.run()
+        self.assertIn("(p=1, W=1)", out)
 
     def test_sessions_split_where_screen_restarts_without_a_stamp(self):
         log = Log()
