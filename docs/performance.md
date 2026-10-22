@@ -512,6 +512,38 @@ full-screen passes are spent carefully:
   To check on the Pi, run the viewer with `V3D_DEBUG=shaderdb`. Every
   `MESA_SHADER_FRAGMENT` line must read `4 threads`, and the journal must
   have no `Falling back to strategy` lines.
+- **Per-frame constants on the CPU; branchless plane sampling.** At 4
+  threads, a pass costs its instructions per pixel. The Pi measured a fade
+  at 176 instructions, of which each photo-plane lookup was about 60: two
+  divisions and four compares with branches.
+
+  Everything that is the same for every pixel of a frame is now computed
+  once on the CPU (`viewer/draw_params.rs`):
+  - where each photo plane lands, as an affine texture-coordinate map that
+    the vertex stage interpolates, so the fragment stage does no division;
+  - the wipe front and its edges;
+  - the push offsets, which move the planes;
+  - the crossfade-zoom maps;
+  - the radial-wipe center and scale;
+  - the venetian-blinds axis and edges.
+
+  A plane is sampled without branches: one sample, plus a select on
+  "inside 0..1" for coverage.
+
+  `fs_rest`, drawn at native 4K on every dwell and at every transition's
+  end, samples only the current plane. If a next photo is ever staged at
+  rest, the CPU draws a fade at progress 0 instead. Output is unchanged
+  except for pixels whose center lies exactly on a plane edge, where the
+  interpolated coordinate can round one ulp the other way.
+- **Lead-in frames before a transition (KMS).** The V3D clock idles at
+  500 MHz through a dwell and needs 150–200 ms of load to reach 960 MHz.
+  The kernel has no devfreq knob for v3d, so this has to be handled in the
+  viewer.
+
+  For the last 300 ms of a dwell whose next photo is ready, the viewer
+  renders the resting photo on every refresh. It is the same picture, so
+  nothing visible changes, and the transition's first frames run at full
+  clock. See `TRANSITION_LEAD_IN` and the KMS module docs.
 
 ## Known limitation: direct scanout
 

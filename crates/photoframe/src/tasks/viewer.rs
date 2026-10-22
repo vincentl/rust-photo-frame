@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod canvas_publish_tests;
 mod display_wait;
+mod draw_params;
 mod image_ops;
 #[cfg(target_os = "linux")]
 mod kms;
@@ -93,6 +94,17 @@ fn iris_layer_scale() -> u32 {
 /// again, so the incoming photo settles into full sharpness instead of
 /// popping when the first dwell frame lands.
 const TRANSITION_FULL_RES_TAIL: f32 = 0.99;
+
+/// DRM/KMS: how long before a transition the viewer starts rendering the
+/// resting photo on every refresh (`wake::plan_wake`, "lead-in"). The V3D
+/// clock idles at its lowest step (500 MHz) through a dwell and reaches
+/// 960 MHz only 150-200 ms after the GPU gets work (Pi measurement,
+/// 2026-10-21; the kernel exposes no devfreq knob for v3d), so without it
+/// the first two transition frames took 30-46 ms. 300 ms (18 refreshes) is
+/// that ramp with margin. The frames are the same picture as the dwell
+/// frame, so nothing visible changes; the cost is 18 resting frames per
+/// photo change.
+const TRANSITION_LEAD_IN: Duration = Duration::from_millis(300);
 
 pub(super) enum ActiveTransition {
     Fade {
@@ -1570,8 +1582,10 @@ struct TransitionUniforms {
     screen_size: [f32; 2],
     progress: f32,
     kind: u32,
-    current_dest: [f32; 4],
-    next_dest: [f32; 4],
+    // Texture-coordinate maps of the current / next plane
+    // (`draw_params::plane_xform`), applied by the vertex stage.
+    current_xform: [f32; 4],
+    next_xform: [f32; 4],
     params0: [f32; 4],
     params1: [f32; 4],
     params3: [f32; 4],
@@ -3670,8 +3684,8 @@ impl App {
                     screen_size: [screen_w, screen_h],
                     progress: 0.0,
                     kind: 0,
-                    current_dest: [0.0; 4],
-                    next_dest: [0.0; 4],
+                    current_xform: draw_params::plane_xform([0.0; 4], [screen_w, screen_h]),
+                    next_xform: draw_params::plane_xform([0.0; 4], [screen_w, screen_h]),
                     params0: [0.0; 4],
                     params1: [0.0; 4],
                     params3: [0.0; 4],
@@ -3684,6 +3698,12 @@ impl App {
                 };
                 let mut petals = <IrisPetals as bytemuck::Zeroable>::zeroed();
                 let mut draw_kind = DrawKind::Rest;
+                // Where the planes are drawn, in screen pixels; turned into
+                // texture-coordinate maps once the kind has had its say
+                // (push moves them).
+                let mut current_dest = [0.0f32; 4];
+                let mut next_dest = [0.0f32; 4];
+                let screen = [screen_w, screen_h];
                 let mut current_bind = &gpu.blank_plane.bind;
                 let mut next_bind = &gpu.blank_plane.bind;
                 let mut have_current = false;
@@ -3696,7 +3716,7 @@ impl App {
                         gpu.config.width,
                         gpu.config.height,
                     );
-                    uniforms.current_dest = rect_to_uniform(rect);
+                    current_dest = rect_to_uniform(rect);
                     current_bind = &cur.plane.bind;
                     have_current = true;
                 }
@@ -3707,7 +3727,7 @@ impl App {
                         gpu.config.width,
                         gpu.config.height,
                     );
-                    uniforms.next_dest = rect_to_uniform(rect);
+                    next_dest = rect_to_uniform(rect);
                     next_bind = &next.plane.bind;
                     have_next = true;
                 }
@@ -3749,14 +3769,24 @@ impl App {
                             let normal = *normal;
                             let (min_proj, inv_span) =
                                 compute_wipe_span(normal, screen_w, screen_h);
-                            uniforms.params0 = [normal[0], normal[1], min_proj, inv_span];
-                            uniforms.params1[0] = *softness;
+                            (uniforms.params0, uniforms.params1) = draw_params::wipe(
+                                normal,
+                                min_proj,
+                                inv_span,
+                                *softness,
+                                uniforms.progress,
+                                screen,
+                            );
                         }
                         ActiveTransition::Push { direction } => {
                             let direction = *direction;
                             let diag = (screen_w * screen_w + screen_h * screen_h).sqrt();
-                            uniforms.params0[0] = direction[0] * diag;
-                            uniforms.params0[1] = direction[1] * diag;
+                            (current_dest, next_dest) = draw_params::push(
+                                current_dest,
+                                next_dest,
+                                [direction[0] * diag, direction[1] * diag],
+                                uniforms.progress,
+                            );
                         }
                         ActiveTransition::EInk {
                             flash_count,
@@ -3785,28 +3815,40 @@ impl App {
                             shape_is_diamond,
                             center,
                         } => {
-                            uniforms.params0[0] = center[0];
-                            uniforms.params0[1] = center[1];
-                            uniforms.params0[2] = *softness;
-                            uniforms.params0[3] = if *shape_is_diamond { 1.0 } else { 0.0 };
+                            (uniforms.params0, uniforms.params1) = draw_params::radial_wipe(
+                                *center,
+                                *softness,
+                                *shape_is_diamond,
+                                uniforms.progress,
+                                screen,
+                            );
                         }
                         ActiveTransition::VenetianBlinds {
                             stripe_count,
                             softness,
                             vertical,
                         } => {
-                            uniforms.params0[0] = (*stripe_count).max(1) as f32;
-                            uniforms.params0[1] = *softness;
-                            uniforms.params0[2] = if *vertical { 1.0 } else { 0.0 };
+                            (uniforms.params0, uniforms.params1) = draw_params::venetian_blinds(
+                                *stripe_count,
+                                *softness,
+                                *vertical,
+                                uniforms.progress,
+                            );
                         }
                         ActiveTransition::CrossfadeZoom {
                             zoom,
                             current_zooms_in,
                             next_zooms_in,
                         } => {
-                            uniforms.params0[0] = *zoom;
-                            uniforms.params0[1] = if *current_zooms_in { 1.0 } else { 0.0 };
-                            uniforms.params0[2] = if *next_zooms_in { 1.0 } else { 0.0 };
+                            (uniforms.params1, uniforms.params3) = draw_params::crossfade_zoom(
+                                current_dest,
+                                next_dest,
+                                *zoom,
+                                *current_zooms_in,
+                                *next_zooms_in,
+                                uniforms.progress,
+                                screen,
+                            );
                         }
                         ActiveTransition::Iris {
                             blades,
@@ -3868,6 +3910,17 @@ impl App {
                 } else if have_current {
                     should_draw_quad = true;
                 }
+
+                if draw_kind == DrawKind::Rest && have_next {
+                    // fs_rest draws the current plane only; a next photo
+                    // staged at rest still counts for coverage, as it always
+                    // has: a fade at progress 0 is exactly that.
+                    draw_kind = DrawKind::Fade;
+                    uniforms.progress = 0.0;
+                    uniforms.params0 = [0.0; 4];
+                }
+                uniforms.current_xform = draw_params::plane_xform(current_dest, screen);
+                uniforms.next_xform = draw_params::plane_xform(next_dest, screen);
 
                 if should_draw_quad {
                     let iris_active = draw_kind == DrawKind::Iris;
@@ -4253,6 +4306,12 @@ impl App {
                 overlay_expires_at: self.presentation.overlay_expires_at(),
                 surface_poll: (!on_kms).then_some(SURFACE_POLL_INTERVAL),
                 overlay_pending,
+                photo_staged: wake.next().is_some() || !wake.pending().is_empty(),
+                lead_in: if on_kms {
+                    TRANSITION_LEAD_IN
+                } else {
+                    Duration::ZERO
+                },
             },
             now,
         )
@@ -5013,6 +5072,8 @@ mod tests {
                                     overlay_expires_at: None,
                                     surface_poll: None,
                                     overlay_pending: false,
+                                    photo_staged: false,
+                                    lead_in: Duration::ZERO,
                                 },
                                 now,
                             );

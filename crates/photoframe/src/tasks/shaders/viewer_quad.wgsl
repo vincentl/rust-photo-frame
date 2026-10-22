@@ -8,6 +8,13 @@
 // texture fetches at a fraction of the speed (Pi measurement, 2026-10-21).
 // Keep each entry point small enough to compile at 4 threads; check with
 // V3D_DEBUG=shaderdb ("4 threads", no "Falling back" lines).
+//
+// At 4 threads the cost is instructions per pixel, so everything that is
+// the same for every pixel of a frame is computed on the CPU
+// (`draw_params.rs`): where each photo plane lands in texture coordinates
+// (an affine map of the screen, interpolated by the vertex stage, so the
+// fragment stage does no division), and each kind's per-frame constants.
+// A plane is sampled without branches (`plane`).
 
 struct TransitionUniforms {
   screen_size: vec2<f32>,
@@ -15,8 +22,11 @@ struct TransitionUniforms {
   // TransitionKind::as_index (kept for the CPU's bookkeeping; the shaders
   // do not branch on it).
   kind: u32,
-  current_dest: vec4<f32>,
-  next_dest: vec4<f32>,
+  // Where the current / next photo plane lands: texture coordinate =
+  // screen_uv * xform.xy + xform.zw (a plane that is not there maps every
+  // pixel outside 0..1).
+  current_xform: vec4<f32>,
+  next_xform: vec4<f32>,
   params0: vec4<f32>,
   params1: vec4<f32>,
   params3: vec4<f32>,
@@ -60,6 +70,10 @@ var petal_samp: sampler;
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) screen_uv: vec2<f32>,
+  // Texture coordinates of the current / next photo plane (affine in the
+  // screen, so interpolating them is exact).
+  @location(1) current_uv: vec2<f32>,
+  @location(2) next_uv: vec2<f32>,
 };
 
 // One triangle covering the screen (draw 3 vertices): (-1,-1), (3,-1),
@@ -72,24 +86,18 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
   var out: VSOut;
   out.pos = vec4<f32>(p, 0.0, 1.0);
   out.screen_uv = vec2<f32>((p.x + 1.0) * 0.5, (1.0 - p.y) * 0.5);
+  out.current_uv = out.screen_uv * U.current_xform.xy + U.current_xform.zw;
+  out.next_uv = out.screen_uv * U.next_xform.xy + U.next_xform.zw;
   return out;
 }
 
-fn sample_plane(
-  tex: texture_2d<f32>,
-  samp: sampler,
-  dest: vec4<f32>,
-  sample_pos: vec2<f32>,
-) -> vec4<f32> {
-  if (dest.z <= 0.0 || dest.w <= 0.0) {
-    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
-  }
-  let uv = (sample_pos - dest.xy) / dest.zw;
-  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
-  }
+// A photo plane at texture coordinate `uv`: its color with coverage 1
+// inside the plane, transparent outside. Branchless: the sample is always
+// taken (the sampler clamps to the edge) and the coverage is a select.
+fn plane(tex: texture_2d<f32>, samp: sampler, uv: vec2<f32>) -> vec4<f32> {
   let c = textureSample(tex, samp, uv);
-  return vec4<f32>(c.rgb, 1.0);
+  let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
+  return select(vec4<f32>(0.0), vec4<f32>(c.rgb, 1.0), inside);
 }
 
 // Signed distance to iris petal `i` using the CPU-precomputed constants in
@@ -226,33 +234,34 @@ fn screen_pos_of(in: VSOut) -> vec2<f32> {
   return in.screen_uv * U.screen_size;
 }
 
-fn current_at(pos: vec2<f32>) -> vec4<f32> {
-  return sample_plane(cur_tex, cur_samp, U.current_dest, pos);
+fn current_of(in: VSOut) -> vec4<f32> {
+  return plane(cur_tex, cur_samp, in.current_uv);
 }
 
-fn next_at(pos: vec2<f32>) -> vec4<f32> {
-  return sample_plane(next_tex, next_samp, U.next_dest, pos);
+fn next_of(in: VSOut) -> vec4<f32> {
+  return plane(next_tex, next_samp, in.next_uv);
 }
 
 fn progress01() -> f32 {
   return clamp(U.progress, 0.0, 1.0);
 }
 
-// A resting photo (no transition).
+// A resting photo (no transition): only the current plane. The next photo
+// is staged only while a transition runs; if one is ever staged at rest,
+// the CPU draws with fs_fade at progress 0 instead (the same result with
+// the next plane's coverage). This is the shader drawn at native 4K on every
+// dwell and at the end of every transition, so it is kept minimal.
 @fragment
 fn fs_rest(in: VSOut) -> @location(0) vec4<f32> {
-  let pos = screen_pos_of(in);
-  let current = current_at(pos);
-  let next = next_at(pos);
-  return over_background(current, current, next);
+  let current = current_of(in);
+  return over_background(current, current, current);
 }
 
 // params0.x > 0.5: through black.
 @fragment
 fn fs_fade(in: VSOut) -> @location(0) vec4<f32> {
-  let pos = screen_pos_of(in);
-  let current = current_at(pos);
-  let next = next_at(pos);
+  let current = current_of(in);
+  let next = next_of(in);
   let progress = progress01();
   if (U.params0.x > 0.5) {
     let half = progress * 2.0;
@@ -265,40 +274,23 @@ fn fs_fade(in: VSOut) -> @location(0) vec4<f32> {
   return over_background(mix(current, next, progress), current, next);
 }
 
-// params0 = (normal.xy, min_proj, inv_span), params1.x = softness.
+// The wipe front as a function of screen_uv: normalized position along the
+// wipe = clamp(dot(params0.xy, screen_uv) + params0.z), and the mask edges
+// params1.xy (draw_params::wipe).
 @fragment
 fn fs_wipe(in: VSOut) -> @location(0) vec4<f32> {
-  let pos = screen_pos_of(in);
-  let current = current_at(pos);
-  let next = next_at(pos);
-  let progress = progress01();
-  let min_proj = U.params0.z;
-  let inv_span = U.params0.w;
-  let softness = clamp(U.params1.x, 0.0, 0.5);
-  let normalized = clamp((dot(U.params0.xy, pos) - min_proj) * inv_span, 0.0, 1.0);
-  var mask = 0.0;
-  if (progress <= 0.0) {
-    mask = 0.0;
-  } else if (progress >= 1.0) {
-    mask = 1.0;
-  } else {
-    let leading = clamp(progress - softness, 0.0, progress);
-    let trailing = clamp(progress + softness, progress, 1.0);
-    let end = max(trailing, leading + 1e-3);
-    let smooth_mask = smoothstep(leading, end, normalized);
-    mask = 1.0 - smooth_mask;
-  }
+  let current = current_of(in);
+  let next = next_of(in);
+  let normalized = clamp(dot(U.params0.xy, in.screen_uv) + U.params0.z, 0.0, 1.0);
+  let mask = 1.0 - smoothstep(U.params1.x, U.params1.y, normalized);
   return over_background(current * (1.0 - mask) + next * mask, current, next);
 }
 
-// params0.xy = translation (px).
+// The planes are shifted on the CPU (draw_params::push).
 @fragment
 fn fs_push(in: VSOut) -> @location(0) vec4<f32> {
-  let pos = screen_pos_of(in);
-  let progress = progress01();
-  let translation = U.params0.xy;
-  let current = current_at(pos - translation * progress);
-  let next = next_at(pos + translation * (1.0 - progress));
+  let current = current_of(in);
+  let next = next_of(in);
   let mask = step(0.5, next.a);
   return over_background(current * (1.0 - mask) + next * mask, current, next);
 }
@@ -307,9 +299,8 @@ fn fs_push(in: VSOut) -> @location(0) vec4<f32> {
 // params1 = (seed.y, flash_rgb).
 @fragment
 fn fs_eink(in: VSOut) -> @location(0) vec4<f32> {
-  let pos = screen_pos_of(in);
-  let current = current_at(pos);
-  let next = next_at(pos);
+  let current = current_of(in);
+  let next = next_of(in);
   let progress = progress01();
   let flashes = max(U.params0.x, 0.0);
   let reveal_start = clamp(U.params0.y, 0.05, 0.95);
@@ -357,13 +348,12 @@ fn fs_eink(in: VSOut) -> @location(0) vec4<f32> {
 // Threshold value-noise by progress. params0 = (softness, cell scale).
 @fragment
 fn fs_dissolve(in: VSOut) -> @location(0) vec4<f32> {
-  let pos = screen_pos_of(in);
-  let current = current_at(pos);
-  let next = next_at(pos);
+  let current = current_of(in);
+  let next = next_of(in);
   let progress = progress01();
   let softness = clamp(U.params0.x, 0.0, 0.5);
   let scale = max(U.params0.y, 1.0);
-  let cell = floor(pos / scale);
+  let cell = floor(screen_pos_of(in) / scale);
   let n = fract(sin(dot(cell, vec2<f32>(12.9898, 78.233))) * 43758.5453);
   let lo = clamp(progress - softness, 0.0, 1.0);
   let hi = clamp(progress + softness, 0.0, 1.0);
@@ -371,40 +361,28 @@ fn fs_dissolve(in: VSOut) -> @location(0) vec4<f32> {
   return over_background(mix(next, current, mask), current, next);
 }
 
-// Circle or diamond reveal from a center.
-// params0 = (center.xy in uv, softness, diamond).
+// Circle or diamond reveal from a center, as a function of screen_uv:
+// the offset from the center in units of the screen diagonal is
+// screen_uv * params0.xy - params0.zw; params1 = (mask edges, diamond)
+// (draw_params::radial_wipe).
 @fragment
 fn fs_radial_wipe(in: VSOut) -> @location(0) vec4<f32> {
-  let pos = screen_pos_of(in);
-  let current = current_at(pos);
-  let next = next_at(pos);
-  let progress = progress01();
-  let center = U.params0.xy * U.screen_size;
-  let softness = clamp(U.params0.z, 0.0, 0.5);
-  let diamond = U.params0.w > 0.5;
-  let dv = pos - center;
-  let max_r = length(U.screen_size);
-  var dist = length(dv) / max(max_r, 1e-3);
-  if (diamond) { dist = (abs(dv.x) + abs(dv.y)) / max(max_r, 1e-3); }
-  let lo = clamp(progress - softness, 0.0, 1.0);
-  let hi = clamp(progress + softness, 0.0, 1.0);
-  let mask = 1.0 - smoothstep(lo, max(hi, lo + 1e-3), dist);
+  let current = current_of(in);
+  let next = next_of(in);
+  let dv = in.screen_uv * U.params0.xy - U.params0.zw;
+  let dist = select(length(dv), abs(dv.x) + abs(dv.y), U.params1.z > 0.5);
+  let mask = 1.0 - smoothstep(U.params1.x, U.params1.y, dist);
   return over_background(mix(current, next, mask), current, next);
 }
 
-// Stripe reveal. params0 = (stripes, softness, vertical).
+// Stripe reveal: stripes along dot(screen_uv, params1.xy), mask edges
+// params0.yz (draw_params::venetian_blinds).
 @fragment
 fn fs_venetian_blinds(in: VSOut) -> @location(0) vec4<f32> {
-  let pos = screen_pos_of(in);
-  let current = current_at(pos);
-  let next = next_at(pos);
-  let progress = progress01();
-  let stripes = max(U.params0.x, 1.0);
-  let softness = clamp(U.params0.y, 0.001, 0.5);
-  let vertical = U.params0.z > 0.5;
-  let axis = select(in.screen_uv.y, in.screen_uv.x, vertical);
-  let local = fract(axis * stripes);
-  let mask = smoothstep(progress - softness, progress + softness, 1.0 - local);
+  let current = current_of(in);
+  let next = next_of(in);
+  let local = fract(dot(in.screen_uv, U.params1.xy) * U.params0.x);
+  let mask = smoothstep(U.params0.y, U.params0.z, 1.0 - local);
   return over_background(mix(current, next, 1.0 - mask), current, next);
 }
 
@@ -412,24 +390,15 @@ fn fs_venetian_blinds(in: VSOut) -> @location(0) vec4<f32> {
 // is 0 at the ends and bumps up in the middle (1 + zoom*sin(pi*progress)).
 // Locking both layers to the same scale avoids the double-image "swim" of
 // opposing zoom directions, is pop-free at both ends, and keeps scale >= 1
-// so edges never go empty. params0 = (zoom, current_zooms_in, next_zooms_in).
+// so edges never go empty. The zoomed planes' texture maps are params1 /
+// params3 (draw_params::crossfade_zoom); coverage uses the unzoomed planes.
 @fragment
 fn fs_crossfade_zoom(in: VSOut) -> @location(0) vec4<f32> {
-  let pos = screen_pos_of(in);
-  let progress = progress01();
-  let zoom = U.params0.x;
-  let cur_in = U.params0.y > 0.5;
-  let next_in = U.params0.z > 0.5;
-  let center = U.screen_size * 0.5;
-  let bump = zoom * sin(3.14159265 * progress);
-  let cur_scale = select(1.0, 1.0 + bump, cur_in);
-  let next_scale = select(1.0, 1.0 + bump, next_in);
-  // The composite's coverage uses the unzoomed planes, as it always has.
-  let current = current_at(pos);
-  let next = next_at(pos);
-  let c = current_at(center + (pos - center) / max(cur_scale, 1e-3));
-  let nxt = next_at(center + (pos - center) / max(next_scale, 1e-3));
-  return over_background(mix(c, nxt, progress), current, next);
+  let current = current_of(in);
+  let next = next_of(in);
+  let c = plane(cur_tex, cur_samp, in.screen_uv * U.params1.xy + U.params1.zw);
+  let nxt = plane(next_tex, next_samp, in.screen_uv * U.params3.xy + U.params3.zw);
+  return over_background(mix(c, nxt, progress01()), current, next);
 }
 
 // Mechanical camera-iris diaphragm. The petals (shape + shading) were
@@ -438,9 +407,8 @@ fn fs_crossfade_zoom(in: VSOut) -> @location(0) vec4<f32> {
 // crossfading photos. params0.w = photo_swap_mix.
 @fragment
 fn fs_iris(in: VSOut) -> @location(0) vec4<f32> {
-  let pos = screen_pos_of(in);
-  let current = current_at(pos);
-  let next = next_at(pos);
+  let current = current_of(in);
+  let next = next_of(in);
   let photo = mix(current, next, clamp(U.params0.w, 0.0, 1.0));
   let petal = textureSample(petal_tex, petal_samp, in.screen_uv);
   let color = vec4<f32>(photo.rgb * (1.0 - petal.a) + petal.rgb, max(photo.a, petal.a));
@@ -453,8 +421,8 @@ fn fs_iris(in: VSOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_debug_bezier(in: VSOut) -> @location(0) vec4<f32> {
   let pos = screen_pos_of(in);
-  let current = current_at(pos);
-  let next = next_at(pos);
+  let current = current_of(in);
+  let next = next_of(in);
   // Control points in pixel space
   let P0 = U.screen_size * clamp(U.params0.xy, vec2<f32>(0.0), vec2<f32>(1.0));
   let P1 = U.screen_size * clamp(U.params0.zw, vec2<f32>(0.0), vec2<f32>(1.0));

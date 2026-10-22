@@ -1432,6 +1432,8 @@ mod tests {
                     overlay_expires_at: None,
                     surface_poll: None,
                     overlay_pending: false,
+                    photo_staged: false,
+                    lead_in: Duration::ZERO,
                 },
                 now,
             );

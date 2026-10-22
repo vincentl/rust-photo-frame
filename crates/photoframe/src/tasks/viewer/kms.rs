@@ -34,6 +34,18 @@
 //!   of the right length with repeats, not a slow-motion one. A KMS
 //!   transition ends when its frame for progress 1 has been rendered
 //!   (`TransitionState::is_complete`).
+//! * **Lead-in.** The V3D clock idles at its lowest step through a dwell
+//!   and needs 150-200 ms of load to reach full speed, which made every
+//!   transition's first frames late. So for the last `TRANSITION_LEAD_IN`
+//!   (300 ms) of a dwell whose next photo is ready, the loop renders the
+//!   resting photo on every refresh (`wake::plan_wake`, `lead_in_frame`):
+//!   the same picture, so nothing visible changes. These are not transition
+//!   frames: the transition clock still anchors at the transition's first
+//!   frame and the audit and metric are unchanged. The lead-in only runs on
+//!   a visible slideshow: asleep (K2), with the panel dark, or under the
+//!   Wi-Fi overlay the slideshow is paused (`wake.visible()` is false), so
+//!   there is no lead-in and no frame; a dwell that resumes picks the
+//!   lead-in up again if it is still due.
 //! * **Why not wait for the vblank before each frame** (the v1.2.0-rc1 law).
 //!   Gate 1 on the Pi measured it: every transition alternated 16.7 and
 //!   33.3 ms frames and none reached 60, while `frametest --drm` (render
@@ -368,6 +380,16 @@ impl App {
                 redraw_requested, ..
             }) => redraw_requested.swap(false, Ordering::Relaxed),
             _ => false,
+        }
+    }
+
+    /// Ask for a frame of whatever is on screen (the lead-in).
+    fn request_kms_redraw(&self) {
+        if let Some(Output::Kms {
+            redraw_requested, ..
+        }) = &self.output
+        {
+            redraw_requested.store(true, Ordering::Relaxed);
         }
     }
 
@@ -964,6 +986,11 @@ async fn drive(
         }
 
         let plan = app.wake_plan(Instant::now());
+        if plan.lead_in_frame {
+            // The lead-in: one more frame of the resting photo, so the GPU
+            // clock has ramped up when the transition starts (wake.rs).
+            app.request_kms_redraw();
+        }
         if plan.redraw_now || plan.tick_now {
             continue;
         }

@@ -75,6 +75,13 @@ pub(super) struct WakeInputs {
     /// has not been presented (a failed present leaves the request set).
     /// KMS re-arms its own requests.
     pub(super) overlay_pending: bool,
+    /// The next photo is ready, so the transition starts when the dwell ends
+    /// (an uploaded screen is waiting, or one is staged).
+    pub(super) photo_staged: bool,
+    /// DRM/KMS: how long before a transition the GPU is given real work, so
+    /// its clock has ramped up by the first transition frame
+    /// (`TRANSITION_LEAD_IN` in viewer.rs). Zero on Wayland.
+    pub(super) lead_in: Duration,
 }
 
 /// How soon a pending overlay redraw is retried. Slow enough to cost nothing,
@@ -110,6 +117,10 @@ pub(super) struct WakePlan {
     /// loader channel, so the channel's backpressure is unchanged: while it
     /// is false the photo stays queued in the loader.
     pub(super) want_photo: bool,
+    /// DRM/KMS: the dwell ends within `lead_in` and the next photo is ready:
+    /// render the resting photo again (the same picture) on every refresh
+    /// until the transition starts. `redraw_now` is set too.
+    pub(super) lead_in_frame: bool,
 }
 
 /// **The decoded-photo bound (review M4).** The viewer's preload counts
@@ -137,12 +148,35 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
     // screen. Once it has run out, starting the transition needs a staged
     // photo, which arrives as an event (matting result or loader); until
     // then there is nothing to wait for but events.
+    //
+    // The lead-in (KMS): with the next photo ready, the last `lead_in` of the
+    // dwell renders the resting photo on every refresh, so the GPU's clock
+    // (which idles at its lowest step through a dwell) has ramped up by the
+    // transition's first frame. The loop wakes at the start of the lead-in
+    // instead of at the end of the dwell.
+    let mut lead_in_frame = false;
     let mut deadline = match inputs.displayed_at {
         Some(shown) if inputs.slideshow_active && !inputs.transition_active => {
-            Some(shown + inputs.dwell).filter(|deadline| *deadline > now)
+            let dwell_end = shown + inputs.dwell;
+            let lead_in = if inputs.photo_staged {
+                inputs.lead_in
+            } else {
+                Duration::ZERO
+            };
+            let lead_in_start = dwell_end.checked_sub(lead_in).unwrap_or(dwell_end);
+            if !lead_in.is_zero() && now >= lead_in_start && now < dwell_end {
+                lead_in_frame = true;
+            }
+            Some(if lead_in_frame {
+                dwell_end
+            } else {
+                lead_in_start
+            })
+            .filter(|deadline| *deadline > now)
         }
         _ => None,
     };
+    let redraw_now = redraw_now || lead_in_frame;
 
     // Bounded polls and retries. Each is "wake no later than": the loop still
     // sleeps on events, and none of them applies to the other's state.
@@ -217,6 +251,7 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
         tick_fast,
         deadline,
         want_photo,
+        lead_in_frame,
     }
 }
 
@@ -309,6 +344,7 @@ impl WakePlan {
         tick_fast: false,
         deadline: None,
         want_photo: false,
+        lead_in_frame: false,
     };
 }
 
@@ -514,6 +550,74 @@ mod tests {
             overlay_expires_at: None,
             surface_poll: None,
             overlay_pending: false,
+            photo_staged: false,
+            lead_in: Duration::ZERO,
+        }
+    }
+
+    const LEAD_IN: Duration = Duration::from_millis(300);
+
+    fn ready_for_lead_in(now: Instant) -> WakeInputs {
+        WakeInputs {
+            photo_staged: true,
+            lead_in: LEAD_IN,
+            ..resting(now)
+        }
+    }
+
+    #[test]
+    fn the_lead_in_starts_before_the_dwell_ends_when_the_next_photo_is_ready() {
+        let shown = Instant::now();
+        let inputs = ready_for_lead_in(shown);
+        // Mid-dwell: sleep until the lead-in starts, not the dwell's end.
+        let plan = plan_wake(inputs, shown + Duration::from_secs(1));
+        assert!(!plan.lead_in_frame && !plan.redraw_now);
+        assert_eq!(plan.deadline, Some(shown + DWELL - LEAD_IN));
+        // In the lead-in: render every refresh until the dwell ends.
+        let at = shown + DWELL - Duration::from_millis(100);
+        let plan = plan_wake(inputs, at);
+        assert!(plan.lead_in_frame && plan.redraw_now);
+        assert_eq!(plan.deadline, Some(shown + DWELL));
+        // At the dwell's end the transition starts (process_tick); no
+        // lead-in past it.
+        let plan = plan_wake(inputs, shown + DWELL);
+        assert!(!plan.lead_in_frame);
+    }
+
+    #[test]
+    fn no_lead_in_without_a_ready_photo_on_wayland_or_while_paused() {
+        let shown = Instant::now();
+        let at = shown + DWELL - Duration::from_millis(100);
+        for inputs in [
+            // Nothing to transition to: frames would be wasted.
+            WakeInputs {
+                photo_staged: false,
+                ..ready_for_lead_in(shown)
+            },
+            // Wayland (lead_in zero).
+            WakeInputs {
+                lead_in: Duration::ZERO,
+                ..ready_for_lead_in(shown)
+            },
+            // Paused: dark panel or Wi-Fi overlay (slideshow not visible),
+            // or asleep.
+            WakeInputs {
+                slideshow_active: false,
+                ..ready_for_lead_in(shown)
+            },
+            WakeInputs {
+                slideshow_active: false,
+                sleeping: true,
+                ..ready_for_lead_in(shown)
+            },
+            // Already animating.
+            WakeInputs {
+                transition_active: true,
+                ..ready_for_lead_in(shown)
+            },
+        ] {
+            let plan = plan_wake(inputs, at);
+            assert!(!plan.lead_in_frame, "{inputs:?}");
         }
     }
 
@@ -529,6 +633,7 @@ mod tests {
                 tick_fast: false,
                 deadline: Some(now + DWELL),
                 want_photo: false,
+                lead_in_frame: false,
             }
         );
     }
@@ -710,6 +815,7 @@ mod tests {
                 tick_fast: false,
                 deadline: None,
                 want_photo: false,
+                lead_in_frame: false,
             }
         );
     }
@@ -829,6 +935,7 @@ mod tests {
             tick_fast: false,
             deadline: None,
             want_photo: false,
+            lead_in_frame: false,
         }
     }
 
@@ -1504,6 +1611,8 @@ mod tests {
                     preload: PRELOAD,
                     surface_poll: None,
                     overlay_pending: false,
+                    photo_staged: false,
+                    lead_in: Duration::ZERO,
                     overlay_expires_at: None,
                 },
                 now,
