@@ -29,7 +29,8 @@ GREETD_INSTALLED=1   # 0: `systemctl list-unit-files greetd.service` finds nothi
 NRESTARTS="${WORK}/nrestarts" # successive NRestarts values, one per line
 # (a file, because the library reads it from command substitutions)
 JOURNAL_LINE=""      # what journalctl prints for the current invocation
-sudo() { "$@"; }
+SUDO_LOG="${WORK}/sudo-users"   # `sudo -u USER cmd`: the user, one line per call
+sudo() { if [[ "${1:-}" == "-u" ]]; then echo "$2 ${3:-}" >>"${SUDO_LOG}"; shift 2; fi; "$@"; }
 find() { echo "find $*" >>"${CALLS}"; }
 sleep() { :; }
 id() { if [[ "${1:-}" == "-u" ]]; then echo 1000; else command id "$@"; fi; }
@@ -363,13 +364,34 @@ echo unknown >"${SYSFS}/card0-Writeback-1/status"
 python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "${WORK}/control.sock"
 export DISPLAY_SYSFS_ROOT="${SYSFS}" PHOTOFRAME_CONTROL_SOCKET="${WORK}/control.sock"
 VIEWER_REPLY=""
-socat() { cat >/dev/null; printf '%s\n' "${VIEWER_REPLY}"; }
+SOCAT_ERR=""   # what the stub socat prints on stderr
+socat() { cat >/dev/null; [[ -z "${SOCAT_ERR}" ]] || echo "${SOCAT_ERR}" >&2; printf '%s\n' "${VIEWER_REPLY}"; }
 kms_check() { display_stack_kms_check 2>&1; }
 
 VIEWER_REPLY='{"ok":true,"state":"on","connector":"HDMI-A-2","mode":"3840x2160@60"}'
 out="$(kms_check)" || fail "healthy KMS display judged failing: ${out}"
 [[ "${out}" == $'OK\tcard1 HDMI-A-2 3840x2160@60 power=on' ]] || fail "KMS check line: ${out}"
 
+# the socket admits only the service user: the query runs as it (test -S and socat)
+: >"${SUDO_LOG}"
+unset SERVICE_USER
+out="$(kms_check)" || true
+[[ "$(grep -c '^kiosk ' "${SUDO_LOG}")" -ge 2 ]] || fail "query did not run as kiosk via sudo -u (test -S and socat): $(cat "${SUDO_LOG}")"
+grep -q '^kiosk socat' "${SUDO_LOG}" || fail "socat did not run as the service user"
+# already the service user: no sudo
+: >"${SUDO_LOG}"
+SERVICE_USER="$(command id -un)" kms_check >/dev/null || true
+[[ ! -s "${SUDO_LOG}" ]] || fail "sudo used although the caller is the service user: $(cat "${SUDO_LOG}")"
+# why a query was skipped
+VIEWER_REPLY=""; SOCAT_ERR="E connect(5, AF_UNIX, ...): Permission denied"
+out="$(kms_check)" || true
+[[ "${out}" == WARN*"permission denied"* ]] || fail "permission failure not named: ${out}"
+SOCAT_ERR=""
+out="$(kms_check)" || true
+[[ "${out}" == WARN*"did not answer"* ]] || fail "silent viewer not named: ${out}"
+rm "${WORK}/control.sock"; out="$(kms_check)" || true
+[[ "${out}" == WARN*"no control socket"* ]] || fail "missing socket not named: ${out}"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "${WORK}/control.sock"
 VIEWER_REPLY='{"ok":true,"state":"on","connector":"HDMI-A-1","mode":"3840x2160@60"}'
 out="$(kms_check)" && fail "a disconnected driven connector passed: ${out}"
 [[ "${out}" == ERROR* ]] || fail "disconnected connector not an ERROR: ${out}"

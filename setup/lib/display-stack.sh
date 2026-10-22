@@ -454,18 +454,42 @@ display_stack_kms_check() {
         fi
     done
 
-    local reply=""
-    if [[ -S "${socket}" ]] && command -v socat >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    # The control socket admits only the service user (its directory is
+    # kiosk:kiosk 0770), so ask as that user when we are someone else, like
+    # every socket command in docs/operate.md. why records why a query did not
+    # produce an answer, so the finding says what to fix.
+    local service_user="${SERVICE_USER:-kiosk}" reply="" why="" err_file
+    local -a as_service=()
+    if [[ "$(id -un)" != "${service_user}" ]]; then
+        as_service=(sudo -u "${service_user}")
+    fi
+    if ! command -v socat >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+        why="socat or jq is not installed, so the viewer was not asked"
+    elif ! ${as_service[@]+"${as_service[@]}"} test -S "${socket}" 2>/dev/null; then
+        why="no control socket at ${socket} (or it cannot be read as ${service_user}); is ${DISPLAY_KMS_UNIT} running?"
+    else
+        err_file="$(mktemp)"
         reply="$(printf '%s' '{"command":"display-power"}' |
-            socat -t 3 - "UNIX-CONNECT:${socket}" 2>/dev/null || true)"
+            ${as_service[@]+"${as_service[@]}"} socat -t 3 - "UNIX-CONNECT:${socket}" 2>"${err_file}" || true)"
+        if [[ -z "${reply}" ]]; then
+            if grep -qi 'permission denied' "${err_file}"; then
+                why="permission denied on ${socket}; the query must run as ${service_user} (sudo -u ${service_user}) or from a user in its group"
+            else
+                why="the viewer did not answer on ${socket} within 3 s (still starting, or waiting for a display?)"
+            fi
+        fi
+        rm -f "${err_file}"
     fi
     if ! jq -e '.ok == true and (.connector | type) == "string"' >/dev/null 2>&1 <<<"${reply}"; then
+        if [[ -n "${reply}" ]]; then
+            why="the viewer answered without a connector: $(jq -r '.error // .detail // "unexpected reply"' 2>/dev/null <<<"${reply}")"
+        fi
         if ((${#connected[@]} == 0)); then
-            printf 'ERROR\tno connected display connector under %s, and the viewer did not report one\n' "${sysfs}"
+            printf 'ERROR\tno connected display connector under %s, and the viewer did not report one (%s)\n' "${sysfs}" "${why}"
             return 1
         fi
-        printf 'WARN\tconnected: %s; the viewer did not report the display it drives (is %s running?)\n' \
-            "${connected[*]}" "${DISPLAY_KMS_UNIT}"
+        printf 'WARN\tconnected: %s; the viewer did not report the display it drives: %s\n' \
+            "${connected[*]}" "${why}"
         return 0
     fi
 
