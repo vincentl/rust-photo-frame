@@ -39,7 +39,11 @@
 //!   transition's first frames late. So for the last `TRANSITION_LEAD_IN`
 //!   (300 ms) of a dwell whose next photo is ready, the loop renders the
 //!   resting photo on every refresh (`wake::plan_wake`, `lead_in_frame`):
-//!   the same picture, so nothing visible changes. These are not transition
+//!   the same picture, so nothing visible changes. It stops two refreshes
+//!   before the dwell ends, so the frames it queued have flipped when the
+//!   transition's first frame anchors the clock; and a plan asked after the
+//!   dwell ended (a lead-in redraw blocks on the swapchain and can carry
+//!   the clock past it) ticks at once, which starts the transition. These are not transition
 //!   frames: the transition clock still anchors at the transition's first
 //!   frame and the audit and metric are unchanged. The lead-in only runs on
 //!   a visible slideshow: asleep (K2), with the panel dark, or under the
@@ -309,6 +313,7 @@ pub async fn run_kms(
     app.enter_greeting();
     app.output = Some(Output::Kms {
         size,
+        refresh_period: target.refresh_period,
         redraw_requested: Arc::new(AtomicBool::new(false)),
     });
     app.install_gpu(parts, size, "kms");

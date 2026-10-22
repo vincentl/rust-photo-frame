@@ -75,13 +75,21 @@ pub(super) struct WakeInputs {
     /// has not been presented (a failed present leaves the request set).
     /// KMS re-arms its own requests.
     pub(super) overlay_pending: bool,
-    /// The next photo is ready, so the transition starts when the dwell ends
-    /// (an uploaded screen is waiting, or one is staged).
+    /// A transition can start as soon as the dwell ends: a photo is on
+    /// screen and the next one is ready (staged, or an uploaded screen is
+    /// waiting). Together with `slideshow_active`, no transition and an
+    /// elapsed dwell, this is exactly when `WakeScene::maybe_start_transition`
+    /// starts one.
     pub(super) photo_staged: bool,
     /// DRM/KMS: how long before a transition the GPU is given real work, so
     /// its clock has ramped up by the first transition frame
     /// (`TRANSITION_LEAD_IN` in viewer.rs). Zero on Wayland.
     pub(super) lead_in: Duration,
+    /// DRM/KMS: the lead-in stops this long before the dwell ends, so the
+    /// frames it queued (FIFO renders at most two ahead) have flipped when the
+    /// transition's first frame is rendered and its clock anchored: two
+    /// refresh periods. The GPU clock does not drop in that time.
+    pub(super) lead_in_drain: Duration,
 }
 
 /// How soon a pending overlay redraw is retried. Slow enough to cost nothing,
@@ -117,9 +125,9 @@ pub(super) struct WakePlan {
     /// loader channel, so the channel's backpressure is unchanged: while it
     /// is false the photo stays queued in the loader.
     pub(super) want_photo: bool,
-    /// DRM/KMS: the dwell ends within `lead_in` and the next photo is ready:
-    /// render the resting photo again (the same picture) on every refresh
-    /// until the transition starts. `redraw_now` is set too.
+    /// DRM/KMS: the dwell ends within `lead_in` (and not within
+    /// `lead_in_drain`) and a transition is ready: render the resting photo
+    /// again (the same picture) on every refresh. `redraw_now` is set too.
     pub(super) lead_in_frame: bool,
 }
 
@@ -149,30 +157,45 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
     // photo, which arrives as an event (matting result or loader); until
     // then there is nothing to wait for but events.
     //
-    // The lead-in (KMS): with the next photo ready, the last `lead_in` of the
+    // The lead-in (KMS): with a transition ready, the last `lead_in` of the
     // dwell renders the resting photo on every refresh, so the GPU's clock
     // (which idles at its lowest step through a dwell) has ramped up by the
-    // transition's first frame. The loop wakes at the start of the lead-in
-    // instead of at the end of the dwell.
+    // transition's first frame. It stops `lead_in_drain` before the dwell
+    // ends, so its queued frames have flipped when the transition starts.
+    // The loop wakes at the start of the lead-in, then at the dwell's end.
+    //
+    // A dwell that has already ended with a transition ready must tick now:
+    // the step that ran before it may have run a moment too early (a redraw,
+    // which blocks on the swapchain for up to a refresh, carried the clock
+    // past the dwell's end), and after the end there is no deadline left to
+    // wake for. That tick starts the transition (the conditions are
+    // `maybe_start_transition`'s), so it cannot repeat.
     let mut lead_in_frame = false;
+    let mut dwell_over_and_ready = false;
     let mut deadline = match inputs.displayed_at {
         Some(shown) if inputs.slideshow_active && !inputs.transition_active => {
             let dwell_end = shown + inputs.dwell;
-            let lead_in = if inputs.photo_staged {
-                inputs.lead_in
+            if now >= dwell_end {
+                dwell_over_and_ready = inputs.photo_staged;
+                None
             } else {
-                Duration::ZERO
-            };
-            let lead_in_start = dwell_end.checked_sub(lead_in).unwrap_or(dwell_end);
-            if !lead_in.is_zero() && now >= lead_in_start && now < dwell_end {
-                lead_in_frame = true;
+                let lead_in = if inputs.photo_staged {
+                    inputs.lead_in
+                } else {
+                    Duration::ZERO
+                };
+                let start = dwell_end.checked_sub(lead_in).unwrap_or(dwell_end);
+                let stop = dwell_end
+                    .checked_sub(inputs.lead_in_drain)
+                    .unwrap_or(dwell_end)
+                    .max(start);
+                if now < start {
+                    Some(start)
+                } else {
+                    lead_in_frame = !lead_in.is_zero() && now < stop;
+                    Some(dwell_end)
+                }
             }
-            Some(if lead_in_frame {
-                dwell_end
-            } else {
-                lead_in_start
-            })
-            .filter(|deadline| *deadline > now)
         }
         _ => None,
     };
@@ -218,7 +241,9 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
     // The step that finalized a transition ran its uploads and matting
     // refill *before* the finalize, while both were still gated off, so the
     // deferred work runs on one more step right after it.
-    let tick_now = (inputs.transition_just_finished && !inputs.sleeping) || overlay_due;
+    let tick_now = (inputs.transition_just_finished && !inputs.sleeping)
+        || overlay_due
+        || dwell_over_and_ready;
 
     // Exactly when MattingBridge::queue_for_wake reads the loader (the test
     // `want_photo_matches_the_bridge_gate` in viewer.rs holds the two
@@ -552,15 +577,18 @@ mod tests {
             overlay_pending: false,
             photo_staged: false,
             lead_in: Duration::ZERO,
+            lead_in_drain: Duration::ZERO,
         }
     }
 
     const LEAD_IN: Duration = Duration::from_millis(300);
+    const DRAIN: Duration = Duration::from_micros(33_333);
 
     fn ready_for_lead_in(now: Instant) -> WakeInputs {
         WakeInputs {
             photo_staged: true,
             lead_in: LEAD_IN,
+            lead_in_drain: DRAIN,
             ..resting(now)
         }
     }
@@ -573,15 +601,53 @@ mod tests {
         let plan = plan_wake(inputs, shown + Duration::from_secs(1));
         assert!(!plan.lead_in_frame && !plan.redraw_now);
         assert_eq!(plan.deadline, Some(shown + DWELL - LEAD_IN));
-        // In the lead-in: render every refresh until the dwell ends.
+        // In the lead-in: render every refresh until the drain.
         let at = shown + DWELL - Duration::from_millis(100);
         let plan = plan_wake(inputs, at);
         assert!(plan.lead_in_frame && plan.redraw_now);
         assert_eq!(plan.deadline, Some(shown + DWELL));
-        // At the dwell's end the transition starts (process_tick); no
-        // lead-in past it.
+        // In the drain: no frames, wake at the dwell's end.
+        let plan = plan_wake(inputs, shown + DWELL - Duration::from_millis(20));
+        assert!(!plan.lead_in_frame && !plan.redraw_now && !plan.tick_now);
+        assert_eq!(plan.deadline, Some(shown + DWELL));
+        // At the dwell's end the transition starts: tick now.
         let plan = plan_wake(inputs, shown + DWELL);
         assert!(!plan.lead_in_frame);
+        assert!(plan.tick_now);
+    }
+
+    /// Pi, 5e85cc1: the last lead-in step ran just before the dwell ended,
+    /// its redraw (blocked on the swapchain for up to a refresh) carried the
+    /// clock past the end, and the plan asked then had no deadline and no
+    /// tick, so the loop slept forever without starting the transition.
+    #[test]
+    fn a_plan_asked_after_the_dwell_ended_ticks_immediately() {
+        let shown = Instant::now();
+        for (inputs, why) in [
+            (ready_for_lead_in(shown), "after a lead-in frame"),
+            // The same hole without a lead-in (Wayland, or any other redraw
+            // that straddles the dwell's end).
+            (
+                WakeInputs {
+                    photo_staged: true,
+                    ..resting(shown)
+                },
+                "after any redraw",
+            ),
+        ] {
+            for late in [
+                Duration::ZERO,
+                Duration::from_micros(150),
+                Duration::from_millis(16),
+            ] {
+                let plan = plan_wake(inputs, shown + DWELL + late);
+                assert!(plan.tick_now, "{why}, {late:?} late: {plan:?}");
+                assert_eq!(plan.deadline, None);
+            }
+        }
+        // Nothing ready: the next photo's arrival (an event) starts it.
+        let plan = plan_wake(resting(shown), shown + DWELL + Duration::from_millis(16));
+        assert!(!plan.tick_now);
     }
 
     #[test]
@@ -597,6 +663,7 @@ mod tests {
             // Wayland (lead_in zero).
             WakeInputs {
                 lead_in: Duration::ZERO,
+                lead_in_drain: Duration::ZERO,
                 ..ready_for_lead_in(shown)
             },
             // Paused: dark panel or Wi-Fi overlay (slideshow not visible),
@@ -1613,6 +1680,7 @@ mod tests {
                     overlay_pending: false,
                     photo_staged: false,
                     lead_in: Duration::ZERO,
+                    lead_in_drain: Duration::ZERO,
                     overlay_expires_at: None,
                 },
                 now,

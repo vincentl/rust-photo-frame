@@ -2007,6 +2007,8 @@ enum Output {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // built only on Linux
     Kms {
         size: PhysicalSize<u32>,
+        /// Exact vblank period of the mode.
+        refresh_period: Duration,
         /// Set by `SceneContext::request_redraw`; the KMS loop takes it.
         redraw_requested: Arc<AtomicBool>,
     },
@@ -4306,11 +4308,18 @@ impl App {
                 overlay_expires_at: self.presentation.overlay_expires_at(),
                 surface_poll: (!on_kms).then_some(SURFACE_POLL_INTERVAL),
                 overlay_pending,
-                photo_staged: wake.next().is_some() || !wake.pending().is_empty(),
+                // `maybe_start_transition`'s own condition.
+                photo_staged: wake.current().is_some()
+                    && (wake.next().is_some() || !wake.pending().is_empty()),
                 lead_in: if on_kms {
                     TRANSITION_LEAD_IN
                 } else {
                     Duration::ZERO
+                },
+                // Two refreshes: the most FIFO queues ahead of the panel.
+                lead_in_drain: match &self.output {
+                    Some(Output::Kms { refresh_period, .. }) => *refresh_period * 2,
+                    _ => Duration::ZERO,
                 },
             },
             now,
@@ -5074,6 +5083,7 @@ mod tests {
                                     overlay_pending: false,
                                     photo_staged: false,
                                     lead_in: Duration::ZERO,
+                                    lead_in_drain: Duration::ZERO,
                                 },
                                 now,
                             );

@@ -1434,6 +1434,7 @@ mod tests {
                     overlay_pending: false,
                     photo_staged: false,
                     lead_in: Duration::ZERO,
+                    lead_in_drain: Duration::ZERO,
                 },
                 now,
             );
