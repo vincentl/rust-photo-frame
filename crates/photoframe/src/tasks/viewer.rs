@@ -137,22 +137,38 @@ impl UpscaleFilter {
     }
 }
 
+/// The upscale filter a `PHOTOFRAME_UPSCALE` reading selects, and the
+/// warning to log for it (an unknown or non-UTF-8 value keeps the default).
+fn upscale_from_env(var: Result<String, std::env::VarError>) -> (UpscaleFilter, Option<String>) {
+    match var {
+        Ok(raw) => match UpscaleFilter::parse(&raw) {
+            Some(filter) => (filter, None),
+            None => (
+                UpscaleFilter::DEFAULT,
+                Some(format!(
+                    "unknown PHOTOFRAME_UPSCALE {raw:?}; using the default"
+                )),
+            ),
+        },
+        Err(std::env::VarError::NotUnicode(raw)) => (
+            UpscaleFilter::DEFAULT,
+            Some(format!(
+                "PHOTOFRAME_UPSCALE {raw:?} is not UTF-8; using the default"
+            )),
+        ),
+        Err(std::env::VarError::NotPresent) => (UpscaleFilter::DEFAULT, None),
+    }
+}
+
 /// The `PHOTOFRAME_UPSCALE` filter (`bilinear`, `bicubic`, `bicubic-9`),
 /// read once.
 fn upscale_filter() -> UpscaleFilter {
     static FILTER: std::sync::OnceLock<UpscaleFilter> = std::sync::OnceLock::new();
     *FILTER.get_or_init(|| {
-        let filter = match std::env::var("PHOTOFRAME_UPSCALE") {
-            Ok(raw) => UpscaleFilter::parse(&raw).unwrap_or_else(|| {
-                warn!(value = %raw, "unknown PHOTOFRAME_UPSCALE; using the default");
-                UpscaleFilter::DEFAULT
-            }),
-            Err(std::env::VarError::NotUnicode(raw)) => {
-                warn!(value = ?raw, "PHOTOFRAME_UPSCALE is not UTF-8; using the default");
-                UpscaleFilter::DEFAULT
-            }
-            Err(std::env::VarError::NotPresent) => UpscaleFilter::DEFAULT,
-        };
+        let (filter, warning) = upscale_from_env(std::env::var("PHOTOFRAME_UPSCALE"));
+        if let Some(warning) = warning {
+            warn!("{warning}");
+        }
         if transition_scale() > 1 {
             info!(filter = ?filter, "viewer_upscale_filter");
         } else {
@@ -169,13 +185,43 @@ fn upscale_filter() -> UpscaleFilter {
 const MIP_SHARPEN_DEFAULT: f32 = 1.0;
 const MIP_SHARPEN_MAX: f32 = 2.0;
 
-/// A `PHOTOFRAME_MIP_SHARPEN` value: a finite number, clamped to
+/// A `PHOTOFRAME_MIP_SHARPEN` value: a finite number (read as f64, so a
+/// huge one such as 1e39 is clamped, not refused), clamped to
 /// 0..=`MIP_SHARPEN_MAX` (the second value says whether it was clamped);
 /// `None` for anything else.
 fn parse_mip_sharpen(raw: &str) -> Option<(f32, bool)> {
-    let value: f32 = raw.trim().parse().ok().filter(|v: &f32| v.is_finite())?;
-    let clamped = value.clamp(0.0, MIP_SHARPEN_MAX);
-    Some((clamped, clamped != value))
+    let value: f64 = raw.trim().parse().ok().filter(|v: &f64| v.is_finite())?;
+    let clamped = value.clamp(0.0, f64::from(MIP_SHARPEN_MAX));
+    Some((clamped as f32, clamped != value))
+}
+
+/// The strength a `PHOTOFRAME_MIP_SHARPEN` reading selects, and the warning
+/// to log for it (clamped, invalid, or not UTF-8).
+fn mip_sharpen_from_env(var: Result<String, std::env::VarError>) -> (f32, Option<String>) {
+    match var {
+        Ok(raw) => match parse_mip_sharpen(&raw) {
+            Some((value, false)) => (value, None),
+            Some((value, true)) => (
+                value,
+                Some(format!(
+                    "PHOTOFRAME_MIP_SHARPEN {raw:?} is out of 0..=2; clamped to {value}"
+                )),
+            ),
+            None => (
+                MIP_SHARPEN_DEFAULT,
+                Some(format!(
+                    "invalid PHOTOFRAME_MIP_SHARPEN {raw:?}; using the default"
+                )),
+            ),
+        },
+        Err(std::env::VarError::NotUnicode(raw)) => (
+            MIP_SHARPEN_DEFAULT,
+            Some(format!(
+                "PHOTOFRAME_MIP_SHARPEN {raw:?} is not UTF-8; using the default"
+            )),
+        ),
+        Err(std::env::VarError::NotPresent) => (MIP_SHARPEN_DEFAULT, None),
+    }
 }
 
 /// `PHOTOFRAME_MIP_SHARPEN`, read once. It applies to photos uploaded after
@@ -183,26 +229,15 @@ fn parse_mip_sharpen(raw: &str) -> Option<(f32, bool)> {
 fn mip_sharpen() -> f32 {
     static SHARPEN: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *SHARPEN.get_or_init(|| {
-        let sharpen = match std::env::var("PHOTOFRAME_MIP_SHARPEN") {
-            Ok(raw) => match parse_mip_sharpen(&raw) {
-                Some((value, clamped)) => {
-                    if clamped {
-                        warn!(raw, value, "PHOTOFRAME_MIP_SHARPEN out of 0..=2; clamped");
-                    }
-                    value
-                }
-                None => {
-                    warn!(raw, "invalid PHOTOFRAME_MIP_SHARPEN; using the default");
-                    MIP_SHARPEN_DEFAULT
-                }
-            },
-            Err(std::env::VarError::NotUnicode(raw)) => {
-                warn!(value = ?raw, "PHOTOFRAME_MIP_SHARPEN is not UTF-8; using the default");
-                MIP_SHARPEN_DEFAULT
-            }
-            Err(std::env::VarError::NotPresent) => MIP_SHARPEN_DEFAULT,
-        };
-        info!(sharpen, "viewer_mip_sharpen");
+        let (sharpen, warning) = mip_sharpen_from_env(std::env::var("PHOTOFRAME_MIP_SHARPEN"));
+        if let Some(warning) = warning {
+            warn!("{warning}");
+        }
+        if transition_scale() > 1 {
+            info!(sharpen, "viewer_mip_sharpen");
+        } else {
+            info!("viewer_mip_sharpen: scale=1 (no mips)");
+        }
         sharpen
     })
 }
@@ -3897,8 +3932,9 @@ impl App {
                 }
             }
             // Priority results (operator-requested) still upload
-            // immediately, mip generation included, so at most one frame
-            // of the animation can slip; everything else waits it out.
+            // immediately, mip generation included (about 4 ms of GPU with
+            // the sharpened level), so a slipped frame in the animation is
+            // likely; everything else waits it out.
             self.ready_results = priority_now;
             if !self.ready_results.is_empty() {
                 self.upload_results_now(wake);
@@ -6192,13 +6228,53 @@ mod tests {
     }
 
     #[test]
+    fn launch_env_readings_resolve_with_their_warnings() {
+        use std::env::VarError;
+        let not_utf8 = || {
+            use std::os::unix::ffi::OsStringExt;
+            VarError::NotUnicode(std::ffi::OsString::from_vec(vec![0x66, 0xff]))
+        };
+        // PHOTOFRAME_UPSCALE.
+        assert_eq!(
+            upscale_from_env(Err(VarError::NotPresent)),
+            (UpscaleFilter::DEFAULT, None)
+        );
+        assert_eq!(
+            upscale_from_env(Ok("bicubic".into())),
+            (UpscaleFilter::Bicubic, None)
+        );
+        let (filter, warning) = upscale_from_env(Ok("lanczos".into()));
+        assert_eq!(filter, UpscaleFilter::DEFAULT);
+        assert!(warning.is_some_and(|w| w.contains("unknown") && w.contains("lanczos")));
+        let (filter, warning) = upscale_from_env(Err(not_utf8()));
+        assert_eq!(filter, UpscaleFilter::DEFAULT);
+        assert!(warning.is_some_and(|w| w.contains("not UTF-8")));
+        // PHOTOFRAME_MIP_SHARPEN.
+        assert_eq!(
+            mip_sharpen_from_env(Err(VarError::NotPresent)),
+            (MIP_SHARPEN_DEFAULT, None)
+        );
+        assert_eq!(mip_sharpen_from_env(Ok("0.5".into())), (0.5, None));
+        let (value, warning) = mip_sharpen_from_env(Ok("1e39".into()));
+        assert_eq!(value, MIP_SHARPEN_MAX);
+        assert!(warning.is_some_and(|w| w.contains("clamped")));
+        let (value, warning) = mip_sharpen_from_env(Ok("sharp".into()));
+        assert_eq!(value, MIP_SHARPEN_DEFAULT);
+        assert!(warning.is_some_and(|w| w.contains("invalid")));
+        let (value, warning) = mip_sharpen_from_env(Err(not_utf8()));
+        assert_eq!(value, MIP_SHARPEN_DEFAULT);
+        assert!(warning.is_some_and(|w| w.contains("not UTF-8")));
+    }
+
+    #[test]
     fn mip_sharpen_parses_a_clamped_finite_number() {
         assert_eq!(parse_mip_sharpen("1"), Some((1.0, false)));
         assert_eq!(parse_mip_sharpen(" 0.5 "), Some((0.5, false)));
         assert_eq!(parse_mip_sharpen("0"), Some((0.0, false)));
         assert_eq!(parse_mip_sharpen("3"), Some((MIP_SHARPEN_MAX, true)));
         assert_eq!(parse_mip_sharpen("-1"), Some((0.0, true)));
-        for bad in ["", "sharp", "NaN", "inf"] {
+        assert_eq!(parse_mip_sharpen("1e39"), Some((MIP_SHARPEN_MAX, true)));
+        for bad in ["", "sharp", "NaN", "inf", "1e400"] {
             assert_eq!(parse_mip_sharpen(bad), None, "{bad:?}");
         }
     }

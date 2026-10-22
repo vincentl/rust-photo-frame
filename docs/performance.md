@@ -549,9 +549,10 @@ full-screen passes are spent carefully:
   detail mip 1 never held. The 5-tap form is as close as the exact one.
   Sharper transitions at no runtime cost have to come from the mip itself:
   see "The mip transitions read is pre-sharpened" below.
-  Every transition kind gains, push included: push reads its photos from
-  level 0, but its frame is drawn into the intermediate and upscaled like
-  the others.
+  The upscale filter applies to every transition kind, push included: push
+  reads its photos from level 0, but its frame is drawn into the
+  intermediate and upscaled like the others. (The sharpened mip below does
+  not reach push, which never reads the mip.)
 
   **Not a sharper downsample.** A sharper-looking downsample than the box,
   Catmull-Rom stretched to 2:1 (16 bilinear taps, at upload), was measured
@@ -608,6 +609,20 @@ full-screen passes are spent carefully:
   3.39 to 3.12, 1.35 to 1.15, 1.77 to 1.45 LSB. A thin line is not
   sharpened (the clamp keeps it within its neighborhood), only kept
   halo-free; at scale 4 only level 2 is sharpened, from a plain level 1.
+  a = 1 was tuned for the 2x round trip (scale 2, the default) only:
+  scales 3 and 4 are untuned, and at scale 3 the lod of 1.585 blends the
+  plain level 1 with the sharpened level 2.
+
+  With `PHOTOFRAME_MIP_SHARPEN=0` the level is exactly the plain box: the
+  center tap is the box (one bilinear tap at the same position as
+  `fs_blit`'s), and with no weight elsewhere the clamp returns it
+  unchanged. The shader folds each tap into a running sum, minimum and
+  maximum as it reads it, so three values stay live instead of nine.
+
+  The mip pass runs at upload, which waits out transitions, except for a
+  priority (operator-requested) photo, which uploads at once: with the
+  sharpened level that pass is about 4 ms of GPU time, so a slip in the
+  transition it lands on is likely.
 - **Iris petals are a signed-distance layer at 1/`IRIS_LAYER_SCALE`
   (default 16)** (`PHOTOFRAME_IRIS_LAYER_SCALE`, 1–16, to override). The
   petal math runs on CPU-precomputed per-frame constants and avoids
