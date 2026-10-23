@@ -623,8 +623,9 @@ full-screen passes are spent carefully:
   priority (operator-requested) photo, which uploads at once: with the
   sharpened level that pass is about 4 ms of GPU time, so a slip in the
   transition it lands on is likely.
-- **Iris petals are a signed-distance layer at 1/`IRIS_LAYER_SCALE`
-  (default 16)** (`PHOTOFRAME_IRIS_LAYER_SCALE`, 1–16, to override). The
+- **Iris petals are a signed-distance layer at 1/`layer-scale`** (the
+  iris transition's config key, 1–16, default 4;
+  `PHOTOFRAME_IRIS_LAYER_SCALE` overrides it for tuning). The
   petal math runs on CPU-precomputed per-frame constants and avoids
   dynamically indexed local arrays, which the V3D compiler demotes to slow
   per-pixel scratch memory. The layer is drawn in two passes:
@@ -664,9 +665,14 @@ full-screen passes are spent carefully:
   where two petal edges meet at an angle (the interpolated distance rounds
   the corner). The overlap edges are sampled at the layer's resolution.
 
-  Pi measurement, 2026-10-22, before this layer: the cover loop is the
-  cost, layer pixels × blades, peaking where the petal band is widest
-  (12.4 ms at scale 4, 3.5 ms at 8), so 16 is the scale that fits a frame.
+  Pi measurement, 2026-10-22: the cover loop is the cost, layer pixels ×
+  blades, peaking where the petal band is widest (12.4 ms at scale 4,
+  3.5 ms at 8, 1.0 at 16). At 16 iris holds 60, but by eye (Vincent,
+  2026-10-22) the petal shading and the overlaps are too fuzzy, so the
+  default is 4: exact shading at about 47 fps on a 4K Pi 5. 8 runs about
+  55 fps with interiors within 2 LSB of 4. The choice is per iris
+  transition (`layer-scale` in configure.md); the viewer logs each one's
+  effective scale at startup (`viewer_iris_layer_scale`).
   All iris entry points compile at 4 threads (`fs_iris_cover` 188
   instructions; the one 2-thread shader in the build is `fs_debug_bezier`,
   used only with `PHOTOFRAME_DEBUG_BEZIER`).
@@ -915,7 +921,8 @@ kernel enforces load limits only on the Pi 3 generation).
 ## Environment knobs
 
 The variables the viewer reads (`PHOTOFRAME_SURFACE`, `PHOTOFRAME_PRESENT_MODE`,
-`PHOTOFRAME_TRANSITION_SCALE`, `PHOTOFRAME_IRIS_LAYER_SCALE`,
+`PHOTOFRAME_TRANSITION_SCALE`, `PHOTOFRAME_IRIS_LAYER_SCALE` (an override
+of the iris transition's `layer-scale`),
 `PHOTOFRAME_DRM_CONNECTOR`, `PHOTOFRAME_DRM_MODE`, `WGPU_BACKEND`), their
 defaults and how to set them on each stack are listed in one place:
 [advanced.md › The launcher and its environment](advanced.md#the-launcher-and-its-environment).

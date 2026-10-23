@@ -100,6 +100,7 @@ transition:
       overlap-shadow: 0.6
       min-aperture: 0.01
       swirl: -0.45
+      layer-scale: 4
 
 # Optional print-simulation effect stage (gallery lighting + paper texture).
 photo-effect:

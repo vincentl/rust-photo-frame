@@ -615,6 +615,7 @@ The remaining knobs depend on the family:
   - **`overlap-shadow`** (float 0–1, default `0.6`): darkness of the soft shadow each petal casts on the one beneath it along the overlap seam.
   - **`min-aperture`** (float 0–0.4, default `0.05`): fraction of the screen circumradius left open at full close; the photos crossfade behind the petals while the aperture is at its smallest.
   - **`swirl`** (float −1–1, default `-0.45`): signed twist of the whole petal rosette while closing, as if both iris rings counter-rotate. `0` keeps the rosette orientation fixed; the sign sets the twist direction.
+  - **`layer-scale`** (integer 1–16, default `4`; outside that range the config is refused): how coarsely the petals' shading and overlaps are drawn, as a fraction of the screen (1/4, 1/8, …). The petal outline stays crisp at any value; this trades shading detail for speed. On a 4K Raspberry Pi 5: `4` draws exact shading at about 47 fps, `8` runs about 55 fps with near-identical shading, `16` holds 60 fps with visibly coarse shading. `PHOTOFRAME_IRIS_LAYER_SCALE` overrides it for every iris transition (see [advanced.md](advanced.md#the-launcher-and-its-environment)).
 
 Examples are in [Transition examples](#transition-examples).
 

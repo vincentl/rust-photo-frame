@@ -48,19 +48,6 @@ use tracing::{Level, debug, info, warn};
 /// end-cap "teeth") for 5..=14 blades at any minimum aperture.
 const IRIS_EXTRA_WIDTH_RAD: f32 = 1.308_997;
 
-/// Linear downscale factor of the iris petal layer relative to the surface.
-/// The layer holds the petals' signed distance and shade; the main pass
-/// draws the outline from the interpolated distance at its own resolution,
-/// so the outline stays crisp at any layer scale and the scale sets only
-/// how finely the shading is sampled. The layer's cost is its pixels × the
-/// blades (Pi, 2026-10-22: up to 12.4 ms at 4, 3.5 ms at 8), so 16 (240x135
-/// at 4K) is what fits the frame. Against the 1/4 layer on the Mac GPU,
-/// petal interiors are within 5 LSB (0.04% of pixels over 1, all in the
-/// overlap-shadow ramps), and where one petal's edge lies over another the
-/// step is sampled at 16 px; 8 keeps interiors within 2 LSB. Override with
-/// PHOTOFRAME_IRIS_LAYER_SCALE (1..=16).
-const IRIS_LAYER_SCALE: u32 = 16;
-
 /// Linear downscale factor for the intermediate that transition frames
 /// render into (resting photos always render at native resolution). 2 →
 /// roughly a quarter of the per-pixel transition cost; motion hides the
@@ -91,10 +78,78 @@ fn transition_scale() -> u32 {
     *SCALE.get_or_init(|| scale_from_env("PHOTOFRAME_TRANSITION_SCALE", TRANSITION_HALF_SCALE, 4))
 }
 
-/// Effective iris petal-layer scale (env-overridable, read once).
-fn iris_layer_scale() -> u32 {
-    static SCALE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *SCALE.get_or_init(|| scale_from_env("PHOTOFRAME_IRIS_LAYER_SCALE", IRIS_LAYER_SCALE, 16))
+/// The iris petal layer's downscale comes from each iris transition's
+/// `layer-scale` (config, 1..=16, default 4; `config::IrisTransition`).
+/// The layer holds the petals' signed distance and shade; the main pass
+/// draws the outline from the interpolated distance at its own resolution,
+/// so the outline stays crisp at any scale and the scale sets only how
+/// finely the shading and the overlaps are sampled. The layer's cost is its
+/// pixels x the blades (Pi, 2026-10-22: up to 12.4 ms at 4, 3.5 ms at 8,
+/// 1.0 at 16). `PHOTOFRAME_IRIS_LAYER_SCALE` overrides it for tuning: what
+/// a reading of it selects, and the warning to log for it.
+fn iris_layer_scale_from_env(
+    var: Result<String, std::env::VarError>,
+) -> (Option<u32>, Option<String>) {
+    let max = crate::config::IRIS_LAYER_SCALE_MAX;
+    match var {
+        Ok(raw) => match raw.trim().parse::<u32>() {
+            Ok(value) if (1..=max).contains(&value) => (Some(value), None),
+            _ => (
+                None,
+                Some(format!(
+                    "invalid PHOTOFRAME_IRIS_LAYER_SCALE {raw:?} (1..={max}); using the config"
+                )),
+            ),
+        },
+        Err(std::env::VarError::NotUnicode(raw)) => (
+            None,
+            Some(format!(
+                "PHOTOFRAME_IRIS_LAYER_SCALE {raw:?} is not UTF-8; using the config"
+            )),
+        ),
+        Err(std::env::VarError::NotPresent) => (None, None),
+    }
+}
+
+/// `PHOTOFRAME_IRIS_LAYER_SCALE`, read once.
+fn iris_layer_scale_override() -> Option<u32> {
+    static SCALE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| {
+        let (scale, warning) =
+            iris_layer_scale_from_env(std::env::var("PHOTOFRAME_IRIS_LAYER_SCALE"));
+        if let Some(warning) = warning {
+            warn!("{warning}");
+        }
+        scale
+    })
+}
+
+/// The petal-layer scale an iris transition draws with: the env override
+/// when set, else its configured `layer-scale`.
+fn effective_iris_layer_scale(configured: u32) -> u32 {
+    iris_layer_scale_override().unwrap_or(configured)
+}
+
+/// At startup: every selectable iris transition's petal-layer scale, and a
+/// warning where the env override replaces the configured one.
+fn log_iris_layer_scales(cfg: &crate::config::Configuration) {
+    for selected in cfg.transition.iter_selected() {
+        if let crate::config::TransitionMode::Iris(iris) = selected.option.mode() {
+            let effective = effective_iris_layer_scale(iris.layer_scale);
+            if effective != iris.layer_scale {
+                warn!(
+                    configured = iris.layer_scale,
+                    effective,
+                    "PHOTOFRAME_IRIS_LAYER_SCALE overrides the iris transition's layer-scale"
+                );
+            }
+            info!(
+                index = selected.entry.index,
+                layer_scale = effective,
+                "viewer_iris_layer_scale"
+            );
+        }
+    }
 }
 
 /// How the reduced-resolution intermediate is upscaled to the surface
@@ -297,6 +352,8 @@ pub(super) enum ActiveTransition {
         overlap_shadow: f32,
         min_aperture: f32,
         swirl: f32,
+        /// The petal layer's downscale (`effective_iris_layer_scale`).
+        layer_scale: u32,
     },
 }
 
@@ -430,6 +487,7 @@ impl TransitionState {
                 overlap_shadow: cfg.overlap_shadow,
                 min_aperture: cfg.min_aperture,
                 swirl: cfg.swirl,
+                layer_scale: effective_iris_layer_scale(cfg.layer_scale),
             },
         };
 
@@ -2174,7 +2232,7 @@ fn pass_times(pairs: [Option<(u64, u64)>; 3], period_ns: f64) -> Option<PassTime
 /// Reduced-resolution offscreen render target that can also be sampled.
 /// At 4K the Pi's frame cost is dominated by per-pixel fill, so heavy
 /// passes render at a fraction of the surface size and get upsampled:
-/// the iris petal layer at 1/IRIS_LAYER_SCALE, and every transition
+/// the iris petal layer at 1/`layer-scale`, and every transition
 /// frame at 1/TRANSITION_HALF_SCALE.
 struct OffscreenTarget {
     view: wgpu::TextureView,
@@ -2223,10 +2281,10 @@ impl GpuCtx {
         OffscreenTarget { view, bind, w, h }
     }
 
-    /// Create (or re-create after a resize) the iris petal layer so it
-    /// tracks the current surface size.
-    fn ensure_iris_layer(&mut self) {
-        let scale = iris_layer_scale();
+    /// Create (or re-create after a resize or for another scale) the iris
+    /// petal layer at 1/`scale` of the surface.
+    fn ensure_iris_layer(&mut self, scale: u32) {
+        let scale = scale.max(1);
         let w = (self.config.width / scale).max(1);
         let h = (self.config.height / scale).max(1);
         if let Some(layer) = self.iris_layer.as_ref()
@@ -4415,8 +4473,12 @@ impl App {
                     if transition_scale() > 1 {
                         gpu.ensure_half_target();
                     }
-                    if kind == TransitionKind::Iris {
-                        gpu.ensure_iris_layer();
+                    if let Some(ActiveTransition::Iris { layer_scale, .. }) = (kind
+                        == TransitionKind::Iris)
+                        .then(|| wake.transition_state().map(|s| s.variant()))
+                        .flatten()
+                    {
+                        gpu.ensure_iris_layer(*layer_scale);
                     }
                 }
                 if let Some(ActiveTransition::EInk { stripe_count, .. }) =
@@ -4601,6 +4663,7 @@ impl App {
                             overlap_shadow,
                             min_aperture,
                             swirl,
+                            layer_scale,
                         } => {
                             // Solve the petal kinematics here so the
                             // per-pixel shader loop is transcendental-free.
@@ -4632,8 +4695,7 @@ impl App {
                             // in screen pixels (iris frames always draw
                             // into the intermediate when there is one).
                             let edge_band = 0.75 * transition_scale().max(1) as f32;
-                            uniforms.params3 =
-                                [iris_layer_scale() as f32, r_mid, 0.5 * r_in, edge_band];
+                            uniforms.params3 = [*layer_scale as f32, r_mid, 0.5 * r_in, edge_band];
                             let (s_psi, c_psi) = psi.sin_cos();
                             for i in 0..n {
                                 let ai = std::f32::consts::TAU * i as f32 / n as f32 + spin;
@@ -4954,6 +5016,7 @@ impl App {
             .max(1);
         let pipeline_capacity = cfg.viewer_preload_count.max(2);
         let mat_pipeline = MattingPipeline::new(worker_count, pipeline_capacity);
+        log_iris_layer_scales(&cfg);
         let clear_color = cfg
             .matting
             .primary_option()
@@ -6225,6 +6288,28 @@ mod tests {
         let last = *frames.last().unwrap();
         state.anchor_once(last + period);
         assert!(state.progress_at(last) > 0.0);
+    }
+
+    #[test]
+    fn iris_layer_scale_override_reads_1_to_16() {
+        use std::env::VarError;
+        assert_eq!(
+            iris_layer_scale_from_env(Err(VarError::NotPresent)),
+            (None, None)
+        );
+        assert_eq!(iris_layer_scale_from_env(Ok("8".into())), (Some(8), None));
+        assert_eq!(
+            iris_layer_scale_from_env(Ok(" 16 ".into())),
+            (Some(16), None)
+        );
+        for bad in ["0", "17", "x"] {
+            let (scale, warning) = iris_layer_scale_from_env(Ok(bad.into()));
+            assert_eq!(scale, None, "{bad}");
+            assert!(
+                warning.is_some_and(|w| w.contains("using the config")),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
