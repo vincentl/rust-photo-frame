@@ -2731,15 +2731,15 @@ pub struct TransitionOptions {
 impl TransitionOptions {
     fn default_for(kind: TransitionKind) -> Self {
         let (duration_ms, mode) = match kind {
-            TransitionKind::Fade => (400, TransitionMode::Fade(FadeTransition::default())),
-            TransitionKind::Wipe => (400, TransitionMode::Wipe(WipeTransition::default())),
-            TransitionKind::Push => (400, TransitionMode::Push(PushTransition::default())),
-            TransitionKind::EInk => (1600, TransitionMode::EInk(EInkTransition::default())),
+            TransitionKind::Fade => (1000, TransitionMode::Fade(FadeTransition::default())),
+            TransitionKind::Wipe => (1000, TransitionMode::Wipe(WipeTransition::default())),
+            TransitionKind::Push => (1000, TransitionMode::Push(PushTransition::default())),
+            TransitionKind::EInk => (2000, TransitionMode::EInk(EInkTransition::default())),
             TransitionKind::Dissolve => {
                 (600, TransitionMode::Dissolve(DissolveTransition::default()))
             }
             TransitionKind::RadialWipe => (
-                500,
+                1000,
                 TransitionMode::RadialWipe(RadialWipeTransition::default()),
             ),
             TransitionKind::VenetianBlinds => (
@@ -2747,7 +2747,7 @@ impl TransitionOptions {
                 TransitionMode::VenetianBlinds(VenetianBlindsTransition::default()),
             ),
             TransitionKind::CrossfadeZoom => (
-                700,
+                1200,
                 TransitionMode::CrossfadeZoom(CrossfadeZoomTransition::default()),
             ),
             TransitionKind::Iris => (2600, TransitionMode::Iris(IrisTransition::default())),

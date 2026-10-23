@@ -58,7 +58,7 @@ transition:
   selection: random # fixed, random, or sequential
   active:
     - kind: fade
-      duration-ms: 400
+      duration-ms: 1000
 global-photo-settings:
   dwell-ms: 12000 # Time an image remains fully visible (ms)
   oversample: 1.0 # GPU render oversample vs. screen size
@@ -133,7 +133,7 @@ If the frame launches to a black screen, check that `photo-library-path` points 
 ### `transition`
 
 - **Purpose:** Controls how the viewer blends between photos.
-- **Required?** Optional; when omitted the frame uses a 400 ms fade.
+- **Required?** Optional; when omitted the frame uses a 1000 ms fade.
 - **Accepted values & defaults:** Mapping documented in [Transition configuration](#transition-configuration).
 - **Effect on behavior:** Adjust duration, direction, randomness, or transition family — from subtle fades to bold pushes or e‑ink reveals.
 
@@ -575,7 +575,7 @@ When `selection` is omitted, the runtime infers it: a single entry becomes `fixe
 
 Each active entry accepts:
 
-- **`duration-ms`** (integer, default `400` for `fade`, `wipe`, `push`; `1600` for `e-ink`): total runtime of the transition. Must be positive.
+- **`duration-ms`** (integer, default `1000` for `fade`, `wipe`, `push`, `radial-wipe`; `1200` for `crossfade-zoom`; `600` for `dissolve`, `venetian-blinds`; `2000` for `e-ink`; `2600` for `iris`): total runtime of the transition. Must be positive.
 
 The remaining knobs depend on the family:
 
@@ -718,7 +718,7 @@ photo-effect:
 transition:
   active:
     - kind: fade
-      duration-ms: 450
+      duration-ms: 1000
 ```
 
 ### Fade through black
@@ -727,7 +727,7 @@ transition:
 transition:
   active:
     - kind: fade
-      duration-ms: 600
+      duration-ms: 1200
       through-black: true
 ```
 
@@ -738,12 +738,12 @@ transition:
   selection: random
   active:
     - kind: fade
-      duration-ms: 450
+      duration-ms: 1000
     - kind: push
-      duration-ms: 520
+      duration-ms: 1000
       angles: [0.0]
     - kind: push
-      duration-ms: 520
+      duration-ms: 1000
       angles: [180.0]
 ```
 
@@ -756,13 +756,13 @@ transition:
   selection: sequential
   active:
     - kind: push
-      duration-ms: 520
+      duration-ms: 1000
       angles: [0.0]
     - kind: wipe
-      duration-ms: 520
+      duration-ms: 1000
       angles: [90.0]
     - kind: push
-      duration-ms: 520
+      duration-ms: 1000
       angles: [180.0]
 ```
 

@@ -49,46 +49,39 @@ transition:
   # both radial shapes, both blind orientations). Repeat a kind to weight it more
   # heavily, tweak any value, or delete entries you don't want. `showcase` mode
   # previews each kind individually with on-screen labels (see showcase/README.md).
+  # Every kind has a built-in duration (fade/wipe/push/radial-wipe 1000 ms, crossfade-zoom 1200,
+  # dissolve/venetian-blinds 600, e-ink 2000, iris 2600); add `duration-ms` to an entry to override it.
   active:
     - kind: fade
-      duration-ms: 450
       through-black: false # true: fade to black before revealing the next photo
     - kind: wipe
-      duration-ms: 600
       angles: [0.0, 90.0, 180.0, 270.0] # directions to rotate through
       angle-jitter: 12.0 # randomize direction by ±this many degrees
       softness: 0.08
     - kind: push
-      duration-ms: 520
       angles: [0.0, 90.0, 180.0, 270.0]
       angle-jitter: 8.0
     - kind: e-ink
-      duration-ms: 1600
       flash-count: 0
       reveal-portion: 0.55
       stripe-count: 24
       flash-color: [255, 255, 255]
     - kind: dissolve # threshold value-noise field by progress
-      duration-ms: 600
       softness: 0.1 # 0 = hard per-pixel pop, up to ~0.5 = soft edge
       scale: 64.0 # noise cell size in pixels
     - kind: radial-wipe # circle or diamond reveal from center
-      duration-ms: 500
       softness: 0.1
       shapes: [circle, diamond] # circle | diamond; list several for variety
       center: [0.5, 0.5]
     - kind: venetian-blinds # horizontal/vertical stripe reveal
-      duration-ms: 600
       stripe-count: 16
       softness: 0.1
       orientations: [horizontal, vertical]
     - kind: crossfade-zoom # fade combined with subtle scale
-      duration-ms: 700
       zoom: 0.06
       current-zooms-in: true
       next-zooms-in: true
     - kind: iris # mechanical camera-iris: petals close over the photo, reopen on the next
-      duration-ms: 2600
       blades: 12 # petal count (5-14); geometry is derived automatically
       color: [42, 42, 49] # base petal RGB; mid-dark shows the shading best
       petal-sheen: 0.5 # 0-1: directional sheen on the blades; 0 = flat petals
