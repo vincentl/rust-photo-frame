@@ -2828,6 +2828,7 @@ impl TransitionOptions {
             }
             TransitionMode::Iris(iris) => {
                 iris.sanitize();
+                iris.validate(self.kind)?;
             }
         }
         Ok(())
@@ -2971,8 +2972,10 @@ impl TransitionOptions {
                         .unwrap_or(defaults.overlap_shadow),
                     min_aperture: builder.iris_min_aperture.unwrap_or(defaults.min_aperture),
                     swirl: builder.iris_swirl.unwrap_or(defaults.swirl),
+                    layer_scale: builder.iris_layer_scale.unwrap_or(defaults.layer_scale),
                 };
                 iris.sanitize();
+                iris.validate(kind)?;
                 TransitionMode::Iris(iris)
             }
         };
@@ -3207,7 +3210,17 @@ pub struct IrisTransition {
     pub overlap_shadow: f32,
     pub min_aperture: f32,
     pub swirl: f32,
+    /// The petal layer's downscale (`layer-scale`, 1..=`IRIS_LAYER_SCALE_MAX`):
+    /// how finely the petal shading and overlaps are sampled; the outline is
+    /// crisp at any scale. 4 is exact shading at ~47 fps on a 4K Pi 5, 16
+    /// holds 60 with coarse shading. `PHOTOFRAME_IRIS_LAYER_SCALE` overrides
+    /// it for tuning.
+    pub layer_scale: u32,
 }
+
+/// The iris petal layer's default and largest downscale (`layer-scale`).
+pub const IRIS_LAYER_SCALE_DEFAULT: u32 = 4;
+pub const IRIS_LAYER_SCALE_MAX: u32 = 16;
 
 impl Default for IrisTransition {
     fn default() -> Self {
@@ -3218,11 +3231,24 @@ impl Default for IrisTransition {
             overlap_shadow: 0.6,
             min_aperture: 0.05,
             swirl: -0.45,
+            layer_scale: IRIS_LAYER_SCALE_DEFAULT,
         }
     }
 }
 
 impl IrisTransition {
+    /// `layer-scale` must name a layer the viewer can draw: 1..=16.
+    fn validate(&self, kind: TransitionKind) -> Result<()> {
+        ensure!(
+            (1..=IRIS_LAYER_SCALE_MAX).contains(&self.layer_scale),
+            format!(
+                "transition option {kind} has layer-scale {}; it must be 1..={IRIS_LAYER_SCALE_MAX}",
+                self.layer_scale
+            )
+        );
+        Ok(())
+    }
+
     fn sanitize(&mut self) {
         let defaults = Self::default();
         // The auto-derived blade width (spacing + 75°) is validated for 5..=14
@@ -3364,6 +3390,7 @@ struct TransitionOptionBuilder {
     iris_overlap_shadow: Option<f32>,
     iris_min_aperture: Option<f32>,
     iris_swirl: Option<f32>,
+    iris_layer_scale: Option<u32>,
 }
 
 impl TransitionOptionBuilder {
@@ -3572,6 +3599,9 @@ fn apply_transition_inline_field<E: de::Error>(
         "blades" if matches!(kind, TransitionKind::Iris) => {
             builder.iris_blades = Some(inline_value_to::<u32, E>(value)?);
         }
+        "layer-scale" if matches!(kind, TransitionKind::Iris) => {
+            builder.iris_layer_scale = Some(inline_value_to::<u32, E>(value)?);
+        }
         "color" if matches!(kind, TransitionKind::Iris) => {
             builder.iris_color = Some(inline_value_to::<[u8; 3], E>(value)?);
         }
@@ -3614,6 +3644,7 @@ fn apply_transition_inline_field<E: de::Error>(
                     "overlap-shadow",
                     "min-aperture",
                     "swirl",
+                    "layer-scale",
                 ],
             ));
         }

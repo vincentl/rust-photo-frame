@@ -1653,8 +1653,39 @@ transition:
             assert_eq!(iris.overlap_shadow, 0.6);
             assert_eq!(iris.min_aperture, 0.05);
             assert_eq!(iris.swirl, -0.45);
+            assert_eq!(iris.layer_scale, 4);
         }
         other => panic!("expected iris, got {other:?}"),
+    }
+}
+
+#[test]
+fn iris_layer_scale_is_configurable_and_range_checked() {
+    let yaml = |scale: &str| {
+        format!(
+            r#"
+photo-library-path: "/photos"
+transition:
+  active:
+    - kind: iris
+      layer-scale: {scale}
+"#
+        )
+    };
+    for scale in [1u32, 8, 16] {
+        let cfg: Configuration = serde_yaml::from_str(&yaml(&scale.to_string())).unwrap();
+        let opts: Vec<_> = cfg.transition.iter_selected().collect();
+        match opts[0].option.mode() {
+            TransitionMode::Iris(iris) => assert_eq!(iris.layer_scale, scale),
+            other => panic!("expected iris, got {other:?}"),
+        }
+    }
+    for bad in ["0", "17"] {
+        let err = serde_yaml::from_str::<Configuration>(&yaml(bad)).unwrap_err();
+        assert!(
+            err.to_string().contains("layer-scale") && err.to_string().contains("1..=16"),
+            "{bad}: {err}"
+        );
     }
 }
 
