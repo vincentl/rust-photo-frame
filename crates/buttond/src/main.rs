@@ -1853,6 +1853,11 @@ fn open_device(device_override: Option<&PathBuf>) -> Result<(Device, PathBuf)> {
         let device =
             Device::open(path).with_context(|| format!("failed to open {}", path.display()))?;
         ensure_power_key(&device, path)?;
+        info!(
+            device = %path.display(),
+            name = device.name().unwrap_or("<unnamed>"),
+            "using input device from buttond.device"
+        );
         return Ok((device, path.clone()));
     }
 
@@ -1867,6 +1872,66 @@ fn open_device(device_override: Option<&PathBuf>) -> Result<(Device, PathBuf)> {
     bail!("no input devices advertising KEY_POWER found");
 }
 
+/// True when a `/dev/input/by-path` link name or an evdev device name looks
+/// like a power button (`...-power-event...` on older kernels,
+/// `platform-pwr_button-event` / `pwr_button` on the Pi 5).
+fn is_power_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("power") || name.contains("pwr")
+}
+
+/// True for HDMI/CEC remote inputs (e.g. `vc4-hdmi-0`), which advertise
+/// KEY_POWER but are not the physical button.
+fn is_hdmi_cec_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("hdmi") || name.contains("cec")
+}
+
+/// An input device considered for auto-detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InputCandidate {
+    path: PathBuf,
+    name: String,
+    has_power_key: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickReason {
+    /// The device name contains "pwr" or "power".
+    PowerName,
+    /// No power-named device; chose a non-HDMI/CEC device with KEY_POWER.
+    OtherDevice,
+    /// Only HDMI/CEC devices advertise KEY_POWER.
+    HdmiCecOnly,
+}
+
+/// Preference order over devices that have KEY_POWER: power-named first, then
+/// other non-HDMI/CEC devices, then HDMI/CEC devices; ties broken by path.
+fn pick_candidate(candidates: &[InputCandidate]) -> Option<(usize, PickReason)> {
+    let tier = |c: &InputCandidate| {
+        if is_hdmi_cec_name(&c.name) {
+            2
+        } else if is_power_name(&c.name) {
+            0
+        } else {
+            1
+        }
+    };
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.has_power_key)
+        .min_by(|(_, a), (_, b)| tier(a).cmp(&tier(b)).then_with(|| a.path.cmp(&b.path)))
+        .map(|(idx, c)| {
+            let reason = match tier(c) {
+                0 => PickReason::PowerName,
+                1 => PickReason::OtherDevice,
+                _ => PickReason::HdmiCecOnly,
+            };
+            (idx, reason)
+        })
+}
+
 fn scan_dir<P: AsRef<Path>>(dir: P, filter_power_name: bool) -> Result<Option<(Device, PathBuf)>> {
     let dir = dir.as_ref().to_path_buf();
     let entries = match fs::read_dir(&dir) {
@@ -1877,7 +1942,7 @@ fn scan_dir<P: AsRef<Path>>(dir: P, filter_power_name: bool) -> Result<Option<(D
         }
     };
 
-    let mut candidates = Vec::new();
+    let mut devices = Vec::new();
     for entry in entries {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
@@ -1885,30 +1950,61 @@ fn scan_dir<P: AsRef<Path>>(dir: P, filter_power_name: bool) -> Result<Option<(D
         }
         let path = entry.path();
         if filter_power_name {
-            let name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(name) => name.to_ascii_lowercase(),
-                None => continue,
-            };
-            if !name.contains("power") {
-                continue;
+            match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) if is_power_name(name) => {}
+                _ => continue,
             }
-        }
-
-        if !filter_power_name
-            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+        } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
             && !name.starts_with("event")
         {
             continue;
         }
 
-        match open_power_device(&path)? {
-            Some(device) => candidates.push((device, path)),
-            None => continue,
+        if let Some(device) = open_power_device(&path)? {
+            devices.push((device, path));
         }
     }
 
-    candidates.sort_by(|a, b| a.1.cmp(&b.1));
-    Ok(candidates.into_iter().next())
+    let candidates: Vec<InputCandidate> = devices
+        .iter()
+        .map(|(device, path)| InputCandidate {
+            path: path.clone(),
+            name: device.name().unwrap_or_default().to_string(),
+            has_power_key: true,
+        })
+        .collect();
+    let Some((idx, reason)) = pick_candidate(&candidates) else {
+        return Ok(None);
+    };
+    let chosen = &candidates[idx];
+    let source = if filter_power_name {
+        "by-path"
+    } else {
+        "event fallback"
+    };
+    match reason {
+        PickReason::PowerName => info!(
+            device = %chosen.path.display(),
+            name = %chosen.name,
+            source,
+            "using input device: name contains pwr/power"
+        ),
+        PickReason::OtherDevice => warn!(
+            device = %chosen.path.display(),
+            name = %chosen.name,
+            source,
+            "no pwr/power-named input device found; using first device advertising KEY_POWER \
+             (set buttond.device if this is wrong)"
+        ),
+        PickReason::HdmiCecOnly => warn!(
+            device = %chosen.path.display(),
+            name = %chosen.name,
+            source,
+            "only an HDMI/CEC input advertises KEY_POWER; physical button presses will likely \
+             be ignored (set buttond.device)"
+        ),
+    }
+    Ok(Some(devices.swap_remove(idx)))
 }
 
 fn open_power_device(path: &Path) -> Result<Option<Device>> {
@@ -1937,6 +2033,88 @@ fn ensure_power_key(device: &Device, path: &Path) -> Result<()> {
         bail!("{} does not support KEY_POWER", path.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod device_pick_tests {
+    use super::*;
+
+    fn cand(path: &str, name: &str, has_power_key: bool) -> InputCandidate {
+        InputCandidate {
+            path: PathBuf::from(path),
+            name: name.to_string(),
+            has_power_key,
+        }
+    }
+
+    #[test]
+    fn power_name_filter_matches_power_and_pwr() {
+        assert!(is_power_name("platform-pwr_button-event"));
+        assert!(is_power_name("platform-gpio-keys-power-event"));
+        assert!(is_power_name("Platform-PWR_Button-Event"));
+        assert!(is_power_name("pwr_button"));
+        assert!(is_power_name("Power Button"));
+        assert!(!is_power_name("platform-107c701400.hdmi-event"));
+        assert!(!is_power_name("usb-keyboard-event-kbd"));
+    }
+
+    #[test]
+    fn hdmi_cec_names_are_detected() {
+        assert!(is_hdmi_cec_name("vc4-hdmi-0"));
+        assert!(is_hdmi_cec_name("VC4-HDMI-1"));
+        assert!(is_hdmi_cec_name("cec-remote"));
+        assert!(!is_hdmi_cec_name("pwr_button"));
+        assert!(!is_hdmi_cec_name("gpio-keys"));
+    }
+
+    #[test]
+    fn pick_prefers_pwr_name_over_hdmi_event0() {
+        let list = vec![
+            cand("/dev/input/event0", "vc4-hdmi-0", true),
+            cand("/dev/input/event1", "vc4-hdmi-1", true),
+            cand("/dev/input/event4", "pwr_button", true),
+        ];
+        assert_eq!(pick_candidate(&list), Some((2, PickReason::PowerName)));
+    }
+
+    #[test]
+    fn pick_prefers_other_device_over_hdmi() {
+        let list = vec![
+            cand("/dev/input/event0", "vc4-hdmi-0", true),
+            cand("/dev/input/event3", "gpio-keys", true),
+        ];
+        assert_eq!(pick_candidate(&list), Some((1, PickReason::OtherDevice)));
+    }
+
+    #[test]
+    fn pick_falls_back_to_hdmi_when_nothing_else() {
+        let list = vec![
+            cand("/dev/input/event1", "vc4-hdmi-1", true),
+            cand("/dev/input/event0", "vc4-hdmi-0", true),
+        ];
+        assert_eq!(pick_candidate(&list), Some((1, PickReason::HdmiCecOnly)));
+    }
+
+    #[test]
+    fn pick_ignores_devices_without_power_key() {
+        let list = vec![
+            cand("/dev/input/event0", "pwr_button", false),
+            cand("/dev/input/event2", "gpio-keys", true),
+        ];
+        assert_eq!(pick_candidate(&list), Some((1, PickReason::OtherDevice)));
+        let only_keyless = [cand("/dev/input/event0", "pwr_button", false)];
+        assert_eq!(pick_candidate(&only_keyless), None);
+        assert_eq!(pick_candidate(&[]), None);
+    }
+
+    #[test]
+    fn pick_breaks_ties_by_path() {
+        let list = vec![
+            cand("/dev/input/event5", "Power Button", true),
+            cand("/dev/input/event4", "pwr_button", true),
+        ];
+        assert_eq!(pick_candidate(&list), Some((1, PickReason::PowerName)));
+    }
 }
 
 #[derive(Clone, Copy)]
