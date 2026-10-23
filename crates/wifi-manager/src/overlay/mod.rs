@@ -28,6 +28,17 @@ pub struct OverlayRequest {
     pub title: Option<String>,
 }
 
+/// Keep "Wi-Fi" on one line in the viewer's overlay. The viewer shapes the
+/// headline with a Unicode line breaker, which treats the hyphen as a break
+/// opportunity, so a tight column wrapped "Wi-" / "Fi" (seen on the frame,
+/// 2026-10-22). U+2060 WORD JOINER on both sides of the hyphen forbids the
+/// break and is zero-width and invisible to the shaper; a non-breaking hyphen
+/// glyph (U+2011) might be missing from the font. The window UI keeps the
+/// plain text: its layout engine does not hide format characters.
+fn unbreakable_wifi(text: &str) -> String {
+    text.replace("Wi-Fi", "Wi\u{2060}-\u{2060}Fi")
+}
+
 /// The overlay's default copy; the window (`ui.rs`) shows the same words.
 pub const DEFAULT_TITLE: &str = "Reconnect the photo frame to Wi-Fi";
 pub const BODY: &str = "Use another device to restore connectivity.";
@@ -68,10 +79,12 @@ impl OverlayRequest {
         }
         Ok(WifiOverlay {
             ttl_sec: DEFAULT_OVERLAY_TTL_SEC,
-            headline: self
-                .title
-                .clone()
-                .unwrap_or_else(|| DEFAULT_TITLE.to_string()),
+            headline: unbreakable_wifi(
+                &self
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_TITLE.to_string()),
+            ),
             body: BODY.to_string(),
             join_qr: qr::wifi_join_payload(&self.ssid, &password),
             ssid: self.ssid.clone(),
@@ -766,7 +779,7 @@ mod tests {
             content.join_qr,
             "WIFI:T:WPA;S:Frame\\;Setup;P:apple-river-stone;;"
         );
-        assert_eq!(content.headline, DEFAULT_TITLE);
+        assert_eq!(content.headline, unbreakable_wifi(DEFAULT_TITLE));
         assert_eq!(content.portal_url, "http://192.168.4.1:8080/");
         assert!(content.validate().is_ok());
         assert!(request(dir.path(), "  \n").viewer_content().is_err());
@@ -970,6 +983,22 @@ mod tests {
         assert_eq!(
             *applied.lock().unwrap(),
             vec!["ping", "wifi-overlay-show", "ping", "wifi-overlay-show"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod headline_tests {
+    use super::*;
+
+    #[test]
+    fn wifi_in_the_viewer_headline_cannot_break_at_the_hyphen() {
+        let joined = unbreakable_wifi(DEFAULT_TITLE);
+        assert!(joined.contains("Wi\u{2060}-\u{2060}Fi"));
+        assert!(!joined.contains("Wi-Fi"));
+        assert_eq!(
+            unbreakable_wifi("no network name here"),
+            "no network name here"
         );
     }
 }

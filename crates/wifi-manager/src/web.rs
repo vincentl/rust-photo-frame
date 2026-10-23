@@ -196,8 +196,15 @@ async fn prepare_submission(
         password: form.password.clone(),
     };
 
+    // The page the operator is looking at names the network in full; the
+    // attempt record on disk (shown by the status page and logs) keeps it
+    // redacted.
     let message = format!(
-        "Queued credentials for {}. The frame is applying them now…",
+        "Photo frame is applying credentials for {} now…",
+        form.ssid.trim()
+    );
+    let recorded = format!(
+        "Photo frame is applying credentials for {} now…",
         redact_ssid(&form.ssid)
     );
     write_last_attempt(
@@ -205,7 +212,7 @@ async fn prepare_submission(
         &AttemptRecord {
             timestamp,
             status: "queued".to_string(),
-            message: message.clone(),
+            message: recorded,
             ssid: redact_ssid(&form.ssid),
             attempt_id: Some(attempt_id.clone()),
             error: None,
