@@ -40,7 +40,7 @@ fn unbreakable_wifi(text: &str) -> String {
 }
 
 /// The overlay's default copy; the window (`ui.rs`) shows the same words.
-pub const DEFAULT_TITLE: &str = "Reconnect the photo frame to Wi-Fi";
+pub const DEFAULT_TITLE: &str = "Reconnect to Wi-Fi";
 pub const BODY: &str = "Use another device to restore connectivity.";
 pub const FOOTER: &str = "The slideshow resumes automatically after the frame reconnects.";
 

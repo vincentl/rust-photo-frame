@@ -717,7 +717,7 @@ mod tests {
     fn content() -> WifiOverlay {
         WifiOverlay {
             ttl_sec: 30,
-            headline: "Reconnect the photo frame to Wi-Fi".into(),
+            headline: "Reconnect to Wi-Fi".into(),
             body: "Use another device to restore connectivity.".into(),
             ssid: "PhotoFrame-Setup".into(),
             password: "apple-river-stone".into(),
