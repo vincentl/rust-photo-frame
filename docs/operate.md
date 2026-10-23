@@ -115,8 +115,8 @@ Expected: all three services `active (running)`, `print-status.sh` exits cleanly
 | Line pattern | Meaning |
 | --- | --- |
 | `single press → toggle frame state` | The power button was pressed once |
-| `frame sleep request completed reason=manual` | The panel was put to sleep (`reason=scheduled` for an `awake-schedule` boundary) |
-| `frame wake request completed reason=manual` | The panel was woken |
+| `frame sleep request completed reason="manual"` | The panel was put to sleep (`reason="scheduled"` for an `awake-schedule` boundary) |
+| `frame wake request completed reason="manual"` | The panel was woken (`reason="scheduled"` at the wake boundary) |
 
 ### Adding photos
 
