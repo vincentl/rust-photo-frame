@@ -104,12 +104,19 @@ Expected: all three services `active (running)`, `print-status.sh` exits cleanly
 
 | Line pattern | Meaning |
 | --- | --- |
-| `loaded <path>` | A photo was decoded and queued |
-| `displaying photo N of M` | Active cycling |
-| `transition <kind> <duration>ms` | GPU transition started |
-| `invalid photo <path>` | Decode failed; that file is skipped until restart |
-| `state change: asleep → awake` | Frame received a wake command |
-| `schedule: sleeping until HH:MM` | `buttond` put the frame to sleep based on schedule |
+| `viewer presenting straight to KMS` | The viewer owns the display (`width`, `height` fields) |
+| `playlist_scheduler order=...` | Logged once at startup: the playlist scheme and its parameters |
+| `photo_display_metric seq=... path=...` | Active cycling: one line per photo shown (needs `metrics: true`) |
+| `transition_frame_metric transition=<kind> frames=...` | A transition finished, with its frame statistics (needs `metrics: true`) |
+| `photo failed to decode; skipping (left on disk) path=...` | Decode failed; that file is skipped |
+
+`buttond` logs to its own unit (`sudo journalctl -u buttond.service -f`):
+
+| Line pattern | Meaning |
+| --- | --- |
+| `single press → toggle frame state` | The power button was pressed once |
+| `frame sleep request completed reason=manual` | The panel was put to sleep (`reason=scheduled` for an `awake-schedule` boundary) |
+| `frame wake request completed reason=manual` | The panel was woken |
 
 ### Adding photos
 
@@ -288,7 +295,7 @@ When recovery is stuck, gather artifacts before changing anything:
    ```bash
    echo '{"command":"display-power"}' | sudo -u kiosk socat -t 3 - UNIX-CONNECT:/run/photoframe/control.sock
    ```
-   On the Wayland fallback the overlay is a Sway window instead: `sudo sh -lc 'uid=$(id -u kiosk); ls "/run/user/$uid"/sway-ipc.*.sock'`.
+   On the Wayland fallback the viewer draws the overlay too; wifi-manager uses a Sway window only when the viewer does not answer. To check for that window: `sudo sh -lc 'uid=$(id -u kiosk); ls "/run/user/$uid"/sway-ipc.*.sock'`.
 5. Try the manual credential apply path:
    ```bash
    sudo -u kiosk /opt/photoframe/bin/wifi-manager nm add --ssid "<ssid>" --psk "<password>"

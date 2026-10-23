@@ -188,15 +188,16 @@ All three should report `active (running)`. (On the Wayland fallback, check `gre
 sudo journalctl -t photoframe -f
 ```
 
-Healthy output:
+Healthy output after a start (timestamps trimmed, order approximate):
 
 ```
-photoframe: scanning /var/lib/photoframe/photos
-photoframe: found 42 photos
-photoframe: loaded sunset.jpg (3840x2160)
-photoframe: displaying photo 3 of 42
-photoframe: transition fade 450ms
+INFO viewer surface surface=Drm
+INFO kms_target target=/dev/dri/card1 HDMI-A-1 connector_id=32 mode=3840x2160@60
+INFO viewer presenting straight to KMS width=3840 height=2160
+INFO playlist_scheduler order=weighted-spread refractory=0.700 min_spacing=0.700 new_multiplicity=3 half_life_secs=259200
 ```
+
+The card and connector in the `kms_target` line are the ones your frame drives. Photo and transition lines appear once you set `metrics: true` (see [Operate](operate.md#reading-the-photo-logs)).
 
 If the greeting never appeared at all, see [Operate › Troubleshooting](operate.md#black-screen-from-the-start--no-greeting-ever-appears).
 

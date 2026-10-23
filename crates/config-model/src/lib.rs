@@ -194,8 +194,8 @@ mod pairing {
         /// Pairing coin: two back-to-back pairable portraits share a screen
         /// with this probability. Never changes the appearance sequence.
         pub probability: f64,
-        /// Center bar between the two windows, as a fraction of the mat's
-        /// border (`H_c x minimum-mat-percentage`). Default 1/phi.
+        /// The center bar's weight against each side margin: the slack left
+        /// after the two photos is shared 1 : bar-ratio : 1. Default 1/phi.
         pub bar_ratio: f32,
         /// A paired screen rests `dwell-ms x dwell-multiplier`; `2 +
         /// transition/dwell` is wall-clock neutral.

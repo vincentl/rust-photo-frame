@@ -97,4 +97,5 @@ Set `showcase.caption: false` in `showcase.yaml` for a clean loop with no labels
 defaults to the Pi location `/var/lib/photoframe/showcase/photos`; for a local
 run, copy `showcase.yaml` and point `photo-library-path` at a local folder, then
 `cargo run -p photoframe -- your-local-showcase.yaml`. Note the frame needs a
-Wayland/X compositor — it won't open a window from a bare SSH shell.
+Wayland/X compositor (or `PHOTOFRAME_SURFACE=drm` on a Linux machine with no
+compositor running) — it won't open a window from a bare SSH shell.

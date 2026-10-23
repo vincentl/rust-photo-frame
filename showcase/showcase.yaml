@@ -9,8 +9,8 @@
 # The tour cycles sequentially through every built-in effect. As of this
 # writing the binary ships:
 #
-#   Transitions (8): fade, wipe, push, e-ink, dissolve, radial-wipe,
-#                    venetian-blinds, crossfade-zoom
+#   Transitions (9): fade, wipe, push, e-ink, dissolve, radial-wipe,
+#                    venetian-blinds, crossfade-zoom, iris
 #   Mats (9):        fixed-color, blur, studio, fixed-image*, gradient,
 #                    vignette, cinematic-blur, passe-partout, drop-shadow
 #

@@ -90,7 +90,8 @@ crates/buttond/        Hardware button daemon + wake/sleep scheduling
 crates/wifi-manager/   Captive portal and Wi-Fi recovery agent
 crates/config-model/   Shared configuration types
 setup/                 Provisioning scripts for Raspberry Pi OS
-docs/                  build, install, configure, operate, advanced
+docs/                  build, install, configure, operate, advanced, performance
+examples/              starter configs (minimal, showcase, everything)
 showcase/              showcase.yaml, activate/deactivate scripts — labeled tour of every effect
 maker/                 Physical build files (STL, SVG, SCAD)
 developer/             Contributor guides (testing, architecture) + debug scripts

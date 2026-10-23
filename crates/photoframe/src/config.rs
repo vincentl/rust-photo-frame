@@ -3624,7 +3624,6 @@ fn apply_transition_inline_field<E: de::Error>(
                     "duration-ms",
                     "through-black",
                     "angles",
-                    "angle-selection",
                     "angle-jitter",
                     "softness",
                     "flash-count",

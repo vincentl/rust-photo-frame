@@ -253,11 +253,11 @@ Things to know:
 
 ## KMS smoke test (experimental)
 
-On a checkout that has the KMS viewer (at the time of writing the branch `claude/viewer-on-kms-1eefd2`,
-not yet on main), `PHOTOFRAME_DISPLAY=kms` adds a compositor-free viewer path (`photoframe-kms.service`,
-`tasks/viewer/kms.rs`, `PHOTOFRAME_DISPLAY=kms`). The setup half of that is covered by
-the smoke test above like any other unit: `systemd-analyze verify` picks up
-`photoframe-kms.service` from `assets/systemd/` when that branch is checked out. With `PHOTOFRAME_DISPLAY=kms` the
+KMS is the default display stack since v1.2: `PHOTOFRAME_DISPLAY=kms` (or leaving it unset in a real
+install) selects the compositor-free viewer path (`photoframe-kms.service`, `tasks/viewer/kms.rs`).
+`smoke-setup.sh` itself defaults to `PHOTOFRAME_DISPLAY=wayland`, the sway fallback. The setup half of
+the KMS path is covered by the smoke test above like any other unit: `systemd-analyze verify` picks up
+`photoframe-kms.service` from `assets/systemd/`. With `PHOTOFRAME_DISPLAY=kms` the
 `greetd.service` strings `smoke-setup.sh` tolerates no longer apply (the unit that cannot start is
 `photoframe-kms.service`); read its output by hand then.
 
@@ -283,8 +283,8 @@ look for that one instead. The original expectation, kept for reference:
   prints nothing, stop here: the most the VM can then show is that the unit starts, logs the
   failure, and respects `StartLimit*` and `Conflicts=greetd.service` ordering. That is a legitimate
   crash/ordering test, but it is not a KMS test.
-- If the extensions *and* `VK_EXT_physical_device_drm` show up, check out the KMS branch, run setup with
-  `PHOTOFRAME_DISPLAY=kms` as that branch documents, and read
+- If the extensions *and* `VK_EXT_physical_device_drm` show up, run setup with
+  `PHOTOFRAME_DISPLAY=kms` and read
   `journalctl -u photoframe-kms.service -t photoframe`.
 
 Whatever it prints, it says nothing about v3d, scanout, or timing. If the grep comes back

@@ -27,7 +27,7 @@ For most edits, this is the sequence:
 5. Validate without launching the viewer:
 
    ```bash
-   cargo run -p photoframe -- --playlist-dry-run 1
+   cargo run -p photoframe -- config.yaml --playlist-dry-run 1
    ```
 
 ## Choosing a starting config
@@ -87,7 +87,7 @@ matting:
       backend: neon  # arm64 vector path; falls back to cpu automatically
 ```
 
-If the frame launches to a black screen, check that `photo-library-path` points to a directory the runtime can read and that the kiosk account has access. The directory should contain `cloud/` and `local/` subdirectories — the runtime merges both. Validate a YAML edit quickly with `cargo run -p photoframe -- --playlist-dry-run 1`, which parses the config without opening the render window.
+If the frame launches to a black screen, check that `photo-library-path` points to a directory the runtime can read and that the kiosk account has access. The directory should contain `cloud/` and `local/` subdirectories — the runtime merges both. Validate a YAML edit quickly with `cargo run -p photoframe -- config.yaml --playlist-dry-run 1`, which parses the config without opening the render window.
 
 ## Top-level keys
 
@@ -101,6 +101,7 @@ If the frame launches to a black screen, check that `photo-library-path` points 
 | **Presentation**        | `photo-effect`, `matting`                                                                  |
 | **Greeting / Sleep**    | `greeting-screen`, `sleep-screen`                                                          |
 | **Runtime control**     | `control-socket-path`                                                                      |
+| **Diagnostics**         | `metrics`                                                                                  |
 | **External scheduling** | `awake-schedule` (consumed by `buttond`)                                                   |
 | **Power button daemon** | `buttond`                                                                                  |
 | **Showcase / preview**  | `showcase`                                                                                 |
@@ -164,6 +165,12 @@ If the frame launches to a black screen, check that `photo-library-path` points 
 - **Required?** Optional. `null` (default) draws entropy from the system RNG.
 - **Effect:** Providing a seed freezes the opening order — useful for demos, debugging, or deterministic tests.
 
+### `metrics`
+
+- **Purpose:** Emits machine-greppable `transition_frame_metric` and `photo_display_metric` log lines at info level.
+- **Required?** Optional. Boolean, default `false` (off, to keep the journal quiet).
+- **Effect:** See [Performance → Measuring](performance.md#measuring) for what each line carries.
+
 ### `playlist`
 
 - **Purpose:** Tunes how the weighting system surfaces new photos and how evenly the slideshow spreads them.
@@ -195,7 +202,7 @@ See [Playlist weighting](#playlist-weighting) for the algorithm and [Portrait pa
 ### `sleep-screen`
 
 - **Purpose:** Styles the card shown as the frame transitions into sleep.
-- **Keys:** Mirror `greeting-screen` aside from `duration-seconds`, which does not apply when sleeping.
+- **Keys:** Mirror `greeting-screen` aside from `duration-seconds`, which does not apply when sleeping. `message` (string) defaults to `Going to Sleep`.
 - **Effect:** Shares the same renderer as the greeting card, so sizing rules and readability checks are identical.
 
 ### Wake/sleep control
@@ -592,7 +599,7 @@ The remaining knobs depend on the family:
   - **`flash-count`** (integer, default `0`, capped at `6`): alternating black/flash pulses before the reveal.
   - **`reveal-portion`** (float, default `0.55`, clamped `0.05–0.95`): fraction of the timeline spent flashing before stripes start uncovering.
   - **`stripe-count`** (integer, default `24`, clamped `1–256`): horizontal bands sweeping in.
-  - **`flash-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB color for the bright flash phases. Channels outside `0–255` are clamped.
+  - **`flash-color`** (`[r, g, b]` array, default `[255, 255, 255]`): RGB color for the bright flash phases. Each channel must be `0–255` (anything else is refused at load).
 - **`dissolve`** — threshold a value-noise field by progress (classic film dissolve).
   - **`softness`** (float 0–0.5, default `0.1`): width of the smoothstep band around the threshold. `0` = hard per-pixel pop.
   - **`scale`** (float > 0, default `64.0`): noise cell size in pixels (smaller = finer grain).
@@ -639,8 +646,8 @@ The `matting` block prepares the background behind each photo. During parsing th
 
 When present, each photo is evaluated **before** mat selection: if its aspect ratio is close enough to the display that filling the screen only crops a little, the viewer may render it edge-to-edge (center-crop to cover) instead of matting it. Because the decision happens before selection, an ineligible photo simply falls through to normal mat selection — the `sequential` counter and `random`/`fixed` pools are untouched.
 
-- **`maximum-crop-percentage`** (float, default `5.0`): a photo is eligible when filling the screen crops less than this percentage off the single overflowing axis. The check is purely aspect-ratio based, so it is independent of resolution. A photo is also only eligible when it is large enough to fill the screen within `global-photo-settings.max-upscale-factor`.
-- **`skip-matting-probability`** (float, default `1.0`, clamped `0–1`): for an eligible photo, the biased-coin probability of actually skipping the mat. `1.0` always fills eligible photos, `0.0` never does (feature effectively off), and values in between mix full-bleed photos with matted ones.
+- **`maximum-crop-percentage`** (float, default `5.0`, must be `0–100`): a photo is eligible when filling the screen crops less than this percentage off the single overflowing axis. The check is purely aspect-ratio based, so it is independent of resolution. A photo is also only eligible when it is large enough to fill the screen within `global-photo-settings.max-upscale-factor`.
+- **`skip-matting-probability`** (float, default `1.0`, must be in `0–1`; anything else is refused): for an eligible photo, the biased-coin probability of actually skipping the mat. `1.0` always fills eligible photos, `0.0` never does (feature effectively off), and values in between mix full-bleed photos with matted ones.
 
 Each active entry accepts:
 
@@ -649,7 +656,7 @@ Each active entry accepts:
 The remaining controls depend on `kind`:
 
 - **`fixed-color`**
-  - **`colors`** (array of `[r, g, b]` triples, default `[[0, 0, 0]]`): one or more RGB swatches to rotate through. Channels outside `0–255` are clamped.
+  - **`colors`** (array of `[r, g, b]` triples, default `[[0, 0, 0]]`): one or more RGB swatches to rotate through. Each channel must be `0–255` (anything else is refused at load).
   - **`color`** (`[r, g, b]` triple): convenience alias for `colors` with one swatch.
 - **`blur`**
   - **`sigma`** (float, default `32.0`): Gaussian blur radius applied to a scaled copy of the photo.

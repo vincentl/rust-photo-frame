@@ -928,6 +928,7 @@ kernel enforces load limits only on the Pi 3 generation).
 The variables the viewer reads (`PHOTOFRAME_SURFACE`, `PHOTOFRAME_PRESENT_MODE`,
 `PHOTOFRAME_TRANSITION_SCALE`, `PHOTOFRAME_IRIS_LAYER_SCALE` (an override
 of the iris transition's `layer-scale`),
+`PHOTOFRAME_UPSCALE`, `PHOTOFRAME_MIP_SHARPEN`, `PHOTOFRAME_PROBE`,
 `PHOTOFRAME_DRM_CONNECTOR`, `PHOTOFRAME_DRM_MODE`, `WGPU_BACKEND`), their
 defaults and how to set them on each stack are listed in one place:
 [advanced.md › The launcher and its environment](advanced.md#the-launcher-and-its-environment).

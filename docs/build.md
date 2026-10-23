@@ -84,7 +84,7 @@ The button is **optional**. The frame can be controlled entirely over SSH or via
 | On            | Long hold    | Bypassed in software — Pi 5 firmware forces a hardware power-off (works even if the software is unresponsive) |
 | Off           | Press        | Powers Pi on                                                                                                 |
 
-**Skipping the button:** leave J2 unwired and use SSH commands (see [Operate](operate.md)) or an `awake-schedule` (see [Configure](configure.md)) instead. The default `buttond` config has `device: null`, which skips evdev enumeration.
+**Skipping the button:** leave J2 unwired and use SSH commands (see [Operate](operate.md)) or an `awake-schedule` (see [Configure](configure.md)) instead. The default `buttond` config has `device: null`, which auto-detects the power-button input (see [Configure > buttond](configure.md#buttond-power-button-daemon)); with J2 unwired it simply never sees a press.
 
 ---
 

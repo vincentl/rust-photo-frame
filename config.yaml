@@ -33,7 +33,7 @@ buttond:
     args: [poweroff]
   screen:
     off-delay-ms: 3500
-    display-name: null # Optional wlr-randr output name, such as HDMI-A-1
+    display-name: null # Optional connector name, such as HDMI-A-1 (the one the viewer drives); null = whatever the viewer drives
     on-command:
       program: /opt/photoframe/bin/powerctl
       args: [wake]

@@ -15,11 +15,12 @@ github_anchor_slug() {
   # - drop trailing heading hashes
   # - lowercase
   # - remove punctuation-like symbols
-  # - collapse whitespace runs into hyphens
+  # - turn each whitespace character into a hyphen (runs are not collapsed,
+  #   so "Step 1 — Flash" becomes step-1--flash)
   heading="$(printf '%s' "${heading}" | sed -E 's/[[:space:]]*#+[[:space:]]*$//')"
   heading="$(printf '%s' "${heading}" | tr '[:upper:]' '[:lower:]')"
   heading="$(printf '%s' "${heading}" | sed -E 's/[^[:alnum:][:space:]_-]//g')"
-  heading="$(printf '%s' "${heading}" | sed -E 's/[[:space:]]+/-/g; s/^-+//; s/-+$//')"
+  heading="$(printf '%s' "${heading}" | sed -E 's/[[:space:]]/-/g; s/^-+//; s/-+$//')"
   printf '%s' "${heading}"
 }
 

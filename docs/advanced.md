@@ -214,6 +214,7 @@ overlay:
 | `ui.bind-address`, `ui.port` | HTTP UI bind. |
 | `photo-app.launch-command`, `photo-app.app-id` | Used in `app-handoff` mode. |
 | `overlay.command`, `overlay.photo-app-id`, `overlay.overlay-app-id` | Sway IPC wiring for the fallback window. |
+| `overlay.sway-socket` | Explicit Sway IPC socket for the fallback window; auto-discovered when unset. |
 | `overlay.control-socket` | The viewer's control socket. Leave it unset to follow the viewer's `control-socket-path` in `overlay.viewer-config` (default `/etc/photoframe/config.yaml`), or `/run/photoframe/control.sock` if that file sets none. |
 
 After editing: `sudo systemctl restart photoframe-wifi-manager.service`.
@@ -320,11 +321,11 @@ echo '{"command":"display-power"}' | sudo -u kiosk socat -t 3 - UNIX-CONNECT:/ru
 | `{"command":"display-power"}` (query) | same as above |
 | `{"command":"wifi-overlay-show","ttl-sec":30,"headline":"…","body":"…","ssid":"…","password":"…","join-qr":"WIFI:T:WPA;S:…;P:…;;","portal-url":"http://192.168.4.1:8080/","footer":"…"}` | `{"ok":true}` |
 | `{"command":"wifi-overlay-hide"}` | `{"ok":true}` |
+| `{"command":"ping"}` | `{"ok":true}`; a client uses it to check the viewer speaks this protocol before sending anything sensitive |
 
 A refusal is `{"ok":false,"error":KIND,"detail":"…"}`, KIND being:
 
 - `unsupported`: `display-power` on the Wayland fallback; sway owns the output, use `swaymsg`.
-- `ping` (`{"command":"ping"}`) is always answered `{"ok":true}`; a client uses it to check the viewer speaks this protocol before sending anything sensitive.
 - `not-driven`: `output` names a connector this viewer does not drive.
 - `invalid`: the request did not parse or is out of limits (texts up to 256 characters, QR payloads up to 512 bytes and encodable).
 - `timeout`: the viewer did not answer within 3 s.
@@ -429,7 +430,7 @@ The frame runs the viewer on one of two display stacks. Exactly one is enabled a
 | Extra packages | none | `greetd`, `seatd`, `sway`, `swaybg`, `swayidle`, `swaylock`, `wayland-protocols` |
 | 4K frame rate | vblank-locked 60 fps | about 32 fps (the compositor's ceiling on Mesa 26) |
 | Display power | the viewer, over the control socket | `swaymsg` |
-| Wi-Fi recovery overlay | drawn by the viewer | a separate fullscreen window |
+| Wi-Fi recovery overlay | drawn by the viewer | drawn by the viewer; a separate fullscreen window only if the viewer does not answer |
 
 KMS is the default because the compositor is the frame-rate ceiling: on Mesa 26.2 with sway 1.10 every present mode is capped near 32 fps at 4K, while the viewer on KMS holds 60. See [performance.md](performance.md#the-viewer-on-kms) for the measurements. The Wayland stack stays for one release (v1.2) as a fallback; expect it to be removed after that.
 
@@ -492,11 +493,13 @@ The viewer reads these variables. They are environment, not `config.yaml` keys, 
 | `PHOTOFRAME_PROBE` | `single-sample` (diagnostic: transitions read one photo per pixel and look wrong on purpose; see [performance.md](performance.md)); remove after measuring | unset |
 | `PHOTOFRAME_DRM_CONNECTOR` | e.g. `HDMI-A-1` (KMS only; a name no card has is an error) | first connected connector |
 | `PHOTOFRAME_DRM_MODE` | `WxH[@Hz]` (KMS only; must exist) | `3840x2160@60` if offered, else the panel's preferred mode |
+| `PHOTOFRAME_DEBUG_BEZIER` | `1`, `true`, `yes` or `on`; a developer diagnostic: draws a debug Bézier stroke over the current photo instead of the transitions. Not for a running frame | unset |
 | `PHOTOFRAME_LOG` | `journal`, `stdout`, `file:/path` (read by the launcher) | `journal` |
+| `RUST_LOG` | a `tracing` filter, e.g. `photoframe=debug` | `info` |
 | `WGPU_BACKEND` | `vulkan` or `gl` (wgpu's own override) | Vulkan |
 | `PHOTOFRAME_CONTROL_SOCKET` | path (read by `powerctl`, not the viewer) | `/run/photoframe/control.sock` |
 
-A value the viewer cannot parse is logged and ignored, except `PHOTOFRAME_SURFACE`, where it is an error. Setup also reads `PHOTOFRAME_DISPLAY` (above), which is a setup choice and never reaches the viewer.
+A value the viewer cannot parse is logged and ignored, except `PHOTOFRAME_SURFACE`, `PHOTOFRAME_DRM_MODE` and `PHOTOFRAME_DRM_CONNECTOR`, where it is an error and the viewer exits. A `PHOTOFRAME_MIP_SHARPEN` outside `0`–`2` is clamped (with a warning), not ignored. Setup also reads `PHOTOFRAME_DISPLAY` (above), which is a setup choice and never reaches the viewer.
 
 **Setting them on KMS.** Add a drop-in; it survives deploys, which rewrite the unit file:
 
