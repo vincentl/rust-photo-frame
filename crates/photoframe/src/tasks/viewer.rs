@@ -4469,14 +4469,12 @@ impl App {
                 encoder.push_debug_group("wake-draw");
                 // Created up front: later code holds immutable
                 // borrows of gpu for the bind groups.
-                if let Some(kind) = wake.transition_state().map(|s| s.kind()) {
+                if wake.transition_state().is_some() {
                     if transition_scale() > 1 {
                         gpu.ensure_half_target();
                     }
-                    if let Some(ActiveTransition::Iris { layer_scale, .. }) = (kind
-                        == TransitionKind::Iris)
-                        .then(|| wake.transition_state().map(|s| s.variant()))
-                        .flatten()
+                    if let Some(ActiveTransition::Iris { layer_scale, .. }) =
+                        wake.transition_state().map(|s| s.variant())
                     {
                         gpu.ensure_iris_layer(*layer_scale);
                     }
@@ -6302,7 +6300,7 @@ mod tests {
             iris_layer_scale_from_env(Ok(" 16 ".into())),
             (Some(16), None)
         );
-        for bad in ["0", "17", "x"] {
+        for bad in ["0", "17", "x", ""] {
             let (scale, warning) = iris_layer_scale_from_env(Ok(bad.into()));
             assert_eq!(scale, None, "{bad}");
             assert!(

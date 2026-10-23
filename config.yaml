@@ -88,7 +88,7 @@ transition:
       overlap-shadow: 0.6 # 0-1: soft shadow each petal casts on its neighbor
       min-aperture: 0.01 # fraction of screen circumradius left open at the swap
       swirl: -0.45 # signed twist of the whole rosette while closing (0 = none)
-      layer-scale: 4 # 1-16: petal shading resolution (4 = exact, ~47 fps at 4K on a Pi 5; 16 = 60 fps, coarse)
+      layer-scale: 4 # 1-16: petal shading resolution (4 = exact, ~47 fps at 4K on a Pi 5; 8 ~54 fps; 16 = 60 fps, coarse)
 
 # Global photo settings
 global-photo-settings:

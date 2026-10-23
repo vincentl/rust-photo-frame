@@ -665,12 +665,17 @@ full-screen passes are spent carefully:
   where two petal edges meet at an angle (the interpolated distance rounds
   the corner). The overlap edges are sampled at the layer's resolution.
 
-  Pi measurement, 2026-10-22: the cover loop is the cost, layer pixels ×
-  blades, peaking where the petal band is widest (12.4 ms at scale 4,
-  3.5 ms at 8, 1.0 at 16). At 16 iris holds 60, but by eye (Vincent,
-  2026-10-22) the petal shading and the overlaps are too fuzzy, so the
-  default is 4: exact shading at about 47 fps on a 4K Pi 5. 8 runs about
-  55 fps with interiors within 2 LSB of 4. The choice is per iris
+  Pi measurements, 2026-10-22, 4K at transition scale 2. The cover loop
+  is the cost: layer pixels × blades, peaking where the petal band is
+  widest. Measured before the signed-distance layer (the loop itself is
+  unchanged): 12.4 ms at scale 4, 3.5 ms at 8. With this layer: 1.0 ms at
+  16. Whole-transition rates with this layer, from `transition_frame_metric`
+  (128 frames each): scale 4 runs 44–48 fps with 31–41 late frames
+  (13 runs, evening of 2026-10-22); 8 about 54 fps; 16 57–60 fps. At 16
+  iris holds 60, but by eye (Vincent, 2026-10-22) the petal shading and
+  the overlaps are too fuzzy, so the default is 4: exact shading at about
+  47 fps. 8 keeps interiors within 2 LSB of 4 but samples the overlap
+  edges more coarsely (15 LSB near them). The choice is per iris
   transition (`layer-scale` in configure.md); the viewer logs each one's
   effective scale at startup (`viewer_iris_layer_scale`).
   All iris entry points compile at 4 threads (`fs_iris_cover` 188
