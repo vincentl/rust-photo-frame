@@ -337,6 +337,8 @@ global-photo-settings:
 
 Restart the kiosk after editing (`sudo systemctl restart photoframe-kms.service`). See [Advanced › Memory tuning](advanced.md#memory-tuning) for a full budget breakdown.
 
+What is normal: on a 4K frame with the default preload and portrait pairing on, the viewer settles at about 1.2 to 1.3 GB resident after a few hours awake, with brief peaks near 1.6 GB while photos decode, and holds flat while the frame is asleep. That leaves more than 2 GB free on a 4 GB Pi 5. A resident size that keeps climbing hour after hour without a plateau is the thing to report.
+
 ### Display power commands run but the monitor stays on
 
 First see which path `powerctl` took:
