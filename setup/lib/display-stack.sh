@@ -345,6 +345,7 @@ display_stack_apply() {
         # it when greetd starts), then stop / sleep / start greetd, never
         # restart: see docs/operate.md.
         _display_stack_sudo systemctl stop "${DISPLAY_KMS_UNIT}" >/dev/null 2>&1 || true
+        _display_stack_sudo systemctl reset-failed "${DISPLAY_KMS_UNIT}" >/dev/null 2>&1 || true
         _display_stack_sudo systemctl reset-failed "${DISPLAY_WAYLAND_UNIT}" >/dev/null 2>&1 || true
         _display_stack_sudo systemctl stop "${DISPLAY_WAYLAND_UNIT}" >/dev/null 2>&1 || true
         sleep 1

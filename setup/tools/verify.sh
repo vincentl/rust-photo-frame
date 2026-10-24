@@ -266,16 +266,22 @@ if systemd_available; then
     failures=$((failures+1))
   }
 
-  check_unit "$(display_stack_unit "${display_choice}")" ERROR "display stack '${display_choice}' (${DISPLAY_ENV_PATH}); set via system install"
-  # A switch that failed or was interrupted leaves the other stack enabled too;
-  # the two conflict at boot.
-  other_enabled="$(display_stack_other_enabled "${display_choice}")"
+  # A frame held on Sway (KMS chosen, but the installed viewer predates KMS)
+  # is healthy while greetd runs; photoframe-kms.service is expected to be
+  # inactive there, so check the stack it actually runs on.
   if display_stack_hold_for_deploy "${display_choice}"; then
     warn "held on Sway until deploy.sh installs the KMS viewer: ./setup/application/deploy.sh switches to ${DISPLAY_KMS_UNIT}; do not disable ${DISPLAY_WAYLAND_UNIT} meanwhile"
     warnings=$((warnings+1))
-  elif [[ -n "${other_enabled}" ]]; then
-    warn "${other_enabled} is still enabled although the ${display_choice} stack is chosen; disable it: sudo systemctl disable ${other_enabled}"
-    warnings=$((warnings+1))
+    check_unit "${DISPLAY_WAYLAND_UNIT}" ERROR "the stack a held frame runs on until deploy.sh installs the KMS viewer"
+  else
+    check_unit "$(display_stack_unit "${display_choice}")" ERROR "display stack '${display_choice}' (${DISPLAY_ENV_PATH}); set via system install"
+    # A switch that failed or was interrupted leaves the other stack enabled
+    # too; the two conflict at boot.
+    other_enabled="$(display_stack_other_enabled "${display_choice}")"
+    if [[ -n "${other_enabled}" ]]; then
+      warn "${other_enabled} is still enabled although the ${display_choice} stack is chosen; disable it: sudo systemctl disable ${other_enabled}"
+      warnings=$((warnings+1))
+    fi
   fi
   # seatd feeds the sway session; the KMS stack does not use it.
   if [[ "${display_choice}" == "wayland" ]]; then

@@ -37,7 +37,7 @@ env \
   SERVICE_USER="${SERVICE_USER:-kiosk}" \
   SERVICE_GROUP="${SERVICE_GROUP:-}" \
   CARGO_PROFILE="${CARGO_PROFILE:-release}" \
-  CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-}" \
+  ${CARGO_BUILD_JOBS:+CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS}"} \
   "${SCRIPT_DIR}/application/deploy.sh"
 
 display_unit="$(display_stack_unit "$(display_stack_current)")"
