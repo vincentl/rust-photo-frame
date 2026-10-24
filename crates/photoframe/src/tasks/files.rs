@@ -20,7 +20,7 @@ const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 use walkdir::WalkDir;
 
 #[instrument(
-    skip(to_manager, invalid_rx, cancel),
+    skip(cfg, to_manager, invalid_rx, cancel),
     fields(root = %cfg.photo_library_path.display())
 )]
 pub async fn run(
