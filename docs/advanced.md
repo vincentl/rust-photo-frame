@@ -465,7 +465,7 @@ Each switch:
 
 - enables the chosen unit before it disables the other, so a failed enable never leaves the frame without a stack at the next boot;
 - restarts the chosen unit (the two units conflict, so starting one stops the other and releases the display);
-- makes `postcheck`, `verify.sh` and `print-status` check the chosen unit.
+- makes `postcheck`, `verify.sh` and `print-status` check the chosen unit (`verify.sh` checks `greetd.service` instead while a pre-v1.2 viewer holds the frame on Sway).
 
 > **Updating a frame installed before v1.2.** It has no `/etc/photoframe/display.env`, so the first install or deploy of v1.2 moves it to KMS. To stay on Sway through the update, run `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` (greetd is already installed there) and the choice is remembered.
 

@@ -273,6 +273,10 @@ if systemd_available; then
     warn "held on Sway until deploy.sh installs the KMS viewer: ./setup/application/deploy.sh switches to ${DISPLAY_KMS_UNIT}; do not disable ${DISPLAY_WAYLAND_UNIT} meanwhile"
     warnings=$((warnings+1))
     check_unit "${DISPLAY_WAYLAND_UNIT}" ERROR "the stack a held frame runs on until deploy.sh installs the KMS viewer"
+    if systemctl is-enabled --quiet "${DISPLAY_KMS_UNIT}" 2>/dev/null; then
+      warn "${DISPLAY_KMS_UNIT} is enabled although the frame is held on Sway; the two conflict at boot: sudo systemctl disable ${DISPLAY_KMS_UNIT}"
+      warnings=$((warnings+1))
+    fi
   else
     check_unit "$(display_stack_unit "${display_choice}")" ERROR "display stack '${display_choice}' (${DISPLAY_ENV_PATH}); set via system install"
     # A switch that failed or was interrupted leaves the other stack enabled

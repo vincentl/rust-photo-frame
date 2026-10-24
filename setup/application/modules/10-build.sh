@@ -55,7 +55,10 @@ fi
 log INFO "Building workspace binaries with cargo ${profile_flag[*]}"
 cd "${REPO_ROOT}"
 # Constrain parallelism on lower-memory devices to reduce OOM risk.
-# Honor operator override via CARGO_BUILD_JOBS when set.
+# Honor operator override via CARGO_BUILD_JOBS when set. Cargo also reads the
+# variable itself (as build.jobs) and refuses an empty value, so an empty
+# export from the caller must not reach it.
+[[ -n "${CARGO_BUILD_JOBS:-}" ]] || unset CARGO_BUILD_JOBS
 cargo_jobs_args=()
 if [[ -n "${CARGO_BUILD_JOBS:-}" ]]; then
     cargo_jobs_args=(--jobs "${CARGO_BUILD_JOBS}")

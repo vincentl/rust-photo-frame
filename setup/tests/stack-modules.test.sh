@@ -122,6 +122,7 @@ printf 'PHOTOFRAME_DISPLAY=wayland\n' >"${DISPLAY_ENV_PATH}"
 out="$(activate)" || fail "45-activate failed on a persisted wayland choice: ${out}"
 logged "start seatd" || fail "45-activate did not start seatd on wayland"
 logged "start greetd.service" || fail "45-activate did not start greetd on wayland"
+logged "reset-failed photoframe-kms.service" || fail "45-activate did not clear the kms unit's failed state on the switch to wayland"
 logged "restart greetd.service" && fail "45-activate restarted greetd (must stop/start)"
 
 rm -f "${DISPLAY_ENV_PATH}"

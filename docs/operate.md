@@ -153,7 +153,7 @@ git pull
 
 > **If the new stack does not come up after an update**, go back to Sway by hand: `sudo systemctl enable greetd.service && sudo systemctl disable photoframe-kms.service && sudo systemctl stop photoframe-kms.service && sudo systemctl start greetd.service`. The system stage (`install-all.sh`, `setup/system/install.sh`) does not switch a running Sway frame to KMS while the installed viewer predates KMS; the application deploy does, after it installs the new viewer.
 
-> **Frames installed before v1.2 run Sway.** They have no `/etc/photoframe/display.env`, so the first v1.2 deploy switches them to the KMS stack (and stops greetd). To keep Sway, run `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` for that update; the choice is remembered. If the new stack does not come up, `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` also takes you back. See [Advanced › Display stacks](advanced.md#display-stacks).
+> **Frames installed before v1.2 run Sway.** They have no `/etc/photoframe/display.env`, so the first v1.2 deploy switches them to the KMS stack (and stops greetd). Their checkout is also dirty: the v1.1 installers ran `chmod +x` on two setup modules that git tracked as non-executable, so `git pull` refuses with "would be overwritten". Drop those two changes first: `git checkout -- setup/application/modules/45-activate-services.sh setup/system/modules/35-firmware.sh`, then pull (v1.2 tracks them as executable, so this does not recur). To keep Sway, run `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` for that update; the choice is remembered. If the new stack does not come up, `PHOTOFRAME_DISPLAY=wayland ./setup/application/deploy.sh` also takes you back. See [Advanced › Display stacks](advanced.md#display-stacks).
 
 `deploy.sh` builds in the background and restarts services at the end. `/etc/photoframe/config.yaml` and `/var/lib/photoframe/` are untouched. If the update includes system-level changes (new packages, unit changes), run the full installer instead:
 
@@ -387,7 +387,7 @@ sudo apt install -y socat
 
 ### `verify.sh` reports warnings about the display stack
 
-On a first deploy, `verify.sh` may warn that `photoframe-kms.service` (or `greetd` on the Wayland fallback) is missing or not active if system provisioning was not yet complete. Re-run both stages:
+On a first deploy, `verify.sh` warns that `photoframe-kms.service` (or `greetd` on the Wayland fallback) is missing, or reports an error and exits 1 when it is installed but not active, if system provisioning was not yet complete. A frame still held on Sway by a pre-v1.2 viewer gets a warning and a check of `greetd.service` instead. Re-run both stages:
 
 ```bash
 sudo ./setup/system/install.sh
