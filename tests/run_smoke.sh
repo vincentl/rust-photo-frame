@@ -60,21 +60,31 @@ main() {
   fi
 
   section "Sleep toggle via control socket"
-  info "Sending toggle-state command via /run/photoframe/control.sock"
-  run_cmd "Send toggle-state" python3 - <<'PY'
+  # The socket belongs to the kiosk user; talk to it as kiosk (as docs/operate.md does).
+  send_toggle() {
+    sudo -n -u kiosk python3 - <<'PY'
 import socket
 
-payload = b'{"command":"toggle-state"}'
+payload = b'{"command":"toggle-state"}\n'
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.settimeout(5)
 try:
     sock.connect("/run/photoframe/control.sock")
     sock.sendall(payload)
+    reply = sock.recv(4096).decode(errors="replace").strip()
+    print(reply)
+    raise SystemExit(0 if '"ok":true' in reply else 1)
 finally:
     sock.close()
 PY
-  sleep 2
+  }
+  info "Sending toggle-state command via /run/photoframe/control.sock (as kiosk)"
+  run_cmd "Send toggle-state" send_toggle
+  sleep 3
   info "Check journal for sleep toggle acknowledgement"
   journalctl -t photoframe -n 20 --no-pager || warn "Unable to read photoframe journal"
+  info "Toggle back so the frame ends in the state it started in"
+  run_cmd "Send toggle-state (restore)" send_toggle
 
   section "Collect log bundle"
   run_cmd "Run log collector" "$REPO_ROOT/tests/collect_logs.sh"
