@@ -71,6 +71,7 @@ sock.settimeout(5)
 try:
     sock.connect("/run/photoframe/control.sock")
     sock.sendall(payload)
+    sock.shutdown(socket.SHUT_WR)  # the viewer reads the request up to EOF
     reply = sock.recv(4096).decode(errors="replace").strip()
     print(reply)
     raise SystemExit(0 if '"ok":true' in reply else 1)
