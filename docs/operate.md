@@ -261,6 +261,18 @@ Verify swap: `swapon --show` should list `zram0`. If missing, re-run `sudo ./set
 
 Setup requires Debian 13. Re-flash with the Trixie 64-bit Raspberry Pi OS image. See [Install › Step 1](install.md#step-1--flash-the-sd-card).
 
+### Wi-Fi takes minutes to rejoin after a reboot
+
+After a reboot the frame may fail to associate for one to several minutes (`wpa_supplicant` logs
+`CTRL-EVENT-ASSOC-REJECT bssid=00:00:00:00:00:00 status_code=16`, a local timeout, not a refusal
+by the router), then join and hold a stable link. wifi-manager treats the gap as a link loss:
+after the grace period it raises the hotspot and shows the recovery overlay, and it retries the
+saved network every `recovery-reconnect-probe-sec` (300 s) on its own, so no action is needed
+unless the overlay stays up past ten minutes. The pattern depends on the access point and on
+other 2.4 GHz devices nearby; a cold power-on usually rejoins faster than a warm reboot. The
+Trixie `firmware-brcm80211 1:20260519` package is reported to make this worse on the BCM4345/6
+(Pi 5): see the release notes for the downgrade.
+
 ### Wi-Fi provisioning hotspot never appears
 
 When the frame loses Wi-Fi, it should raise the `PhotoFrame-Setup` hotspot after about 30 seconds.
