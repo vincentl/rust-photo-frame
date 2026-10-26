@@ -104,7 +104,9 @@ Expected: all three services `active (running)`, `print-status.sh` exits cleanly
 
 | Line pattern | Meaning |
 | --- | --- |
-| `viewer presenting straight to KMS` | The viewer owns the display (`width`, `height` fields) |
+| `viewer presenting straight to KMS` | The viewer owns the display (`width`, `height` fields). Also how long each startup step took, in ms: `instance_surface_ms` (Vulkan instance and DRM surface), `device_ms` (adapter and device), `greeting_ms` (the greeting's text renderer and font scan), `pipelines_ms` (the slideshow's render pipelines), `overlays_ms` (the sleep, Wi-Fi and caption overlays) |
+| `viewer: greeting on screen` | The greeting's first frame was presented; its `duration-seconds` count from here |
+| `viewer: greeting on; request held until it is over request=...` | A `set-state` or `toggle-state` arrived during the greeting (the startup state, a button press); it is applied when the greeting ends (`viewer: entering wake` or `viewer: entering sleep`) |
 | `playlist_scheduler order=...` | Logged once at startup: the playlist scheme and its parameters |
 | `photo_display_metric seq=... path=...` | Active cycling: one line per photo shown (needs `metrics: true`) |
 | `transition_frame_metric transition=<kind> frames=...` | A transition finished, with its frame statistics (needs `metrics: true`) |

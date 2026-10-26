@@ -193,7 +193,10 @@ Healthy output after a start (timestamps trimmed, order approximate):
 ```
 INFO viewer surface surface=Drm
 INFO kms_target target=/dev/dri/card1 HDMI-A-1 connector_id=32 mode=3840x2160@60
-INFO viewer presenting straight to KMS width=3840 height=2160
+INFO viewer presenting straight to KMS width=3840 height=2160 instance_surface_ms=… device_ms=… greeting_ms=… pipelines_ms=… overlays_ms=…
+INFO viewer: greeting on screen
+INFO viewer: greeting on; request held until it is over request=Set(Awake)
+INFO viewer: entering wake
 INFO playlist_scheduler order=weighted-spread refractory=0.700 min_spacing=0.700 new_multiplicity=3 half_life_secs=259200
 ```
 

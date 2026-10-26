@@ -1436,6 +1436,7 @@ mod tests {
                     photo_staged: false,
                     lead_in: Duration::ZERO,
                     lead_in_drain: Duration::ZERO,
+                    greeting_ends_at: None,
                 },
                 now,
             );

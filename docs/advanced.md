@@ -591,7 +591,7 @@ Commands that arrive while waiting (sleep or wake, the Wi-Fi overlay) are applie
 sudo journalctl -t photoframe -b | grep -E "kms_|viewer presenting"
 ```
 
-At startup the viewer logs `kms_probe` lines (cards, connectors, modes, the Vulkan plane) and `kms_target`. On every stop it logs the teardown steps in order: `kms_teardown: releasing swapchain`, then `destroying the wgpu instance`, then `closing the card`. The unit's `TimeoutStopSec=10s` bounds that teardown.
+At startup the viewer logs `kms_probe` lines (cards, connectors, modes, the Vulkan plane) and `kms_target`, then `viewer presenting straight to KMS` with the time each startup step took (`instance_surface_ms`, `device_ms`, `greeting_ms`, `pipelines_ms`, `overlays_ms`; see [Operate](operate.md#reading-the-photo-logs)), then `viewer: greeting on screen` when the greeting's first frame is presented. The startup state (`set-state`) is held while the greeting is on (`viewer: greeting on; request held until it is over`) and applied once it has been on screen for `greeting-screen.duration-seconds`. On every stop it logs the teardown steps in order: `kms_teardown: releasing swapchain`, then `destroying the wgpu instance`, then `closing the card`. The unit's `TimeoutStopSec=10s` bounds that teardown.
 
 The variables the unit honours (`PHOTOFRAME_DRM_CONNECTOR`, `PHOTOFRAME_DRM_MODE`, `PHOTOFRAME_PRESENT_MODE` and the rest) are listed under [The launcher and its environment](#the-launcher-and-its-environment).
 

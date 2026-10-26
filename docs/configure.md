@@ -196,7 +196,7 @@ See [Playlist weighting](#playlist-weighting) for the algorithm and [Portrait pa
   - `corner-radius` (float DIP, default `0.75 × stroke-width`)
   - `duration-seconds` (float ≥ 0, default `4.0`)
   - `colors.background`, `colors.font`, `colors.accent` (hex sRGB strings)
-- **Effect:** The renderer fits and centers the message inside a rounded double-line frame. `duration-seconds` guarantees the greeting remains on screen for at least that many seconds before the first photo appears.
+- **Effect:** The renderer fits and centers the message inside a rounded double-line frame. `duration-seconds` guarantees the greeting remains on screen for at least that many seconds before the first photo appears (or the sleep card, when the frame starts asleep). The seconds count from when the greeting first reaches the panel, not from the start of the process. Before that (the panel switched off, the Wi-Fi overlay covering the greeting) nothing counts; once the greeting has been shown, time with the panel dark or under the overlay counts too. The slideshow also waits until its first photo is ready, so the greeting may stay longer on a large library, and with an empty library it stays up until a photo is added. `0` means: until the greeting has been shown once and, for the slideshow, a photo is ready. Awake/asleep requests that arrive during the greeting (`set-state`, `toggle-state`, a button press) are applied, in order, once it is over.
 - **Notes:** Colors accept `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`. Low-contrast combinations log a warning.
 
 ### `sleep-screen`

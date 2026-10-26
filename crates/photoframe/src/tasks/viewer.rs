@@ -2,6 +2,9 @@
 mod canvas_publish_tests;
 mod display_wait;
 mod draw_params;
+mod greeting_hold;
+#[cfg(test)]
+mod greeting_order_tests;
 mod image_ops;
 #[cfg(target_os = "linux")]
 mod kms;
@@ -1176,7 +1179,10 @@ impl<'a> MattingBridge<'a> {
 // Viewer state machine overview
 // -----------------------------
 //  - `ViewerModeKind::Greeting` shows the greeting overlay once after resume and
-//    stays idle until the first photo is ready.
+//    stays idle until the first photo is ready. Awake/asleep requests that
+//    arrive meanwhile are held (`greeting_hold.rs`) until the greeting has
+//    been on screen for its duration, timed from its first present, and, for
+//    awake, a photo is ready.
 //  - `ViewerModeKind::Wake` drives the continuous photo slideshow, requesting
 //    redraws while transitions or new frames are pending.
 //  - `ViewerModeKind::Sleep` renders a single "Going to Sleep" banner and then
@@ -2861,6 +2867,41 @@ struct GpuParts {
     sleep: SleepScene,
     caption_overlay: Option<scenes::CaptionOverlay>,
     wifi_overlay: scenes::wifi_overlay::WifiOverlayScreen,
+    times: GpuBuildTimes,
+}
+
+/// How long each part of `build_gpu` took. The KMS startup line reports
+/// them, so a slow cold boot shows which part to blame (follow-up 23).
+#[derive(Clone, Copy, Debug, Default)]
+struct GpuBuildTimes {
+    /// Adapter, device and the surface's capabilities.
+    device: Duration,
+    /// The greeting scene: a text renderer and a system font scan.
+    greeting: Duration,
+    /// The slideshow's render pipelines (a shader compile each on V3D).
+    pipelines: Duration,
+    /// The sleep, Wi-Fi and showcase caption overlays (a font scan each).
+    overlays: Duration,
+}
+
+impl GpuBuildTimes {
+    fn ms(duration: Duration) -> u64 {
+        duration.as_millis() as u64
+    }
+}
+
+/// The part of the GPU context the greeting needs: the device, the surface
+/// and its configuration (not yet applied), and the greeting scene. The
+/// slideshow's pipelines and the other overlays come after it
+/// (`build_gpu_rest`).
+struct GpuBase {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    limits: wgpu::Limits,
+    greeting: GreetingScene,
+    times: GpuBuildTimes,
 }
 
 /// Adapter, device, surface configuration (not yet applied), pipelines and
@@ -2874,6 +2915,20 @@ fn build_gpu(
     cfg: &crate::config::Configuration,
     reason: &'static str,
 ) -> Result<GpuParts, String> {
+    let base = build_gpu_base(instance, surface, size, present_default, cfg, reason)?;
+    Ok(build_gpu_rest(base, cfg, reason))
+}
+
+/// Adapter, device, the surface configuration and the greeting scene.
+fn build_gpu_base(
+    instance: &wgpu::Instance,
+    surface: wgpu::Surface<'static>,
+    size: PhysicalSize<u32>,
+    present_default: PresentDefault,
+    cfg: &crate::config::Configuration,
+    reason: &'static str,
+) -> Result<GpuBase, String> {
+    let started = Instant::now();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: Some(&surface),
@@ -2943,6 +2998,46 @@ fn build_gpu(
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };
+    let device_done = Instant::now();
+    let greeting = GreetingScene::new(GreetingScreen::new(
+        &device,
+        &queue,
+        format,
+        cfg.greeting_screen.screen(),
+    ));
+    let times = GpuBuildTimes {
+        device: device_done - started,
+        greeting: device_done.elapsed(),
+        ..GpuBuildTimes::default()
+    };
+    Ok(GpuBase {
+        device,
+        queue,
+        surface,
+        config,
+        limits,
+        greeting,
+        times,
+    })
+}
+
+/// The slideshow's pipelines and the overlay scenes other than the greeting.
+fn build_gpu_rest(
+    base: GpuBase,
+    cfg: &crate::config::Configuration,
+    reason: &'static str,
+) -> GpuParts {
+    let GpuBase {
+        device,
+        queue,
+        surface,
+        config,
+        limits,
+        greeting,
+        mut times,
+    } = base;
+    let started = Instant::now();
+    let format = config.format;
     // Resources for quad
     let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("viewer-uniforms"),
@@ -3274,13 +3369,8 @@ fn build_gpu(
     };
 
     let blank_plane = make_plane("blank-texture", 1, 1, &[0, 0, 0, 255]);
-
-    let greeting = GreetingScene::new(GreetingScreen::new(
-        &device,
-        &queue,
-        format,
-        cfg.greeting_screen.screen(),
-    ));
+    let pipelines_done = Instant::now();
+    times.pipelines = pipelines_done - started;
 
     let sleep = SleepScene::new(GreetingScreen::new(
         &device,
@@ -3298,6 +3388,7 @@ fn build_gpu(
         format,
         cfg.greeting_screen.screen(),
     );
+    times.overlays = pipelines_done.elapsed();
     let pass_timer = PassTimer::new(&device, &queue);
     debug!(
         context = reason,
@@ -3329,13 +3420,14 @@ fn build_gpu(
         half_target: None,
         pass_timer,
     };
-    Ok(GpuParts {
+    GpuParts {
         gpu,
         greeting,
         sleep,
         caption_overlay,
         wifi_overlay,
-    })
+        times,
+    }
 }
 
 struct App {
@@ -3390,6 +3482,8 @@ struct App {
     /// this display yet" is read from it (`presentation::power_commit`);
     /// panel power never depends on it (wgpu hides present errors).
     frames_presented: u64,
+    /// Awake/asleep requests held while the greeting is on (`greeting_hold.rs`).
+    greeting_hold: greeting_hold::GreetingHold,
     /// Wayland: where the winit thread publishes `wake::Published` after each
     /// event batch for the driver (`wake::drive_forwarding`). `None` on KMS,
     /// which waits in its own loop, and in tests.
@@ -3719,7 +3813,16 @@ impl App {
             sleep,
             caption_overlay,
             mut wifi_overlay,
+            times,
         } = parts;
+        debug!(
+            context = reason,
+            device_ms = GpuBuildTimes::ms(times.device),
+            greeting_ms = GpuBuildTimes::ms(times.greeting),
+            pipelines_ms = GpuBuildTimes::ms(times.pipelines),
+            overlays_ms = GpuBuildTimes::ms(times.overlays),
+            "viewer_gpu_build_times"
+        );
         self.caption_overlay = caption_overlay;
         // A lease held across a GPU rebuild is drawn by the new renderer.
         if let Some(content) = self.presentation.overlay() {
@@ -3861,6 +3964,12 @@ impl App {
     fn handle_control_command(&mut self, cmd: ViewerCommand) {
         debug!(command = ?cmd, "viewer_control_command");
         match cmd {
+            ViewerCommand::SetState(state) if self.mode_kind() == ViewerModeKind::Greeting => {
+                self.hold_for_greeting(greeting_hold::StateRequest::Set(state));
+            }
+            ViewerCommand::ToggleState if self.mode_kind() == ViewerModeKind::Greeting => {
+                self.hold_for_greeting(greeting_hold::StateRequest::Toggle);
+            }
             ViewerCommand::SetState(ControlViewerState::Awake) => self.enter_wake(),
             ViewerCommand::SetState(ControlViewerState::Asleep) => self.enter_sleep(),
             ViewerCommand::ToggleState => match self.mode_kind() {
@@ -3913,6 +4022,7 @@ impl App {
             }
             self.mode = Some(mode);
         }
+        self.release_greeting_hold();
 
         let _ = self.with_active_scene(|scene, ctx| {
             scene.process_tick(ctx);
@@ -4087,12 +4197,56 @@ impl App {
     }
 
     fn enter_greeting(&mut self) {
-        if self.mode_kind() != ViewerModeKind::Greeting {
+        let from = self.mode_kind();
+        if from != ViewerModeKind::Greeting {
             info!("viewer: entering greeting");
+            // A greeting after the slideshow (a GPU rebuild) gives way to it
+            // again; one at startup waits for the startup state.
+            self.greeting_hold
+                .restart((from == ViewerModeKind::Wake).then_some(ControlViewerState::Awake));
         }
         self.mode_mut().wake_mut().take_redraw_needed();
         self.set_mode(ViewerModeKind::Greeting);
         self.log_event_loop_state("enter_greeting");
+    }
+
+    /// An awake/asleep request during the greeting: held until the greeting
+    /// has had its time on screen (`greeting_hold.rs`).
+    fn hold_for_greeting(&mut self, request: greeting_hold::StateRequest) {
+        info!(
+            ?request,
+            "viewer: greeting on; request held until it is over"
+        );
+        self.greeting_hold.request(request);
+        self.release_greeting_hold();
+    }
+
+    /// Apply the held request once the greeting may give way to it.
+    fn release_greeting_hold(&mut self) {
+        if self.mode_kind() != ViewerModeKind::Greeting {
+            return;
+        }
+        let photo_ready = self.greeting_photo_ready();
+        match self.greeting_hold.release(Instant::now(), photo_ready) {
+            Some(ControlViewerState::Awake) => self.enter_wake(),
+            Some(ControlViewerState::Asleep) => self.enter_sleep(),
+            None => return,
+        }
+        self.sync_presentation();
+    }
+
+    /// A photo the slideshow can open on: what an awake request held by the
+    /// greeting waits for.
+    fn greeting_photo_ready(&self) -> bool {
+        let wake = self.mode().wake();
+        wake.current().is_some() || !wake.pending().is_empty()
+    }
+
+    /// The greeting reached the panel (`greeting_hold.rs` times it from here).
+    fn note_greeting_presented(&mut self) {
+        if self.greeting_hold.note_presented(Instant::now()) {
+            info!("viewer: greeting on screen");
+        }
     }
 
     /// Count one acquire timeout; a streak of
@@ -4454,6 +4608,7 @@ impl App {
                 frame.present();
                 screen.after_submit();
                 self.record_frame_presented();
+                self.note_greeting_presented();
             }
             ViewerModeKind::Wake => {
                 let wake = mode.wake_mut();
@@ -5029,6 +5184,7 @@ impl App {
             })
             .unwrap_or(wgpu::Color::BLACK);
         let pairing_rules = crate::tasks::manager::pairing::PairingRules::from_config(&cfg);
+        let cfg_greeting_duration = cfg.greeting_screen.effective_duration();
         let initial_wake = scenes::WakeScene::new(
             cfg.global_photo_settings.dwell_ms,
             scenes::pair_dwell_ms(
@@ -5070,6 +5226,7 @@ impl App {
             layer: presentation::Layer::Scene(ViewerModeKind::Greeting),
             wifi_overlay: None,
             frames_presented: 0,
+            greeting_hold: greeting_hold::GreetingHold::new(cfg_greeting_duration),
             wake_published: None,
             events_handled: 0,
             tick_wanted: false,
@@ -5230,6 +5387,11 @@ impl App {
                 lead_in_drain: match &self.output {
                     Some(Output::Kms { refresh_period, .. }) => *refresh_period * 2,
                     _ => Duration::ZERO,
+                },
+                greeting_ends_at: if kind == ViewerModeKind::Greeting {
+                    self.greeting_hold.deadline(self.greeting_photo_ready())
+                } else {
+                    None
                 },
             },
             now,
@@ -5995,6 +6157,7 @@ mod tests {
                                     photo_staged: false,
                                     lead_in: Duration::ZERO,
                                     lead_in_drain: Duration::ZERO,
+                                    greeting_ends_at: None,
                                 },
                                 now,
                             );

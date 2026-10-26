@@ -90,6 +90,12 @@ pub(super) struct WakeInputs {
     /// transition's first frame is rendered and its clock anchored: two
     /// refresh periods. The GPU clock does not drop in that time.
     pub(super) lead_in_drain: Duration,
+    /// The greeting releases the awake/asleep request it holds at this
+    /// instant (its duration on screen ends, `greeting_hold.rs`); possibly
+    /// already past. `None` when nothing is held, before the greeting's
+    /// first present, or while an awake request waits for a photo, whose
+    /// arrival is an event.
+    pub(super) greeting_ends_at: Option<Instant>,
 }
 
 /// How soon a pending overlay redraw is retried. Slow enough to cost nothing,
@@ -237,6 +243,16 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
     {
         sooner(now + REFILL_RETRY);
     }
+    // The greeting's time on screen ends: the step then applies the
+    // awake/asleep request it held (`greeting_hold.rs`). One that ended
+    // already (the first present was in the redraw after the last step, or
+    // the step ran a moment early) is due now, as the dwell's and the
+    // overlay's are: that tick releases the request and leaves the
+    // greeting, so it cannot repeat.
+    let greeting_due = inputs.greeting_ends_at.is_some_and(|at| at <= now);
+    if let Some(at) = inputs.greeting_ends_at.filter(|at| *at > now) {
+        sooner(at);
+    }
     // The Wi-Fi overlay's lease (presentation.rs): one that ends in the
     // future is a deadline in every scene (with the slideshow paused under
     // the overlay there is no dwell to wake for); one already over is taken
@@ -251,6 +267,7 @@ pub(super) fn plan_wake(inputs: WakeInputs, now: Instant) -> WakePlan {
     // deferred work runs on one more step right after it.
     let tick_now = (inputs.transition_just_finished && !inputs.sleeping)
         || overlay_due
+        || greeting_due
         || dwell_over_and_ready;
 
     // Exactly when MattingBridge::queue_for_wake reads the loader (the test
@@ -586,6 +603,7 @@ mod tests {
             photo_staged: false,
             lead_in: Duration::ZERO,
             lead_in_drain: Duration::ZERO,
+            greeting_ends_at: None,
         }
     }
 
@@ -955,6 +973,30 @@ mod tests {
         assert!(!plan.redraw_now);
         assert_eq!(plan.deadline, None);
         assert!(plan.want_photo);
+    }
+
+    #[test]
+    fn the_greeting_wakes_the_loop_when_its_time_on_screen_ends() {
+        let now = Instant::now();
+        let ends = now + Duration::from_secs(6);
+        let greeting = WakeInputs {
+            slideshow_active: false,
+            displayed_at: None,
+            pending: 0,
+            greeting_ends_at: Some(ends),
+            ..resting(now)
+        };
+        let plan = plan_wake(greeting, now);
+        assert_eq!(plan.deadline, Some(ends));
+        assert!(!plan.redraw_now && !plan.tick_now);
+        // An end already past is due now: a tick, never a past deadline
+        // (the wait would spin) and never nothing (the loop would sleep on
+        // a releasable hold).
+        for at in [ends, ends + Duration::from_millis(1)] {
+            let plan = plan_wake(greeting, at);
+            assert!(plan.tick_now, "at {at:?}");
+            assert_eq!(plan.deadline, None);
+        }
     }
 
     fn photo(name: &str) -> PhotoLoaded {
@@ -1698,6 +1740,7 @@ mod tests {
                     photo_staged: false,
                     lead_in: Duration::ZERO,
                     lead_in_drain: Duration::ZERO,
+                    greeting_ends_at: None,
                     overlay_expires_at: None,
                 },
                 now,

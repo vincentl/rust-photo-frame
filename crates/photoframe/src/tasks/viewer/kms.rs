@@ -10,7 +10,11 @@
 //!   that order matters). The mode is fixed for the process lifetime, so
 //!   the surface is configured once and marked ready immediately; the
 //!   `SurfaceReadyGate` exists for compositor configure churn that KMS does
-//!   not have.
+//!   not have. The startup line `viewer presenting straight to KMS` says
+//!   how long each step took (`instance_surface_ms`, `device_ms`,
+//!   `greeting_ms`, `pipelines_ms`, `overlays_ms`). A set-state that
+//!   arrives before or during the greeting is held until the greeting has
+//!   been on screen for its duration (`greeting_hold.rs`).
 //! * **Loop.** No winit and no 4 ms ticker. Each iteration drains control
 //!   commands, runs `process_tick()`, and renders if a scene asked for a
 //!   frame. When nothing needs drawing the loop sleeps in
@@ -332,6 +336,7 @@ pub async fn run_kms(
     // A dup of the card fd for vblank waits and connector checks; dropping
     // it never releases master (the original fd in `target` stays open).
     let display = target.display_handle()?;
+    let stage = Instant::now();
     // 2. Only now the wgpu instance.
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
     let mut trace = |line: &str| info!("kms_probe: {line}");
@@ -341,8 +346,10 @@ pub async fn run_kms(
     let surface = unsafe { instance.create_surface_unsafe(surface_target) }
         .map_err(|e| anyhow::anyhow!("create DRM surface: {e}"))?;
     let size = PhysicalSize::new(target.width, target.height);
+    let instance_surface_ms = stage.elapsed().as_millis() as u64;
     let parts = build_gpu(&instance, surface, size, PresentDefault::Kms, &cfg, "kms")
         .map_err(|e| anyhow::anyhow!("failed to initialize GPU on KMS: {e}"))?;
+    let times = parts.times;
 
     let mut app = App::new(
         from_loader,
@@ -363,9 +370,16 @@ pub async fn run_kms(
     for cmd in held {
         app.handle_control_command(cmd);
     }
+    // Where the startup went (follow-up 23: ~30 s at a cold boot with a
+    // large library, cause not yet measured).
     info!(
         width = size.width,
         height = size.height,
+        instance_surface_ms,
+        device_ms = GpuBuildTimes::ms(times.device),
+        greeting_ms = GpuBuildTimes::ms(times.greeting),
+        pipelines_ms = GpuBuildTimes::ms(times.pipelines),
+        overlays_ms = GpuBuildTimes::ms(times.overlays),
         "viewer presenting straight to KMS"
     );
 
