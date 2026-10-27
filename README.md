@@ -6,6 +6,8 @@ Build a wall-mounted digital photo frame from a Raspberry Pi 5 and a 4K monitor.
 
 **Built for makers and hobbyists** who want a bespoke display they fully control, not a subscription appliance.
 
+**Current release: [v1.2.0](https://github.com/vincentl/rust-photo-frame/releases/tag/v1.2.0)** (2026-10-26). The release notes are the tag message: `git tag -n99 v1.2.0`.
+
 ---
 
 ## What you'll build
@@ -137,6 +139,7 @@ flowchart LR
 
 ## References
 
+- **Compositor-free rendering, display-locked pacing, portrait pairing.** The v1.2 move of the viewer onto DRM/KMS, the vblank-locked frame pacing and the paired-portrait layout were motivated by Wolfgang Männel's [picframe3](https://github.com/sapnho/Digital-Picture-Frame-Pi-2026) (MIT), itself a rebuild of [helgeerbe/picframe](https://github.com/helgeerbe/picframe). Our implementation is independent; the ideas are theirs.
 - **Studio mat weave texture.** Adapted from Mike Cauchi's breakdown of tillable cloth shading. ["Research – Tillable Images and Cloth Shading"](https://www.mikecauchiart.com/single-post/2017/01/23/research-tillable-images-and-cloth-shading).
 - **Print simulation shading.** Based on Rohit A. Patil, Mark D. Fairchild, and Garrett M. Johnson, ["3D Simulation of Prints for Improved Soft Proofing"](https://repository.rit.edu/cgi/viewcontent.cgi?article=1159&context=other).
 
