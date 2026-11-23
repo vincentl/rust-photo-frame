@@ -63,8 +63,10 @@ var next_tex: texture_2d<f32>;
 @group(2) @binding(1)
 var next_samp: sampler;
 
-// Reduced-resolution iris petal layer rendered by fs_iris_layer (premultiplied
-// alpha). Bound to the blank texture when no iris transition is active.
+// Reduced-resolution iris petal layer rendered by fs_iris_layer (rgb: shade,
+// a: signed distance, iris_d8_encode), this frame or by an
+// earlier iris at the same step (the viewer's IrisLayerCache). For e-ink, its
+// reveal mask. Bound to the blank texture otherwise.
 @group(3) @binding(0)
 var petal_tex: texture_2d<f32>;
 @group(3) @binding(1)
@@ -242,15 +244,44 @@ fn fs_iris_cover(in: VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(d_min, f32(shown), f32(countOneBits(covered)), 0.0);
 }
 
-// The petals' shade (linear rgb, not premultiplied) and the signed distance
-// (alpha), from this pixel's cover texel (bound at group 1, same resolution
-// as this target). Beyond the main pass's reach only the distance matters.
+// The petals' shade and the signed distance, from this pixel's cover texel
+// (bound at group 1, same resolution as this target), into an
+// Rgba8UnormSrgb layer: rgb = the shade (linear here; the target stores it
+// sRGB-encoded, which keeps the dark petals' gradients finer than the
+// screen's own 8-bit sRGB steps, where linear 8-bit visibly banded),
+// a = the signed distance (iris_d8_encode). Beyond the main pass's reach
+// only the distance matters. The layer depends only on the iris's
+// configuration and its progress, never on the photos, which is what lets
+// the viewer keep each frame's layer and reuse it on every later iris
+// (IrisLayerCache): four bytes a texel keep that cache at half the size of
+// an Rgba16Float one.
+//
+// Not a two-channel layer with the color applied in fs_iris: that multiply
+// cost the main pass 24 V3D instructions (106 -> 130) and 0.6 ms a frame
+// on the Pi (2026-11-23), more than the iris's whole margin.
+
+// The signed distance in the layer's alpha: [-IRIS_D8_RANGE, IRIS_D8_RANGE]
+// screen px over 0..1, 0.125 px a step. Beyond the range only "far inside"
+// or "far outside" matters to fs_iris: its anti-aliasing band is 1.5 px and
+// the rim reaches 3.5 * IRIS_RIM_PX = 14 px. (At 32 px, a 0.25 px step, the
+// outline's anti-aliased pixels moved by up to 8 LSB against a half-float
+// layer; at 16 px by up to 4.)
+const IRIS_D8_RANGE: f32 = 16.0;
+
+fn iris_d8_encode(d: f32) -> f32 {
+  return clamp(d / (2.0 * IRIS_D8_RANGE) + 0.5, 0.0, 1.0);
+}
+
+fn iris_d8_decode(a: f32) -> f32 {
+  return a * (2.0 * IRIS_D8_RANGE) - IRIS_D8_RANGE;
+}
+
 @fragment
 fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   let cover = textureLoad(cur_tex, vec2<i32>(in.pos.xy), 0);
   let d_min = cover.x;
   if (d_min > iris_reach(max(U.params3.x, 1.0))) {
-    return vec4<f32>(0.0, 0.0, 0.0, d_min);
+    return vec4<f32>(0.0, 0.0, 0.0, iris_d8_encode(d_min));
   }
   let n = max(i32(U.params0.x), 1);
   let contrast = clamp(U.params0.y, 0.0, 1.0);
@@ -283,7 +314,7 @@ fn fs_iris_layer(in: VSOut) -> @location(0) vec4<f32> {
   let occ = 0.5 * (1.0 - smoothstep(0.0, shadow_w, dn1))
     + 0.22 * (1.0 - smoothstep(0.0, shadow_w * 0.6, dn2));
   let blade_rgb = clamp(U.params1.yzw, vec3<f32>(0.0), vec3<f32>(1.0));
-  return vec4<f32>(blade_rgb * tone * (1.0 - shadow_amt * occ), d_min);
+  return vec4<f32>(blade_rgb * tone * (1.0 - shadow_amt * occ), iris_d8_encode(d_min));
 }
 
 // Upscales the half-resolution transition intermediate (bound at group 1)
@@ -675,7 +706,7 @@ fn fs_crossfade_zoom(in: VSOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_iris(in: VSOut) -> @location(0) vec4<f32> {
   let layer = textureSample(petal_tex, petal_samp, in.screen_uv);
-  let d = layer.a;
+  let d = iris_d8_decode(layer.a);
   let band = U.params3.w;
   let cov = 1.0 - smoothstep(-band, band, d);
   // Thin edge highlight, under petal_sheen so 0 is perfectly flat.

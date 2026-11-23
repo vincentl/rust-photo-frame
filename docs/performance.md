@@ -682,6 +682,55 @@ full-screen passes are spent carefully:
   instructions; the one 2-thread shader in the build is `fs_debug_bezier`,
   used only with `PHOTOFRAME_DEBUG_BEZIER`).
 
+  **The petal layer is cached across irises.** Why scale 4 could not hold
+  60 live, Pi 5, Mesa 26.2.7, 4K, scale 2, 12 blades, 2026-11-23
+  (`examples/iris_bench.rs`, the viewer's own shaders run headless on the
+  render node; medians):
+
+  | Progress | `fs_iris_cover` | `fs_iris_layer` | Layer total | `fs_iris` (main) |
+  |---|---|---|---|---|
+  | 0.0 / 1.0 (petals off screen) | 0.8 ms | 0.8 ms | 1.6 ms | 5.0 ms |
+  | 0.1 / 0.9 | 1.2 ms | 0.8 ms | 2.0 ms | 5.0 ms |
+  | 0.3 / 0.7 | 8.5 ms | 1.7 ms | 10.3 ms | 5.0 ms |
+  | 0.5 (closed) | 10.7 ms | 2.0 ms | 12.8 ms | 5.0 ms |
+
+  The main pass and the ~11 ms upscale leave about 0.8 ms of a refresh,
+  and the two layer passes cost twice that with no petal on screen (two
+  960x540 targets written). A cheaper loop cannot close that gap: one cover
+  pass per sector of the iris's N-fold symmetry (a polar texture of one
+  sector, rotated into place) cut the cover loop 3.2x on the Pi
+  (10.6 to 3.4 ms closed) but grew the shading pass (2.0 to 3.3 ms), 2x in
+  all; culling the loop to the petals near each texel (2-4 of 12 at
+  sector x 64 px bins) would be exact but still leaves the fixed cost.
+  Hardware (HVS) scaling of the intermediate would remove the upscale, but
+  Mesa's `VK_KHR_display` path pins the plane's source to the mode
+  (`wsi_common_display.c`: min/max src extent = mode, `SRC_W/H` = mode).
+
+  What is free is time: the layer depends only on the iris's
+  configuration and its progress, never on the photos, and on KMS every
+  frame of an anchored transition lands on progress k / (duration x 60 Hz)
+  exactly. So the viewer keeps each grid step's layer (`IrisLayerCache`):
+  the first iris after startup renders them as today, into the cache, and
+  every later iris binds its step's layer and skips both passes. Easing and
+  the petals' path are symmetric (the iris closes and reopens along the same
+  path), so steps k and N - k share a slot: 79 slots for a 2.6 s iris. A
+  cached iris frame costs its main pass (5.1 ms) and the upscale, a little
+  less than radial-wipe, which holds 60. The whole 157-frame sequence is
+  1.1 s of GPU time, once.
+
+  The layer is `Rgba8UnormSrgb`: the shade sRGB-encoded (linear 8-bit
+  banded the dark petals; sRGB steps are no coarser than the screen's own)
+  and the signed distance in alpha over +-16 px (0.125 px a step). Against
+  the Rgba16Float layer the final image differs by at most 4-5 LSB on
+  under 0.01% of channels (the outline's anti-aliased pixels, about a tenth
+  of a pixel of shift) and by 1 LSB on about 1% (Mac GPU, 11 steps). The
+  cache is 79 x 960 x 540 x 4 bytes, about 164 MB at 4K, layer-scale 4. A
+  two-channel layer (shade x color applied in `fs_iris`) would have been
+  as small with exact distances, but that one multiply cost the main pass
+  24 V3D instructions (106 to 130) and 0.6 ms, more than the margin.
+  `PHOTOFRAME_IRIS_CACHE=0` turns the cache off; `viewer_iris_cache_allocated`
+  and `viewer_iris_cache_complete` log its size and when every step is in.
+
   `fs_iris` fetches both photos and evaluates the outline on every pixel
   (see "Branch-free transition shaders" below). `kms_frame` reports the layer and the main pass separately (`gpu_layer_ms`,
   `gpu_main_ms`). The layer is `Rgba16Float`, not 8-bit: petals are very
@@ -927,7 +976,8 @@ kernel enforces load limits only on the Pi 3 generation).
 
 The variables the viewer reads (`PHOTOFRAME_SURFACE`, `PHOTOFRAME_PRESENT_MODE`,
 `PHOTOFRAME_TRANSITION_SCALE`, `PHOTOFRAME_IRIS_LAYER_SCALE` (an override
-of the iris transition's `layer-scale`),
+of the iris transition's `layer-scale`), `PHOTOFRAME_IRIS_CACHE` (`0` turns
+the iris layer cache off),
 `PHOTOFRAME_UPSCALE`, `PHOTOFRAME_MIP_SHARPEN`, `PHOTOFRAME_PROBE`,
 `PHOTOFRAME_DRM_CONNECTOR`, `PHOTOFRAME_DRM_MODE`, `WGPU_BACKEND`), their
 defaults and how to set them on each stack are listed in one place:

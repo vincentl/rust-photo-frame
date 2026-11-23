@@ -51,6 +51,95 @@ use tracing::{Level, debug, info, warn};
 /// end-cap "teeth") for 5..=14 blades at any minimum aperture.
 const IRIS_EXTRA_WIDTH_RAD: f32 = 1.308_997;
 
+/// The iris petal layer: the shade (sRGB-encoded) and the signed distance
+/// to the petals' outline in alpha (`fs_iris_layer`, `iris_d8_encode`).
+/// Four bytes a texel, half an Rgba16Float layer, so the cache of every
+/// step's layer (`IrisLayerCache`) is about 164 MB at 4K, layer-scale 4,
+/// for a 2.6 s iris.
+const IRIS_LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// The rate iris frames are planned at: progress is snapped to a grid of
+/// this many steps per second, so each step's petal layer can be kept
+/// (`IrisLayerCache`). On DRM/KMS at 60 Hz the transition clock is anchored
+/// to a vblank and frame k is drawn k refreshes later, so every frame lands
+/// on the grid exactly; at any other rate a frame is drawn for the nearest
+/// step, at most half a step (8.3 ms) from its own time.
+const IRIS_GRID_HZ: f32 = 60.0;
+
+/// Whether iris petal layers are cached (`PHOTOFRAME_IRIS_CACHE=0` turns it
+/// off: every frame then renders its layer, as before v1.3).
+fn iris_cache_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = !matches!(
+            std::env::var("PHOTOFRAME_IRIS_CACHE").as_deref(),
+            Ok("0" | "false" | "no" | "off")
+        );
+        if !on {
+            info!("viewer_iris_cache disabled by PHOTOFRAME_IRIS_CACHE");
+        }
+        on
+    })
+}
+
+/// Grid steps for an iris of `duration` (`IRIS_GRID_HZ`), at least 2.
+fn iris_grid_steps(duration: Duration) -> u32 {
+    ((duration.as_secs_f32() * IRIS_GRID_HZ).round() as u32).max(2)
+}
+
+/// The grid step an iris frame at linear progress `base` is drawn for, and
+/// the cache slot holding its layer. A step before the end never rounds up
+/// to the end (the end is the transition's final frame, drawn at rest).
+/// Easing is symmetric (smoothstep(1 - b) = 1 - smoothstep(b)) and so is the
+/// petals' motion (they close over the first half and open over the second
+/// along the same path), so steps i and steps - i show the same petals and
+/// share a slot: `steps / 2 + 1` slots for the whole transition.
+fn iris_grid_step(base: f32, steps: u32) -> (u32, usize) {
+    let last = if base < 1.0 { steps - 1 } else { steps };
+    let i = ((base.clamp(0.0, 1.0) * steps as f32).round() as u32).min(last);
+    (i, i.min(steps - i) as usize)
+}
+
+/// What an iris petal layer depends on: the transition's configuration (not
+/// the petal color, which fs_iris applies), the surface, and the grid. A
+/// cache built for one key is never read for another.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct IrisCacheKey {
+    blades: u32,
+    petal_sheen: u32,
+    overlap_shadow: u32,
+    min_aperture: u32,
+    swirl: u32,
+    layer_scale: u32,
+    width: u32,
+    height: u32,
+    steps: u32,
+}
+
+/// The iris petal layer of every grid step, kept after the frame that first
+/// drew it. The layer depends only on the configuration and the progress
+/// (never on the photos), so from the second iris on a frame binds its
+/// step's layer and skips both layer passes (`fs_iris_cover`, the loop over
+/// petals, and `fs_iris_layer`): at 4K with layer-scale 4 those cost
+/// 1.6-12.8 ms of GPU time per frame on a Pi 5 (examples/iris_bench.rs,
+/// 2026-11-23), against a refresh budget the main pass and the upscale
+/// already nearly fill. A step a frame never drew (a late frame skips one)
+/// is filled the next time a frame lands on it.
+struct IrisLayerCache {
+    key: IrisCacheKey,
+    // Kept alive for the views below.
+    _texture: wgpu::Texture,
+    slots: Vec<OffscreenTarget>,
+    filled: Vec<std::cell::Cell<bool>>,
+    complete_logged: std::cell::Cell<bool>,
+}
+
+impl IrisLayerCache {
+    fn filled_count(&self) -> usize {
+        self.filled.iter().filter(|f| f.get()).count()
+    }
+}
+
 /// Linear downscale factor for the intermediate that transition frames
 /// render into (resting photos always render at native resolution). 2 →
 /// roughly a quarter of the per-pixel transition cost; motion hides the
@@ -2023,6 +2112,8 @@ struct GpuCtx {
     iris_layer_pipeline: wgpu::RenderPipeline,
     iris_cover: Option<OffscreenTarget>,
     iris_layer: Option<OffscreenTarget>,
+    /// Every grid step's petal layer, once drawn (`IrisLayerCache`).
+    iris_cache: Option<IrisLayerCache>,
     /// E-ink's per-cell reveal mask (`fs_eink_mask`), stripes x stripes,
     /// read by `fs_eink` at group 3.
     eink_mask_pipeline: wgpu::RenderPipeline,
@@ -2299,17 +2390,87 @@ impl GpuCtx {
         {
             return;
         }
-        // Half-float, not 8-bit: the petals are very dark in linear light,
-        // so a smooth shading gradient spans only a handful of 8-bit
-        // levels and visibly bands. Rgba16Float has ample dark-range
-        // precision; the layer is quarter-res so the extra bytes are
-        // negligible.
-        self.iris_layer =
-            Some(self.make_offscreen("iris-petal-layer", w, h, wgpu::TextureFormat::Rgba16Float));
+        // sRGB 8-bit, not linear: the petals are very dark in linear light,
+        // where linear 8-bit spans only a handful of levels and visibly
+        // bands; sRGB spends its levels there. The signed distance rides in
+        // alpha (fs_iris_layer, iris_d8_encode).
+        self.iris_layer = Some(self.make_offscreen("iris-petal-layer", w, h, IRIS_LAYER_FORMAT));
         // The cover pass's output, read texel for texel by the shading pass
         // (see fs_iris_cover for what half floats hold).
         self.iris_cover =
             Some(self.make_offscreen("iris-petal-cover", w, h, wgpu::TextureFormat::Rgba16Float));
+    }
+
+    /// Make the iris layer cache match `key`: kept as it is when it already
+    /// does, otherwise (first iris, a resize, another configuration or
+    /// duration) replaced by an empty one, `steps / 2 + 1` layers of the
+    /// petal layer's size in one array texture.
+    fn ensure_iris_cache(&mut self, key: IrisCacheKey) {
+        if self.iris_cache.as_ref().is_some_and(|c| c.key == key) {
+            return;
+        }
+        let slots = key.steps / 2 + 1;
+        let w = (key.width / key.layer_scale.max(1)).max(1);
+        let h = (key.height / key.layer_scale.max(1)).max(1);
+        let slots = slots.min(self.device.limits().max_texture_array_layers);
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("iris-layer-cache"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: slots,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: IRIS_LAYER_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let views: Vec<OffscreenTarget> = (0..slots)
+            .map(|slot| {
+                let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("iris-layer-cache-slot"),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: slot,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                });
+                let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("iris-layer-cache-slot"),
+                    layout: &self.img_bind_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                });
+                OffscreenTarget { view, bind, w, h }
+            })
+            .collect();
+        let bytes = u64::from(w) * u64::from(h) * 4 * u64::from(slots);
+        info!(
+            slots,
+            width = w,
+            height = h,
+            mb = format_args!("{:.1}", bytes as f64 / 1e6),
+            steps = key.steps,
+            "viewer_iris_cache_allocated"
+        );
+        self.iris_cache = Some(IrisLayerCache {
+            key,
+            _texture: texture,
+            filled: (0..views.len())
+                .map(|_| std::cell::Cell::new(false))
+                .collect(),
+            slots: views,
+            complete_logged: std::cell::Cell::new(false),
+        });
     }
 
     /// Create (or re-create for another stripe count) e-ink's reveal mask,
@@ -3150,10 +3311,13 @@ fn build_gpu_rest(
             bind_group_layouts: &[&uniform_layout, &img_bind_layout],
             push_constant_ranges: &[],
         });
-    // Both petal-layer passes write Rgba16Float: the layer because dark
-    // petals band in 8-bit (see ensure_iris_layer), the cover for its
-    // distances.
-    let petal_pipeline = |label: &str, layout: &wgpu::PipelineLayout, entry_point: &str| {
+    // The cover pass writes Rgba16Float (exact distances and petal
+    // indices); the layer pass writes IRIS_LAYER_FORMAT (see
+    // ensure_iris_layer).
+    let petal_pipeline = |label: &str,
+                          layout: &wgpu::PipelineLayout,
+                          entry_point: &str,
+                          format: wgpu::TextureFormat| {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(layout),
@@ -3170,7 +3334,7 @@ fn build_gpu_rest(
                 module: &shader,
                 entry_point: Some(entry_point),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float,
+                    format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -3184,16 +3348,19 @@ fn build_gpu_rest(
         "iris-cover-pipeline",
         &iris_cover_pipeline_layout,
         "fs_iris_cover",
+        wgpu::TextureFormat::Rgba16Float,
     );
     let iris_layer_pipeline = petal_pipeline(
         "iris-layer-pipeline",
         &iris_layer_pipeline_layout,
         "fs_iris_layer",
+        IRIS_LAYER_FORMAT,
     );
     let eink_mask_pipeline = petal_pipeline(
         "eink-mask-pipeline",
         &iris_cover_pipeline_layout,
         "fs_eink_mask",
+        wgpu::TextureFormat::Rgba16Float,
     );
     let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("blit-pipeline-layout"),
@@ -3412,6 +3579,7 @@ fn build_gpu_rest(
         iris_layer_pipeline,
         iris_cover: None,
         iris_layer: None,
+        iris_cache: None,
         eink_mask_pipeline,
         eink_mask: None,
         blit_pipeline,
@@ -4628,10 +4796,31 @@ impl App {
                     if transition_scale() > 1 {
                         gpu.ensure_half_target();
                     }
-                    if let Some(ActiveTransition::Iris { layer_scale, .. }) =
-                        wake.transition_state().map(|s| s.variant())
+                    if let Some(state) = wake.transition_state()
+                        && let ActiveTransition::Iris {
+                            blades,
+                            petal_sheen,
+                            overlap_shadow,
+                            min_aperture,
+                            swirl,
+                            layer_scale,
+                            ..
+                        } = state.variant()
                     {
                         gpu.ensure_iris_layer(*layer_scale);
+                        if iris_cache_enabled() {
+                            gpu.ensure_iris_cache(IrisCacheKey {
+                                blades: (*blades).clamp(1, 16),
+                                petal_sheen: petal_sheen.to_bits(),
+                                overlap_shadow: overlap_shadow.to_bits(),
+                                min_aperture: min_aperture.to_bits(),
+                                swirl: swirl.to_bits(),
+                                layer_scale: (*layer_scale).max(1),
+                                width: gpu.config.width,
+                                height: gpu.config.height,
+                                steps: iris_grid_steps(state.duration),
+                            });
+                        }
                     }
                 }
                 if let Some(ActiveTransition::EInk { stripe_count, .. }) =
@@ -4658,6 +4847,9 @@ impl App {
                     ],
                 };
                 let mut petals = <IrisPetals as bytemuck::Zeroable>::zeroed();
+                // The iris layer cache slot this frame's petals live in, when
+                // the cache is on (`IrisLayerCache`).
+                let mut iris_slot: Option<usize> = None;
                 let mut draw_kind = DrawKind::Rest;
                 // Where the planes are drawn, in screen pixels; turned into
                 // texture-coordinate maps once the kind has had its say
@@ -4825,6 +5017,15 @@ impl App {
                             // 2*r_in) with semicircular end caps, pivoting
                             // by `psi` about the center of the trailing cap.
                             let n = (*blades).clamp(1, 16) as usize;
+                            if iris_cache_enabled() {
+                                // Draw for the grid step, so the layer is the
+                                // one every iris draws at this step.
+                                let steps = iris_grid_steps(state.duration);
+                                let (step, slot) = iris_grid_step(base_progress, steps);
+                                let b = step as f32 / steps as f32;
+                                uniforms.progress = b * b * (3.0 - 2.0 * b);
+                                iris_slot = Some(slot);
+                            }
                             let t = uniforms.progress;
                             let x = if t < 0.5 { t * 2.0 } else { 2.0 - t * 2.0 };
                             let f = x * x * (3.0 - 2.0 * x);
@@ -4841,7 +5042,14 @@ impl App {
                             uniforms.params0 = [n as f32, *petal_sheen, *overlap_shadow, swap];
                             // Inscribed aperture radius: pixels closer to
                             // center than this are provably petal-free.
-                            uniforms.params1 = [r_in - e, color[0], color[1], color[2]];
+                            // The petal color, clamped here once rather than
+                            // per pixel in fs_iris.
+                            uniforms.params1 = [
+                                r_in - e,
+                                color[0].clamp(0.0, 1.0),
+                                color[1].clamp(0.0, 1.0),
+                                color[2].clamp(0.0, 1.0),
+                            ];
                             // The layer's scale (how far its texels reach),
                             // the ring geometry, and the main pass's edge
                             // anti-aliasing half-width: 0.75 of its pixel,
@@ -4976,12 +5184,29 @@ impl App {
                         }
                         pass.draw(0..3, 0..1);
                     };
+                    // The petal layer the main pass composites: this grid
+                    // step's cache slot when the cache is on (drawn by an
+                    // earlier frame, or by this one into the slot), the
+                    // per-frame layer otherwise.
+                    let cache_slot = iris_slot.and_then(|slot| {
+                        gpu.iris_cache
+                            .as_ref()
+                            .and_then(|cache| cache.slots.get(slot).map(|t| (cache, slot, t)))
+                    });
+                    let iris_layer_target = match cache_slot {
+                        Some((_, _, target)) => gpu.iris_layer.as_ref().map(|_| target),
+                        None => gpu.iris_layer.as_ref(),
+                    };
+                    let iris_layer_drawn =
+                        cache_slot.is_some_and(|(cache, slot, _)| cache.filled[slot].get());
                     // Render the petals into the reduced-resolution
                     // layer first, in two passes (cover, then shading);
-                    // the main pass composites it.
+                    // the main pass composites it. A cached step skips
+                    // both: its layer is already in its slot.
                     if iris_active
+                        && !iris_layer_drawn
                         && let (Some(cover), Some(layer)) =
-                            (gpu.iris_cover.as_ref(), gpu.iris_layer.as_ref())
+                            (gpu.iris_cover.as_ref(), iris_layer_target)
                     {
                         layer_pass(
                             &mut encoder,
@@ -5001,6 +5226,15 @@ impl App {
                             false,
                             true,
                         );
+                        if let Some((cache, slot, _)) = cache_slot {
+                            cache.filled[slot].set(true);
+                            if !cache.complete_logged.get()
+                                && cache.filled_count() == cache.filled.len()
+                            {
+                                cache.complete_logged.set(true);
+                                info!(slots = cache.filled.len(), "viewer_iris_cache_complete");
+                            }
+                        }
                     }
                     // E-ink's per-cell reveal mask.
                     let eink_mask = gpu
@@ -5018,7 +5252,7 @@ impl App {
                             true,
                         );
                     }
-                    let petal_bind = match (gpu.iris_layer.as_ref(), eink_mask) {
+                    let petal_bind = match (iris_layer_target, eink_mask) {
                         (Some(layer), _) if iris_active => &layer.bind,
                         (_, Some(mask)) => &mask.bind,
                         _ => &gpu.blank_plane.bind,
@@ -6449,6 +6683,53 @@ mod tests {
         let last = *frames.last().unwrap();
         state.anchor_once(last + period);
         assert!(state.progress_at(last) > 0.0);
+    }
+
+    #[test]
+    fn iris_grid_has_a_step_per_60hz_refresh() {
+        // The default iris, 2600 ms, is 156 refreshes at 60 Hz exactly.
+        assert_eq!(iris_grid_steps(Duration::from_millis(2600)), 156);
+        assert_eq!(iris_grid_steps(Duration::from_millis(1000)), 60);
+        assert_eq!(iris_grid_steps(Duration::from_millis(1)), 2);
+    }
+
+    #[test]
+    fn iris_grid_step_lands_kms_frames_exactly_and_mirrors_slots() {
+        let steps = 156;
+        // KMS: frame k of an anchored transition is drawn for k / steps.
+        for k in 0..steps {
+            let (step, slot) = iris_grid_step(k as f32 / steps as f32, steps);
+            assert_eq!(step, k, "frame {k}");
+            assert_eq!(slot as u32, k.min(steps - k));
+        }
+        // Closing and opening frames at the same distance from the middle
+        // share a slot; the middle has one of its own.
+        assert_eq!(
+            iris_grid_step(10.0 / 156.0, steps).1,
+            iris_grid_step(146.0 / 156.0, steps).1
+        );
+        assert_eq!(iris_grid_step(0.5, steps), (78, 78));
+        // A frame before the end never becomes the end (the final frame is
+        // drawn at rest); the end is only reached at progress 1.
+        assert_eq!(iris_grid_step(0.999, steps).0, 155);
+        assert_eq!(iris_grid_step(1.0, steps), (156, 0));
+        // Off-grid times round to the nearest step.
+        assert_eq!(iris_grid_step(10.4 / 156.0, steps).0, 10);
+        assert_eq!(iris_grid_step(10.6 / 156.0, steps).0, 11);
+    }
+
+    #[test]
+    fn iris_eased_progress_is_symmetric_so_mirrored_steps_match() {
+        // The slot sharing above relies on smoothstep(1 - b) = 1 - smoothstep(b):
+        // the petals at eased t and 1 - t are the same (x is |2t - 1| folded).
+        let steps = 156u32;
+        for i in 0..=steps {
+            let ease = |b: f32| b * b * (3.0 - 2.0 * b);
+            let a = ease(i as f32 / steps as f32);
+            let b = ease((steps - i) as f32 / steps as f32);
+            let fold = |t: f32| if t < 0.5 { t * 2.0 } else { 2.0 - t * 2.0 };
+            assert!((fold(a) - fold(b)).abs() < 1e-5, "step {i}");
+        }
     }
 
     #[test]
