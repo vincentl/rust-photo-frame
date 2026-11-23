@@ -350,6 +350,16 @@ mean is `1/weight` for every `f`, so **a photo's long-run show frequency never
 changes** — only its spacing does (coefficient of variation `= 1 − f`). The floor also
 auto-scales with weight, so a high-weight new photo is still allowed back sooner.
 
+**Startup placement.** When the frame starts, each photo's first showing is placed as if
+the slideshow had already been running, at a random point in that photo's cycle: the
+equilibrium forward-recurrence time of the gap law, which is "with probability `f`,
+`Uniform(0, f/weight)`; otherwise `f/weight + (1 − f)/weight · Exp(1)`". The mix of
+photos therefore matches the weights from the first slide, and a restart (boot, deploy,
+config change) doesn't favour recent photos. Placing every photo a full gap out instead,
+as if each had just been shown, would make old photos sit out their whole floor `f`
+while recent ones wait only `f/weight`, so recent photos would repeat among themselves
+before any old one appeared.
+
 **Prompt debut for new photos.** The minimum-spacing floor would otherwise delay a
 freshly copied-in photo's *first* appearance by a full `min-spacing` lap (tens of
 minutes on a large library). To avoid that, photos discovered while the frame is
@@ -359,7 +369,7 @@ biased coin: the new photo wins against the normal rotation at odds equal to its
 while the rest of the rotation still shows ~`1/(w+1)` of the time — no stall. After its
 debut the photo joins the spaced timeline normally. This applies only to runtime
 additions; the startup scan and `--playlist-dry-run` schedule straight onto the
-timeline, so simulation stays deterministic.
+timeline (see *Startup placement* above), so simulation stays deterministic.
 
 Turn on `metrics: true` (see [Performance → Measuring](performance.md#measuring)) and
 grep `photo_display_metric` to measure the effect — the `gap` column is the number of

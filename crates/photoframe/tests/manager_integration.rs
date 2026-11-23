@@ -724,3 +724,53 @@ async fn live_pairing_never_sends_a_photo_removed_while_its_screen_waited() {
     cancel.cancel();
     let _ = handle.await;
 }
+
+/// Regression: startup photos used to draw a full refractory gap for their
+/// first slot, as if every photo had just been shown. Old photos (w = 1) then
+/// waited out a floor of `min-spacing` while new ones (w = 3) waited only a
+/// third of it, so after every restart the new photos had the screen to
+/// themselves and repeated several times before any old photo appeared (about
+/// 3× their share of the first few hundred slides). With first slots drawn
+/// from the equilibrium residual, the mix matches the weights from slide one.
+#[test]
+fn weighted_spread_startup_mix_matches_weights_from_the_first_slide() {
+    let options = PlaylistOptions {
+        new_multiplicity: 3,
+        half_life: Duration::from_secs(86_400 * 3),
+        order: PlaylistOrder::WeightedSpread,
+        min_spacing: 0.7,
+        ..Default::default()
+    };
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100_000_000);
+    let old = now - Duration::from_secs(86_400 * 200);
+    let (n_old, n_new, slides) = (1000usize, 10usize, 200usize);
+    let mut photos: Vec<PhotoInfo> = (0..n_old)
+        .map(|i| photo_info(PathBuf::from(format!("old/{i}.jpg")), old))
+        .collect();
+    photos.extend((0..n_new).map(|i| photo_info(PathBuf::from(format!("new/{i}.jpg")), now)));
+
+    let seeds = 0..20u64;
+    let runs = seeds.end as f64;
+    let mut new_shown = 0usize;
+    let mut first_slide_new = 0usize;
+    for seed in seeds {
+        let plan =
+            manager::simulate_playlist(photos.clone(), options.clone(), now, slides, Some(seed));
+        let is_new = |p: &PathBuf| p.starts_with("new");
+        new_shown += plan.iter().filter(|p| is_new(p)).count();
+        first_slide_new += usize::from(is_new(&plan[0]));
+    }
+    // Weight share of the new photos: 30 / 1030 ≈ 2.9%, ≈ 5.8 of 200 slides.
+    // The old placement gave ≈ 19 (all 10 new photos ~twice before any old one).
+    let expected = slides as f64 * (3.0 * n_new as f64) / (n_old as f64 + 3.0 * n_new as f64);
+    let mean = new_shown as f64 / runs;
+    assert!(
+        (mean - expected).abs() < 2.0,
+        "new photos shown {mean:.1} times per {slides} slides, expected ≈ {expected:.1}"
+    );
+    // The first slide is no longer reserved for the newest photos.
+    assert!(
+        first_slide_new < 5,
+        "a new photo opened {first_slide_new} of 20 runs"
+    );
+}

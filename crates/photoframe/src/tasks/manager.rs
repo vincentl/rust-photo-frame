@@ -478,15 +478,65 @@ impl PlaylistState {
         f * mean + (1.0 - f) * mean * (-u.ln())
     }
 
+    /// Time until a photo's *first* showing when it joins a timeline that is
+    /// already running (startup scan, dry run): the forward-recurrence time of
+    /// the `sample_gap` renewal law in equilibrium, i.e. how long until the next
+    /// showing of a photo observed at a random moment of its cycle.
+    ///
+    /// Drawing a full `sample_gap` here instead would treat every startup photo
+    /// as *just shown*, so each would sit out its whole refractory floor `f/w`
+    /// first. That floor shrinks with weight, so new photos (w ≈ 3) would have
+    /// the screen to themselves until the old ones' floor `f` elapsed, and
+    /// repeat several times before any old photo appeared (about 3× their
+    /// share over the first lap after a restart).
+    ///
+    /// For a gap `G = a + b·Exp(1)` with `a = f/w`, `b = (1−f)/w` and mean
+    /// `μ = 1/w`, the equilibrium residual has density `P(G > t)/μ`: flat at
+    /// `1/μ` on `[0, a)`, then `e^{−(t−a)/b}/μ`. That is the mixture "with
+    /// probability `a/μ = f`, `Uniform(0, a)`; otherwise `a + Exp(b)`". With
+    /// every photo started this way the display mix is stationary from the
+    /// first slide: each photo's share is its weight's share from the start.
+    /// `f == 0` reduces to `Exp(1/w)` and draws exactly what `sample_gap`
+    /// would, so weighted-random's seeded sequences are unchanged.
+    fn sample_first_gap(&mut self, weight: f64) -> f64 {
+        let f = self.refractory;
+        if f <= 0.0 {
+            return self.sample_gap(weight);
+        }
+        let mean = 1.0 / weight.max(1.0);
+        let floor = f * mean;
+        if self.rng.random::<f64>() < f {
+            floor * self.rng.random::<f64>()
+        } else {
+            let u = 1.0 - self.rng.random::<f64>();
+            floor + (1.0 - f) * mean * (-u.ln())
+        }
+    }
+
     fn next_seq(&mut self) -> u64 {
         let s = self.seq;
         self.seq += 1;
         s
     }
 
-    fn schedule(&mut self, path: Arc<PathBuf>, created_at: SystemTime, generation: u32) {
+    /// Push `path` onto the heap one gap ahead of `vclock`. `first` (a photo
+    /// joining from the startup scan, never yet on this timeline) draws the
+    /// equilibrium residual; otherwise the photo was just shown (a priority
+    /// debut) and draws a full refractory gap.
+    fn schedule(
+        &mut self,
+        path: Arc<PathBuf>,
+        created_at: SystemTime,
+        generation: u32,
+        first: bool,
+    ) {
         let weight = self.options.weight_for(created_at, self.now());
-        let key = self.vclock + self.sample_gap(weight);
+        let gap = if first {
+            self.sample_first_gap(weight)
+        } else {
+            self.sample_gap(weight)
+        };
+        let key = self.vclock + gap;
         let seq = self.next_seq();
         self.heap.push(Entry {
             key,
@@ -581,7 +631,7 @@ impl PlaylistScheduler for PlaylistState {
             // its first show (see `commit_shown`), so it isn't scheduled here.
             self.priority_fifo.push_back(path_arc);
         } else {
-            self.schedule(path_arc, created_at, generation);
+            self.schedule(path_arc, created_at, generation, true);
         }
     }
 
@@ -649,7 +699,7 @@ impl PlaylistScheduler for PlaylistState {
                 meta.shown = true;
                 (meta.created_at, meta.generation)
             };
-            self.schedule(path, created_at, generation);
+            self.schedule(path, created_at, generation, false);
             return;
         }
         let entry = match self.heap.pop() {
@@ -1347,5 +1397,58 @@ mod live_loop_tests {
         assert!(out.contains(" pairing_dwell_multiplier=1.5\n"), "{out}");
         assert!(out.contains(" pairing_probability=1 "), "{out}");
         assert!(out.contains(" pairing_lookahead=3 "), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod first_gap_tests {
+    //! `sample_first_gap` is the equilibrium forward-recurrence time of the
+    //! refractory renewal law `G = f/w + (1−f)/w·Exp(1)`.
+    use super::*;
+    use crate::config::PlaylistOrder;
+
+    fn state(min_spacing: f64, seed: u64) -> PlaylistState {
+        let options = PlaylistOptions {
+            order: PlaylistOrder::WeightedSpread,
+            min_spacing,
+            ..Default::default()
+        };
+        PlaylistState::with_rng(options, StdRng::seed_from_u64(seed), None)
+    }
+
+    #[test]
+    fn first_gap_matches_the_equilibrium_residual_moments() {
+        // Residual of a renewal gap G: P(R < a) = a/E[G] = f, and
+        // E[R] = E[G²]/(2E[G]) = (1 + (1−f)²)/(2w).
+        let f = 0.7;
+        for w in [1.0, 3.0] {
+            let mut s = state(f, 11);
+            let n = 200_000;
+            let floor = f / w;
+            let draws: Vec<f64> = (0..n).map(|_| s.sample_first_gap(w)).collect();
+            let mean = draws.iter().sum::<f64>() / n as f64;
+            let below = draws.iter().filter(|&&r| r < floor).count() as f64 / n as f64;
+            let want_mean = (1.0 + (1.0 - f) * (1.0 - f)) / (2.0 * w);
+            assert!(
+                (mean - want_mean).abs() < 0.01 * want_mean.max(0.1),
+                "w={w}: mean {mean:.4} vs {want_mean:.4}"
+            );
+            assert!(
+                (below - f).abs() < 0.005,
+                "w={w}: P(R<floor) {below:.4} vs {f}"
+            );
+            assert!(draws.iter().all(|&r| r >= 0.0));
+        }
+    }
+
+    #[test]
+    fn zero_min_spacing_first_gap_is_the_ordinary_gap() {
+        // Exponential gaps are memoryless: the residual is the gap itself, and
+        // the draw is identical so weighted-random's seeded plans don't move.
+        let mut a = state(0.0, 5);
+        let mut b = state(0.0, 5);
+        for w in [1.0, 2.5, 3.0] {
+            assert_eq!(a.sample_first_gap(w), b.sample_gap(w));
+        }
     }
 }
