@@ -122,7 +122,7 @@ Expected: all three services `active (running)`, `print-status.sh` exits cleanly
 
 ### Adding photos
 
-Both `local/` (manual imports, never overwritten by sync) and `cloud/` (managed by the sync service) under `/var/lib/photoframe/photos` are scanned recursively. Supported formats: JPEG, PNG.
+Both `local/` (manual imports, never overwritten by sync) and `cloud/` (managed by the sync service) under `/var/lib/photoframe/photos` are scanned recursively; hidden files and folders (names starting with `.`) are skipped. Supported formats: JPEG, PNG.
 
 From your laptop, use `rsync` (not `scp` — the sftp subsystem doesn't load supplementary groups, so `scp` writes silently fail):
 

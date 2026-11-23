@@ -7,7 +7,7 @@ use notify::{Event, EventKind, RecursiveMode, Watcher, recommended_watcher};
 use rand::{SeedableRng, seq::SliceRandom};
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -29,6 +29,8 @@ pub async fn run(
     mut invalid_rx: Receiver<InvalidPhoto>,
     cancel: CancellationToken,
 ) -> Result<()> {
+    let library = LibraryRoot::new(&cfg.photo_library_path);
+
     // 1) Startup scan (recursive) -> collect, shuffle, emit
     let initial = discover_startup_photos(&cfg)?;
     for info in &initial {
@@ -94,12 +96,16 @@ pub async fn run(
                             // pushed album). `add_path` recurses into directories,
                             // which also closes the race where files land before the
                             // recursive watch attaches to the new subdir.
-                            for p in event.paths {
+                            for p in event.paths.into_iter().filter(|p| !library.hides(p)) {
                                 add_path(&p, &to_manager, read_headers).await;
                             }
                         }
                         EventKind::Remove(RemoveKind::File) => {
-                            for p in event.paths.into_iter().filter(|p| is_image(p.as_path())) {
+                            for p in event
+                                .paths
+                                .into_iter()
+                                .filter(|p| is_image(p.as_path()) && !library.hides(p))
+                            {
                                 debug!(path = %p.display(), "fs: remove (remove)");
                                 let _ = to_manager.send(InventoryEvent::PhotoRemoved(p)).await;
                             }
@@ -108,7 +114,10 @@ pub async fn run(
                             // macOS often reports moves as Name(Any); a directory may
                             // also be renamed/moved into the library wholesale. Decide
                             // per-path by existence, recursing into moved-in dirs.
-                            for p in event.paths {
+                            // A hidden path was never in inventory (a photo moved
+                            // into `.trash/` surfaces as a removal of its old,
+                            // visible path), so it is skipped either way.
+                            for p in event.paths.into_iter().filter(|p| !library.hides(p)) {
                                 if p.exists() {
                                     add_path(&p, &to_manager, read_headers).await;
                                 } else {
@@ -137,6 +146,60 @@ fn is_image(p: &Path) -> bool {
         .is_some_and(|ext| SUPPORTED_EXTENSIONS.contains(&ext.as_str()))
 }
 
+/// A dot-name (`.cloud-staging`, `.Trash`, `._IMG_1.jpg`): hidden by Unix
+/// convention, and never part of the library.
+#[inline]
+fn is_dot_name(name: &OsStr) -> bool {
+    name.as_encoded_bytes().first() == Some(&b'.')
+}
+
+/// Walk `dir`, pruning hidden entries below it (`dir` itself is the caller's
+/// to judge, so a library that lives under a dot-directory such as
+/// `~/.local/share/photos` still scans). Pruning a hidden directory skips its
+/// whole subtree without descending into it.
+fn walk_visible(dir: &Path, follow_links: bool) -> impl Iterator<Item = walkdir::DirEntry> {
+    WalkDir::new(dir)
+        .follow_links(follow_links)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !is_dot_name(e.file_name()))
+        .filter_map(Result::ok)
+}
+
+/// The library root as configured and as canonicalized, so watcher paths can
+/// be judged relative to it whichever form the platform reports (inotify
+/// echoes the watched path; macOS FSEvents reports the canonical one).
+struct LibraryRoot {
+    given: PathBuf,
+    canonical: Option<PathBuf>,
+}
+
+impl LibraryRoot {
+    fn new(root: &Path) -> Self {
+        Self {
+            given: root.to_path_buf(),
+            canonical: root.canonicalize().ok(),
+        }
+    }
+
+    /// Whether `path` is hidden inside the library: any component below the
+    /// root is a dot-name. This keeps the sync service's `.cloud-staging/`
+    /// (hard-linked copies of every `cloud/` photo) and transfer temp files out
+    /// of the inventory. A path outside the root is judged by its file name.
+    fn hides(&self, path: &Path) -> bool {
+        let rel = path
+            .strip_prefix(&self.given)
+            .ok()
+            .or_else(|| path.strip_prefix(self.canonical.as_deref()?).ok());
+        match rel {
+            Some(rel) => rel.components().any(|c| match c {
+                Component::Normal(name) => is_dot_name(name),
+                _ => false,
+            }),
+            None => path.file_name().is_some_and(is_dot_name),
+        }
+    }
+}
+
 /// Emit `PhotoAdded` for `path` if it is a supported image, or for every image
 /// found by recursing if it is a directory (e.g. a whole album pushed or moved
 /// into the library at once — inotify reports only the top-level create, and the
@@ -146,7 +209,7 @@ fn is_image(p: &Path) -> bool {
 async fn add_path(path: &Path, to_manager: &Sender<InventoryEvent>, read_headers: bool) {
     if path.is_dir() {
         debug!(path = %path.display(), "fs: add (dir, recursing)");
-        for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
+        for entry in walk_visible(path, false) {
             let p = entry.path();
             if p.is_file() && is_image(p) {
                 send_added(p, to_manager, read_headers).await;
@@ -247,13 +310,9 @@ fn photo_created_at(path: &Path) -> (SystemTime, CreatedSource) {
 pub fn discover_startup_photos(cfg: &Configuration) -> Result<Vec<PhotoInfo>> {
     let mut initial = Vec::<PathBuf>::new();
     // follow_links(true) is intentional so symlinked sub-directories work. WalkDir's internal
-    // inode tracker prevents infinite loops from circular symlinks.
-    for entry in WalkDir::new(&cfg.photo_library_path)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-    {
+    // inode tracker prevents infinite loops from circular symlinks. Hidden entries are pruned
+    // (see `LibraryRoot::hides`).
+    for entry in walk_visible(&cfg.photo_library_path, true).filter(|e| e.file_type().is_file()) {
         let path = entry.path().to_path_buf();
         if is_image(&path) {
             initial.push(path);
@@ -282,4 +341,69 @@ pub fn discover_startup_photos(cfg: &Configuration) -> Result<Vec<PhotoInfo>> {
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hides_dot_components_below_the_root_only() {
+        let lib = LibraryRoot {
+            given: PathBuf::from("/var/lib/photoframe/photos"),
+            canonical: None,
+        };
+        let hidden = [
+            "/var/lib/photoframe/photos/.cloud-staging",
+            "/var/lib/photoframe/photos/.cloud-staging/IMG_1.jpeg",
+            "/var/lib/photoframe/photos/.cloud-staging/2024/IMG_2.jpeg",
+            "/var/lib/photoframe/photos/local/.Trash/IMG_3.jpg",
+            "/var/lib/photoframe/photos/local/._IMG_4.jpg",
+            "/var/lib/photoframe/photos/cloud/.IMG_5.jpeg.a1B2c3",
+        ];
+        for p in hidden {
+            assert!(lib.hides(Path::new(p)), "{p} should be hidden");
+        }
+        let visible = [
+            "/var/lib/photoframe/photos/cloud/IMG_1.jpeg",
+            "/var/lib/photoframe/photos/local/2008/DSC_0074 (1).jpeg",
+            "/var/lib/photoframe/photos/local/v1.2.jpg",
+            "/var/lib/photoframe/photos",
+        ];
+        for p in visible {
+            assert!(!lib.hides(Path::new(p)), "{p} should be visible");
+        }
+    }
+
+    #[test]
+    fn a_library_under_a_dot_directory_is_not_itself_hidden() {
+        let lib = LibraryRoot {
+            given: PathBuf::from("/home/kiosk/.local/share/photos"),
+            canonical: None,
+        };
+        assert!(!lib.hides(Path::new("/home/kiosk/.local/share/photos/a.jpg")));
+        assert!(lib.hides(Path::new("/home/kiosk/.local/share/photos/.staging/a.jpg")));
+    }
+
+    #[test]
+    fn watcher_paths_in_canonical_form_are_judged_relative_to_the_root() {
+        // macOS FSEvents reports /private/var/... for a root configured as /var/...;
+        // `.local` is above the canonical root and must not count.
+        let lib = LibraryRoot {
+            given: PathBuf::from("/var/photos"),
+            canonical: Some(PathBuf::from("/private/.local/photos")),
+        };
+        assert!(!lib.hides(Path::new("/private/.local/photos/cloud/a.jpg")));
+        assert!(lib.hides(Path::new("/private/.local/photos/.cloud-staging/a.jpg")));
+    }
+
+    #[test]
+    fn a_path_outside_the_root_is_judged_by_its_file_name() {
+        let lib = LibraryRoot {
+            given: PathBuf::from("/var/photos"),
+            canonical: None,
+        };
+        assert!(lib.hides(Path::new("/elsewhere/._a.jpg")));
+        assert!(!lib.hides(Path::new("/elsewhere/.x/a.jpg")));
+    }
 }

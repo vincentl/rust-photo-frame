@@ -121,7 +121,7 @@ If the frame launches to a black screen, check that `photo-library-path` points 
 - **Required?** Yes.
 - **Accepted values & defaults:** Any absolute or relative filesystem path. The setup pipeline provisions `/var/lib/photoframe/photos` with `cloud/` and `local/` subdirectories.
 - **Effect on behavior:** Switching the path changes the library the watcher monitors; the viewer reloads the playlist when the directory contents change.
-- **Notes:** Keep the `cloud/` and `local/` folders under the configured root. Use `cloud/` for sync-managed content (rclone, Nextcloud) and `local/` for manual imports the sync should never prune.
+- **Notes:** Hidden files and folders (any name starting with `.`, such as the sync service's `.cloud-staging/`, a `.Trash/` or macOS `._` files) are skipped, both at startup and as files arrive. Keep the `cloud/` and `local/` folders under the configured root. Use `cloud/` for sync-managed content (rclone, Nextcloud) and `local/` for manual imports the sync should never prune.
 
 ### `control-socket-path`
 

@@ -76,7 +76,7 @@ fallback when birth time is unavailable). If `created_source` is ever not
 `birthtime`, photos are being aged by something other than when they landed on
 the frame, so check the sync tooling and filesystem (see the note in
 [configure.md → Playlist weighting](configure.md#playlist-weighting)). To audit coverage, grep these lines over a long run, list
-the library recursively (`find <photo-library-path> -type f`), and diff the
+the library recursively (`find <photo-library-path> -type f -not -path '*/.*'`, which leaves out the hidden entries the frame skips, such as `.cloud-staging/`), and diff the
 two sets: paths that never appear are starved, and a `gap` distribution that
 clusters well below `inventory` means photos repeat too soon.
 

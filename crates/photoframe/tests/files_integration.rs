@@ -311,3 +311,46 @@ async fn pairing_header_pass_reports_startup_sizes_after_the_adds() {
     cancel.cancel();
     let _ = handle.await;
 }
+
+/// The cloud sync stages downloads in `<library>/.cloud-staging/` and hard-links
+/// them into `cloud/`, so every synced photo exists twice on disk. Only the
+/// `cloud/` copy may enter the inventory; other hidden entries (a `.Trash`,
+/// macOS `._` AppleDouble files) are skipped too.
+#[test]
+fn startup_scan_skips_hidden_entries_such_as_the_sync_staging_dir() {
+    let tmp = tempdir().unwrap();
+    // A library that itself lives under a dot-directory must still scan.
+    let lib = tmp.path().join(".local").join("photos");
+    for dir in ["cloud", ".cloud-staging/2024", "local/.Trash", "local/2008"] {
+        fs::create_dir_all(lib.join(dir)).unwrap();
+    }
+    for file in [
+        "cloud/IMG_1.jpeg",
+        ".cloud-staging/IMG_1.jpeg",
+        ".cloud-staging/2024/IMG_2.jpeg",
+        "local/.Trash/old.jpg",
+        "local/._DSC_1.jpg",
+        "local/2008/DSC_1.jpg",
+    ] {
+        fs::write(lib.join(file), b"x").unwrap();
+    }
+
+    let cfg = Configuration {
+        photo_library_path: lib.clone(),
+        startup_shuffle_seed: Some(7),
+        ..Default::default()
+    };
+    let mut names: Vec<String> = files::discover_startup_photos(&cfg)
+        .unwrap()
+        .into_iter()
+        .map(|info| {
+            info.path
+                .strip_prefix(&lib)
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["cloud/IMG_1.jpeg", "local/2008/DSC_1.jpg"]);
+}

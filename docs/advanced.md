@@ -15,7 +15,7 @@ The frame can keep `/var/lib/photoframe/photos/cloud/` in sync with cloud storag
 - `photoframe-sync.timer` triggers the sync (hourly default).
 - The timer is **disabled by default**; it activates only after you configure a source.
 
-Sync is safe while the frame is displaying photos: it stages downloads, then promotes them to `cloud/` in a single step. Unchanged files are hard-linked across staging and `cloud/`, so sync uses no extra disk space.
+Sync is safe while the frame is displaying photos: it stages downloads in `/var/lib/photoframe/photos/.cloud-staging/`, then promotes them to `cloud/` in a single step. Unchanged files are hard-linked across staging and `cloud/`, so sync uses no extra disk space. The frame skips hidden folders, so only the `cloud/` copy of each photo is in rotation (builds through v1.2.0 also showed the staging copies, so every synced photo was in rotation twice).
 
 ### Supported providers
 
