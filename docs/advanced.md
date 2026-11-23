@@ -19,7 +19,7 @@ Sync is safe while the frame is displaying photos: it stages downloads, then pro
 
 ### Supported providers
 
-The frame uses [rclone](https://rclone.org), which supports 40+ providers including Google Drive (`drive`), Dropbox (`dropbox`), S3 (`s3`), OneDrive (`onedrive`), Backblaze B2 (`b2`), iCloud Drive (`iclouddrive`), SFTP, WebDAV. Full list: `rclone help backends`.
+The frame uses [rclone](https://rclone.org), which supports 40+ providers including Google Drive (`drive`), Dropbox (`dropbox`), S3 (`s3`), OneDrive (`onedrive`), Backblaze B2 (`b2`), pCloud (`pcloud`), iCloud Drive (`iclouddrive`), SFTP, WebDAV. Full list: `rclone help backends`.
 
 For a NAS on your local network, you can use rsync directly — see [Using rsync instead](#using-rsync-instead).
 
@@ -75,6 +75,82 @@ sudo systemctl enable --now photoframe-sync.timer
 systemctl list-timers photoframe-sync.timer
 ```
 
+`rclone sync` mirrors the source: deleting a photo from the remote folder removes it from the frame on the next run. `local/` is never touched.
+
+### Syncing only JPEG and PNG
+
+`rclone sync` downloads everything under the remote path. If the folder also receives HEIC photos or videos (phone auto-upload, for example), they take up disk on the Pi but never appear in rotation. Filter them out at download time with `/etc/photoframe/rclone-filter.txt`:
+
+```
++ *.{jpg,jpeg,png}
+- *
+```
+
+```bash
+sudo chown kiosk:kiosk /etc/photoframe/rclone-filter.txt
+```
+
+Then set in `/etc/photoframe/sync.env`:
+
+```bash
+RCLONE_FLAGS=--checkers=8 --transfers=4 --retries=5 --copy-links --ignore-case --filter-from=/etc/photoframe/rclone-filter.txt
+```
+
+Setting `RCLONE_FLAGS` replaces the service defaults rather than adding to them, so the first four flags repeat those defaults. Use a filter file rather than `--include` patterns in `RCLONE_FLAGS`: the flags are word-split without quoting, so quotes and globs there don't survive. `--ignore-case` lets the filter match `.JPG` too.
+
+### Example: pCloud
+
+pCloud is a native rclone backend, authorized with OAuth. The Pi has no browser, so authorize on your laptop and paste the token into the wizard on the Pi.
+
+**1. Make a dedicated folder** in pCloud, e.g. `Frame/`, holding only what the frame should show. Folders inside pCloud Crypto can't be read by rclone.
+
+**2. Get a token on your laptop** (macOS shown; any OS with rclone works):
+
+```bash
+brew install rclone
+rclone authorize "pcloud"
+```
+
+A browser opens; sign in and approve. rclone prints a token block to paste in the next step.
+
+**3. Create the remote on the Pi as `kiosk`.** Running the wizard as the service user writes the config straight to `/home/kiosk/.config/rclone/rclone.conf`, so step 2 of the general setup (copying the config) isn't needed:
+
+```bash
+sudo -u kiosk rclone config
+```
+
+Choose `n` (new remote), name it `pcloud`, storage `pcloud`, leave client id and secret blank, and answer **No** to "Use web browser to automatically authenticate?". Paste the token from your laptop when asked. Check it:
+
+```bash
+sudo -u kiosk rclone ls pcloud:Frame
+```
+
+pCloud keeps US and EU accounts in separate regions. The token normally records the right API host; if an EU account fails to log in, check that the remote in `rclone.conf` has `hostname = eapi.pcloud.com`.
+
+**4. Point the sync at it** in `/etc/photoframe/sync.env`, and add the [JPEG/PNG filter](#syncing-only-jpeg-and-png) if the folder may hold other files:
+
+```bash
+RCLONE_REMOTE=pcloud:Frame
+```
+
+A pCloud account used only for the frame can sync from the account root instead: `RCLONE_REMOTE=pcloud:` (the trailing colon is required; without it `pcloud` is a local folder name).
+
+**Syncing from the root needs `--disable ListR`.** Since an April 2026 pCloud API change, rclone's recursive listing of the account root fails with `pcloud error: Invalid request. (1101)` — `rclone ls pcloud:` and `rclone size pcloud:` break, while `lsd`, `about` and listings of subfolders still work. rclone fixed this upstream ([rclone#9315](https://github.com/rclone/rclone/issues/9315)), but the Debian package on the Pi predates the fix. Turning off `ListR` makes rclone list one folder at a time, which works:
+
+```bash
+sudo -u kiosk rclone ls pcloud: --disable ListR
+```
+
+Add it to the sync flags in `/etc/photoframe/sync.env` (shown with the JPEG/PNG filter):
+
+```bash
+RCLONE_FLAGS=--checkers=8 --transfers=4 --retries=5 --copy-links --ignore-case --filter-from=/etc/photoframe/rclone-filter.txt --disable ListR
+```
+
+The flag is harmless on a subfolder remote, and can be dropped once the Pi's rclone includes the fix.
+
+Then test and enable the timer as in steps 4–5 above. For iPhone photos, either set Camera → Formats to **Most Compatible** or convert HEIC to JPEG before it lands in `Frame/`.
+
 ### Changing the sync schedule
 
 ```bash
@@ -127,6 +203,7 @@ sudo -u kiosk ssh-copy-id user@nas.local
 | `Failed to create file system for ... not found` | Remote name wrong | `rclone listremotes`; check spelling |
 | `directory not found` | Path doesn't exist | `rclone lsd gdrive:` to list folders |
 | Auth errors / token expired | OAuth token needs refresh | `rclone config reconnect gdrive:` as operator, then copy config to kiosk |
+| `pcloud error: Invalid request. (1101)` | pCloud API change (April 2026) breaks rclone's recursive listing (`ListR`) of the account root; Debian's rclone predates the fix | Add `--disable ListR` to `RCLONE_FLAGS` — see [Example: pCloud](#example-pcloud) |
 | Photos don't appear after sync | Wrong file format | Only JPEG and PNG; `rclone ls` to verify types |
 | `permission denied` writing to `cloud/` | Permissions issue | `sudo chown -R kiosk:kiosk /var/lib/photoframe/photos/cloud` |
 
