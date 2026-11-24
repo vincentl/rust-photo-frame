@@ -716,7 +716,11 @@ full-screen passes are spent carefully:
   path), so steps k and N - k share a slot: 79 slots for a 2.6 s iris. A
   cached iris frame costs its main pass (5.1 ms) and the upscale, a little
   less than radial-wipe, which holds 60. The whole 157-frame sequence is
-  1.1 s of GPU time, once.
+  1.1 s of GPU time, once. In the viewer on the same frame: the first iris
+  after a restart ran 51.0 fps (23 late frames; it reuses the closing
+  half's layers on the way back open, and its late frames skip steps that
+  the next iris fills in), every later one 60.0 fps with 0 late, against
+  47.5 fps and 33 late without the cache.
 
   The layer is `Rgba8UnormSrgb`: the shade sRGB-encoded (linear 8-bit
   banded the dark petals; sRGB steps are no coarser than the screen's own)
@@ -733,9 +737,8 @@ full-screen passes are spent carefully:
 
   `fs_iris` fetches both photos and evaluates the outline on every pixel
   (see "Branch-free transition shaders" below). `kms_frame` reports the layer and the main pass separately (`gpu_layer_ms`,
-  `gpu_main_ms`). The layer is `Rgba16Float`, not 8-bit: petals are very
-  dark in linear light, so a smooth shading gradient spans only a few
-  8-bit levels and visibly bands; half floats also hold the distance.
+  `gpu_main_ms`); on a cached frame `gpu_layer_ms` is `-`, as no layer
+  pass ran.
 - **The main pass renders opaquely** (no blending) and composites letterbox
   regions over the background color in-shader, saving a destination read
   per pixel and keeping the surface eligible for direct scanout.
