@@ -6,7 +6,7 @@ Build a wall-mounted digital photo frame from a Raspberry Pi 5 and a 4K monitor.
 
 **Built for makers and hobbyists** who want a bespoke display they fully control, not a subscription appliance.
 
-**Current release: [v1.2.1](https://github.com/vincentl/rust-photo-frame/releases/tag/v1.2.1)** (2026-11-22). The release notes are the tag message: `git tag -n99 v1.2.1`.
+**Current release: [v1.2.2](https://github.com/vincentl/rust-photo-frame/releases/tag/v1.2.2)** (2026-11-23). The release notes are the tag message: `git tag -n99 v1.2.2`.
 
 ---
 
